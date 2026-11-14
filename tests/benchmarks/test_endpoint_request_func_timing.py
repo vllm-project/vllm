@@ -312,6 +312,41 @@ def test_server_metrics_tolerate_unavailable_values(data: dict[str, Any]) -> Non
     assert output.server_ttft is None
 
 
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS[:2],
+    ids=[e[0] for e in STREAMING_ENDPOINTS[:2]],
+)
+def test_usage_on_token_chunk_preserves_counts_and_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Token content and usage in one event must both be accounted for."""
+    monkeypatch.setattr(request_func_module, "time", _FakeTime(_ScriptedClock()))
+    last_token = json.loads(_token_chunk(1, chat=chat).decode().removeprefix("data: "))
+    last_token["usage"] = {
+        "prompt_tokens": 7,
+        "completion_tokens": 11,
+    }
+    chunks = [
+        (0.0, _token_chunk(0, chat=chat)),
+        (0.0, _sse(last_token)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+
+    output = _run(request_func, api_url, endpoint_id, chunks, 11)
+
+    assert output.generated_text == "tok0 tok1 "
+    assert output.prompt_len == 7
+    assert output.output_tokens == 11
+    assert output.ttft == 1.0
+    assert output.itl == [1.0]
+    assert output.latency == 2.0
+
+
 def test_server_metrics_results_preserve_alignment() -> None:
     outputs = [
         RequestFuncOutput(server_queue_time=0.1, server_ttft=0.2),

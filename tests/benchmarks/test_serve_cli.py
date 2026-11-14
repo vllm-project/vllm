@@ -1,17 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import json
 import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import TypedDict
 
+import aiohttp
 import pytest
 import requests
 import urllib3
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+from vllm.benchmarks.lib.endpoint_request_func import (
+    RequestFuncInput,
+    StreamedResponseHandler,
+    async_request_openai_chat_completions,
+    async_request_openai_completions,
+)
 
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+INLINE_USAGE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+
+class _InlineUsageState(TypedDict):
+    text: str
+    usage: dict[str, int] | None
+    inline: bool
+    trailer: int
+    done: bool
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
@@ -183,3 +205,112 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.fixture(scope="module")
+def inline_usage_server():
+    args = [
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "2",
+        "--gpu-memory-utilization",
+        "0.45",
+        "--dtype",
+        "half",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--enforce-eager",
+    ]
+    with RemoteOpenAIServer(INLINE_USAGE_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("chat", [False, True], ids=["completions", "chat"])
+def test_benchmark_reads_inline_usage_from_real_server(inline_usage_server, chat):
+    """Keep real streamed usage when a proxy omits the usage-only trailer."""
+
+    async def run():
+        path = "/v1/chat/completions" if chat else "/v1/completions"
+        seen: _InlineUsageState = {
+            "text": "",
+            "usage": None,
+            "inline": False,
+            "trailer": 0,
+            "done": False,
+        }
+        async with aiohttp.ClientSession() as session:
+
+            async def proxy(request):
+                body = await request.json()
+                async with session.post(
+                    inline_usage_server.url_for(path), json=body
+                ) as upstream:
+                    upstream.raise_for_status()
+                    response = web.StreamResponse(
+                        headers={"Content-Type": "text/event-stream"}
+                    )
+                    await response.prepare(request)
+                    parser = StreamedResponseHandler()
+                    async for raw in upstream.content.iter_any():
+                        for message in parser.add_chunk(raw):
+                            data = message.removeprefix("data: ")
+                            if data == "[DONE]":
+                                seen["done"] = True
+                            else:
+                                frame = json.loads(data)
+                                choices = frame.get("choices")
+                                usage = frame.get("usage")
+                                if usage:
+                                    seen["usage"] = usage
+                                if not choices and usage:
+                                    seen["trailer"] += 1
+                                    continue
+                                if choices:
+                                    choice = choices[0]
+                                    text = (
+                                        choice.get("delta", {}).get("content")
+                                        if chat
+                                        else choice.get("text")
+                                    ) or ""
+                                    seen["text"] += text
+                                    seen["inline"] |= bool(text and usage)
+                            await response.write(f"{message}\n\n".encode())
+                    await response.write_eof()
+                    return response
+
+            app = web.Application()
+            app.router.add_post(path, proxy)
+            async with TestServer(app, host="127.0.0.1") as proxy_server:
+                request = RequestFuncInput(
+                    prompt="Write a short greeting.",
+                    api_url=str(proxy_server.make_url(path)),
+                    prompt_len=999,
+                    output_len=8,
+                    model=INLINE_USAGE_MODEL,
+                    ignore_eos=True,
+                    extra_body={
+                        "temperature": 0,
+                        "stream_options": {
+                            "include_usage": True,
+                            "continuous_usage_stats": True,
+                        },
+                    },
+                )
+                func = (
+                    async_request_openai_chat_completions
+                    if chat
+                    else async_request_openai_completions
+                )
+                output = await func(request, session)
+        assert seen["inline"] and seen["trailer"] == 1 and seen["done"], seen
+        assert output.success, output.error
+        assert output.generated_text == seen["text"]
+        assert seen["usage"] is not None
+        assert output.prompt_len == seen["usage"]["prompt_tokens"]
+        assert output.output_tokens == seen["usage"]["completion_tokens"] == 8
+
+    asyncio.run(run())

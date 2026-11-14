@@ -295,7 +295,7 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
@@ -495,7 +495,7 @@ async def async_request_openai_chat_completions(
                                 # Only token chunks advance the request end;
                                 # the trailing usage chunk carries no token.
                                 most_recent_timestamp = timestamp
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
