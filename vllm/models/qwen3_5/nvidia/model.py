@@ -375,6 +375,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 reduce_results=not self.use_fused_allreduce_norm,
+                enable_gated_linear_silu=True,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")

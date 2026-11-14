@@ -179,6 +179,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                enable_gated_linear_silu=True,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
