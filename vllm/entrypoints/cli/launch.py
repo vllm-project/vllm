@@ -13,6 +13,7 @@ from vllm.entrypoints.common.cli_args import (
 )
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
+from vllm.entrypoints.launchers.render.multi import run_multi_launch
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -61,7 +62,11 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        uvloop.run(run_launch_fastapi(args))
+        num_api_servers = getattr(args, "api_server_count", 1)
+        if num_api_servers is None or num_api_servers <= 1:
+            uvloop.run(run_launch_fastapi(args))
+        else:
+            run_multi_launch(args)
 
 
 class LaunchSubcommand(CLISubcommand):
