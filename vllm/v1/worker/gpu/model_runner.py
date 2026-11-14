@@ -1303,7 +1303,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
             if self.speculator is not None:
-                self.speculator.add_request(req_index)
+                self.speculator.add_request(req_index, new_req_data)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
@@ -2539,6 +2539,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # time LLMEngine's finalizer runs, the top-level model may be gone.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
+            speculator.shutdown()
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
                 remove_bytecode_hooks(draft_model)
