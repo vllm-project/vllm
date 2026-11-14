@@ -286,6 +286,33 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
     )
 
 
+def _warmup_indexer_schedule_metadata(worker: "Worker") -> None:
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
+    )
+
+    runner = worker.model_runner
+    speculator = getattr(runner, "speculator", None)
+    groups = list(getattr(runner, "attn_groups", None) or [])
+    groups += list(getattr(speculator, "attn_groups", None) or [])
+    builders: dict[tuple, DeepseekV32IndexerMetadataBuilder] = {}
+    for group in (g for gs in groups for g in gs):
+        for builder in group.metadata_builders:
+            if isinstance(builder, DeepseekV32IndexerMetadataBuilder):
+                key = (
+                    builder.kv_cache_spec.num_states,
+                    tuple(builder.paged_mqa_logits_metadata_shapes()),
+                    builder.supports_varlen,
+                )
+                builders.setdefault(key, builder)
+    if not builders:
+        return
+    num_shards = max(torch.accelerator.device_count(), 1)
+    shard_id = worker.local_rank % num_shards
+    for builder in builders.values():
+        builder.warmup_paged_mqa_logits_metadata(shard_id, num_shards)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
@@ -363,6 +390,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         for model in (worker.get_model(), worker.get_draft_model()):
             if model is not None:
                 deep_gemm_warmup(model, max_tokens)
+        # Decode schedule metadata compiles once per batch size on SM90.
+        _warmup_indexer_schedule_metadata(worker)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 

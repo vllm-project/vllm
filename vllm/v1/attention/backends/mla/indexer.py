@@ -32,7 +32,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
     native_next_n_supported,
 )
-from vllm.utils.math_utils import round_down
+from vllm.utils.math_utils import round_down, round_up
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -1874,6 +1874,48 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         return attn_metadata
+
+    def paged_mqa_logits_metadata_shapes(self) -> list[tuple[int, int]]:
+        """Every decode context_lens shape `build()` can produce, per 32-row bucket."""
+        scheduler_config = self.vllm_config.scheduler_config
+        next_n = self.num_speculative_tokens + 1
+        max_decode_tokens = min(
+            scheduler_config.max_num_seqs * next_n,
+            scheduler_config.max_num_batched_tokens,
+        )
+
+        # SM90 templates the kernel on the batch rounded up to 32.
+        def buckets(max_rows: int) -> list[int]:
+            return [min(r, max_rows) for r in range(32, round_up(max_rows, 32) + 1, 32)]
+
+        shapes = [(rows, 1) for rows in buckets(max_decode_tokens)]
+        if not (self.use_flattening or self.supports_varlen):
+            shapes += [
+                (rows, cols)
+                for cols in range(2, next_n + 1)
+                if _supports_native_decode(cols)
+                for rows in buckets(scheduler_config.max_num_seqs)
+            ]
+        return shapes
+
+    def warmup_paged_mqa_logits_metadata(
+        self, shard_id: int = 0, num_shards: int = 1
+    ) -> None:
+        if not (current_platform.is_cuda() and has_deep_gemm()):
+            return
+        shapes = self.paged_mqa_logits_metadata_shapes()
+        # Own shard first; the full pass then loads other ranks' compiles from disk.
+        for rows, cols in shapes[shard_id::num_shards] + shapes:
+            context_lens = torch.ones(
+                (rows, cols), dtype=torch.int32, device=self.device
+            )
+            indices = self.arange_buffer[:rows] if self.supports_varlen else None
+            get_paged_mqa_logits_metadata(
+                context_lens,
+                self.kv_cache_spec.num_states,
+                self.num_sms,
+                indices=indices,
+            )
 
     def update_draft_decode_metadata(
         self,
