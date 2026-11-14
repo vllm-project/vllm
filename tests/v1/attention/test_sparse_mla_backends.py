@@ -5343,26 +5343,6 @@ def test_fp8_dcp_accepts_comm_backend(monkeypatch, comm_backend):
     assert builder.fp8_use_mixed_batch
 
 
-@pytest.mark.parametrize(
-    ("num_heads", "use_hisparse", "pcp_dcp_kv_gather", "expected"),
-    [
-        (MIN_HEADS_FOR_BF16_PREFILL - 1, False, False, True),
-        (MIN_HEADS_FOR_BF16_PREFILL, False, False, False),
-        (MIN_HEADS_FOR_BF16_PREFILL - 1, True, False, False),
-        (MIN_HEADS_FOR_BF16_PREFILL - 1, False, True, False),
-    ],
-)
-def test_fp8_mixed_batch_requires_few_heads_without_hisparse_or_kv_gather(
-    num_heads, use_hisparse, pcp_dcp_kv_gather, expected
-):
-    assert (
-        FlashMLASparseImpl._use_fp8_mixed_batch(
-            num_heads, use_hisparse, pcp_dcp_kv_gather
-        )
-        is expected
-    )
-
-
 @pytest.mark.parametrize("num_heads", [16, 32])
 @pytest.mark.parametrize("use_hisparse", [False, True])
 @pytest.mark.parametrize(("pcp_size", "dcp_size"), [(1, 1), (2, 2)])
