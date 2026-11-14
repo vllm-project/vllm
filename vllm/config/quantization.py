@@ -308,8 +308,13 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
     ),
-    # LUT-B routed experts with MXFP8 activations; native on Rubin (SM107),
-    # emulated elsewhere. Dense layers stay unquantized.
+    # LUT-B weights with MXFP8 activations; native on Rubin (SM107), emulated
+    # elsewhere. `lut_b` covers linear and MoE layers, `lut_b_moe` only the
+    # routed experts (dense layers stay unquantized).
+    "lut_b": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kLutBStatic),
+        moe=QuantSpec(weight=kLutBStatic),
+    ),
     "lut_b_moe": QuantizationConfigArgs(
         moe=QuantSpec(weight=kLutBStatic),
     ),

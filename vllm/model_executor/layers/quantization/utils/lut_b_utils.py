@@ -18,6 +18,11 @@ uses 3.14 bits per weight.
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize,
+)
+
 LUT_B_BLOCK_N = 8
 LUT_B_BLOCK_K = 64
 LUT_B_CODEBOOK_SIZE = 8
@@ -279,3 +284,21 @@ def lut_b_to_sm107_tiles(
     book_bytes = torch.nn.functional.pad(books, (0, 256))
 
     return torch.cat((index_bytes, scale_bytes, book_bytes), dim=-1).contiguous()
+
+
+def lut_b_sm107_supported() -> bool:
+    """Whether this device can run the native Rubin (SM107) LUT-B GEMM."""
+    from vllm import _custom_ops as ops
+    from vllm.platforms import current_platform
+
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability((10, 7))
+        and ops.lut_b_moe_gemm_supported()
+    )
+
+
+def mxfp8_qdq(x: torch.Tensor) -> torch.Tensor:
+    """Round activations through MXFP8, as the native kernel consumes them."""
+    x_q, x_scales = mxfp8_e4m3_quantize(x)
+    return dequant_mxfp8_to_bf16(x_q, x_scales.view(*x.shape[:-1], -1)).to(x.dtype)

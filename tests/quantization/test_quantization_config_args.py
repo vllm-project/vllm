@@ -142,6 +142,13 @@ def test_resolve_shorthand_only_populates_both_slots():
     assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
 
 
+def test_resolve_lut_b_shorthand_populates_both_slots():
+    args = resolve_quantization_config("lut_b", None)
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kLutBStatic)
+    assert args.moe == QuantSpec(weight=kLutBStatic)
+
+
 @pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
 def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     """Checkpoint metadata determines whether an MXFP shorthand is online."""
