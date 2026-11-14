@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import subprocess
+import sys
+
+import pytest
+
+from vllm.v1.executor.early_kv_recv import EarlyKVOutputAggregator
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+
+def test_poll_failure_exits_worker():
+    # Without a KV connector the poll fails. Exceptions are suppressed so that
+    # only os._exit(1) can produce exit code 1.
+    code = """
+from contextlib import suppress
+with suppress(Exception):
+    from vllm.v1.executor.early_kv_recv import EarlyKVRecvSender
+    from vllm.utils.network_utils import get_open_zmq_ipc_path
+    EarlyKVRecvSender(get_open_zmq_ipc_path()).poll()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 1
+    assert "Early KV receive poll failed" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "ordinary_rank,failed,invalid",
+    [(None, False, False)]
+    + [
+        (rank, failed, invalid)
+        for rank in (0, 1)
+        for failed, invalid in ((False, False), (False, True), (True, False))
+    ],
+)
+def test_early_receives_share_normal_quorum(ordinary_rank, failed, invalid):
+    aggregator = EarlyKVOutputAggregator(2)
+
+    def aggregate(kv_output=None):
+        output = ModelRunnerOutput([], {}, kv_connector_output=kv_output)
+        aggregator.aggregate([output])
+        assert output.kv_connector_output is not None
+        return output.kv_connector_output
+
+    early = set()
+    normal = KVConnectorOutput()
+    for rank in range(2):
+        if rank == ordinary_rank:
+            # A step-output vote: a failure, invalid blocks, or a success that
+            # was not reported early.
+            normal = aggregate(
+                KVConnectorOutput(
+                    finished_recving={"request"},
+                    failed_recving={"request"} if failed else set(),
+                    invalid_block_ids={7} if invalid else set(),
+                ),
+            )
+        else:
+            early |= aggregator.add_finished_recving({"request"})
+        if rank == 0:
+            assert not early and not normal.finished_recving
+    # A step without output must keep a deferred vote for the next one.
+    assert aggregator.aggregate([None]) is None
+    if not normal.finished_recving:
+        normal = aggregate()
+    # A step output with a vote may carry invalid blocks or a failure that the
+    # scheduler has not processed yet, so a receive finishes early only when
+    # every worker reported it early.
+    assert early == ({"request"} if ordinary_rank is None else set())
+    assert (normal.finished_recving or set()) == {"request"} - early
+    assert normal.failed_recving == ({"request"} if failed else set())
+    assert aggregate().is_empty()
