@@ -2566,12 +2566,16 @@ class Scheduler(SchedulerInterface):
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
+        retryable_error_req_ids: set[str] = set()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+            retryable_error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
             # An encoder input the connector can no longer obtain. Failing is
             # retryable: re-issuing the request re-runs the encode.
-            error_req_ids.update(self.ec_connector.take_unavailable_requests())
+            unavailable_ec_req_ids = self.ec_connector.take_unavailable_requests()
+            error_req_ids.update(unavailable_ec_req_ids)
+            retryable_error_req_ids.update(unavailable_ec_req_ids)
 
         if error_req_ids:
             error_reqs = self.finish_requests(
@@ -2585,7 +2589,19 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        error=request_errors.get(request.request_id),
+                        error=request_errors.get(request.request_id)
+                        or (
+                            RequestError(
+                                code="retryable_cache_load_error",
+                                message=(
+                                    "A cache load failed; retry the request to "
+                                    "re-run preprocessing."
+                                ),
+                                retryable=True,
+                            )
+                            if request.request_id in retryable_error_req_ids
+                            else None
+                        ),
                     )
                 )
 
