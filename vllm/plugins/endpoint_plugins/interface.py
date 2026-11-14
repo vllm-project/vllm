@@ -28,8 +28,13 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 `init_state`/their route handlers and degrade gracefully.
 """
 
+import asyncio
+import inspect
+import os
+import time
 from argparse import Namespace
 from copy import copy
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from fastapi import FastAPI
@@ -37,6 +42,7 @@ from fastapi.routing import APIRoute
 from starlette.datastructures import State
 from starlette.routing import BaseRoute
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -90,6 +96,67 @@ class EndpointPlugin(Protocol):
         `None` explicitly (e.g. skip engine dependent setup, or have route
         handlers return an error) if the plugin is loadable for `render` but
         cannot function without an engine.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsStart(Protocol):
+    """Optional endpoint plugin startup capability."""
+
+    async def start(self, state: State) -> None:
+        """Acquire resources after state initialization, before HTTP accepts.
+
+        If startup fails or is cancelled, clean up partially acquired resources
+        before raising. The server only stops plugins whose startup completed.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsStop(Protocol):
+    """Optional endpoint plugin cleanup capability."""
+
+    async def stop(self, state: State) -> None:
+        """Release resources before app state is deleted.
+
+        The engine may already be stopped. The hook must settle any background
+        work owned by the plugin within
+        `VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS` (default 5). On expiry the
+        server cancels the hook and stops waiting for it. Cleanup remains
+        cooperative: a hook that ignores cancellation keeps running alongside
+        later cleanup, and one that blocks the event loop cannot be bounded.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsReady(Protocol):
+    """Optional synchronous endpoint plugin readiness capability."""
+
+    def ready(self, state: State) -> bool:
+        """Return whether this process can accept new plugin work owners."""
+        ...
+
+
+@runtime_checkable
+class SupportsDrain(Protocol):
+    """Optional endpoint plugin session drain capability."""
+
+    async def drain(self, state: State, timeout: float) -> None:
+        """Settle accepted work before engine shutdown, within `timeout` seconds.
+
+        The server sets `state.draining` before calling any drain hook. Plugin
+        admission paths must reject new work owners, including new sessions on
+        existing connections, while allowing accepted owners to submit final
+        engine work. On completion, error or cancellation, settle or abort and
+        await all owned work so it cannot submit later engine requests. The
+        server does not track plugin sessions or provide an abort hook.
+
+        Hooks run concurrently under a shared deadline. Cancellation cleanup
+        remains cooperative; a repeated signal after the deadline abandons it
+        and exits after engine shutdown without running `stop`. Otherwise
+        `stop` runs after it settles.
         """
         ...
 
@@ -160,5 +227,175 @@ async def init_endpoint_plugins_state(
     engine (see `init_render_app_state`). Plugins must handle a `None`
     `engine_client` themselves (see `EndpointPlugin.init_state`).
     """
+    state.draining = False
     for plugin in getattr(state, "endpoint_plugins", []):
         await plugin.init_state(engine_client, state, args)
+
+
+def validate_endpoint_plugin_hooks(plugin: EndpointPlugin) -> None:
+    for name in ("start", "stop"):
+        hook = getattr(plugin, name, None)
+        if hook is not None and not inspect.iscoroutinefunction(hook):
+            raise TypeError(
+                f"Endpoint plugin {plugin.name} attribute {name} is a reserved "
+                "lifecycle hook name: rename it or make it `async def`"
+            )
+
+
+def validate_endpoint_plugin_stop_timeout() -> None:
+    try:
+        valid = envs.VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS > 0
+    except ValueError:
+        valid = False
+    if not valid:
+        value = os.getenv("VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS")
+        raise ValueError(
+            "VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS must be a positive "
+            f"integer, got {value!r}"
+        )
+
+
+def cancel_endpoint_plugin_startup(state: State) -> None:
+    """Cancel acquisition once, without interrupting rollback or listener binding."""
+    state.endpoint_plugin_startup_cancelled = True
+    task = getattr(state, "endpoint_plugin_startup_task", None)
+    if task is not None and not task.cancelling():
+        task.cancel()
+
+
+async def start_endpoint_plugins(state: State) -> None:
+    """Start plugins in load order, recording those eligible for cleanup."""
+    started: list[EndpointPlugin] = []
+    state.started_endpoint_plugins = started
+
+    async def start() -> None:
+        for plugin in getattr(state, "endpoint_plugins", []):
+            if getattr(state, "endpoint_plugin_startup_cancelled", False):
+                raise asyncio.CancelledError
+            if isinstance(plugin, SupportsStart):
+                await plugin.start(state)
+            started.append(plugin)
+
+    task = asyncio.create_task(start())
+    state.endpoint_plugin_startup_task = task
+    try:
+        await task
+    finally:
+        state.endpoint_plugin_startup_task = None
+
+
+def endpoint_plugins_ready(state: State) -> bool:
+    """Check every loaded readiness provider; a missing predicate is ready."""
+    plugins: list[EndpointPlugin] = getattr(state, "endpoint_plugins", [])
+    for plugin in plugins:
+        if isinstance(plugin, SupportsReady):
+            try:
+                if not plugin.ready(state):
+                    return False
+            except Exception:
+                logger.exception("Endpoint plugin %s readiness failed", plugin.name)
+                return False
+    return True
+
+
+async def drain_endpoint_plugins(state: State, deadline: float) -> None:
+    """Close plugin admission and drain concurrently against a monotonic deadline."""
+    state.draining = True
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return
+
+    async def drain(plugin: SupportsDrain, name: str) -> None:
+        try:
+            await plugin.drain(state, max(0.0, deadline - time.monotonic()))
+        except Exception:
+            logger.exception("Endpoint plugin %s failed to drain", name)
+
+    try:
+        async with asyncio.timeout(remaining), asyncio.TaskGroup() as group:
+            plugins: list[EndpointPlugin] = getattr(
+                state, "started_endpoint_plugins", []
+            )
+            for plugin in plugins:
+                if isinstance(plugin, SupportsDrain):
+                    group.create_task(drain(plugin, plugin.name))
+    except TimeoutError:
+        logger.warning("Endpoint plugin drain deadline expired")
+
+
+# Stop hooks that outlived their deadline, referenced until they complete.
+_abandoned_stop_tasks: set[asyncio.Task] = set()
+
+
+def _discard_abandoned_stop_task(name: str, task: asyncio.Task) -> None:
+    _abandoned_stop_tasks.discard(task)
+    # Retrieve the exception so the event loop does not report it.
+    if not task.cancelled() and (error := task.exception()) is not None:
+        logger.debug(
+            "Endpoint plugin %s failed to stop after its deadline",
+            name,
+            exc_info=error,
+        )
+
+
+async def _stop_endpoint_plugin(
+    plugin: SupportsStop, name: str, state: State, timeout: int
+) -> None:
+    """Await one stop hook until it completes or its deadline expires."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    try:
+        # Calling the hook can raise before it is awaited, for example when its
+        # signature does not accept `state`.
+        task = asyncio.create_task(plugin.stop(state))
+    except Exception:
+        logger.exception("Endpoint plugin %s failed to stop", name)
+        return
+    while not task.done() and (remaining := deadline - loop.time()) > 0:
+        try:
+            # Not `asyncio.wait_for`, which awaits the cancelled hook.
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            # The lifespan task was cancelled: pass it on to the hook and give
+            # it the rest of its deadline to finish.
+            task.cancel()
+    if not task.done():
+        task.cancel()
+        _abandoned_stop_tasks.add(task)
+        task.add_done_callback(partial(_discard_abandoned_stop_task, name))
+        logger.warning(
+            "Endpoint plugin %s did not stop within %d seconds; "
+            "continuing shutdown without waiting for it",
+            name,
+            timeout,
+        )
+        return
+    try:
+        task.result()
+    except (Exception, asyncio.CancelledError):
+        logger.exception("Endpoint plugin %s failed to stop", name)
+
+
+async def stop_endpoint_plugins(state: State) -> None:
+    """Stop eligible plugins once in reverse order, deferring cancellation."""
+    shutdown_task = getattr(state, "shutdown_task", None)
+    if shutdown_task is not None and not shutdown_task.done():
+        # Do not interrupt cancellation cleanup already in progress.
+        if not shutdown_task.cancelling():
+            shutdown_task.cancel()
+        while not shutdown_task.done():
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                # Repeated lifespan cancellations must not release session owners.
+                pass
+            except Exception:
+                logger.exception("Endpoint plugin shutdown failed")
+    started: list[EndpointPlugin] = getattr(state, "started_endpoint_plugins", [])
+    while started:
+        plugin = started.pop()
+        if isinstance(plugin, SupportsStop):
+            timeout = envs.VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS
+            await _stop_endpoint_plugin(plugin, plugin.name, state, timeout)
+    if (task := asyncio.current_task()) is not None and task.cancelling():
+        raise asyncio.CancelledError

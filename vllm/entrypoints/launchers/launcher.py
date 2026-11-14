@@ -3,9 +3,11 @@
 
 import asyncio
 import contextlib
+import os
 import signal
 import socket
-from collections.abc import Generator, MutableSequence
+import time
+from collections.abc import Callable, Generator, MutableSequence
 from functools import partial
 from typing import Any
 
@@ -24,6 +26,10 @@ from vllm.entrypoints.common.startup import (
 )
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
+from vllm.plugins.endpoint_plugins.interface import (
+    cancel_endpoint_plugin_startup,
+    drain_endpoint_plugins,
+)
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
@@ -67,6 +73,17 @@ class NoSignalServer(uvicorn.Server):
         self.peer_loads = peer_loads
         self._accept_tasks: set[asyncio.Task] = set()
         self._connecting = 0
+        self.startup_complete = asyncio.Event()
+        self.cancel_startup: Callable[[], None] = lambda: None
+        self._exit_after_startup = False
+
+    def request_exit(self) -> None:
+        """Request HTTP exit once startup can reach Uvicorn's shutdown path."""
+        if self.startup_complete.is_set():
+            self.should_exit = True
+        else:
+            self._exit_after_startup = True
+            self.cancel_startup()
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -83,6 +100,15 @@ class NoSignalServer(uvicorn.Server):
         return loads[index] <= min(loads)
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        try:
+            await self._startup(sockets)
+        finally:
+            self.startup_complete.set()
+            if self._exit_after_startup:
+                # Older Uvicorn skips shutdown if startup returns with this set.
+                asyncio.get_running_loop().call_soon(self.request_exit)
+
+    async def _startup(self, sockets: list[socket.socket] | None) -> None:
         if not (self.peer_loads and sockets):
             return await super().startup(sockets)
         # With no sockets uvicorn starts no asyncio server; _accept serves
@@ -180,11 +206,18 @@ async def serve_http(
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
     peer_loads: tuple[MutableSequence[int], int] | None = None,
+    *,
+    exit_on_repeated_cleanup_signal: bool = True,
     **uvicorn_kwargs: Any,
 ):
     """Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
+
+    `exit_on_repeated_cleanup_signal` is False for a server whose parent
+    process signals it and bounds its shutdown, so that a signal delivered
+    twice does not skip HTTP and plugin cleanup. Such a server still exits on
+    a repeated signal once it has abandoned a plugin drain.
     """
     logger.info("Available routes are:")
     # post endpoints
@@ -232,11 +265,76 @@ async def serve_http(
     config.h11_max_header_count = h11_max_header_count
     config.load()
     server = NoSignalServer(config, peer_loads=peer_loads)
+    server.cancel_startup = partial(cancel_endpoint_plugin_startup, app.state)
     app.state.server = server
 
     loop = asyncio.get_running_loop()
 
+    shutdown_event = asyncio.Event()
+
+    def request_shutdown() -> None:
+        if shutdown_event.is_set():
+            return
+        logger.info_once("[shutdown] API server: shutdown triggered")
+        shutdown_event.set()
+
+    app.state.request_shutdown = request_shutdown
+
     engine_client = app.state.engine_client
+    engine_stopped = False
+    # A pending plugin drain that a repeated signal abandons after its deadline.
+    drain_task: asyncio.Task[None] | None = None
+    drain_deadline = 0.0
+    drain_abandoned: asyncio.Future[int] = loop.create_future()
+    received_signals: set[int] = set()
+
+    def abandon_drain(signum: int) -> None:
+        try:
+            if engine_client is not None:
+                engine_client.shutdown(timeout=0)
+        except Exception:
+            logger.exception("[shutdown] API server: engine shutdown failed")
+        finally:
+            os._exit(128 + signum)
+
+    def handle_signal(signum: int) -> None:
+        repeated = signum in received_signals
+        received_signals.add(signum)
+        if (
+            repeated
+            and drain_task is not None
+            and not drain_task.done()
+            and time.monotonic() >= drain_deadline
+            and not drain_abandoned.done()
+        ):
+            logger.warning(
+                "[shutdown] API server: received %s after the drain deadline; "
+                "abandoning plugin drains and exiting after engine shutdown",
+                signal.Signals(signum).name,
+            )
+            drain_abandoned.set_result(signum)
+            return
+        cleanup_only = (
+            engine_stopped
+            or drain_abandoned.done()
+            or (shutdown_task is not None and shutdown_task.done())
+        )
+        # A supervised server's parent bounds its HTTP and plugin cleanup, but
+        # not an abandoned drain's engine shutdown.
+        may_exit = exit_on_repeated_cleanup_signal or drain_abandoned.done()
+        if not (repeated and cleanup_only and may_exit):
+            request_shutdown()
+            return
+        # Only HTTP and plugin cleanup, or engine shutdown after an abandoned
+        # drain, remain. A repeated signal must not wait for a hook or engine
+        # shutdown that never returns. Exit directly: as a container's PID 1,
+        # the process ignores a signal whose action is the default.
+        logger.warning(
+            "[shutdown] API server: received %s during shutdown; exiting",
+            signal.Signals(signum).name,
+        )
+        os._exit(128 + signum)
+
     watchdog_task = (
         loop.create_task(watchdog_loop(server, engine_client))
         if engine_client is not None
@@ -255,35 +353,68 @@ async def serve_http(
         )
     )
 
-    shutdown_event = asyncio.Event()
-
-    def signal_handler() -> None:
-        if shutdown_event.is_set():
-            return
-        logger.info_once("[shutdown] API server: shutdown triggered")
-        shutdown_event.set()
-
     async def dummy_shutdown() -> None:
         pass
 
     async def handle_shutdown() -> None:
+        nonlocal engine_stopped, drain_task, drain_deadline
         await shutdown_event.wait()
 
+        vllm_config = (
+            engine_client.vllm_config
+            if engine_client is not None
+            else getattr(app.state, "vllm_config", None)
+        )
+        timeout = vllm_config.shutdown_timeout if vllm_config is not None else 0
+        deadline = time.monotonic() + timeout
+        if timeout <= 0:
+            # Drain hooks are skipped, so there is no drain to abandon.
+            await drain_endpoint_plugins(app.state, deadline)
+        else:
+            drain = loop.create_task(drain_endpoint_plugins(app.state, deadline))
+            drain_task, drain_deadline = drain, deadline
+            settled = (drain, drain_abandoned)
+            cancelled = False
+            # Like a TaskGroup, defer repeated cancellation until the drain settles.
+            while not (drain.done() or drain_abandoned.done()):
+                try:
+                    await asyncio.wait(settled, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
+                    if not cancelled:
+                        drain.cancel()
+                    cancelled = True
+            if drain_abandoned.done():
+                # Neither cancellation nor an engine error may skip the exit, and
+                # `stop` must not run beside the abandoned drain.
+                signum = drain_abandoned.result()
+                exiting = loop.run_in_executor(None, abandon_drain, signum)
+                while True:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait((exiting,))
+            if cancelled:
+                raise asyncio.CancelledError
+            drain.result()
+
         if engine_client is not None:
-            timeout = engine_client.vllm_config.shutdown_timeout
-            mode = "abort" if timeout == 0 else "drain"
+            remaining = max(0.0, deadline - time.monotonic())
+            mode = "abort" if remaining == 0 else "drain"
 
             logger.info(
-                "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
+                "[shutdown] API server: stopping engine client mode=%s timeout=%.1fs",
                 mode,
-                timeout,
+                remaining,
             )
 
             await loop.run_in_executor(
-                None, partial(engine_client.shutdown, timeout=timeout)
+                None, partial(engine_client.shutdown, timeout=remaining)
             )
             logger.info_once("[shutdown] API server: engine client stopped")
 
+        engine_stopped = True
+        server.cancel_startup()
+        # Finish binding before requesting exit: older Uvicorn otherwise skips
+        # shutdown, and cancelling create_server can orphan its listener.
+        await server.startup_complete.wait()
         server.should_exit = True
         logger.info_once("[shutdown] API server: signalling HTTP server shutdown")
         server_task.cancel()
@@ -292,11 +423,15 @@ async def serve_http(
 
     shutdown_task = None
     try:
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        loop.add_signal_handler(signal.SIGINT, handle_signal, signal.SIGINT)
+        loop.add_signal_handler(signal.SIGTERM, handle_signal, signal.SIGTERM)
         shutdown_task = loop.create_task(handle_shutdown())
+        app.state.shutdown_task = shutdown_task
 
         await server_task
+        if not server.started:
+            # Uvicorn < 0.50 returns from a failed startup; later versions exit.
+            raise SystemExit(3)
         return dummy_shutdown()
     except asyncio.CancelledError:
         port = uvicorn_kwargs["port"]
@@ -342,7 +477,10 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
         envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH or engine.should_keep_api_server_alive
     )
     if not keep_alive and engine_errored:
-        server.should_exit = True
+        if isinstance(server, NoSignalServer):
+            server.request_exit()
+        else:
+            server.should_exit = True
 
 
 def create_server_socket(

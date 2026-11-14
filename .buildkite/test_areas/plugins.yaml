@@ -12,6 +12,13 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/test_endpoint_plugins.py
+  - tests/entrypoints/launchers/test_shutdown.py
+  - vllm/entrypoints/launchers/launcher.py
+  - vllm/entrypoints/launchers/utils/server_utils.py
+  - vllm/entrypoints/serve/instrumentator/health.py
+  - vllm/entrypoints/launchers/render/entry.py
+  - tests/utils.py
   commands:
   # These plugins act only when a test names them (io_processor and endpoint)
   # or add new model names (dummy_model), so they can all be installed at once.
@@ -38,6 +45,13 @@ steps:
       source_file_dependencies:
       - vllm/plugins/
       - tests/plugins/
+      - tests/plugins_tests/test_endpoint_plugins.py
+      - tests/entrypoints/launchers/test_shutdown.py
+      - vllm/entrypoints/launchers/launcher.py
+      - vllm/entrypoints/launchers/utils/server_utils.py
+      - vllm/entrypoints/serve/instrumentator/health.py
+      - vllm/entrypoints/launchers/render/entry.py
+      - tests/utils.py
       - vllm/platforms/rocm.py
 
 # The platform and stat logger plugins act on every vLLM process while

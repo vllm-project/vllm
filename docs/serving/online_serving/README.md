@@ -93,6 +93,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
+- `/ready` - Readiness check for this API server, including endpoint plugins and draining
 
 ### Metrics APIs
 

@@ -76,6 +76,86 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
+## Optional startup and cleanup
+
+An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
+
+The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. A failed or cancelled startup exits the process with status 3. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
+
+SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative.
+
+`start` and `stop` are reserved hook names on endpoint plugins. Optional `start` and `stop` hooks must be async functions. The plugin loader rejects synchronous hooks with an error naming the plugin and hook before attaching routes or initializing state.
+
+On shutdown, the server awaits each eligible `stop(state)` once in reverse order before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work.
+
+Each stop hook has a deadline of `VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS` seconds (default 5; must be positive), which also applies to stops run after a failed startup. On expiry the server cancels the hook, logs a warning naming the plugin, stops waiting for it and continues with earlier plugins and native serving cleanup. With N stop hooks, cleanup can take up to N times the deadline plus native cleanup. The deadline is cooperative: a hook that ignores cancellation may keep running, overlap later cleanup and still hang the final event-loop teardown (a repeated signal still exits a standalone server), and a hook that blocks the event loop synchronously cannot be bounded.
+
+Once the engine has stopped, or the shutdown sequence has otherwise ended, a repeated SIGINT or SIGTERM exits the process immediately with status 128 plus the signal number and skips the remaining cleanup; a startup hook that ignores cancellation is handled the same way. A signal is repeated when the process has already received the same signal number, so SIGINT followed by SIGTERM does not exit, and neither does the first signal after `request_shutdown()`. Signals that arrive while the engine is still shutting down only request shutdown, unless a drain was abandoned (see [Draining accepted work](#draining-accepted-work)). Repeated `request_shutdown()` calls remain idempotent.
+
+API servers started by a parent vLLM process (multi-API-server workers and data parallel servers) do not exit on a repeated signal during HTTP and plugin cleanup, because the parent signals them itself and bounds their shutdown. The multi-API-server parent sends each worker SIGTERM whichever signal it received, and the data parallel supervisor forwards the signal it received. In multi-API-server mode the parent force-kills its workers after `--shutdown-timeout` (default 0, meaning immediately), so worker stop hooks are only attempted when that timeout is positive; when the parent exits for a reason other than a signal it waits 5 seconds instead.
+
+The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
+
+For example, this subclass acquires and closes an HTTP client used by its routes:
+
+```python
+import httpx
+from starlette.datastructures import State
+
+from vllm.plugins.endpoint_plugins.interface import SupportsStart, SupportsStop
+
+
+class ResourceEndpointPlugin(MyAdminEndpointPlugin):
+    async def start(self, state: State) -> None:
+        state.plugin_http_client = httpx.AsyncClient()
+
+    async def stop(self, state: State) -> None:
+        await state.plugin_http_client.aclose()
+
+
+plugin = ResourceEndpointPlugin()
+startup: SupportsStart = plugin
+cleanup: SupportsStop = plugin
+```
+
+The assignments let a static type checker validate the hook signatures. Runtime protocol checks detect capability members; they do not validate signatures or whether methods are asynchronous.
+
+### Requesting process shutdown
+
+`serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
+
+## Optional readiness and draining
+
+[`SupportsReady`][vllm.plugins.endpoint_plugins.interface.SupportsReady] and [`SupportsDrain`][vllm.plugins.endpoint_plugins.interface.SupportsDrain] are independent capabilities. A plugin can implement either, both, or neither, independently of `start` and `stop`:
+
+```python
+class SupportsReady(Protocol):
+    def ready(self, state: State) -> bool: ...
+
+class SupportsDrain(Protocol):
+    async def drain(self, state: State, timeout: float) -> None: ...
+```
+
+Plugin authors can assign an instance to `SupportsReady` or `SupportsDrain` in a type-checked module, as in the startup example above, to check signatures. Runtime checks only detect capability members.
+
+### Readiness probes
+
+The Python HTTP API server exposes `/ready` for engine health, plugin readiness and drain state. It returns 503 if `state.draining` is true, the engine raises `EngineDeadError`, or any loaded plugin's synchronous `ready(state)` returns false or raises an ordinary exception. Other engine health errors propagate as 500, matching `/health`. A plugin without `ready` is ready by default. Render servers check draining and plugins without an engine health check.
+
+Use `/ready` for Kubernetes readiness and retain `/health` for liveness. `/health`, including SageMaker `/ping`, retains its existing engine-health behavior; plugin unreadiness and draining do not change it. Existing deployments keep their behavior until their readiness probes are reconfigured. See [Kubernetes deployment](../deployment/k8s.md).
+
+These checks describe the built-in routes. Plugins retain their existing ability to override `/ready` or `/health`. Readiness applies to this API-server process; it does not aggregate across workers or change DP-supervisor or gRPC probes, and it does not detect generation stalls.
+
+### Draining accepted work
+
+On SIGINT, SIGTERM or `state.request_shutdown()`, the server sets `state.draining = True` before awaiting any plugin. Each plugin must check that flag in its admission paths and reject **new work owners**, including new sessions on existing connections. Already accepted owners may continue submitting final engine requests. Native realtime admission is a separate concern; plugin hooks do not close it.
+
+The server runs eligible plugins' `drain(state, timeout)` hooks concurrently before engine shutdown. Eligibility follows startup: a plugin is eligible once its startup completes, or once startup reaches its position if it has no `start` hook. Each drain receives the remaining seconds from one monotonic deadline based on `--shutdown-timeout`. Ordinary drain errors are logged independently so healthy peers can finish. On completion, error or cancellation, a plugin must settle or abort and await its owned work before returning or raising. Core does not maintain a plugin session registry or provide an abort hook.
+
+The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
+
+`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. Cancellation cleanup remains cooperative, so the drain deadline is **not a hard process-exit bound**. If a drain ignores cancellation, a repeated SIGINT or SIGTERM (a signal number the process has already received) after the deadline abandons it, including in servers started by a parent vLLM process: the server stops the engine with no remaining allowance, then exits with status 128 plus the signal number without running `stop` hooks. A further repeated signal during that engine shutdown exits at once without waiting for it, which may leave the EngineCore process running, as after SIGKILL.
+
 ## Registering the entry point
 
 Register a zero argument factory (a class or function) under the `vllm.endpoint_plugins` group. The factory must return an object satisfying `EndpointPlugin`:
