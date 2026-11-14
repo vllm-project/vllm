@@ -69,9 +69,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Quantized Fusions"
+      label: ":amd: (MI300 DPX) Quantized Fusions"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
