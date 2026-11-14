@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.stream_processor import (
     ChatStreamProcessor,
+    observe_stream_processors,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -295,7 +296,9 @@ class ServingTokens(GenerateBaseServing):
                 try:
                     processors = [
                         self.online_derenderer.make_stream_processor(
-                            derender_request, history_tool_call_cnt
+                            derender_request,
+                            history_tool_call_cnt,
+                            request_id=request_id,
                         )
                         for _ in range(sampling_params.n)
                     ]
@@ -580,6 +583,7 @@ class ServingTokens(GenerateBaseServing):
                     derender_request,
                     history_tool_call_cnt,
                     final_res.prompt_token_ids,
+                    request_id=request_id,
                 )
             except (ValueError, VLLMValidationError) as e:
                 return self.create_error_response(e)
@@ -911,6 +915,9 @@ class ServingTokens(GenerateBaseServing):
             task.add_done_callback(_background_tasks.discard)
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        finally:
+            if processors:
+                observe_stream_processors(processors)
         yield "data: [DONE]\n\n"
 
     @staticmethod

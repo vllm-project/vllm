@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -12,6 +13,11 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 
 
 class ChatStreamStep(NamedTuple):
@@ -37,6 +43,9 @@ class ChatStreamProcessor:
         *,
         enable_auto_tools: bool,
         parser_cls: type[Parser] | None,
+        mode: ParserMode = ParserMode.STREAMING,
+        endpoint: Endpoint = Endpoint.CHAT_COMPLETIONS,
+        request_id: str | None = None,
     ) -> None:
         self.request = request
         self.parser = parser
@@ -45,6 +54,7 @@ class ChatStreamProcessor:
         )
         self.num_output_tokens = 0
         self.tools_streamed = False
+        self.metrics = ParserMetrics(mode, endpoint, request_id=request_id)
         # Logprobs and token IDs would leak hidden reasoning through decoded
         # logprob tokens or raw IDs, so callers drop both on every chunk.
         self.hide_metadata = parser is not None and not request.include_reasoning
@@ -69,18 +79,20 @@ class ChatStreamProcessor:
             `parallel_tool_calls`, and the chat `finish_reason`.
 
         """
+        num_delta_tokens = len(delta_token_ids)
         delta: DeltaMessage | None
         if not delta_text and not delta_token_ids and not self.num_output_tokens:
             # Finished without output. Send the final chunk unparsed.
             delta = DeltaMessage()
         elif self.parser is not None:
-            delta = self.parser.parse_delta(
-                delta_text=delta_text,
-                delta_token_ids=delta_token_ids,
-                request=self.request,
-                prompt_token_ids=prompt_token_ids,
-                finished=finish_reason is not None,
-            )
+            with self.metrics.time_call(tokens=num_delta_tokens):
+                delta = self.parser.parse_delta(
+                    delta_text=delta_text,
+                    delta_token_ids=delta_token_ids,
+                    request=self.request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=finish_reason is not None,
+                )
             if delta is not None and delta.tool_calls:
                 if self.keep_tool_calls:
                     self.tools_streamed = True
@@ -90,12 +102,24 @@ class ChatStreamProcessor:
                         delta = None
         else:
             delta = DeltaMessage(content=delta_text)
-        self.num_output_tokens += len(delta_token_ids)
+        self.num_output_tokens += num_delta_tokens
 
         if delta is not None:
             delta = maybe_filter_parallel_tool_calls(delta, self.request)
         if finish_reason is not None:
+            self.metrics.finish_reason = finish_reason
             finish_reason = resolve_finish_reason(
                 finish_reason, self.request, self.tools_streamed
             )
         return ChatStreamStep(delta, finish_reason)
+
+
+def observe_stream_processors(processors: Sequence[ChatStreamProcessor]) -> None:
+    """Record one request's summed parser time across its streamed choices."""
+    if not processors:
+        return
+    first = processors[0].metrics
+    summary = ParserMetrics(first.mode, first.endpoint, request_id=first.request_id)
+    for processor in processors:
+        summary.merge(processor.metrics)
+    summary.observe()

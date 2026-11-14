@@ -32,6 +32,11 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 from vllm.renderers.chat_utils import ConversationMessage
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
@@ -51,6 +56,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
     Processes N conversations from a single request concurrently and returns
     one choice per conversation indexed 0, 1, ..., N-1.
     """
+
+    parser_endpoint = Endpoint.OTHER
 
     async def render_batch_chat_request(
         self,
@@ -279,9 +286,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             cached_tokens.append(final_res.num_cached_tokens)
             cache_creation_tokens.append(final_res.num_cache_creation_tokens)
 
+            parser_metrics = ParserMetrics(
+                ParserMode.NON_STREAMING,
+                self.parser_endpoint,
+                request_id=f"{request_id}_{prompt_idx}",
+            )
+            # Check every output before parsing any, so an error on a later
+            # choice does not waste work on the earlier ones.
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
-
+            for output in final_res.outputs:
                 if request.logprobs:
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
@@ -307,11 +321,13 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         ),
                     )
                     parser.set_prompt_token_ids(final_res.prompt_token_ids)
-                    reasoning, content, _ = parser.parse(
-                        output.text,
-                        request=single_request,
-                        model_output_token_ids=output.token_ids,
-                    )
+                    parser_metrics.finish_reason = output.finish_reason
+                    with parser_metrics.time_call(tokens=len(output.token_ids)):
+                        reasoning, content, _ = parser.parse(
+                            output.text,
+                            request=single_request,
+                            model_output_token_ids=output.token_ids,
+                        )
                     total_reasoning_tokens += parser.count_reasoning_tokens(
                         output.token_ids
                     )
@@ -358,6 +374,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         is_streaming=False,
                         delta=False,
                     )
+            parser_metrics.observe()
 
         mm_total: Counter[str] = Counter()
         for counts in mm_token_counts or ():
