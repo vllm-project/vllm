@@ -101,6 +101,20 @@ def test_reload_weights_sets_current_config():
     assert model_runner.seen_config is worker.vllm_config
 
 
+def test_remote_engram_rejects_weight_changes_before_mutation():
+    from vllm.config.engram import EngramConfig
+
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.vllm_config.engram_config = EngramConfig(rdma_provider="test_provider")
+    with pytest.raises(RuntimeError, match="does not support weight reload"):
+        Worker.reload_weights(worker)
+    with pytest.raises(RuntimeError, match="does not support online weight updates"):
+        Worker.start_weight_update(worker)
+    assert not engine.started
+    assert worker.model_runner.seen_config is None
+
+
 @pytest.mark.parametrize(
     "enabled,active", [(True, False), (True, True), (False, False)]
 )

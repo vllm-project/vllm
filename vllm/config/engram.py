@@ -61,6 +61,18 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    rdma_provider: str | None = None
+    """Experimental dotted module name for a remote Engram reader provider."""
+
+    rdma_prefetch: bool = True
+    """Allow remote Engram lookups to overlap decoder computation."""
+
+    rdma_full_decode_graph: bool = False
+    """Capture remote lookups in a full decode CUDA graph (experimental)."""
+
+    rdma_keep_prefill_rows: bool = False
+    """Retain all producer prefill rows instead of bounded decoder replay."""
+
     peer_group_size: int = 0
     """Split each GPU table's rows over this many GPUs of several engines in one
     NVLink domain (the sum of their GPU counts); lookups read rows from the
@@ -75,11 +87,27 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.rdma_full_decode_graph and (
+            not self.rdma_provider or not self.rdma_prefetch
+        ):
+            raise ValueError(
+                "rdma_full_decode_graph requires a prefetching rdma_provider"
+            )
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
+        if self.rdma_provider and (
+            not self.cpu_offload
+            or self.dp_shared_memory
+            or self.use_thp
+            or self.embedding_across_dp
+        ):
+            raise ValueError(
+                "rdma_provider requires cpu_offload and excludes DP sharing, "
+                "embedding_across_dp, and use_thp"
             )
         if (self.peer_group_size > 0) != (self.peer_group_store is not None):
             raise ValueError(
@@ -91,6 +119,16 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
+        if self.rdma_provider and (
+            model_config is None
+            or model_config.architecture != "DeepseekV41ForCausalLM"
+        ):
+            raise ValueError("rdma_provider currently requires DeepseekV41ForCausalLM")
+        if self.rdma_provider:
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError("rdma_provider currently requires CUDA")
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -120,6 +158,7 @@ class EngramConfig:
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
+                and not self.rdma_provider
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
@@ -127,6 +166,8 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.rdma_provider and parallel_config.data_parallel_size > 1:
+            raise ValueError("rdma_provider currently requires data_parallel_size=1")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")

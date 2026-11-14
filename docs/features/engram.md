@@ -142,6 +142,72 @@ Costs and limits:
   `instanttensor`, or `--safetensors-load-strategy eager`);
   `--load-format dummy` serves zeros.
 
+## Experimental remote table reader
+
+`--engram-config.rdma_provider` selects a Python module that supplies an
+experimental remote-table reader. vLLM includes a provider, checkpoint-backed
+owner and reader lifecycle control in `vllm.distributed.engram_share.rdma`; set
+`rdma_provider` to `vllm.distributed.engram_share.rdma.provider` to use them. The
+GPU GET transport remains a separately built NIXL dependency. The current
+prototype needs the experimental ABI-3 shim, not an ordinary NIXL wheel.
+See the [setup and verification example](../../examples/disaggregated/engram_rdma/README.md).
+An alternative provider must expose `get_reader(checkpoint_path=None)` and
+`close_reader()` and implement the Engram lookup contract. The model loader
+initializes the reader with its checkpoint path before lookups use it.
+The provider contract is defined in `vllm.distributed.engram_share.provider`.
+The provider owns a worker-local reader: it validates the checkpoint and owns
+the remote lease, registered buffers and lookup ordering. The worker closes the
+reader during shutdown; a failed retirement keeps the reader and lease alive.
+
+The engine model and `ENGRAM_SHARED_MODEL` must resolve to the same local
+checkpoint directory. Remote table readers do not support online weight
+updates or weight reload; restart the engine and owner with the new checkpoint.
+
+The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
+size 1.
+It requires `--load-format safetensors --safetensors-load-strategy lazy` and
+single-threaded loading. The research provider accepts `--enforce-eager` or
+breakable `PIECEWISE` CUDA graphs. Experimental full decode capture can be
+enabled with `rdma_full_decode_graph: true` and `rdma_prefetch: true`, using
+`FULL_DECODE_ONLY` or breakable `FULL_AND_PIECEWISE`; full prefill capture is
+not supported. The reader shares a scratch buffer across layers and requires
+lookups to remain on the same prefetch stream after capture; independently
+concurrent graph executions sharing one reader are not supported. Remote
+KV-producer processes use the same bounded decoder replay as local tables by
+default. Set `rdma_keep_prefill_rows` to `true` to retain all producer rows as
+a conservative comparison mode. DP table sharing,
+`embedding_across_dp`, and `use_thp` cannot be combined with it. The provider is
+responsible for checkpoint identity, remote memory registration, completion
+visibility and safe lifetime.
+
+Remote lookups use the existing per-layer prefetch stream by default. Set
+`rdma_prefetch` to `false` in the Engram configuration to issue them inline
+for comparison or troubleshooting.
+The ordinary local-table path remains the default.
+
+For a bounded local-versus-remote lookup microbenchmark, use the same model,
+owner and transport setup described above:
+
+```bash
+python benchmarks/benchmark_engram_rdma.py \
+  --model "$MODEL" --ready "$OWNER_READY_FILE" \
+  --library "$ENGRAM_NIXL_SHIM" --reader-port-base "$TEST_READER_PORT_BASE" \
+  --tokens 1 4 16 64 256 1024 --heads 2 --output results.json
+```
+
+The benchmark compares the native local lookup and remote provider using the
+same randomly selected rows from a bounded checkpoint prefix. It checks exact
+BF16 output and alternates the two paths. It reports CUDA-event and synchronized
+host-wall durations; event intervals can include host launch gaps. This is a
+single-reader component test, not a serving benchmark or a prefetch-overlap
+measurement. The bounded table and repeated IDs may affect cache behavior;
+token counts do not by themselves imply production prefill or decode shapes.
+
+Use a nonzero `--shutdown-timeout` to allow worker cleanup. A forced shutdown
+can leave an owner lease outstanding; the owner must retain the backing until
+the affected consumers are confirmed stopped. Automatic recovery is not part of
+this prototype.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
