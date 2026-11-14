@@ -215,8 +215,11 @@ def test_mtp_draft_lm_head_quantization(
     greedy outputs match stock MTP and acceptance stays within 10%."""
     prompts = get_test_prompts(mm_enabled=False)
     results = {}
-    # NVFP4 needs a CUDA W4A16 kernel.
-    quants = (None, "fp8", "nvfp4") if current_platform.is_cuda() else (None, "fp8")
+    # NVFP4 needs a CUDA W4A16 kernel. "none" also opts out of the SM121
+    # default.
+    quants = ("none", "fp8", "nvfp4")
+    if not current_platform.is_cuda():
+        quants = quants[:2]
     for quant in quants:
         with vllm_runner(
             "Qwen/Qwen3.5-0.8B-Base",
@@ -234,7 +237,7 @@ def test_mtp_draft_lm_head_quantization(
             outputs = runner.llm.chat(prompts, sampling_config)
             results[quant] = (outputs, compute_acceptance_len(runner.llm.get_metrics()))
 
-    ref_outputs, ref_al = results.pop(None)
+    ref_outputs, ref_al = results.pop("none")
     for quant, (outputs, al) in results.items():
         assert_request_outputs_match(
             ref_outputs,

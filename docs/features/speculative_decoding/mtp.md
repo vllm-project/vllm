@@ -83,3 +83,6 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+- On DGX Spark (SM121), MTP uses `"nvfp4"` by default when the shared lm_head
+  is unquantized BF16. Set `"draft_lm_head_quantization": "none"` to keep the
+  drafter on the target head.
