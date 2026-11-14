@@ -199,6 +199,8 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 ![Free queue after a request is freed](../assets/design/prefix_caching/free.png)
 
+This order applies to cached blocks, i.e., blocks with a hash. A freed block without a hash, typically the last block of a request, which is not full, can never be hit by another request. It is added to the head of the free queue instead, so that it is reused before any cached block is evicted.
+
 ### Eviction (LRU)
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
@@ -223,14 +225,14 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 
 ![Example Time 3](../assets/design/prefix_caching/example-time-4.png)
 
-**Time 4: Request 0 is finished and free.** Blocks 2, 3 and 4 are added to the free queue in the reverse order (but block 2 and 3 are still cached). Block 0 and 1 are not added to the free queue because they are being used by Request 1.
+**Time 4: Request 0 is finished and free.** Blocks 3 and 2 are added to the tail of the free queue in the reverse order (they are still cached). Block 4 has no hash, so it is added to the head. Block 0 and 1 are not added to the free queue because they are being used by Request 1.
 
 ![Example Time 4](../assets/design/prefix_caching/example-time-5.png)
 
-**Time 5: Request 1 is finished and free.**
+**Time 5: Request 1 is finished and free.** Block 6 has no hash and is added to the head of the free queue. Blocks 5, 1 and 0 are still cached and are added to the tail in the reverse order.
 
 ![Example Time 5](../assets/design/prefix_caching/example-time-6.png)
 
-**Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
+**Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `6 - 4 - 7 - 8 - 9 - 3 - 2 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `6 - 4 - 7 - 8 - 9 - 3 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 6, 4, 7, 8, 9. Blocks 6 and 4 have no hash and are reused first, so no cached block is evicted. If the request needed one more block, block 3, the new head of the free queue, would be evicted.
 
 ![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
