@@ -15,9 +15,9 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -303,6 +303,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
         layer_causal: Mapping[str, bool] | None = None,
     ) -> None:
         self._layer_causal: dict[str, bool] | bool = not self.requires_non_causal
@@ -324,6 +325,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
             layer_causal=(
                 self._layer_causal if isinstance(self._layer_causal, dict) else None
             ),
@@ -335,9 +337,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+                if getattr(builder, "aot_schedule", False) and issubclass(
+                    kv_group.manager_cls, SlidingWindowManager
+                ):
                     # `aot_schedule` belongs to FlashAttention's builder, not
                     # to the base class this loop is typed against.
                     builder.aot_schedule = False  # type: ignore[attr-defined]

@@ -786,7 +786,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
         return num_video_tokens_total
 
@@ -806,15 +808,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self.get_max_video_frames(seq_len - max_image_tokens)
+        max_total_frames = self.get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -854,7 +852,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         image_width, image_height = self.info.get_image_size_with_most_features()
         video_width, video_height = self.info.get_video_frame_size_with_most_features()
         num_video_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, num_videos
         )
 
         video_overrides = mm_options.get("video")
@@ -1662,9 +1660,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return int(
             info.get_num_frames_with_most_features(
                 seq_len=self.vllm_config.model_config.max_model_len,
-                mm_counts={
-                    "video": self.multimodal_config.get_limit_per_prompt("video")
-                },
+                num_videos=self.multimodal_config.get_limit_per_prompt("video"),
             )
         )
 

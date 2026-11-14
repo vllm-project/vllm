@@ -211,7 +211,7 @@ class BailingMoeV3VLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
                 width=target_width,
                 height=target_height,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

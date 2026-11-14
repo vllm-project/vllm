@@ -4,7 +4,10 @@
 stage, selected by `VLLM_PP_TRANSPORT`."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
+
+import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -15,6 +18,29 @@ if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+# A received tensor's dtype and per-token shape.
+RowSpec = tuple[torch.dtype, tuple[int, ...]]
+
+
+def row_specs(tensors: Mapping[str, torch.Tensor]) -> dict[str, RowSpec]:
+    return {k: (t.dtype, tuple(t.shape[1:])) for k, t in tensors.items()}
+
+
+def check_intermediate_tensors(
+    tensors: Mapping[str, torch.Tensor], expected: Mapping[str, RowSpec]
+) -> None:
+    """Raise unless `tensors` match the receiving stage's persistent intermediate
+    tensors in keys, dtypes and per-token shapes, which every PP transport
+    requires. Otherwise the copy into them would silently drop, cast or
+    broadcast values."""
+    actual = row_specs(tensors)
+    if actual != expected:
+        raise RuntimeError(
+            f"PP intermediate tensors {actual} do not match the receiving "
+            f"stage's {dict(expected)}. Declare them in the model's "
+            "make_empty_intermediate_tensors."
+        )
 
 
 class PPTransport(ABC):

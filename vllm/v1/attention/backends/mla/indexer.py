@@ -159,7 +159,7 @@ class PrepareUniformDecodeKernel(
         # All reqs now have decode_len = 1.
         tl.store(decode_lens_ptr + idx, 1)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         block_size: int,
@@ -253,7 +253,7 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if kv_cache_spec is not None:
-            # Worker get_kv_cache_spec: runs without the current config.
+            # Worker get_kv_cache_layer_configs: runs without the current config.
             index_kpool = int(kv_cache_spec.tokens_per_state)
         else:
             # Platform block-size selection: no spec yet, under the current config.
@@ -534,7 +534,7 @@ class BuildPrefillChunkMetadataKernel(
             mask = offset < compressed_seq_len
             tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         query_slice_start: int,
