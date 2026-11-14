@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Validate JIT dispatch against pre-contract behavior."""
 
+import inspect
 from typing import Any
 
 import pytest
@@ -321,7 +322,7 @@ def test_tilelang_warmup_inputs_reproduce_compile_key(
     compiled: list[Any] = []
     single_kernel = isinstance(
         kernel,
-        (MhcPostTileLangKernel, MhcFusedTileLangKernel, HcHeadFusedTileLangKernel),
+        (MhcFusedTileLangKernel, HcHeadFusedTileLangKernel),
     )
     expected_kernel = kernel.kernel() if single_kernel else kernel.kernel(compile_key)
     if single_kernel:
@@ -339,3 +340,33 @@ def test_tilelang_warmup_inputs_reproduce_compile_key(
     kernel.compile(compile_key)
 
     assert compiled == [expected_kernel]
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 16, 17, 40, 64, 65, 128])
+@pytest.mark.parametrize("hidden_size,hc_mult", [(5120, 4), (4096, 4), (5120, 2)])
+def test_mhc_post_warmup_covers_spatial_dispatch(
+    num_tokens: int, hidden_size: int, hc_mult: int
+) -> None:
+    """Warmup must compile the same hidden tiling as a real launch."""
+    kernel = MhcPostTileLangKernel()
+    key = kernel.dispatch(
+        num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    expected_tiles = (
+        5
+        if current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and 0 < num_tokens <= 64
+        and hidden_size == 5120
+        and hc_mult == 4
+        else 1
+    )
+    assert key.h_tiles == expected_tiles
+    keys = kernel.get_warmup_keys(hidden_size=hidden_size, hc_mult=hc_mult)
+    assert key in keys
+    for warmup_key in keys:
+        spec = inspect.unwrap(kernel.__call__)(
+            kernel, **kernel.warmup_inputs(warmup_key)
+        )
+        assert spec[0] == (warmup_key,)
+        assert spec[2] == {"h_tiles": warmup_key.h_tiles}
