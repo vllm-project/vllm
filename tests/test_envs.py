@@ -625,3 +625,59 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+class TestGetBoolEnv:
+    """Shared boolean env parser used by the bool(int(...)) env getters."""
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "True", "yes", "on", " 1 "])
+    def test_true_values(self, monkeypatch: pytest.MonkeyPatch, raw: str):
+        monkeypatch.setenv("VLLM_TEST_BOOL", raw)
+        assert envs.get_bool_env("VLLM_TEST_BOOL", False) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", " 0 "])
+    def test_false_values(self, monkeypatch: pytest.MonkeyPatch, raw: str):
+        monkeypatch.setenv("VLLM_TEST_BOOL", raw)
+        assert envs.get_bool_env("VLLM_TEST_BOOL", True) is False
+
+    @pytest.mark.parametrize("default", [True, False])
+    def test_unset_and_empty_return_default(
+        self, monkeypatch: pytest.MonkeyPatch, default: bool
+    ):
+        monkeypatch.delenv("VLLM_TEST_BOOL", raising=False)
+        assert envs.get_bool_env("VLLM_TEST_BOOL", default) is default
+        monkeypatch.setenv("VLLM_TEST_BOOL", "   ")
+        assert envs.get_bool_env("VLLM_TEST_BOOL", default) is default
+
+    @pytest.mark.parametrize("raw", ["2", "maybe", "truee", "-1"])
+    def test_invalid_value_raises_naming_variable(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ):
+        monkeypatch.setenv("VLLM_TEST_BOOL", raw)
+        with pytest.raises(ValueError, match="VLLM_TEST_BOOL"):
+            envs.get_bool_env("VLLM_TEST_BOOL", False)
+
+    def test_migrated_getter_accepts_true(self, monkeypatch: pytest.MonkeyPatch):
+        """Regression: VLLM_BATCH_INVARIANT=true used to raise on import/access."""
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "true")
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+        assert envs.VLLM_BATCH_INVARIANT is True
+
+    def test_migrated_getter_keeps_nonzero_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Defaults that were "1" in the old code must stay True when unset."""
+        monkeypatch.delenv("VLLM_CPU_INT4_W4A8", raising=False)
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+        assert envs.VLLM_CPU_INT4_W4A8 is True
+
+    def test_migrated_getter_invalid_value_names_variable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "2")
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+        with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT"):
+            _ = envs.VLLM_BATCH_INVARIANT
