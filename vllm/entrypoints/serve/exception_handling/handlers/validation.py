@@ -8,6 +8,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 
+from vllm.entrypoints.anthropic.protocol import AnthropicError, AnthropicErrorResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -106,7 +107,7 @@ def _summarize_error_input(value: object) -> object:
     return text
 
 
-def _format_error(err: object) -> str:
+def _format_error(err: object, *, readable: bool = False) -> str:
     """Render one validation error, bounded in size."""
     if isinstance(err, dict):
         err = dict(err)
@@ -118,6 +119,8 @@ def _format_error(err: object) -> str:
             # `loc`, which is ~800 characters of type names per entry here.
             # `param` is already cleaned this way.
             err["loc"] = clean_loc_for_param(tuple(loc))
+        if readable:
+            err = f"{err.get('loc', 'request')}: {err.get('msg', 'Invalid value')}"
     text = str(err)
     if len(text) > _MAX_ERROR_CHARS:
         text = text[:_MAX_ERROR_CHARS] + "...[truncated]"
@@ -157,6 +160,12 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
 
     param = None
     errors = exc.errors()
+    # The matched route excludes any deployment root_path prefix.
+    route = req.scope.get("route")
+    is_anthropic = getattr(route, "path", None) in {
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+    }
     for error in errors:
         if "ctx" in error and "error" in error["ctx"]:
             ctx_error = error["ctx"]["error"]
@@ -177,12 +186,25 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
         label = "error" if count == 1 else "errors"
         reported = errors[:_MAX_REPORTED_ERRORS]
         message = f"{count} validation {label}:\n"
-        message += "".join(f"  {_format_error(err)}\n" for err in reported)
+        message += "".join(
+            f"  {_format_error(err, readable=is_anthropic)}\n" for err in reported
+        )
         if count > len(reported):
             message += f"  ...and {count - len(reported)} more {label}\n"
         message = message.rstrip()
     else:
         message = "Validation error"
+
+    if is_anthropic:
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type="invalid_request_error",
+                message=sanitize_message(message),
+            )
+        )
+        return JSONResponse(
+            anthropic_error.model_dump(), status_code=HTTPStatus.BAD_REQUEST
+        )
 
     err = ErrorResponse(
         error=ErrorInfo(
