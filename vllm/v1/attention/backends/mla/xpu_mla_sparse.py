@@ -134,16 +134,6 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
-        self.topk_tokens_tensor = torch.tensor(
-            [self.topk_tokens], device=device, dtype=torch.int32
-        )
-        self.max_model_len_tensor = torch.tensor(
-            [self.model_config.max_model_len], device=device, dtype=torch.int32
-        )
-        # this is ignored by `flash_mla_with_kvcache` if indices not None
-        self.dummy_block_table = torch.empty(
-            (1, 1), dtype=torch.int32, device=self.device
-        )
 
         self.req_id_per_token_buffer = torch.empty(
             (max_num_batched_tokens,),

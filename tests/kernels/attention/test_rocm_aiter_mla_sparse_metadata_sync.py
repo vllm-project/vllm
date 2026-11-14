@@ -27,6 +27,7 @@ if not is_aiter_found_and_supported():
     )
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 
@@ -315,7 +316,11 @@ def _construct_builder(monkeypatch, impl: SimpleNamespace, cache_dtype: str):
         speculative_config=None,
         compilation_config=SimpleNamespace(
             static_forward_context={
-                "layers.0": SimpleNamespace(impl=impl, prefill_backend=None)
+                "layers.0": SimpleNamespace(
+                    impl=impl,
+                    prefill_backend=None,
+                    get_attn_backend=lambda: sparse_mod.ROCMAiterMLASparseBackend,
+                )
             }
         ),
     )
@@ -545,7 +550,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
         num_decode_tokens=1,
         seq_lens=seq_lens,
         prefill_max_seq_len=4,
-        prefill=SimpleNamespace(use_dense_mha=True),
+        prefill=SimpleNamespace(route=SparseMLAPrefillRoute.DENSE_MHA),
     )
 
     monkeypatch.setattr(
@@ -632,7 +637,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
         num_decode_tokens=1,
         seq_lens=seq_lens,
         prefill_max_seq_len=5,
-        prefill=SimpleNamespace(use_dense_mha=False),
+        prefill=SimpleNamespace(route=SparseMLAPrefillRoute.SPARSE_MQA),
     )
 
     monkeypatch.setattr(
@@ -868,7 +873,15 @@ def test_sparse_metadata_workload_length_dtype_matrix(
         num_decode_tokens=num_decodes,
         seq_lens=seq_lens,
         prefill_max_seq_len=prefill_len if num_prefills else 0,
-        prefill=SimpleNamespace(use_dense_mha=not is_long) if num_prefills else None,
+        prefill=(
+            SimpleNamespace(
+                route=SparseMLAPrefillRoute.SPARSE_MQA
+                if is_long
+                else SparseMLAPrefillRoute.DENSE_MHA
+            )
+            if num_prefills
+            else None
+        ),
     )
     monkeypatch.setattr(
         sparse_mod.SparseMLACommonMetadataBuilder,

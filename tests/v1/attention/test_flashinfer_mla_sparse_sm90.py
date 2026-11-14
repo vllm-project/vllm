@@ -16,6 +16,7 @@ import torch
 
 # isort: off
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
+from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Backend,
     FlashInferMLASparseSM90Builder,
@@ -169,16 +170,16 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
-@pytest.mark.parametrize("use_mha", [False, True])
+@pytest.mark.parametrize("route", list(SparseMLAPrefillRoute))
 @pytest.mark.parametrize("num_decodes", [0, 1])
-def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_decodes):
+def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decodes):
     """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
     state = FakeState(TOPK)
     builder.state = state
-    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.prefill = SimpleNamespace(route=route)
     metadata.state = None
     metadata.req_id_per_token = None
     metadata.num_prefills = 1
@@ -203,7 +204,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
 
     assert result.state is builder.state
     expected_lens = [1402] if num_decodes else []
-    if not use_mha:
+    if route is SparseMLAPrefillRoute.SPARSE_MQA:
         expected_lens += [1, 2, 3, 4, 5]
     assert state.plan_calls[0][0] == len(expected_lens)
     assert state.plan_calls[0][1].tolist() == expected_lens
