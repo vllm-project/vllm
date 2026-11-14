@@ -136,6 +136,37 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     assert torch.equal(single_output[0], batch_output[0])
 
 
+@skip_unsupported
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (12288, 1536),
+        (1536, 6144),
+        (24576, 1536),
+        (1536, 12288),
+        (20480, 2560),
+        (2560, 10240),
+    ],
+)
+def test_gemma4_matmul_rows_are_invariant_at_bucket_boundaries(n, k):
+    # Gemma's transposed MLP weights must preserve row bits when M changes
+    # the SM120 tile, including the transition back to the default config.
+    torch.manual_seed(42)
+    a = torch.randn((2049, k), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    b = (torch.randn((n, k), dtype=torch.bfloat16, device=DEVICE_TYPE) * 0.02).t()
+    needle = a[:1].clone()
+    expected = matmul_batch_invariant(needle, b)[0].view(torch.int16)
+    sizes = {1, 2049}
+    for boundary in (16, 32, 64, 128, 256, 2048):
+        sizes.update((boundary - 1, boundary, boundary + 1))
+    for m in sorted(sizes):
+        positions = sorted({0, m // 2, m - 1})
+        a[positions] = needle
+        actual = matmul_batch_invariant(a[:m], b).view(torch.int16)
+        for row in positions:
+            assert torch.equal(actual[row], expected), (m, row, n, k)
+
+
 @pytest.fixture
 def batch_invariant_mode():
     # The overrides are process-global: remove them so later tests compare

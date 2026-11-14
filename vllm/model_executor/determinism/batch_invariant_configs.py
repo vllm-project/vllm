@@ -378,6 +378,67 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
         ),
     },
     "sm120": {
+        (12288, 1536): _MatmulShapeConfig(  # Gemma 4 E2B gate_up_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 256, 8, 3)),
+                (32, _MatmulMConfig(32, 256, 4, 3)),
+                (64, _MatmulMConfig(64, 256, 4, 3)),
+                (256, _MatmulMConfig(64, 128, 4, 5)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (1536, 6144): _MatmulShapeConfig(  # Gemma 4 E2B down_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 32, 4, 5)),
+                (32, _MatmulMConfig(32, 32, 4, 5)),
+                (64, _MatmulMConfig(64, 32, 8, 5)),
+                (128, _MatmulMConfig(128, 32, 8, 5)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (24576, 1536): _MatmulShapeConfig(  # Gemma 4 E2B KV-shared gate_up_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 128, 4, 4)),
+                (32, _MatmulMConfig(32, 128, 4, 5)),
+                (64, _MatmulMConfig(64, 128, 4, 5)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (1536, 12288): _MatmulShapeConfig(  # Gemma 4 E2B KV-shared down_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 32, 4, 5)),
+                (32, _MatmulMConfig(32, 32, 4, 5)),
+                (64, _MatmulMConfig(64, 32, 8, 5)),
+                (128, _MatmulMConfig(128, 32, 4, 5)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (20480, 2560): _MatmulShapeConfig(  # Gemma 4 E4B gate_up_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 128, 4, 4)),
+                (32, _MatmulMConfig(32, 128, 4, 4)),
+                (64, _MatmulMConfig(64, 128, 4, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (2560, 10240): _MatmulShapeConfig(  # Gemma 4 E4B down_proj
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 32, 8, 5)),
+                (32, _MatmulMConfig(32, 32, 4, 5)),
+                (64, _MatmulMConfig(64, 32, 8, 5)),
+                (128, _MatmulMConfig(128, 32, 4, 5)),
+                (256, _MatmulMConfig(128, 64, 8, 4)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
         (12288, 2048): _MatmulShapeConfig(  # Qwen3-1.7B gate_up_proj
             block_k=64,
             m_buckets=(
