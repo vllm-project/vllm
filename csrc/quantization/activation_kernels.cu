@@ -32,6 +32,20 @@ typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
 
 namespace vllm {
 
+// GELU with the tanh approximation, matching PyTorch
+// F.gelu(approximate="tanh") and gelu_tanh_kernel in csrc/activation_kernels.cu
+// so that the fused and unfused paths stay bit-identical.
+// This is the variant Gemma 2/3, Gemma3n and Rnj1 use.
+template <typename T>
+__device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
+  const float f = static_cast<float>(x);
+  constexpr float BETA = M_SQRT2 * M_2_SQRTPI * 0.5f;
+  constexpr float KAPPA = 0.044715f;
+  const float x_cube = f * f * f;
+  const float inner = BETA * (f + KAPPA * x_cube);
+  return static_cast<T>(0.5f * f * (1.0f + ::tanhf(inner)));
+}
+
 template <typename T>
 __device__ __forceinline__ T silu_kernel(const T& x) {
   // x * sigmoid(x)
@@ -601,6 +615,22 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
       "Input must be FP16 or BF16");
   STD_TORCH_CHECK(input.size(-1) % 2 == 0);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
+}
+
+// GELU(tanh approx) + gated multiply + static FP8 quantization.
+// out[..., j] = fp8_e4m3(gelu(input[..., j]) * input[..., d + j] / scale)
+void gelu_tanh_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
+                             torch::stable::Tensor& input,  // [..., 2 * d]
+                             torch::stable::Tensor& scale) {
+  STD_TORCH_CHECK(
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz);
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::Half ||
+          input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Input must be FP16 or BF16");
+  STD_TORCH_CHECK(input.size(-1) % 2 == 0);
+  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel);
 }
 
 void persistent_masked_m_silu_mul_quant(
