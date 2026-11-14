@@ -65,6 +65,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     supports_multimodal_inputs: bool = False
+    logprobs_mode: str = "raw_logprobs"
     vocab_size = 151936
 
     def get_diff_sampling_param(self):
@@ -260,6 +261,38 @@ class TestValidation:
 
         assert isinstance(result, ErrorResponse)
         assert expected_error in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "logprobs_mode",
+        ["raw_logprobs", "processed_logprobs", "raw_logits", "processed_logits"],
+    )
+    async def test_apply_softmax_false_needs_logprobs_mode(self, logprobs_mode):
+        """The logits modes return logits, and exp(logit) is not a probability."""
+        mock_engine = _create_mock_engine()
+        mock_engine.model_config.logprobs_mode = logprobs_mode
+        serving = _create_serving(mock_engine)
+
+        async def mock_generate(*args, **kwargs):
+            yield _create_mock_request_output({1234: -0.5, 5678: -2.0})
+
+        mock_engine.generate = mock_generate
+        request = GenerativeScoringRequest(
+            model=MODEL_NAME,
+            query=[100],
+            items=[[200]],
+            label_token_ids=[1234, 5678],
+            apply_softmax=False,
+        )
+        result = await serving.create_generative_scoring(request, None)
+
+        if logprobs_mode.endswith("_logprobs"):
+            assert isinstance(result, GenerativeScoringResponse)
+            assert result.data[0].score == math.exp(-0.5)
+        else:
+            assert isinstance(result, ErrorResponse)
+            assert result.error.code == 400
+            assert "--logprobs-mode" in result.error.message
 
 
 class TestPromptBuilding:
