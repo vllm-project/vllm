@@ -48,7 +48,7 @@ _mean_std_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class ImageInput:
     # PIL.Image | torch.Tensor (C,H,W)
     image: Any
@@ -56,7 +56,7 @@ class ImageInput:
     min_pixels: int | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoInput:
     # tuple[frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor]
     video: Any
@@ -73,14 +73,14 @@ class VideoInput:
     segment_type: Literal["individual", "partial"] = "individual"
 
 
-@dataclass
+@dataclass(slots=True)
 class AudioInput:
     # tuple[waveform_1D, sr]
     # | np.ndarray | torch.Tensor (T,n_vq)
     audio: Any
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoAudioInput:
     video: Any  # same as VideoInput.video
     audio: Any  # same as AudioInput.audio
@@ -97,14 +97,14 @@ class VideoAudioInput:
     segment_type: Literal["individual", "partial"] = "individual"
 
 
-@dataclass
+@dataclass(slots=True)
 class Content:
     type: Literal["text", "image", "video", "audio", "video_audio"]
     content: Any
     is_target: bool | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MiMoVLInputSample:
     input_ids: torch.Tensor
     labels: torch.Tensor | None
@@ -220,8 +220,8 @@ class MiMoVLProcessor:
     Ported from SGLang's MiMoVLProcessor.
 
     Media strings (URL / path / data:) are resolved upstream in vLLM's media
-    pipeline; this processor accepts only already-decoded inputs (``PIL.Image``
-    for images, ``(waveform, sr)`` tuples for audio).
+    pipeline; this processor accepts only already-decoded inputs (`PIL.Image`
+    for images, `(waveform, sr)` tuples for audio).
     """
 
     def __init__(
@@ -414,7 +414,7 @@ class MiMoVLProcessor:
         return kw
 
     def preprocess_audio(self, audio: Any) -> tuple[torch.Tensor, int]:
-        """Convert a pre-loaded ``(waveform, sr)`` tuple into (mel_spec, token_len)."""
+        """Convert a pre-loaded `(waveform, sr)` tuple into (mel_spec, token_len)."""
         if not isinstance(audio, tuple):
             raise ValueError(
                 f"Unsupported audio source type: {type(audio)}. Audio must be a "
@@ -981,8 +981,8 @@ class MiMoOmniProcessor(ProcessorMixin):
                 )
 
         rope_type = "rope"
-        rs = getattr(hf_config, "rope_scaling", None)
-        if rs and rs.get("type") == "default" and rs.get("mrope_section") is not None:
+        rp = getattr(hf_config, "rope_parameters", None)
+        if rp and rp.get("type") == "default" and rp.get("mrope_section") is not None:
             rope_type = "mrope"
 
         unit = patch_size * merge_size
@@ -1063,24 +1063,24 @@ class MiMoOmniProcessor(ProcessorMixin):
 
         Args:
             text: Prompt string(s) containing multimodal placeholders
-                  ``<|vision_start|><|image_pad|><|vision_end|>``,
-                  ``<|vision_start|><|video_pad|><|vision_end|>``, or
-                  ``<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>``.
+                  `<|vision_start|><|image_pad|><|vision_end|>`,
+                  `<|vision_start|><|video_pad|><|vision_end|>`, or
+                  `<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>`.
             images: PIL.Image or list[PIL.Image].
-            videos: list of ``(frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor)``
+            videos: list of `(frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor)`
                     tuples (pre-decoded).
-            audio: list of ``str`` (path/url/base64), ``bytes``,
-                   ``(waveform_1D, sample_rate)`` tuples, or ``np.ndarray``.
-            video_audio: audio track extracted from ``videos``, in the same
-                   formats accepted by ``audio``.
-            return_tensors: Passed to :class:`BatchFeature`.
+            audio: list of `str` (path/url/base64), `bytes`,
+                   `(waveform_1D, sample_rate)` tuples, or `np.ndarray`.
+            video_audio: audio track extracted from `videos`, in the same
+                   formats accepted by `audio`.
+            return_tensors: Passed to `BatchFeature`.
 
         Returns:
-            :class:`BatchFeature` with keys:
-            - ``input_ids``
-            - ``pixel_values`` + ``image_grid_thw``
-            - ``pixel_values_videos`` + ``video_grid_thw`` + ``second_per_grid_ts``
-            - ``audio_features``
+            `BatchFeature` with keys:
+            - `input_ids`
+            - `pixel_values` + `image_grid_thw`
+            - `pixel_values_videos` + `video_grid_thw` + `second_per_grid_ts`
+            - `audio_features`
 
         """
         if isinstance(text, list):

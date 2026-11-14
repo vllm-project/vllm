@@ -66,7 +66,7 @@ def _ir(v):
 
 
 def _dma(rsrc, lds_addr, voff, size):
-    """buffer_load ... lds: ``size`` bytes per lane into LDS at ``lds_addr``."""
+    """buffer_load ... lds: `size` bytes per lane into LDS at `lds_addr`."""
     lds = llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<3>"), _ir(fx.Int32(lds_addr)))
     fx.rocdl.raw_ptr_buffer_load_lds(
         rsrc,
@@ -141,7 +141,7 @@ def score_resources(arg_q, arg_score, i32_total_q, i32_hs, i32_S, heads):
 
 
 def page_lookup(arg_bt, bt_row, end):
-    """Page of a block, clamped to the last block before ``end``.
+    """Page of a block, clamped to the last block before `end`.
 
     A constant-space s_load: before an s_buffer_load LLVM would wait for the
     in-flight LDS DMAs.
@@ -358,8 +358,8 @@ def compile_score_prefill(heads: int = 1):
                 rd_col = [q16 ^ (l16 >> 1), (4 + q16) ^ (l16 >> 1)]
 
                 def compute_block(slot, blk, masked, st, dslot):
-                    """This wave's scores of ``blk``; dequantizes the next block's
-                    raw page ``st`` into key slot ``dslot`` on the way."""
+                    """This wave's scores of `blk`; dequantizes the next block's
+                    raw page `st` into key slot `dslot` on the way."""
                     if const_expr(masked):
                         vis = [
                             qpos[ni] - (blk * BLK + q16 * 4)

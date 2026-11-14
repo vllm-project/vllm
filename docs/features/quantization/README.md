@@ -40,6 +40,37 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+## Hadamard Input Transforms (QuIP)
+
+Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.
+
+Other transforms, older GPUs, and an explicit `--linear-backend` other than `auto` or `humming` use the generic transform path, which applies the transform separately before the selected kernel.
+
+!!! note
+    The `fp_quant` quantization method and the QuTLASS backend have been removed. Use a compressed-tensors checkpoint instead.
+
+!!! note
+    Marlin kernels no longer quantize activations to INT8 or FP8, and the `VLLM_MARLIN_INPUT_DTYPE` environment variable has been removed (setting it is an error). Marlin always runs with 16-bit activations. To run GPTQ, AWQ, or compressed-tensors weight-only checkpoints with 8-bit activations (W4A8), use the `humming` quantization method and set the activation dtype with `VLLM_HUMMING_INPUT_QUANT_CONFIG`, for example:
+
+    ```bash
+    VLLM_HUMMING_INPUT_QUANT_CONFIG='{"dtype":"int8"}' \
+      vllm serve <model> --quantization humming
+    ```
+
+    Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
+
+## Activation Quantization Fallbacks
+
+A quantized checkpoint (or `--quantization` / `--quantization-config`) requests both a weight and an activation scheme, for example FP8 W8A8 or NVFP4 W4A4. When the kernels that run the requested activation quantization are unavailable for the device or deployment, vLLM by default falls back to a weight-only kernel (Marlin, Humming, the CPU W8A16 kernels) that keeps the quantized weights but runs activations in 16-bit, so W8A8 runs as W8A16 and W4A4 as W4A16. This costs no accuracy, but it is not the scheme the checkpoint was calibrated and benchmarked with, and it is logged once as a warning:
+
+```text
+MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.
+```
+
+Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
+
+Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
@@ -83,7 +114,7 @@ th:not(:first-child) {
 - *Turing does not support Marlin MXFP4.
 
 !!! note
-    For information on quantization support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on quantization support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/#quantization-support) documentation.
 
 !!! note
     This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
