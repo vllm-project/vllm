@@ -1,4 +1,3 @@
-include LICENSE
 include requirements/common.txt
 include requirements/cuda.txt
 include requirements/rocm.txt
