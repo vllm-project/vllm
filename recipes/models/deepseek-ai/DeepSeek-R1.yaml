@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek-R1 is a 671B-parameter MoE reasoning model built on the DeepSeek-V3 architecture, trained with large-scale reinforcement learning for strong chain-of-thought capabilities."
   date_added: 2025-08-01
-  date_updated: 2026-10-02
+  date_updated: 2026-11-04
   tasks:
     - text
   performance_headline: "Open-weights RL-trained reasoning model with native FP8 / FP4 variants"
@@ -78,11 +78,13 @@ variants:
       - mi355x
     tp: 8
     extra_args:
-      - "--no-enable-expert-parallel"
       - "--kv-cache-dtype"
       - "fp8"
+      - "--compilation-config"
+      - '{"use_inductor_graph_partition": true, "pass_config": {"fuse_attn_quant": true}}'
     extra_env:
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      VLLM_ROCM_USE_AITER_FP8BMM: "1"
 
   redhat_nvfp4:
     model_id: "RedHatAI/DeepSeek-R1-NVFP4-FP8-BLOCK"
@@ -271,11 +273,13 @@ guide: |
   ```bash
   export VLLM_ROCM_USE_AITER=1
   export VLLM_ROCM_USE_SKINNY_GEMM=0
+  export VLLM_ROCM_USE_AITER_FP8BMM=1
 
   vllm serve amd/DeepSeek-R1-0528-MXFP4-MTP-MoEFP4 \
     --trust-remote-code \
     --tensor-parallel-size 8 \
-    --kv-cache-dtype fp8
+    --kv-cache-dtype fp8 \
+    --compilation-config '{"use_inductor_graph_partition": true, "pass_config": {"fuse_attn_quant": true}}'
   ```
 
   ## Benchmarking

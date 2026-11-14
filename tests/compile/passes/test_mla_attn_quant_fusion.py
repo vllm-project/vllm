@@ -42,6 +42,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -339,6 +341,50 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
         return self.block_fp8_linear(attn_output)
 
 
+class TestMLAAttentionFp8PerTokenQuantPatternModel(MLAAttentionQuantPatternModel):
+    """Test model for MLA Attention + per-token FP8 quant fusion."""
+
+    quant_key = kFp8DynamicTokenSym
+    quant_config = Fp8Config()
+    aiter_quant = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(self.output_dim, self.output_dim),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=kFp8StaticChannelSym,
+            device=self.device,
+            input_dtype=self.dtype,
+        )
+
+        w = kwargs.get("w")
+        if w is not None:
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+        }
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+    ):
+        """Forward pass: MLA attention -> per-token FP8 linear."""
+        attn_output = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(q.shape[0], self.output_dim),
+        )
+        return self.fp8_linear(attn_output)
+
+
 def is_nvfp4_supported():
     return current_platform.has_device_capability(100)
 
@@ -566,6 +612,8 @@ def test_mla_attention_quant_pattern(
     aiter_quant = getattr(model_class, "aiter_quant", False)
     if "-quant_fp8" in custom_ops_list:
         quant_op = torch.ops.aten.reciprocal
+    elif quant_key == kFp8DynamicTokenSym:
+        quant_op = rocm_aiter_ops.get_per_token_quant_op()
     elif aiter_quant or rocm_aiter_ops.is_linear_fp8_enabled():
         quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
     else:
@@ -591,7 +639,7 @@ def test_mla_attention_quant_pattern(
 
     # After fusion: derive expected scale presence from quant_key properties.
     # - output_scale: present for static quant or non-FP8 (NVFP4 carries input_scale)
-    # - output_block_scale: present when quant uses per-group/block scaling
+    # - output_block_scale: present for dynamic FP8 (per-group/block or per-token)
     has_output_scale = attn_nodes_post[0].kwargs.get("output_scale") is not None
     has_block_scale = attn_nodes_post[0].kwargs.get("output_block_scale") is not None
 
@@ -599,8 +647,10 @@ def test_mla_attention_quant_pattern(
     assert has_output_scale == expects_output_scale, (
         f"output_scale: expected present={expects_output_scale}, got {has_output_scale}"
     )
-    assert has_block_scale == is_per_group, (
-        f"output_block_scale: expected present={is_per_group}, got {has_block_scale}"
+    expects_block_scale = is_per_group or quant_key == kFp8DynamicTokenSym
+    assert has_block_scale == expects_block_scale, (
+        f"output_block_scale: expected present={expects_block_scale}, "
+        f"got {has_block_scale}"
     )
 
     # Check numerical correctness
@@ -626,6 +676,36 @@ def test_rocm_aiter_static_quant_mla_attention(
                 custom_ops="+quant_fp8",
                 model_name="deepseek-ai/DeepSeek-V2-Lite",
                 model_class=TestMLAAttentionAiterFp8StaticQuantPatternModel,
+                backend=AttentionBackendEnum.ROCM_AITER_MLA,
+                dist_init=dist_init,
+                disable_vllm_compile_cache=disable_vllm_compile_cache,
+                workspace_init=workspace_init,
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="Requires ROCm AITER MLA attention and quantization",
+)
+def test_rocm_aiter_per_token_quant_mla_attention(
+    dist_init, disable_vllm_compile_cache, workspace_init, monkeypatch
+):
+    """Fuse AITER's per-token FP8 quant into the AITER FP8 W_UV BMM output."""
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            patch.setenv("VLLM_ROCM_USE_AITER_FP8BMM", "1")
+            patch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "0")
+            rocm_aiter_ops.refresh_env_variables()
+            test_mla_attention_quant_pattern(
+                *MLA_DIMS[0],
+                batch_size=8,
+                dtype=torch.bfloat16,
+                custom_ops="+quant_fp8",
+                model_name="deepseek-ai/DeepSeek-V2-Lite",
+                model_class=TestMLAAttentionFp8PerTokenQuantPatternModel,
                 backend=AttentionBackendEnum.ROCM_AITER_MLA,
                 dist_init=dist_init,
                 disable_vllm_compile_cache=disable_vllm_compile_cache,

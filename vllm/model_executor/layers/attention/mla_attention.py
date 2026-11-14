@@ -262,6 +262,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -338,6 +339,7 @@ def _detect_output_quant_key(
     output_scale: torch.Tensor | None,
     output_block_scale: torch.Tensor | None,
     output_dim: int,
+    quant_group_size: int | None,
 ) -> QuantKey | None:
     """Detect the output quantization key from fusion pass parameters.
 
@@ -352,6 +354,8 @@ def _detect_output_quant_key(
             assert output_scale is None
             # Infer group size from scale shape
             num_groups = output_block_scale.shape[-1]
+            if num_groups == 1 and quant_group_size is None:
+                return kFp8DynamicTokenSym
             group_size = output_dim // num_groups
             if group_size == 128:
                 return kFp8Dynamic128Sym
@@ -1061,7 +1065,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         assert output is not None, "Output tensor must be provided."
 
         quant_key = _detect_output_quant_key(
-            output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
+            output,
+            output_scale,
+            output_block_scale,
+            self.num_heads * self.v_head_dim,
+            quant_group_size,
         )
         if quant_key is not None:
             # The fusion pass has allocated output with quantized dtype
@@ -1172,6 +1180,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output_scale=mha_output_scale,
             )
 
+        fused_v_up_proj_quant = (
+            quant_key == kFp8DynamicTokenSym
+            and num_mha_tokens == 0
+            and self.is_aiter_triton_fp8_bmm_enabled
+            and not self.is_aiter_triton_fp4_bmm_enabled
+        )
         if num_mqa_tokens > 0:
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
@@ -1256,7 +1270,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection, unless the DCP merge already applied it
             if self.W_UV_dcp is None:
-                self._v_up_proj(attn_out, out=mqa_output_slice)
+                if fused_v_up_proj_quant:
+                    assert output_block_scale is not None
+                    self._v_up_proj(
+                        attn_out,
+                        out=quant_output[:num_mqa_tokens],
+                        out_scale=output_block_scale[:num_mqa_tokens],
+                    )
+                else:
+                    self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
             quant_idx = num_mqa_tokens if mha_use_quant_output else num_actual_toks
@@ -1289,6 +1311,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     quant_col_major,
                     quant_tma_aligned,
                 )
+            elif quant_key == kFp8DynamicTokenSym:
+                # Per-token FP8
+                assert output_block_scale is not None
+                start_idx = num_mqa_tokens if fused_v_up_proj_quant else 0
+                if start_idx < quant_idx:
+                    rocm_aiter_ops.per_token_quant_inplace(
+                        quant_output[start_idx:quant_idx],
+                        output[start_idx:quant_idx],
+                        output_block_scale[start_idx:quant_idx],
+                    )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
                 if self._aiter_output_quant:
@@ -1671,7 +1703,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         return FullAttentionManager.layer_config(spec)
 
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+    def _v_up_proj(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        out_scale: torch.Tensor | None = None,
+    ):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
@@ -1689,7 +1726,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         elif self.is_aiter_triton_fp8_bmm_enabled:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+                x,
+                self.W_V,
+                self.W_V_scale,
+                group_size=128,
+                transpose_bm=True,
+                YQ=out,
+                y_scale=out_scale,
             )
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
@@ -3604,6 +3647,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     """
 
     def fused_output_quant_supported(self, quant_key):
+        if quant_key == kFp8DynamicTokenSym:
+            return current_platform.is_rocm()
         return quant_key in (
             kFp8StaticTensorSym,
             kNvfp4Dynamic,

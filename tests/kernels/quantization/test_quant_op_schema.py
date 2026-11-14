@@ -65,6 +65,17 @@ def test_per_token_quant_dynamic_schema():
     )
 
 
+def test_per_token_quant_inplace_schema():
+    """Dynamic per-token in place: op computes scale into the caller's buffer."""
+    x = _x()
+    out = torch.empty_like(x, dtype=FP8_DTYPE)
+    scale = torch.empty((x.shape[0], 1), dtype=torch.float32, device="cuda")
+    opcheck(
+        torch.ops.vllm.rocm_aiter_per_token_quant_inplace,
+        (out, x, scale),
+    )
+
+
 def test_group_fp8_quant_schema():
     """Dynamic per-token-group quant."""
     x = _x()
