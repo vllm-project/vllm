@@ -463,6 +463,15 @@ To discard queued requests for a particular retry, include `"abort": true` in
 the retry request's `params`. This parameter must be a JSON boolean and defaults
 to `false`; resumption still requires `request_failure_policy="recompute"`.
 
+With fault tolerance enabled, vLLM warns at startup when a timeout that reports
+a peer fault (the all2all kernel timeout, `--cpu-distributed-timeout-seconds`,
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`) is not shorter than
+`engine_recovery_timeout_sec`, or when a kernel or CPU timeout is not shorter
+than `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`. Set
+`--cpu-distributed-timeout-seconds` explicitly; the gloo default is 1800 s.
+NCCL-based EPLB communicators (`torch_nccl`, `pynccl`) abort the process on a
+failed collective and cannot be used with fault tolerance.
+
 ### Coordinating recovery
 
 Send recovery instructions to `POST /v1/fault_tolerance/apply`, then poll

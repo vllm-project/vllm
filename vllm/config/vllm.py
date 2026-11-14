@@ -43,6 +43,7 @@ from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
+from .fault_tolerance import warn_ft_config_conflicts
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
@@ -1680,6 +1681,8 @@ class VllmConfig:
                 "fault tolerance is enabled.",
             )
             self.parallel_config.disable_nccl_for_dp_synchronization = True
+
+        warn_ft_config_conflicts(self.parallel_config)
 
         if (
             self.observability_config.per_request_spec_decode_metrics != "none"
