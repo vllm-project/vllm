@@ -179,7 +179,6 @@ guide: |
   - Size the GPU for the full ~8B of weights — all experts are resident even though ~1B is active.
   - It fits on one GPU; tensor parallelism gives no real speedup on basically any GPU (you can still try `--tensor-parallel-size N`).
   - Set `--max-model-len` to match your workload (up to 128K).
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
   - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
 
   ## References

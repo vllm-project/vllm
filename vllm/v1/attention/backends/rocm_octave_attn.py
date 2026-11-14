@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Octave attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
 
-KV cache format and reference: ``vllm/v1/attention/ops/rocm_octave.py``.
-Kernels: ``csrc/attention/octave_attn.cu`` and the per-architecture tiers in
-``_kernel_tier``; RDNA3 and CDNA3, validated on gfx1100 and gfx942. See
-``docs/design/rocm_octave.md``.
+KV cache format and reference: `vllm/v1/attention/ops/rocm_octave.py`.
+Kernels: `csrc/attention/octave_attn.cu` and the per-architecture tiers in
+`_kernel_tier`; RDNA3 and CDNA3, validated on gfx1100 and gfx942. See
+`docs/design/rocm_octave.md`.
 
 Decode, MTP verification and short continuation chunks (every request with
-at most ``_DECODE_MAX_QUERY_LEN`` query tokens) run the split-KV decode
+at most `_DECODE_MAX_QUERY_LEN` query tokens) run the split-KV decode
 kernel over the packed cache; consecutive query tokens of one request share
 each K/V read. Longer prefills run the prefill kernel, which reads the cached
 prefix from the packed cache and the current chunk's K/V unquantized.

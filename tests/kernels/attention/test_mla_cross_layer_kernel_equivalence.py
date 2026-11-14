@@ -4,10 +4,10 @@
 cross-layer (block-major) KV cache layout.
 
 The cross-layer layout carves each layer's per-block page out of a single
-unified slot, so the per-layer view has an inflated ``stride(0)`` (the full
+unified slot, so the per-layer view has an inflated `stride(0)` (the full
 unified slot) and a non-zero storage offset. These tests confirm the MLA
 kernels behind the backends that opt in to the layout (FlashMLA dense,
-FlashInfer MLA dense, FlashMLA fp8 sparse, plus the ``concat_and_cache_mla``
+FlashInfer MLA dense, FlashMLA fp8 sparse, plus the `concat_and_cache_mla`
 write) honor that strided view bit-identically to a contiguous per-layer
 cache, and that writes do not bleed into neighbouring layers' segments.
 """

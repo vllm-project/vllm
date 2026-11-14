@@ -4,6 +4,8 @@
 from typing import Any
 
 import pytest
+import transformers
+from packaging.version import Version
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
@@ -36,9 +38,7 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<sound>Transcribe the input speech.<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
-        "vllm_runner_kwargs": {
-            "gpu_memory_utilization": 0.85,
-        },
+        "vllm_runner_kwargs": {},
     },
     "microsoft/VibeVoice-ASR-HF": {
         "prompt": (
@@ -55,7 +55,6 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
         "sampling_rate": 24000,
         "vllm_runner_kwargs": {
             "max_num_batched_tokens": 2048,
-            "gpu_memory_utilization": 0.85,
         },
     },
     "zai-org/GLM-ASR-Nano-2512": {
@@ -133,3 +132,39 @@ def test_transformers_audio_generation(
         name_0="hf",
         name_1="vllm",
     )
+
+
+def test_transformers_audio_mixed_lengths(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+):
+    """Audios of different lengths encoded in one batch are split into items, whose
+    ragged fields must each stay a batch of one. One prompt holds both audios, as
+    separate requests may not reach the encoder in the same step."""
+    # TODO: Remove once huggingface/transformers#50417 is released
+    if Version(transformers.__version__) < Version("5.23.0.dev0"):
+        monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "warn")
+    model_id = "microsoft/VibeVoice-ASR-HF"
+    settings = AUDIO_MODEL_SETTINGS[model_id]
+    target_sr = settings["sampling_rate"]
+    resampler = AudioResampler(target_sr=target_sr)
+
+    assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+    audios = [
+        (resampler.resample(audio, orig_sr=sr), target_sr)
+        for audio, sr in (asset.audio_and_sample_rate for asset in assets)
+    ]
+    placeholder = "<|object_ref_start|><|box_start|><|object_ref_end|>"
+    prompt = settings["prompt"].replace(placeholder, placeholder * 2)
+
+    with vllm_runner(
+        model_id,
+        model_impl="transformers",
+        dtype="bfloat16",
+        max_model_len=2048,
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 2},
+        **settings["vllm_runner_kwargs"],
+    ) as vllm_model:
+        [(_, text)] = vllm_model.generate_greedy([prompt], 256, audios=[audios])
+
+    assert "lamb" in text

@@ -768,14 +768,14 @@ class Idefics3ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         image_features = self.model.image_pixels_to_features(
-            inputs["pixel_values"],
-            pixel_attention_mask=inputs["pixel_attention_mask"],
+            values["pixel_values"],
+            pixel_attention_mask=values["pixel_attention_mask"],
             remove_padding=False,
-            position_ids=inputs["position_ids"],
+            position_ids=values["position_ids"],
         )
         image_features = self.model.connector(image_features)
         return image_features.flatten(0, 1)

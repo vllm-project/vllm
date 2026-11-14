@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """LUT-B weight format: 3-bit indices into per-tile E4M3 codebooks.
 
-Rubin's ``tcgen05.mma ... decompress::lut::b`` instructions decode each weight
+Rubin's `tcgen05.mma ... decompress::lut::b` instructions decode each weight
 from a three-bit index into an eight-entry E4M3 codebook shared by eight
 output channels. This module implements a calibration-free format matching
-that contract. Each ``8 (N) x 64 (K)`` tile of a ``[N, K]`` weight stores:
+that contract. Each `8 (N) x 64 (K)` tile of a `[N, K]` weight stores:
 
 * 192 bytes of packed three-bit indices (row-major over the tile),
 * an eight-entry E4M3 codebook, and
@@ -43,7 +43,7 @@ def pack_lut_b_indices(indices: torch.Tensor) -> torch.Tensor:
 
 
 def unpack_lut_b_indices(packed: torch.Tensor) -> torch.Tensor:
-    """Inverse of :func:`pack_lut_b_indices`."""
+    """Inverse of `pack_lut_b_indices`."""
     if packed.shape[-1] % 3 != 0:
         raise ValueError("The number of packed bytes must be divisible by 3")
 
@@ -102,7 +102,7 @@ def _init_uniform(values: torch.Tensor) -> torch.Tensor:
 def _fit_tiles(
     values: torch.Tensor, num_iterations: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fit one E4M3 codebook per row of ``values`` with Lloyd iterations.
+    """Fit one E4M3 codebook per row of `values` with Lloyd iterations.
 
     Three initializations are tried and the lowest-error fit per tile is kept.
     """
@@ -138,11 +138,11 @@ def quantize_lut_b(
     num_iterations: int = LUT_B_LLOYD_ITERATIONS,
     max_tiles_per_chunk: int = LUT_B_MAX_TILES_PER_CHUNK,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize a ``[N, K]`` or stacked ``[E, N, K]`` weight to LUT-B.
+    """Quantize a `[N, K]` or stacked `[E, N, K]` weight to LUT-B.
 
-    Returns ``(packed, codebooks, scales)`` with shapes
-    ``[E, N/8, K/64, 192]`` (uint8), ``[E, N/8, K/64, 8]`` (float8_e4m3fn)
-    and ``[E, N/8, K/64]`` (uint8 UE8M0). The expert dim is dropped for 2D
+    Returns `(packed, codebooks, scales)` with shapes
+    `[E, N/8, K/64, 192]` (uint8), `[E, N/8, K/64, 8]` (float8_e4m3fn)
+    and `[E, N/8, K/64]` (uint8 UE8M0). The expert dim is dropped for 2D
     inputs.
     """
     squeeze = weight.ndim == 2
@@ -206,7 +206,7 @@ def dequantize_lut_b(
     scales: torch.Tensor,
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """Reconstruct the ``[N, K]`` or ``[E, N, K]`` weight from LUT-B tiles."""
+    """Reconstruct the `[N, K]` or `[E, N, K]` weight from LUT-B tiles."""
     squeeze = packed.ndim == 3
     if squeeze:
         packed, codebooks, scales = packed[None], codebooks[None], scales[None]
@@ -245,14 +245,14 @@ def lut_b_to_sm107_tiles(
 ) -> torch.Tensor:
     """Rearrange stacked LUT-B weights into the SM107 MoE kernel layout.
 
-    Returns ``[E, N / 128, K / 128, 7168]`` uint8. Each tile holds:
+    Returns `[E, N / 128, K / 128, 7168]` uint8. Each tile holds:
 
     * 6144 bytes of 3-bit indices, 48 bytes (K128) per output channel, in the
       no-swizzle K-major core-matrix layout (8 rows x 16 bytes),
-    * 512 bytes of UE8M0 B scales: byte ``q`` of word ``[lane][col]`` is the
-      scale of channel ``col * 32 + lane`` for K32 block ``q``,
-    * 512 bytes of codebooks: lane ``g`` holds the two eight-entry books (one
-      per K64 half) of channel group ``g``; lanes 16-31 are zero padding.
+    * 512 bytes of UE8M0 B scales: byte `q` of word `[lane][col]` is the
+      scale of channel `col * 32 + lane` for K32 block `q`,
+    * 512 bytes of codebooks: lane `g` holds the two eight-entry books (one
+      per K64 half) of channel group `g`; lanes 16-31 are zero padding.
     """
     num_experts, n_tiles, k_tiles = packed.shape[:3]
     n, k = n_tiles * LUT_B_BLOCK_N, k_tiles * LUT_B_BLOCK_K

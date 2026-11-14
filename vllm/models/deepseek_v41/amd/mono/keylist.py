@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2's key lists without K1's ``stage_kt``: the KT and KLEN that it writes.
+"""K2's key lists without K1's `stage_kt`: the KT and KLEN that it writes.
 
 On an index layer (2, 8, 14, 20, 24, 28, 32 and 36 of DeepSeek-V4.1-Flash)
 vLLM's compressor and indexer run between K1 and K2, and the indexer writes
 the layer's top-512, which the keys need. So K1 writes no keys there
-(``FrontBuild.index``), but K2 reads each token's keys from KT and KLEN,
-which ``stage_kt`` writes on the other layers. ``launch`` writes them with
-one Triton program a token, from the same inputs ``stage_kt`` reads, in the
+(`FrontBuild.index`), but K2 reads each token's keys from KT and KLEN,
+which `stage_kt` writes on the other layers. `launch` writes them with
+one Triton program a token, from the same inputs `stage_kt` reads, in the
 same format:
 
     KT[t * KEYS + k] = the compressed slot | 1 << 31 of top-k entry k, for
@@ -15,7 +15,7 @@ same format:
                        slots, then -1 up to KEYS
     KLEN[t] = ntopk + the window length, KLEN[S + t] = ntopk
 
-ntopk is min((position + 1) // ratio, TOPK), as in ``stage_kt``, and a token
+ntopk is min((position + 1) // ratio, TOPK), as in `stage_kt`, and a token
 whose slot is -1 has no keys. tests/kernels/models/amd/test_dsv41_mono_gfx942.py
 compares the result with a reference built in torch.
 """

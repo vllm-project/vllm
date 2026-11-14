@@ -14,7 +14,6 @@ import torch
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cudagraph_pool import capture_pool
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
     BatchDescriptor,
@@ -29,7 +28,7 @@ from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 logger = init_logger(__name__)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CUDAGraphStat:
     num_unpadded_tokens: int
     num_padded_tokens: int
@@ -124,7 +123,7 @@ class CUDAGraphLogging:
         self.reset()
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
     cudagraph: torch.cuda.CUDAGraph | None = None
@@ -135,7 +134,7 @@ class CUDAGraphEntry:
     input_addresses: list[int] | None = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class CUDAGraphOptions:
     debug_log_enable: bool = True
     gc_disable: bool = False
@@ -275,9 +274,6 @@ class CUDAGraphWrapper:
                     self.runtime_mode.name,
                     entry.batch_descriptor,
                 )
-            # validate that cudagraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
-
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]

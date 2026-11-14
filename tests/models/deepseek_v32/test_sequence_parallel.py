@@ -49,6 +49,18 @@ class _RecordingProjection(nn.Module):
         return hidden_states[:, :2]
 
 
+class _RecordingAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.num_tokens = 0
+
+    def forward(self, positions, hidden_states):
+        self.num_tokens = hidden_states.shape[0]
+        if hidden_states.shape[0] < positions.shape[0]:
+            hidden_states = torch.cat([hidden_states, hidden_states])[: len(positions)]
+        return hidden_states
+
+
 class _SequenceParallelMTPBlock:
     use_sequence_parallel = True
 
@@ -89,7 +101,7 @@ def test_decoder_layer_keeps_dense_states_sequence_sharded(monkeypatch):
     layer.use_sequence_parallel = True
     layer.input_layernorm = _IdentityNorm()
     layer.post_attention_layernorm = _IdentityNorm()
-    layer.self_attn = _RecordingModule()
+    layer.self_attn = _RecordingAttention()
     layer.mlp = _RecordingModule()
 
     _mock_sequence_parallel_collectives(monkeypatch, deepseek_v32_model)
@@ -100,13 +112,13 @@ def test_decoder_layer_keeps_dense_states_sequence_sharded(monkeypatch):
     hidden_states, residual = layer(positions, hidden_states, residual=None)
 
     assert hidden_states.shape == residual.shape == (2, 2)
-    assert layer.self_attn.num_tokens == 3
+    assert layer.self_attn.num_tokens == 2
     assert layer.mlp.num_tokens == 2
 
     hidden_states, residual = layer(positions, hidden_states, residual)
 
     assert hidden_states.shape == residual.shape == (2, 2)
-    assert layer.self_attn.num_tokens == 3
+    assert layer.self_attn.num_tokens == 2
     assert layer.mlp.num_tokens == 2
 
 
@@ -165,6 +177,7 @@ def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
     model.layers = nn.ModuleList([_PartialSumLayer()])
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
+    model.shardq_sequence_parallel = False
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {}
 

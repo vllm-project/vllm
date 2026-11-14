@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for reading and editing PyTorch's allocator configuration.
 
-Torch's allocator config is parsed as a whole: ``parseArgs`` resets every
+Torch's allocator config is parsed as a whole: `parseArgs` resets every
 option that is not explicitly present in the string it is handed. Writing a
 single field therefore silently drops the rest of the user's configuration,
 for the remainder of the process:
@@ -46,7 +46,7 @@ def alloc_conf_from_env(
 
 
 def live_alloc_conf() -> str | None:
-    """The allocator config string currently in effect, or ``None``.
+    """The allocator config string currently in effect, or `None`.
 
     Read from the live allocator rather than the environment, so that a
     *runtime* write by another component is visible.
@@ -70,7 +70,7 @@ def current_alloc_conf() -> str:
 
 
 def conf_flag_enabled(conf: str, key: str) -> bool:
-    """Parse ``<key>:<bool>`` out of an allocator config string."""
+    """Parse `<key>:<bool>` out of an allocator config string."""
     for field in conf.split(","):
         name, _, value = field.partition(":")
         if name.strip() == key:
@@ -79,7 +79,7 @@ def conf_flag_enabled(conf: str, key: str) -> bool:
 
 
 def with_conf_flag(conf: str, key: str, enabled: bool) -> str:
-    """Return ``conf`` with only ``key`` flipped, every other field verbatim."""
+    """Return `conf` with only `key` flipped, every other field verbatim."""
     want = f"{key}:{'True' if enabled else 'False'}"
     fields = [f for f in (f.strip() for f in conf.split(",")) if f]
     for i, field in enumerate(fields):
@@ -97,9 +97,9 @@ def expandable_segments_enabled_from_env(
 
 
 def expandable_segments_enabled() -> bool | None:
-    """Live ``expandable_segments`` state, or ``None`` if it cannot be read.
+    """Live `expandable_segments` state, or `None` if it cannot be read.
 
-    ``None`` is deliberately distinct from ``False``: the environment can never
+    `None` is deliberately distinct from `False`: the environment can never
     reflect a runtime write, so a caller verifying a write it just issued must
     not read "cannot tell" as "the write did not take".
     """
@@ -123,7 +123,7 @@ def set_alloc_conf(conf: str) -> None:
 
 @contextmanager
 def non_expandable_allocations() -> Generator[None, None, None]:
-    """Run the body with ``expandable_segments`` off, then restore the config."""
+    """Run the body with `expandable_segments` off, then restore the config."""
     conf = current_alloc_conf()
     if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
         yield

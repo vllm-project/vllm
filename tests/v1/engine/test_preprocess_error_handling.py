@@ -14,10 +14,9 @@ MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
-    if current_platform.is_rocm() or current_platform.is_xpu():
+    if current_platform.is_xpu():
         pytest.skip(
-            "Skipped on ROCm/XPU: this test only works with 'fork', "
-            "but ROCm/XPU uses 'spawn'."
+            "Skipped on XPU: this test only works with 'fork', but XPU uses 'spawn'."
         )
 
     assert not torch.cuda.is_initialized(), (
@@ -39,6 +38,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         EngineCore, "preprocess_add_request", conditional_failing_preprocess
     )
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     llm = LLM(model=MODEL_NAME)
 
