@@ -11,7 +11,7 @@ formats, the step's KV caches as vLLM's insert writes them.
 Each stage is compared on its own input, so a failure names the stage; the MoE
 is checked on the kernels' own FFN input, where routing cannot differ.
 
-On gfx942 at TP4, `test_mono_decode_942_replays` runs the composed runner on
+On gfx942 at TP4 and TP8, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
 gfx942 are checked by `test_dsv41_mono_layers.py`."""
@@ -677,8 +677,8 @@ def _mono_replay_942(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
 
 def _replay_942(rank: int, tp: int, device) -> None:
-    """The composed gfx942 runner at TP4 on the copies of the weights that the
-    model makes at load. The steps have 6 rows (one GEMV pass), 8 rows (two
+    """The composed gfx942 runner at TP4 or TP8 on the copies of the weights
+    that the model makes at load. The steps have 6 rows (one GEMV pass), 8 rows (two
     passes, the second one padded) and 42 rows (seven passes, the most that
     the gfx942 kernels take). The padded pass must leave the real rows alone,
     and the steps alternating in one CUDA graph must give the first run's
@@ -729,7 +729,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
         moe,
         torch.Generator(device=device).manual_seed(2001 + rank),
         torch.Generator(device=device).manual_seed(2000),
-        inter=mono_decode.INTER_TP4,
+        inter=mono_decode._routed_inter_942(),
     )
     process_weights_after_loading(moe, vc.model_config, device)
 
@@ -821,7 +821,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
             w13=w13, w13_s=w13_s, w2=w2, w2_s=w2_s, sgu=sgu, sgu_s=sgu_s,
             sw2=sw2, sw2_s=sw2_s,
         )  # fmt: skip
-        mw.check_942(moe.n_routed_experts)
+        mw.check_942(tp, moe.n_routed_experts)
         ins = inputs(M)
         # this rank's unreduced wo_b output, for the FFN launch
         part = (torch.randn(M, HIDDEN, generator=gs) * 0.1).to(bf).to(device)
@@ -877,9 +877,12 @@ def _replay_942(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 mono kernels")
-def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch):
-    # The gfx942 kernels build for TP4 only.
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("needs 4 GPUs")
+@pytest.mark.parametrize("tp", [4, 8])
+def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch, tp: int):
+    # The gfx942 kernels build for TP4 and TP8. At TP8 a rank has 8 heads,
+    # one padded 16-wide head tile, and a 288-wide routed intermediate, whose
+    # w2 rows end in a single K block.
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, 4, 1, _mono_replay_942)
+    multi_process_parallel(monkeypatch, tp, 1, _mono_replay_942)
