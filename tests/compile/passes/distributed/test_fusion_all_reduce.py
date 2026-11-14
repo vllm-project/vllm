@@ -137,7 +137,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(
         self,
         hidden_size=16,
-    token_num=16,
+        token_num=16,
         eps=1e-6,
         dtype: torch.dtype = torch.float16,
         use_aiter: bool = False,
