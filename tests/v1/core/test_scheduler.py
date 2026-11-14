@@ -25,7 +25,7 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
-    num_retained_objects,
+    retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -320,7 +320,7 @@ def test_add_requests():
 def _aux_output_connector(scheduler: Scheduler) -> AuxOutputSchedulerConnector:
     manager = scheduler.kv_cache_manager
     return AuxOutputSchedulerConnector(
-        manager, num_retained_objects(scheduler.vllm_config, manager.kv_cache_config)
+        manager, retained_objects(scheduler.vllm_config, manager.kv_cache_config)[0]
     )
 
 

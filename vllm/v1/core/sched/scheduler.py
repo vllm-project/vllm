@@ -11,7 +11,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
-    num_retained_objects,
+    retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
@@ -464,9 +464,7 @@ class Scheduler(SchedulerInterface):
         self.aux_output_connector = (
             AuxOutputSchedulerConnector(
                 self.kv_cache_manager,
-                num_retained_objects(
-                    vllm_config, self.kv_cache_manager.kv_cache_config
-                ),
+                retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
             )
             if vllm_config.aux_output_config.enabled
             else None

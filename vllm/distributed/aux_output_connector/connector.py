@@ -30,11 +30,11 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-def num_retained_objects(
+def retained_objects(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> int:
+) -> tuple[int, int]:
     """Number of hash-block objects whose routed experts the scheduler retains
-    and the worker stores."""
+    and the worker stores, and the tokens per object."""
     block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
     )
@@ -43,11 +43,11 @@ def num_retained_objects(
         object_nbytes = hash_block_size * get_routed_experts_bytes_per_token(
             vllm_config
         )
-        return max(max_bytes // object_nbytes, 1)
+        return max(max_bytes // object_nbytes, 1), hash_block_size
     num_blocks = kv_cache_config.num_blocks
     if vllm_config.kv_transfer_config is not None:
         num_blocks *= 2
-    return num_blocks * (block_size // hash_block_size)
+    return num_blocks * (block_size // hash_block_size), hash_block_size
 
 
 @dataclass(slots=True)

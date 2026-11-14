@@ -18,7 +18,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
-    num_retained_objects,
+    retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -2045,7 +2045,7 @@ def test_retained_objects_follow_max_bytes(
         kv_transfer_config=kv_transfer_config,
     )
     kv_cache_config = SimpleNamespace(num_blocks=3)
-    assert num_retained_objects(vllm_config, kv_cache_config) == expected
+    assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
 
 
 def test_connector_releases_oldest_uncached_blocks_past_capacity():

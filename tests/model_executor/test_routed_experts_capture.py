@@ -817,8 +817,9 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         aux_output_worker, "RoutedExpertsCapturer", Mock(return_value=capturer)
     )
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())
-    for module in (aux_output_worker, aux_output_connector):
-        monkeypatch.setattr(module, "resolve_kv_cache_block_sizes", lambda *_: (32, 16))
+    monkeypatch.setattr(
+        aux_output_connector, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
+    )
     monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
     monkeypatch.setattr(
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
