@@ -1290,6 +1290,16 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
 
+@pytest.mark.parametrize(
+    ("spec_cls", "aligned"), [(MLAAttentionSpec, False), (SelfAddressedMLASpec, True)]
+)
+def test_only_splittable_token_caches_align_to_kernel_blocks(spec_cls, aligned):
+    """Only self-addressed token caches are padded to whole kernel blocks."""
+    group = _packed_group(1, 1152, [64], spec_cls=spec_cls)
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
+    assert (spec.block_stride_alignment is not None) == aligned
+
+
 def test_packed_token_cache_without_slot_mapping_is_split():
     """A packed token cache that takes no slot mapping is split like a compressed
     one: its kernel blocks address the manager blocks' rows."""
