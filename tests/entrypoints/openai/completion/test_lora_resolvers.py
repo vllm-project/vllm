@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -255,3 +256,46 @@ async def test_serving_completion_flag_not_set(mock_serving_setup):
 
     mock_engine.add_lora.assert_not_called()
     mock_engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_lora_cancelled_during_add_lora():
+    started = asyncio.Event()
+
+    async def hang(_lora_request):
+        started.set()
+        await asyncio.Event().wait()
+
+    engine = MagicMock()
+    engine.model_config = MockModelConfig()
+    engine.add_lora = hang
+
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+
+    class _Resolver(LoRAResolver):
+        def __init__(self):
+            self.calls = 0
+
+        async def resolve_lora(self, base_model_name, lora_name):
+            self.calls += 1
+            return LoRARequest(
+                lora_name=lora_name,
+                lora_int_id=1,
+                lora_path="/fake/path/cancelled-lora",
+            )
+
+    first = _Resolver()
+    second = _Resolver()
+    models.lora_resolvers = [first, second]
+
+    task = asyncio.create_task(models.resolve_lora("cancelled-lora"))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert first.calls == 1
+    assert second.calls == 0
