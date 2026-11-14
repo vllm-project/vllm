@@ -17,6 +17,7 @@ def test_python_llm_requires_rust_for_multimodal(vllm_runner, monkeypatch):
             dtype="bfloat16",
             max_model_len=2048,
             enforce_eager=True,
+            enable_chunked_prefill=True,
         )
 
 

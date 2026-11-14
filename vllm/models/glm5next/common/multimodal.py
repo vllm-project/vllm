@@ -690,6 +690,32 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
 
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        image_processor = self.get_hf_processor().image_processor
+        temporal_factor = image_processor.temporal_patch_size
+        factor = self._alignment_factor(image_processor)
+        max_pixels = self._get_video_max_pixels()
+        # Each temporal group needs at least one aligned spatial patch.
+        max_frames = max_pixels // factor**2
+        max_frames = min(
+            max_frames,
+            max_tokens * temporal_factor // image_processor.patch_expand_factor**2,
+        )
+        width, height = self.get_image_size_with_most_features()
+        best_frames, best_tokens = temporal_factor, 0
+        for num_frames in range(temporal_factor, max_frames + 1, temporal_factor):
+            _, num_tokens = self._get_vision_info(
+                image_width=width,
+                image_height=height,
+                num_frames=num_frames,
+                max_image_pixels=max_pixels,
+            )
+            if best_tokens < num_tokens <= max_tokens:
+                best_frames, best_tokens = num_frames, num_tokens
+                if best_tokens == max_tokens:
+                    break
+        return best_frames
+
     def get_image_size_with_most_features(self) -> ImageSize:
         # The inherited square probe strands budget whenever the token
         # ceiling is not a perfect square: with max_image_tokens=8000 the
@@ -742,9 +768,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         image_processor = self.get_hf_processor().image_processor
         factor = self._alignment_factor(image_processor)
         temporal_factor = image_processor.temporal_patch_size
-        # `smart_resize` denominates its bounds in vision tokens. Round down,
-        # but keep the profiling search viable when the caller's budget is
-        # below one aligned canvas of the requested duration.
+        # `smart_resize` denominates its bounds in vision tokens.
         max_image_tokens = max(
             max_image_pixels // self._pixels_per_token(image_processor), 1
         )

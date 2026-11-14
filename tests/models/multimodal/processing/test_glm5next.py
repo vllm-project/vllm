@@ -81,6 +81,7 @@ def test_rust_engine_profiles_synthetic_patches(monkeypatch, modality, count):
         assert pixels.dtype == torch.float32
         assert torch.count_nonzero(pixels) == 0
         assert placeholder.length == num_patches // vision_config.spatial_merge_size**2
+        assert placeholder.length <= 100
         assert placeholder.offset + placeholder.length <= len(
             inputs["prompt_token_ids"]
         )
