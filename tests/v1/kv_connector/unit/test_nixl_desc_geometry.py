@@ -1492,9 +1492,10 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
         NixlConnectorMetadata,
     )
 
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=8, kernel_block_size=8, num_logical_blocks=8, mamba=False
-    ).worker
+    )
+    worker = fixture.worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=8,
@@ -1534,7 +1535,7 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
     assert isinstance(worker, NixlPullConnectorWorker)
     worker._read_blocks_for_req("req-b", meta)
 
-    _assert_local_writes_within(worker, _owned_byte_ranges(worker, local_ids))
+    _assert_local_writes_within(worker, _owned_byte_ranges(fixture, local_ids))
     assert worker.get_transfer_results().failed_recving == set()
 
 
