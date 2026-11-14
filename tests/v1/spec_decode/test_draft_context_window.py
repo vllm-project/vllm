@@ -16,12 +16,11 @@ from vllm.config import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheGroup
 from vllm.v1.worker.gpu.attn_utils import init_attn_backend
 from vllm.v1.worker.gpu.spec_decode.utils import check_draft_context_window
 
@@ -57,14 +56,14 @@ def test_eagle3_drafter_window(dist_init, window):
 
 
 @pytest.mark.parametrize(
-    ("is_draft_layer", "option_window", "spec_type"),
+    ("is_draft_layer", "option_window", "manager_cls"),
     [
-        pytest.param(True, 2048, FullAttentionSpec, id="draft-with-option"),
-        pytest.param(True, None, SlidingWindowSpec, id="draft-checkpoint-window"),
-        pytest.param(False, 2048, SlidingWindowSpec, id="target"),
+        pytest.param(True, 2048, FullAttentionManager, id="draft-with-option"),
+        pytest.param(True, None, SlidingWindowManager, id="draft-checkpoint-window"),
+        pytest.param(False, 2048, SlidingWindowManager, id="target"),
     ],
 )
-def test_kv_cache_spec(is_draft_layer, option_window, spec_type):
+def test_kv_cache_config(is_draft_layer, option_window, manager_cls):
     speculative_config = SpeculativeConfig(model="ngram", num_speculative_tokens=3)
     vllm_config = VllmConfig(
         model_config=ModelConfig(max_model_len=1024),
@@ -77,7 +76,9 @@ def test_kv_cache_spec(is_draft_layer, option_window, spec_type):
             8, 128, 0.1, num_kv_heads=8, per_layer_sliding_window=2048, prefix="layer"
         )
     layer.is_draft_layer = is_draft_layer
-    assert type(layer.get_kv_cache_spec(vllm_config)) is spec_type
+    layer_config = layer.get_kv_cache_config(vllm_config)
+    assert layer_config is not None
+    assert layer_config.manager_cls is manager_cls
 
 
 def test_windowed_draft_layer_gets_its_own_attention_group():
@@ -93,13 +94,17 @@ def test_windowed_draft_layer_gets_its_own_attention_group():
                 per_layer_sliding_window=window,
                 prefix=prefix,
             )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=32, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=16,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["target", "draft"], spec)],
+        kv_cache_groups=[
+            KVCacheGroup(
+                {"target": spec, "draft": spec}, FullAttentionManager.config(), 32
+            )
+        ],
     )
 
     attn_groups, _, _ = init_attn_backend(
