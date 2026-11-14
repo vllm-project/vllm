@@ -82,7 +82,7 @@ class EncoderDecoderModelState(ModelState):
             req_encoder_inputs = scheduled_encoder_inputs.get(req_id, [])
             if req_encoder_inputs:
                 encoder_inputs[req_id] = req_encoder_inputs
-        _, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
+        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
         if mm_kwargs:
             # Encoder-decoder models consume encoder outputs through the
             # `encoder_outputs` forward kwarg, not `inputs_embeds`. Single modality
@@ -90,7 +90,9 @@ class EncoderDecoderModelState(ModelState):
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
             with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
-                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                    mm_kwargs, mm_hashes
+                )
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []

@@ -20,7 +20,7 @@ import functools
 import gc
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -152,7 +152,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_num_active_loras_for_dispatch,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.mm.lora import activate_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -2066,18 +2066,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-                if self.supports_mm_inputs and self.lora_config is not None:
-                    set_active_mm_loras(
+                mm_lora_ctx = (
+                    activate_mm_loras(
                         model=self.model,
                         lora_manager=self.lora_manager,
-                        encoder_cache=self.encoder_cache,
+                        encoder_runner=self.model_state.encoder_runner,
                         req_id_to_index=self.req_states.req_id_to_index,
                         lora_state=self.lora_state,
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
-                with self.ec_connector.maybe_get_output(
-                    scheduler_output
-                ) as ec_connector_output:
+                    if self.supports_mm_inputs and self.lora_config is not None
+                    else nullcontext()
+                )
+                with (
+                    mm_lora_ctx,
+                    self.ec_connector.maybe_get_output(
+                        scheduler_output
+                    ) as ec_connector_output,
+                ):
                     inputs_embeds = self.model_state.prepare_inputs_embeds(
                         scheduled_encoder_inputs, input_batch, self.req_states
                     )
