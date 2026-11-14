@@ -1021,14 +1021,8 @@ def test_weight_loading_requantization(
             lambda **kwargs: Mock(),
         )
         config = _fully_quantized_modelopt_mxfp8_config()
-        expected_source_cls = ModelOptLinearMethod
     elif source_format == "modelopt_nvfp4":
-        from vllm.model_executor.layers.quantization.online.requantization import (
-            _ModelOptNvfp4LinearSource,
-        )
-
         config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
-        expected_source_cls = _ModelOptNvfp4LinearSource
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     config.online_quantization_config = OnlineQuantizationConfig(
@@ -1054,7 +1048,7 @@ def test_weight_loading_requantization(
     assert isinstance(target, Fp8PtpcOnlineLinearMethod)
     source = target.requantization_source
     # Checkpoint parameters must belong to the selected source method.
-    assert isinstance(source, expected_source_cls)
+    assert isinstance(source, ModelOptLinearMethod)
     for name in ("weight", "weight_scale"):
         # Source registration must choose V2 rather than the online target's loader.
         assert getattr(layer, name).weight_loader == layer.weight_loader_v2

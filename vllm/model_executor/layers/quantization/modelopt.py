@@ -87,6 +87,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
+    dequantize_to_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     CSF_SCALE_ENCODINGS,
@@ -3158,10 +3159,32 @@ class ModelOptLinearMethod(LinearMethodBase):
             return dequant_mxfp8_to_bf16(
                 layer.weight.contiguous(), layer.weight_scale.contiguous()
             )
-        else:
-            raise NotImplementedError(
-                "ModelOpt weight dequantization is only supported for MXFP8."
+        if self.wkey.key is kNvfp4Static:
+            assert self.ctx.group_size is not None, "NVFP4 requires a group_size"
+            input_size = layer.weight.shape[1] * 2
+            weight = torch.empty(
+                (layer.weight.shape[0], input_size),
+                dtype=self.out_dtype,
+                device=layer.weight.device,
             )
+            chunk_rows = max(1, 16 * 1024 * 1024 // input_size)
+            offset = 0
+            for partition, width in enumerate(layer.logical_widths):
+                for start in range(offset, offset + width, chunk_rows):
+                    rows = slice(start, min(start + chunk_rows, offset + width))
+                    weight[rows] = dequantize_to_dtype(
+                        layer.weight[rows].contiguous(),
+                        layer.weight_scale[rows].contiguous(),
+                        layer.weight_scale_2[partition],
+                        weight.dtype,
+                        block_size=self.ctx.group_size,
+                        swizzle=False,
+                    )
+                offset += width
+            return weight
+        raise NotImplementedError(
+            "ModelOpt weight dequantization is only supported for MXFP8 and NVFP4."
+        )
 
     def apply(self, layer, x, bias=None):
         return self.fmt.apply(
