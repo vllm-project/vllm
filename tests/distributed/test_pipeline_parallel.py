@@ -463,6 +463,64 @@ def test_pp_mixed_precision_kv_cache():
     )
 
 
+@multi_gpu_only(num_gpus=2)
+@create_new_process_for_each_test()
+def test_pp_longcat_ngram_embedding(vllm_runner, tmp_path):
+    """Only the first PP stage loads and consumes the n-gram embedding."""
+    import torch
+    from transformers import LongcatFlashConfig, LongcatFlashForCausalLM
+
+    config = LongcatFlashConfig(
+        num_layers=2,
+        hidden_size=256,
+        vocab_size=128,
+        num_attention_heads=4,
+        ffn_hidden_size=512,
+        expert_ffn_hidden_size=256,
+        n_routed_experts=4,
+        zero_expert_num=0,
+        zero_expert_type="identity",
+        moe_topk=2,
+        mla_scale_q_lora=True,
+        mla_scale_kv_lora=True,
+        emb_neighbor_num=2,
+        emb_split_num=1,
+        ngram_vocab_size_ratio=1,
+    )
+    torch.manual_seed(7)
+    model = LongcatFlashForCausalLM(config).bfloat16()
+    weights = model.state_dict()
+    # One bigram table and its projection, in checkpoint layout.
+    weights["model.ngram_embeddings.embedders.0.weight"] = torch.randn(
+        config.vocab_size + 1, config.hidden_size, dtype=torch.bfloat16
+    )
+    weights["model.ngram_embeddings.post_projs.0.weight"] = torch.eye(
+        config.hidden_size, dtype=torch.bfloat16
+    )
+    model.save_pretrained(tmp_path, state_dict=weights, save_original_format=True)
+    config.architectures = ["LongcatFlashNgramForCausalLM"]
+    config.save_pretrained(tmp_path)
+
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            str(tmp_path),
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=4,
+            kv_cache_memory_bytes=64 << 20,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+        ) as runner:
+            outputs[pp_size] = runner.generate_greedy_logprobs(
+                [[7, 13, 11], [31, 5, 28, 6]], max_tokens=4, num_logprobs=5
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[1], outputs_1_lst=outputs[2], name_0="pp1", name_1="pp2"
+    )
+
+
 @create_new_process_for_each_test()
 def test_pp_granite4_vision_deepstack(num_gpus_available):
     """A later PP stage must receive the deepstack features of its layers."""
