@@ -82,6 +82,9 @@ class DefaultModelState(ModelState):
                 )
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
+                prompt_lens=[new_req_data.prompt_len]
+                if self.model_config.mm_prefix_whole_prompt
+                else None,
             )[0]
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
