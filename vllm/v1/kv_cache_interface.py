@@ -165,7 +165,7 @@ class SparseCacheRole(StrEnum):
     INDEXER = "indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManagerConfig:
     """Allocation policy of a layer: the `SingleTypeKVCacheManager` that
     enforces it and that manager's `Params`. Layers whose configs compare
@@ -332,12 +332,14 @@ def compute_layout_strides(
     order = layout.stride_order
     padded_page_size = getattr(spec, "page_size_padded", None)
     if padded_page_size is not None:
-        assert kernel_block_size is None or kernel_block_size == spec.block_size, (
-            "Padded KV pages do not support kernel block splitting."
+        blocks_per_page = shape[_DIM_B] // num_blocks
+        assert padded_page_size % blocks_per_page == 0, (
+            "Padded page size must divide into equal kernel pages."
         )
+        padded_page_size //= blocks_per_page
         page_grid_end = max(order.index(_DIM_L), order.index(_DIM_B)) + 1
         page_grid_shape = tuple(shape[dim] for dim in order[:page_grid_end])
-        assert prod(page_grid_shape) == num_layers * num_blocks, (
+        assert prod(page_grid_shape) == num_layers * shape[_DIM_B], (
             "Page padding requires dimensions outside the page tail to be L, B, "
             f"or singleton; got {layout.name} with shape {shape}."
         )
@@ -374,15 +376,16 @@ def create_kv_cache_views(
     )
     ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
-        # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
-        # they sit a constant stride apart only if a block is one dense page: no
-        # padding at its end, and no other layer's page before the next block.
-        dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
-        if block_stride != dense_page_size:
+        # Distribute page padding evenly among the kernel blocks. Other
+        # layers must not sit between consecutive pages of this layer.
+        page_size = getattr(spec, "page_size_padded", None) or prod(
+            compute_layer_kv_cache_shape_bytes(spec, 1)[1:]
+        )
+        if block_stride != page_size:
             raise ValueError(
                 f"The resolved KV cache layout ({layout.name}) does not store "
-                "blocks as dense, unpadded pages (block stride "
-                f"{block_stride} != page {dense_page_size}), so a manager "
+                "blocks as contiguous pages (block stride "
+                f"{block_stride} != page {page_size}), so a manager "
                 f"block cannot be split into {ratio} kernel blocks of "
                 f"{kernel_block_size} tokens. Reduce --block-size to "
                 f"{kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
@@ -627,7 +630,7 @@ def is_mamba_prefill_checkpoint_valid(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
 
@@ -656,7 +659,7 @@ class KVCacheGroupRole(StrEnum):
     HISPARSE_INDEXER = "hisparse_indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KVCacheLayerConfig:
     """What one layer needs from the KV cache: the manager that allocates its
     blocks, that manager's policy, and the layer's tensor layout."""
@@ -681,7 +684,7 @@ class KVCacheLayerConfig:
         return blocks * self.spec.page_size_bytes
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheGroup:
     """Represents a group of model layers that share the same KV cache block table.
     These layers are regarded as one layer in the KV cache manager.

@@ -49,7 +49,7 @@ def allocate_records(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMDeferred:
     """A step's deferred RecoverSSM (the KDA metadata's `recoverssm_deferred`,
     set by the specialized decode's metadata build): after sampling, each request's
