@@ -114,14 +114,24 @@ impl TextRequestProcessor {
         prompt_truncation: Option<PromptTruncation>,
     ) -> Result<Vec<u32>> {
         let tokenizer = self.backend.tokenizer();
-        let mut prompt_token_ids = match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
+        let (mut prompt_token_ids, text) = match prompt {
+            Prompt::Text(text) => (tokenizer.encode(&text, add_special_tokens)?, Some(text)),
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids,
+            Prompt::TokenIds(token_ids) => (token_ids, None),
         };
-        if let Some(prompt_truncation) = prompt_truncation {
-            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+        match (prompt_truncation, text) {
+            (Some(prompt_truncation), Some(text)) if add_special_tokens => {
+                prompt_truncation.apply_keeping_added_tokens(
+                    &mut prompt_token_ids,
+                    || Ok(tokenizer.encode(&text, false)?),
+                    self.max_model_len,
+                )?;
+            }
+            (Some(prompt_truncation), _) => {
+                prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+            }
+            (None, _) => {}
         }
         Ok(prompt_token_ids)
     }
@@ -516,6 +526,49 @@ mod tests {
             processor.prepare(request).unwrap().generate_request.prompt_token_ids,
             vec![3, 4, 5]
         );
+    }
+
+    /// Like the Python frontend, truncating a text prompt keeps the BOS the
+    /// tokenizer adds; without it, BOS-dependent models such as Gemma or Llama 3
+    /// see a different prompt.
+    #[test]
+    fn text_prompt_truncation_keeps_the_added_bos() {
+        struct BosTextBackend;
+
+        impl TextBackend for BosTextBackend {
+            fn tokenizer(&self) -> DynTokenizer {
+                Arc::new(TestTokenizer::new().with_bos_token("<s>", 300))
+            }
+
+            fn model_id(&self) -> &str {
+                "test-model"
+            }
+        }
+
+        let processor = TextRequestProcessor::new(Arc::new(BosTextBackend), 10);
+        let request = |add_special_tokens| TextRequest {
+            prompt: Prompt::Text("abcde".to_string()),
+            add_special_tokens,
+            prompt_truncation: Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(3),
+                side: TruncationSide::Left,
+            }),
+            ..TextRequest::for_test()
+        };
+        let [b, c, d, e] = [b'b', b'c', b'd', b'e'].map(u32::from);
+
+        assert_eq!(processor.tokenize(request(true)).unwrap(), vec![300, d, e]);
+        assert_eq!(
+            processor.prepare(request(true)).unwrap().generate_request.prompt_token_ids,
+            vec![300, d, e]
+        );
+        assert_eq!(processor.tokenize(request(false)).unwrap(), vec![c, d, e]);
+        // An untruncated prompt is unchanged.
+        let short = TextRequest {
+            prompt: Prompt::Text("bc".to_string()),
+            ..request(true)
+        };
+        assert_eq!(processor.tokenize(short).unwrap(), vec![300, b, c]);
     }
 
     /// `truncate_prompt_tokens=-1` keeps `max_model_len - 1` prompt tokens

@@ -49,6 +49,45 @@ impl PromptTruncation {
     }
 
     pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, max_model_len: u32) -> Result<()> {
+        let max_input_tokens = self.max_input_tokens(max_model_len)?;
+        self.truncate(prompt_token_ids, max_input_tokens);
+        Ok(())
+    }
+
+    /// Truncate a text prompt like Hugging Face tokenizers do, which is what the
+    /// Python frontend uses: only the text's own tokens are cut, and the special
+    /// tokens the tokenizer added around them (such as BOS) are kept.
+    ///
+    /// `content_token_ids` encodes the same text without special tokens. It is
+    /// only called when the prompt is too long. If its ids are not a contiguous
+    /// run of `prompt_token_ids`, or the added tokens alone exceed the limit,
+    /// this falls back to [`Self::apply`].
+    pub(crate) fn apply_keeping_added_tokens(
+        self,
+        prompt_token_ids: &mut Vec<u32>,
+        content_token_ids: impl FnOnce() -> Result<Vec<u32>>,
+        max_model_len: u32,
+    ) -> Result<()> {
+        let max_input_tokens = self.max_input_tokens(max_model_len)?;
+        if prompt_token_ids.len() <= max_input_tokens {
+            return Ok(());
+        }
+        let mut content_token_ids = content_token_ids()?;
+        let content_len = content_token_ids.len();
+        let num_added = prompt_token_ids.len().saturating_sub(content_len);
+        let content_start = (0..=num_added)
+            .find(|&start| prompt_token_ids[start..].starts_with(&content_token_ids));
+        match content_start {
+            Some(start) if num_added <= max_input_tokens => {
+                self.truncate(&mut content_token_ids, max_input_tokens - num_added);
+                prompt_token_ids.splice(start..start + content_len, content_token_ids);
+            }
+            _ => self.truncate(prompt_token_ids, max_input_tokens),
+        }
+        Ok(())
+    }
+
+    fn max_input_tokens(self, max_model_len: u32) -> Result<usize> {
         let max_input_tokens = match self.limit {
             PromptTruncationLimit::InputBudget => max_model_len.saturating_sub(1),
             PromptTruncationLimit::Fixed(limit) => {
@@ -60,20 +99,21 @@ impl PromptTruncation {
                 }
                 limit as u32
             }
-        } as usize;
+        };
+        Ok(max_input_tokens as usize)
+    }
 
-        if prompt_token_ids.len() <= max_input_tokens {
-            return Ok(());
+    fn truncate(self, token_ids: &mut Vec<u32>, max_tokens: usize) {
+        if token_ids.len() <= max_tokens {
+            return;
         }
-
         match self.side {
             TruncationSide::Left => {
-                let start = prompt_token_ids.len() - max_input_tokens;
-                prompt_token_ids.drain(0..start);
+                let start = token_ids.len() - max_tokens;
+                token_ids.drain(0..start);
             }
-            TruncationSide::Right => prompt_token_ids.truncate(max_input_tokens),
+            TruncationSide::Right => token_ids.truncate(max_tokens),
         }
-        Ok(())
     }
 }
 
@@ -122,6 +162,40 @@ mod tests {
         .apply(&mut right, 90)
         .unwrap();
         assert_eq!(right, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn keeps_added_tokens_when_truncating_from_either_side() {
+        // A BOS (100) and an EOS (101) around the text's own tokens 1..=5.
+        for (side, expected) in [
+            (TruncationSide::Left, vec![100, 4, 5, 101]),
+            (TruncationSide::Right, vec![100, 1, 2, 101]),
+        ] {
+            let mut prompt = vec![100, 1, 2, 3, 4, 5, 101];
+            PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(4),
+                side,
+            }
+            .apply_keeping_added_tokens(&mut prompt, || Ok(vec![1, 2, 3, 4, 5]), 90)
+            .unwrap();
+            assert_eq!(prompt, expected);
+        }
+    }
+
+    #[test]
+    fn keeping_added_tokens_falls_back_to_plain_truncation() {
+        let left = PromptTruncation {
+            limit: PromptTruncationLimit::Fixed(2),
+            side: TruncationSide::Left,
+        };
+        // The text's own ids are not a contiguous run of the prompt.
+        let mut prompt = vec![100, 1, 9, 2, 3];
+        left.apply_keeping_added_tokens(&mut prompt, || Ok(vec![1, 2, 3]), 90).unwrap();
+        assert_eq!(prompt, vec![2, 3]);
+        // The added tokens alone exceed the limit.
+        let mut prompt = vec![100, 101, 102, 1, 2];
+        left.apply_keeping_added_tokens(&mut prompt, || Ok(vec![1, 2]), 90).unwrap();
+        assert_eq!(prompt, vec![1, 2]);
     }
 
     #[test]
