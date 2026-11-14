@@ -56,6 +56,14 @@ Multiple vLLM dependencies indicate either a preference or requirement for using
 
 Known issues exist when using `fork` after initializing these dependencies.
 
+### OpenMP in `fork` mode
+
+On Linux, if PyTorch uses GNU OpenMP (`libgomp`), a forked child can inherit a thread pool whose workers exist only in its parent. The child can then hang or crash when it runs a parallel operation.
+
+If your application starts an `LLM` in a forked child, run `from vllm import LLM` in the parent before it forks. This loads vLLM's fork hook. With `VLLM_WORKER_MULTIPROC_METHOD=fork`, the hook joins libgomp's idle workers before each `os.fork()` in the process, including forks outside vLLM. This adds overhead to each fork, and the parent recreates its workers on its next parallel operation.
+
+Importing `LLM` after the fork is too late to repair an inherited pool. With `VLLM_WORKER_MULTIPROC_METHOD=spawn`, vLLM skips the release and starts its workers in fresh interpreters.
+
 ## Current State (v0)
 
 The environment variable `VLLM_WORKER_MULTIPROC_METHOD` can be used to control which method is used by vLLM. The current default is `fork`.
