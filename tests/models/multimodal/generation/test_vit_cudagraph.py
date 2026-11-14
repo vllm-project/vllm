@@ -481,6 +481,26 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "minicpmv_46": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-V-4.6",
+        image_prompt=minicpmv_chat_template(
+            "<|image_pad|>\nWhat is in this image?"
+        ),
+        video_prompt=minicpmv_chat_template(
+            "<|video_pad|>\nDescribe this video in one sentence."
+        ),
+        max_model_len=2048,
+        num_video_frames=4,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "enable_chunked_prefill": True,
+        },
+        marks=[pytest.mark.core_model],
+    ),
 }
 
 

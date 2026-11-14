@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniCPM-V 4.6 model (MiniCPMV4_6ForConditionalGeneration)."""
 
-from collections.abc import Iterable, Mapping
-from typing import Any
+import math
+from collections.abc import Hashable, Iterable, Mapping
+from functools import cached_property
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -41,6 +43,14 @@ from vllm.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
@@ -48,6 +58,7 @@ from .interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -55,6 +66,8 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .minicpmv import (
+    _MINICPMV_BASE_PATCH_BUCKETS,
+    _MINICPMV_CUDAGRAPH_PATCH_GRID_KEY,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVImageEmbeddingInputs,
     MiniCPMVImageEmbeddingItems,
@@ -79,11 +92,11 @@ from .vision import is_vit_use_data_parallel
 def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     fields = dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
-        tgt_sizes=MultiModalFieldConfig.batched("image"),
+        tgt_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
         video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
     if "use_vit_merger" in hf_inputs:
@@ -976,14 +989,20 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         nh, nw = H // wh, W // ww
         num_windows = nh * nw
 
-        x = valid_states.view(H, W, D)
-        x = x.view(nh, wh, nw, ww, D).permute(0, 2, 1, 3, 4).contiguous()
-        x = x.view(num_windows, wh * ww, D)
+        x = valid_states.reshape(-1, H, W, D)
+        B = x.shape[0]
+
+        x = x.view(B, nh, wh, nw, ww, D).permute(0, 1, 3, 2, 4, 5).contiguous()
+        x = x.view(B * num_windows, wh * ww, D)
 
         x = self.self_attn(x)
 
-        x = x.view(nh, nw, wh, ww, D).permute(0, 2, 1, 3, 4).contiguous()
-        return x.view(H * W, D)
+        x = x.view(B, nh, nw, wh, ww, D).permute(0, 1, 3, 2, 4, 5).contiguous()
+        x = x.view(B, H * W, D)
+
+        if valid_states.dim() == 2:
+            x = x.squeeze(0)
+        return x
 
     def _apply_mlp_downsample(
         self,
@@ -995,17 +1014,22 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         wh, ww = self.window_kernel_size
         nh, nw = H // wh, W // ww
 
-        x = valid_states.view(H, W, D)
-        x = x.view(nh, wh, nw, ww, D).permute(0, 2, 1, 3, 4).contiguous()
+        x = valid_states.reshape(-1, H, W, D)
+        B = x.shape[0]
+        x = x.view(B, nh, wh, nw, ww, D).permute(0, 1, 3, 2, 4, 5).contiguous()
 
-        residual = x.reshape(nh * nw, wh * ww, D).mean(dim=1)
-        x = x.reshape(nh * nw, wh * ww * D)
+        residual = x.reshape(B, nh * nw, wh * ww, D).mean(dim=2)
+        x = x.reshape(B, nh * nw, wh * ww * D)
 
         x = self.pre_norm(x)
         x = self.linear_1(x)
         x = self.act(x)
         x = self.linear_2(x)
-        return x + residual
+
+        x = x + residual
+        if valid_states.dim() == 2:
+            x = x.squeeze(0)
+        return x
 
     def forward(
         self,
@@ -1033,7 +1057,6 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
             all_merged.append(self._apply_mlp_downsample(hs, H, W))
             new_tgt_sizes[b] = torch.tensor(
                 [new_H, new_W],
-                device=device,
                 dtype=tgt_sizes.dtype,
             )
 
@@ -1065,6 +1088,21 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
             new_attention_mask = new_attention_mask[:, None, None, :]
 
         return new_hidden, new_tgt_sizes, new_attention_mask
+
+    def forward_cudagraph(
+        self,
+        hidden_states: torch.Tensor,
+        mask2d: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, H, W = mask2d.shape
+
+        residual = hidden_states
+        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states = residual + self._apply_window_attention(hidden_states, H, W)
+        hidden_states = self._apply_mlp_downsample(hidden_states, H, W)
+        wh, ww = self.window_kernel_size
+        mask2d = mask2d[:, ::wh, ::ww]
+        return hidden_states, mask2d
 
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
@@ -1155,6 +1193,38 @@ class MiniCPMV4_6Merger(nn.Module):
 
         return results
 
+    def forward_cudagraph(
+        self,
+        hidden_states: torch.Tensor,
+        mask2d: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        B, H, W = mask2d.shape
+        m1, m2 = self.merge_kernel_size
+
+        hs = hidden_states.reshape(B, H // m1, m1, W // m2, m2, -1)
+        hs = hs.permute(0, 1, 3, 2, 4, 5).reshape(
+            B,
+            (H // m1) * (W // m2),
+            m1 * m2 * hs.shape[-1],
+        )
+        hs = self.mlp[0](hs)
+
+        if self.times > 1:
+            cur_h, cur_w = H // m1, W // m2
+            for t in range(1, self.times):
+                cur_h, cur_w = cur_h // m1, cur_w // m2
+                hs = hs.reshape(B, cur_h, m1, cur_w, m2, -1)
+                hs = hs.permute(0, 1, 3, 2, 4, 5).reshape(
+                    B,
+                    cur_h * cur_w,
+                    m1 * m2 * hs.shape[-1],
+                )
+                hs = self.mlp[t](hs)
+
+        mask2d = mask2d[:, :: m1**self.times, :: m2**self.times]
+
+        return hs, mask2d
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     MiniCPMV4_6MultiModalProcessor,
@@ -1170,6 +1240,7 @@ class MiniCPMV4_6ForConditionalGeneration(
     IsHybrid,
     SupportsEagle3,
     SupportsMRoPE,
+    SupportsEncoderCudaGraph,
 ):
     supports_encoder_tp_data = True
 
@@ -1233,6 +1304,7 @@ class MiniCPMV4_6ForConditionalGeneration(
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.model_config = vllm_config.model_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         # --- Vision tower ---
@@ -1563,3 +1635,439 @@ class MiniCPMV4_6ForConditionalGeneration(
     @classmethod
     def get_mamba_state_copy_func(cls):
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+    # ----- Encoder Cuda Graph -----
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=[
+                "all_pixel_values",
+                "tgt_sizes",
+                "patch_attn_mask",
+            ],
+            out_hidden_size=int(self.config.text_config.hidden_size),
+            max_frames_per_video=self.get_max_frames_per_video(),
+            capture_axes=(self._mcpmv_patch_grid_keys(),),
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """Return the modality of the inputs (default: image-only)."""
+        if "video_pixel_values" in mm_kwargs:
+            return "video"
+        return "image"
+
+    def get_max_frames_per_video(
+        self,
+    ) -> int:
+        """Return model-specific max frames per video."""
+        info = self._processing_info
+        return int(
+            info.get_num_frames_with_most_features(
+                seq_len=self.model_config.max_model_len,
+                mm_counts={
+                    "video": self.multimodal_config.get_limit_per_prompt("video")
+                },
+            )
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        """Return (min_token_budget, max_token_budget) for auto-inference.
+
+        - min_token_budget: estimated smallest possible encoder input
+          (e.g. 64 for a 224x224 image)
+        - max_token_budget: estimated largest budget worth capturing
+          (e.g. max_num_batched_tokens)
+
+        Used when ``encoder_cudagraph_token_budgets`` and/or
+        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
+        specified by the user.
+        """
+        info = self._processing_info
+        image_processor = info.get_image_processor()
+        scale_res = int(image_processor.scale_resolution)
+
+        # not exactly correct, but a good estimate
+        min_budget = info.get_num_image_tokens(
+            ImageSize(width=scale_res, height=scale_res)
+        )
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list["EncoderItemSpec"]:
+        """Return specs describing each item in the batch.
+
+        Replaces the former separate methods for num_items,
+        per_item_output_tokens, and per_item_input_sizes.
+        The manager derives all three from this single return value.
+        """
+        if "image_embeds" in mm_kwargs or "video_embeds" in mm_kwargs:
+            raise ValueError(
+                "MiniCPMV4_6 encoder CUDA graph does not support "
+                "precomputed image_embeds/video_embeds"
+            )
+
+        if "video_pixel_values" in mm_kwargs:
+            tgt_sizes = mm_kwargs["video_tgt_sizes"]
+        else:
+            tgt_sizes = mm_kwargs["tgt_sizes"]
+
+        input_patch_nums = [tgt_size.prod(-1).sum().item() for tgt_size in tgt_sizes]
+        downsample_mode = getattr(self.config, "downsample_mode", "16x")
+        token_divisor = 4 if downsample_mode == "4x" else 16
+
+        return [
+            EncoderItemSpec(
+                input_patch_num,
+                input_patch_num // token_divisor,
+            )
+            for input_patch_num in input_patch_nums
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        """Select a subset of items and return mm_kwargs for the sub-batch.
+
+        Called by the manager during greedy packing and DP sharding to
+        extract inputs for a specific set of items (e.g. images at
+        indices [0, 3, 5]).  The implementation is model-specific
+        because input formats differ:
+
+        - Qwen-family: slice concatenated pixel_values by cumulative
+          patch offsets, subset grid_thw by indices.
+        - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models that configure ``EncoderCudaGraphConfig.capture_axes`` must
+        additionally store the resolved per-axis keys (one key per axis, in
+        order) under ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG`` in the returned
+        dict; the manager pops it before the kwargs are used elsewhere.
+        """
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_values_key = (
+            "video_pixel_values" if modality == "video" else "pixel_values"
+        )
+        tgt_sizes_key = "video_tgt_sizes" if modality == "video" else "tgt_sizes"
+        subset = dict(mm_kwargs)
+
+        keys = self._mcpmv_patch_grid_keys()
+
+        if not indices:
+            device = next(self.vpm.parameters()).device
+            subset.update(
+                {
+                    pixel_values_key: [],
+                    tgt_sizes_key: torch.zeros((0, 2), dtype=torch.long, device=device),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (keys[0],),
+                    _MINICPMV_CUDAGRAPH_PATCH_GRID_KEY: keys[0],
+                }
+            )
+            return subset
+
+        selected_pixel_values = []
+        selected_tgt_sizes = []
+        patch_grid = keys[-1]
+        # selected_num_slices = []
+
+        for index in indices:
+            selected_pixel_values.append(mm_kwargs[pixel_values_key][index])
+            selected_tgt_sizes.append(mm_kwargs[tgt_sizes_key][index])
+            # selected_num_slices.append(mm_kwargs["num_slices"][index])
+
+        tgt = torch.cat(selected_tgt_sizes, dim=0)
+        max_patch_num_h, max_patch_num_w = tgt.max(dim=0).values
+        for th, tw in keys:
+            if th >= max_patch_num_h and tw >= max_patch_num_w:
+                patch_grid = (th, tw)
+                break
+
+        subset.update(
+            {
+                pixel_values_key: selected_pixel_values,
+                tgt_sizes_key: selected_tgt_sizes,
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (patch_grid,),
+                _MINICPMV_CUDAGRAPH_PATCH_GRID_KEY: patch_grid,
+                # "num_slices": selected_num_slices,
+            }
+        )
+        return subset
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Args:
+            token_budget: Token budget the capture is sized for.
+            max_batch_size: Maximum number of items in a captured batch.
+            max_frames_per_batch: Maximum number of frames in a captured batch.
+            device: Device the dummy inputs and buffers are created on.
+            dtype: Dtype of the dummy inputs and buffers.
+            path: Configured encoder path.
+            axis_keys: The resolved capture-axis keys (one per axis of
+                ``EncoderCudaGraphConfig.capture_axes``) this capture is for.
+                None or empty when no capture axes are configured; models
+                without capture axes ignore it.
+
+        """
+        info = self._processing_info
+        image_processor = info.get_image_processor()
+        patch_size = image_processor.patch_size
+
+        patch_grid = (
+            cast("tuple[int, int]", axis_keys[0])
+            if axis_keys
+            else self._mcpmv_patch_grid_keys()[-1]
+        )
+
+        patch_num_h, patch_num_w = patch_grid
+        pixel_h, pixel_w = patch_num_h * patch_size, patch_num_w * patch_size
+        max_slice_num = max(
+            info.get_image_max_slice_num(), info.get_video_max_slice_num()
+        )
+        max_slices_by_content = max(max_batch_size, max_frames_per_batch) * (
+            max_slice_num + 1
+        )
+        max_slices_by_token_budget = token_budget // self._min_tokens_per_slice
+        max_num_slices = min(max_slices_by_content, max_slices_by_token_budget)
+
+        all_pixel_values_buffer = torch.zeros(
+            (max_num_slices, 3, pixel_h, pixel_w),
+            device=device,
+            dtype=dtype,
+        )
+
+        tgt_sizes_buffer = torch.zeros(
+            (max_num_slices, 2),
+            device=device,
+            dtype=torch.long,
+        )
+        tgt_sizes_buffer[:, 0] = patch_num_h
+        tgt_sizes_buffer[:, 1] = patch_num_w
+
+        patch_attn_mask_buffer = torch.zeros(
+            (max_num_slices, patch_num_h, patch_num_w),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        values: dict[str, torch.Tensor] = {
+            "all_pixel_values": all_pixel_values_buffer,
+            "tgt_sizes": tgt_sizes_buffer,
+            "patch_attn_mask": patch_attn_mask_buffer,
+        }
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> "EncoderCudaGraphReplayBuffers":
+        """Compute buffer values from actual batch inputs for replay."""
+        info = self._processing_info
+        image_processor = info.get_image_processor()
+        patch_size = image_processor.patch_size
+
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_values_key = (
+            "video_pixel_values" if modality == "video" else "pixel_values"
+        )
+        tgt_sizes_key = "video_tgt_sizes" if modality == "video" else "tgt_sizes"
+
+        patch_grid = mm_kwargs[_MINICPMV_CUDAGRAPH_PATCH_GRID_KEY]
+        patch_num_h, patch_num_w = patch_grid
+
+        pixel_values = mm_kwargs[pixel_values_key]
+        tgt_sizes = mm_kwargs[tgt_sizes_key]
+
+        slices = [slc for img in pixel_values for slc in img]
+        tgt_sizes = torch.cat(tgt_sizes, dim=0)
+        device, dtype = slices[0].device, slices[0].dtype
+
+        pixel_values_canvas = torch.zeros(
+            len(slices),
+            3,
+            patch_num_h * patch_size,
+            patch_num_w * patch_size,
+            dtype=dtype,
+            device=device,
+        )
+        patch_atten_mask = torch.zeros(
+            len(slices),
+            patch_num_h,
+            patch_num_w,
+            dtype=torch.bool,
+            device=device,
+        )
+
+        for i in range(len(slices)):
+            tgt_size = tgt_sizes[i]
+            patch_num_h, patch_num_w = tgt_size
+            img = (
+                slices[i][..., : patch_num_h * patch_num_w * patch_size]
+                .view(3, patch_size, patch_num_h, patch_num_w, patch_size)
+                .permute(0, 2, 1, 3, 4)
+            )
+            h, w = patch_num_h * patch_size, patch_num_w * patch_size
+            pixel_values_canvas[i, :, :h, :w] = img.reshape(3, h, w)
+            patch_atten_mask[i, :patch_num_h, :patch_num_w] = True
+
+        values: dict[str, torch.Tensor] = {
+            "all_pixel_values": pixel_values_canvas,
+            "tgt_sizes": async_tensor_h2d(tgt_sizes, device, dtype=torch.long),
+            "patch_attn_mask": patch_atten_mask,
+        }
+
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def _format_2d_mask(
+        self, dtype: torch.dtype, patch_attn_mask: torch.Tensor
+    ) -> torch.Tensor:
+        min_val = torch.finfo(dtype).min
+        attention_mask = (~patch_attn_mask.flatten(1)).to(dtype) * min_val
+        attention_mask = attention_mask[:, None, None, :]
+        return attention_mask
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        """Run the encoder forward pass with precomputed buffers.
+
+        Used during both CUDA graph capture and replay.
+        """
+        all_pixel_values = inputs["all_pixel_values"]
+        patch_attn_mask = inputs["patch_attn_mask"]
+        tgt_sizes = inputs["tgt_sizes"]
+
+        hidden_states = self.vpm.embeddings(
+            all_pixel_values,
+            patch_attention_mask=patch_attn_mask,
+            tgt_sizes=tgt_sizes,
+        )  # (B, th * tw, D)
+
+        # Encoder layers with mid-encoder merger injection
+        insert_layer_id = getattr(self.config, "insert_layer_id", -1)
+        downsample_mode = getattr(self.config, "downsample_mode", "16x")
+        use_vit_merger = downsample_mode != "4x" and insert_layer_id >= 0
+
+        attention_mask = self._format_2d_mask(hidden_states.dtype, patch_attn_mask)
+        for layer in self.vpm.encoder.layers[: insert_layer_id + 1]:
+            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+
+        if use_vit_merger:
+            hidden_states, patch_attn_mask = self.vit_merger.forward_cudagraph(
+                hidden_states, patch_attn_mask
+            )
+        attention_mask = self._format_2d_mask(hidden_states.dtype, patch_attn_mask)
+        for layer in self.vpm.encoder.layers[insert_layer_id + 1 :]:
+            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+
+        hidden_states = self.vpm.post_layernorm(hidden_states)
+        hidden_states, patch_attn_mask = self.merger.forward_cudagraph(
+            hidden_states, patch_attn_mask
+        )
+
+        # compact valid tokens
+        valid = patch_attn_mask.flatten()
+        dest = torch.where(valid, valid.cumsum(0) - 1, valid.numel())
+        buf = hidden_states.new_zeros(valid.numel() + 1, hidden_states.shape[-1])
+        buf.index_copy_(0, dest, hidden_states.flatten(0, 1))
+        hidden_states = buf[:-1]
+
+        return hidden_states
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        """Run the encoder forward pass without precomputed buffers.
+
+        Used as eager fallback when inputs exceed all budgets.
+        """
+        return torch.cat(list(self.embed_multimodal(**mm_kwargs)), dim=0)
+
+    def _mcpmv_patch_grid_keys(self, alignment: int = 4) -> tuple[tuple[int, int], ...]:
+        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
+        max_side = (
+            math.ceil(
+                int(self.vpm.embeddings.image_size)
+                / int(self.vpm.embeddings.patch_size)
+                / alignment
+            )
+            * alignment
+        )
+
+        keys: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for th, tw in _MINICPMV_BASE_PATCH_BUCKETS:
+            if th <= max_side and tw <= max_side:
+                keys.append((th, tw))
+                seen.add((th, tw))
+        full = (max_side, max_side)
+        if full not in seen:
+            keys.append(full)
+        return tuple(keys)
+
+    @cached_property
+    def _processing_info(self) -> MiniCPMV4_6ProcessingInfo:
+        info = MULTIMODAL_REGISTRY.get_processing_info(self.model_config)
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info
+
+    @cached_property
+    def _min_tokens_per_slice(self) -> int:
+        """Smallest encoder output of one slice, sampled from the processor."""
+        info = self._processing_info
+        image_processor = info.get_image_processor()
+        scale_res = int(image_processor.scale_resolution)
+        slice_limits = {
+            int(image_processor.max_slice_nums),
+            info.get_video_max_slice_num(),
+        }
+
+        min_tokens = None
+        for max_slice_nums in slice_limits:
+            for area_scale in range(1, max_slice_nums + 2):
+                side = scale_res * math.sqrt(area_scale)
+                for log_ratio in np.linspace(-math.log(50), math.log(50), 1001):
+                    width = max(1, round(side * math.exp(log_ratio / 2)))
+                    height = max(1, round(side * math.exp(-log_ratio / 2)))
+                    _, source_tokens, patch_tokens = info._compute_visual_tokens(
+                        ImageSize(width=width, height=height),
+                        max_slice_nums=max_slice_nums,
+                    )
+                    for tokens in (source_tokens, patch_tokens):
+                        if tokens > 0:
+                            min_tokens = (
+                                tokens
+                                if min_tokens is None
+                                else min(min_tokens, tokens)
+                            )
+        assert min_tokens is not None
+        return min_tokens
