@@ -8,10 +8,11 @@ PrometheusInstrumentatorMiddleware before being caught by ServerErrorMiddleware.
 """
 
 from argparse import Namespace
+from http import HTTPStatus
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from prometheus_client import CollectorRegistry
 
 from vllm.entrypoints.launchers.api_server.entry import build_app
@@ -77,6 +78,10 @@ def app(registry):
     async def raise_http_exception_404():
         raise HTTPException(status_code=404, detail="not found")
 
+    @app.post("/raise_http_exception_detail/{status_code}")
+    async def raise_http_exception_detail(status_code: int, request: Request):
+        raise HTTPException(status_code=status_code, detail=await request.json())
+
     @app.get("/raise_request_validation_error")
     async def raise_request_validation_error(n: int):
         # Invalid ``n`` triggers FastAPI's RequestValidationError.
@@ -122,6 +127,42 @@ def app(registry):
         return {"status": "ok"}
 
     return app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 429, 503])
+@pytest.mark.parametrize(
+    "detail,expected_message",
+    [
+        ({"reason": "invalid value"}, "{'reason': 'invalid value'}"),
+        (
+            ["invalid value", "/home/server/model/config.json"],
+            "['invalid value', '<path>']",
+        ),
+        (42, "42"),
+        (False, "False"),
+        ("invalid value", "invalid value"),
+    ],
+)
+async def test_http_exception_preserves_status_with_non_string_detail(
+    app, status_code, detail, expected_message
+):
+    """JSON-valued HTTP details must retain the status and sanitized message."""
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/raise_http_exception_detail/{status_code}", json=detail
+        )
+
+    assert response.status_code == status_code
+    assert response.json() == {
+        "error": {
+            "message": expected_message,
+            "type": HTTPStatus(status_code).phrase,
+            "param": None,
+            "code": status_code,
+        }
+    }
 
 
 def _get_http_requests_total(registry, method: str, handler: str):
