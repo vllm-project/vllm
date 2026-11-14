@@ -562,7 +562,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["align", "none"] = "none",
+    enable_prefix_caching: bool = False,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         make_kv_cache_group(
@@ -599,7 +599,7 @@ def make_kv_cache_config(
                     dtypes=(torch.float16,),
                 ),
                 MambaManager,
-                MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                MambaManager.config(enable_prefix_caching=enable_prefix_caching),
             )
         )
     return KVCacheConfig(

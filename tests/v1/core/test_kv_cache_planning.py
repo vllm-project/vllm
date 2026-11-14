@@ -1458,7 +1458,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
         _grouping_config(),
         {
             "model.full_attn": full_layer(full_spec),
-            "model.mamba": mamba_layer(mamba_spec, mamba_cache_mode="align"),
+            "model.mamba": mamba_layer(mamba_spec, enable_prefix_caching=True),
             "cache_only_layers.0": full_layer(hidden_spec),
         },
     )
@@ -1699,6 +1699,8 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Without prefix caching a Mamba layer holds 1 + gamma blocks.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -2107,7 +2109,7 @@ def _hybrid_specs(draft=True):
         specs[f"layers.{i}"] = (
             new_kv_cache_layer()
             if i % 4 == 3
-            else new_mamba_layer(mamba_cache_mode="align")
+            else new_mamba_layer(enable_prefix_caching=True)
         )
     if draft:
         specs["mtp.0"] = _as_draft(new_kv_cache_layer())

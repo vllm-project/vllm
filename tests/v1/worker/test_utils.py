@@ -1449,6 +1449,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
+        self.cache_config = SimpleNamespace(enable_prefix_caching=True)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 

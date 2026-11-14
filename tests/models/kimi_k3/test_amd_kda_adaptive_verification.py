@@ -38,7 +38,7 @@ def _config(adaptive: bool):
         num_speculative_tokens=NUM_SPEC,
         enable_adaptive_verification=adaptive,
     )
-    vllm_config.cache_config.mamba_cache_mode = "none"
+    vllm_config.cache_config.enable_prefix_caching = False
     return vllm_config
 
 

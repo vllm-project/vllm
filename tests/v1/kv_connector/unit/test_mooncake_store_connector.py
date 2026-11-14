@@ -114,7 +114,7 @@ def _make_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _make_qsa_hybrid_kv_cache_config(mamba_mode: str):
+def _make_qsa_hybrid_kv_cache_config(enable_prefix_caching: bool):
     full_spec = AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
     qsa_spec = circular_buffer_layer(
         block_size=8,
@@ -127,7 +127,7 @@ def _make_qsa_hybrid_kv_cache_config(mamba_mode: str):
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode=mamba_mode,
+        enable_prefix_caching=enable_prefix_caching,
     )
     return KVCacheConfig(
         num_blocks=4,
@@ -145,21 +145,21 @@ def test_validation_accepts_aligned_mamba_after_block_size_rewrite():
     vllm_config.cache_config.block_size = 8
 
     mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
-        vllm_config, _make_qsa_hybrid_kv_cache_config("align")
+        vllm_config, _make_qsa_hybrid_kv_cache_config(enable_prefix_caching=True)
     )
 
 
-def test_validation_rejects_mamba_mode_directly():
+def test_validation_rejects_mamba_without_prefix_caching():
     vllm_config = _make_vllm_config()
     vllm_config.cache_config.block_size = 800
 
-    with pytest.raises(ValueError, match="mamba_cache_mode=\x27none\x27"):
+    with pytest.raises(ValueError, match="Mamba without prefix caching"):
         mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
-            vllm_config, _make_qsa_hybrid_kv_cache_config("none")
+            vllm_config, _make_qsa_hybrid_kv_cache_config(enable_prefix_caching=False)
         )
 
 
-def _make_mamba_none_kv_cache_config(
+def _make_mamba_no_prefix_caching_kv_cache_config(
     attention_block_size: int | None, mamba_block_size: int
 ) -> KVCacheConfig:
     groups = [
@@ -169,7 +169,6 @@ def _make_mamba_none_kv_cache_config(
                 block_size=mamba_block_size,
                 shapes=((1, 1),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="none",
             ),
         )
     ]
@@ -204,14 +203,14 @@ def _make_role_vllm_config(kv_role: str, enable_lookup: bool, save_decode_cache:
     return vllm_config
 
 
-_MAMBA_NONE_LAYOUTS = pytest.mark.parametrize(
+_MAMBA_NO_PREFIX_CACHING_LAYOUTS = pytest.mark.parametrize(
     "attention_block_size,mamba_block_size",
     [(None, 16), (1_048_576, 6_400)],
     ids=["mamba-only", "hybrid-no-prefix"],
 )
 
 
-@_MAMBA_NONE_LAYOUTS
+@_MAMBA_NO_PREFIX_CACHING_LAYOUTS
 @pytest.mark.parametrize(
     "kv_role,enable_lookup,save_decode_cache",
     [
@@ -221,11 +220,11 @@ _MAMBA_NONE_LAYOUTS = pytest.mark.parametrize(
         ("kv_both", False, False),
     ],
 )
-def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
+def test_scheduler_requires_prefix_caching_for_mamba_kv_transfer(
     kv_role, enable_lookup, save_decode_cache, attention_block_size, mamba_block_size
 ):
     vllm_config = _make_role_vllm_config(kv_role, enable_lookup, save_decode_cache)
-    kv_cache_config = _make_mamba_none_kv_cache_config(
+    kv_cache_config = _make_mamba_no_prefix_caching_kv_cache_config(
         attention_block_size, mamba_block_size
     )
 
@@ -234,20 +233,20 @@ def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
             "scheduler.LookupKeyClient"
         ),
-        pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
+        pytest.raises(AssertionError, match="requires prefix caching for Mamba"),
     ):
         scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
 
 
-@_MAMBA_NONE_LAYOUTS
-def test_capacity_only_scheduler_allows_mamba_none_mode(
+@_MAMBA_NO_PREFIX_CACHING_LAYOUTS
+def test_capacity_only_scheduler_allows_mamba_without_prefix_caching(
     attention_block_size, mamba_block_size
 ):
-    """Capacity-only consumers transfer no KV, so any Mamba mode is allowed."""
+    """Capacity-only consumers transfer no KV, so Mamba needs no prefix caching."""
     vllm_config = _make_role_vllm_config(
         "kv_consumer", enable_lookup=False, save_decode_cache=False
     )
-    kv_cache_config = _make_mamba_none_kv_cache_config(
+    kv_cache_config = _make_mamba_no_prefix_caching_kv_cache_config(
         attention_block_size, mamba_block_size
     )
 
@@ -1531,7 +1530,7 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
                     block_size=16,
                     shapes=((1,),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                 ),
             ),
         ],

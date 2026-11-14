@@ -3570,8 +3570,12 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-        # Mamba cache align-mode constraints
-        if self.cache_config.mamba_cache_mode == "align":
+        # Mamba prefix caching constraints
+        if (
+            self.cache_config.enable_prefix_caching
+            and self.model_config is not None
+            and self.model_config.is_hybrid
+        ):
             assert not self.scheduler_config.disable_chunked_mm_input, (
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
@@ -3687,13 +3691,14 @@ class VllmConfig:
             )
             if (
                 is_flashinfer
-                and self.cache_config.mamba_cache_mode == "align"
+                and self.cache_config.enable_prefix_caching
                 and self.model_config is not None
                 and self.model_config.dtype != torch.bfloat16
             ):
                 raise ValueError(
-                    "FlashInfer ReplaySSM align requires bfloat16 model inputs "
-                    "for its replay rings; SSM state cache dtype is independent"
+                    "FlashInfer ReplaySSM with prefix caching requires bfloat16 "
+                    "model inputs for its replay rings; SSM state cache dtype is "
+                    "independent"
                 )
             if not is_flashinfer and self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(

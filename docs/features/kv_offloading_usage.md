@@ -57,7 +57,7 @@ The unit of operation is a **chunk** — a fixed-size piece of KV data covering 
 
 ## Hybrid attention and recurrent models
 
-With prefix caching enabled and Mamba cache mode `align`, the CPU tier can
+With prefix caching enabled, the CPU tier can
 restore retained prompt-tail checkpoints between full-attention block
 boundaries, including with decode context parallelism (DCP). Use
 `blocks_per_chunk: 1` and a `prefix_match_unit` supported by the model's KV

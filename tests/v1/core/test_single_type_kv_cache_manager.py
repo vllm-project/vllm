@@ -78,7 +78,7 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
 def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     spec = MambaManager.layer_config(
         MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=1,
     )
     block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
@@ -106,13 +106,13 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
 def test_mamba_retirement_crosses_null_gaps():
     spec = MambaManager.layer_config(
         MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
-    pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=4)
     manager = MambaManager(
         new_kv_cache_group(["layer"], spec),
         block_pool=pool,
-        enable_caching=False,
+        enable_caching=True,
         kv_cache_group_id=0,
         scheduler_block_size=4,
     )
@@ -144,7 +144,7 @@ def test_mamba_retirement_crosses_null_gaps():
 def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=5,
     )
     pool = BlockPool(num_gpu_blocks=1000, enable_caching=True, hash_block_size=256)
@@ -184,7 +184,7 @@ def test_mamba_checkpoint_admission_matches_allocation(
     """Checkpoint admission must match the subsequent physical allocation."""
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=64,
@@ -241,7 +241,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
     block_size = 128
     spec = MambaManager.layer_config(
         MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,

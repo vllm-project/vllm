@@ -252,7 +252,7 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-_MAMBA_ALIGN = MambaManager.config(mamba_cache_mode="align")
+_MAMBA_ALIGN = MambaManager.config(enable_prefix_caching=True)
 
 
 def _mamba_spec() -> MambaSpec:

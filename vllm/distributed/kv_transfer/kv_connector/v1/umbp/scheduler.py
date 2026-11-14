@@ -31,8 +31,8 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     get_block_hash,
     get_group_id,
-    is_mamba_align_group,
     is_mamba_group,
+    is_mamba_prefix_caching_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_dcp_kv_block_size,
@@ -236,15 +236,15 @@ class UMBPStoreConnectorScheduler:
             group_id: resolve_dcp_kv_block_size(group, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
-        # Mamba "align" block tables are not append-only: a position may hold
-        # the live state the next step writes, or a speculative block core will
+        # Mamba block tables are not append-only: a position may hold the live
+        # state the next step writes, or a speculative block core will
         # relocate, so positional stores would read or pin the wrong block.
         # Core hands off each committed boundary state instead
         # (_add_boundary_state_plans).
         self._boundary_handoff_groups = frozenset(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if is_mamba_align_group(group)
+            if is_mamba_prefix_caching_group(group)
         )
         self.runtime = runtime
         self.enable_kv_cache_events = bool(

@@ -45,7 +45,7 @@ def _reserved_block_count(
     num_speculative_blocks = 0
     if isinstance(config.params, MambaManager.Params):
         num_speculative_blocks = config.params.num_speculative_blocks
-        if config.params.mamba_cache_mode == "align":
+        if config.params.enable_prefix_caching:
             return cdiv(num_tokens, block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
     return cdiv(num_tokens, block_size) + num_speculative_blocks

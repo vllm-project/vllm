@@ -10,7 +10,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import eagle_proof_margin, is_mamba_align_group
+from vllm.v1.core.kv_cache_utils import (
+    eagle_proof_margin,
+    is_mamba_prefix_caching_group,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -79,14 +82,16 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For Mamba groups in "align" cache mode the hit window must be
-    rounded down to a multiple of the offloaded chunk size. Asserts that all
-    such groups agree on the same value.
+    For Mamba groups with prefix caching the hit window must be rounded down
+    to a multiple of the offloaded chunk size. Asserts that all such groups
+    agree on the same value.
     """
     mamba_align_size: int | None = None
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
-        if is_mamba_align_group(kv_cache_config.kv_cache_groups[group.group_id]):
+        if is_mamba_prefix_caching_group(
+            kv_cache_config.kv_cache_groups[group.group_id]
+        ):
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -224,7 +229,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     manager_config=kv_cache_group.manager_config,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=group_id in eagle_groups,
-                    requires_cow_source=is_mamba_align_group(kv_cache_group),
+                    requires_cow_source=is_mamba_prefix_caching_group(kv_cache_group),
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)

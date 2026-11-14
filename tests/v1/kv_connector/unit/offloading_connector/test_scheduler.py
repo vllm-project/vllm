@@ -905,7 +905,7 @@ def test_partial_lookup_and_load_address_each_group_block_size_under_dcp():
     assert req_status.partial_tail_boundary is None
 
 
-def test_normal_store_excludes_align_mode_mamba_sources():
+def test_normal_store_excludes_prefix_caching_mamba_sources():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.num_computed_tokens = 0
@@ -7416,7 +7416,7 @@ class TestMambaHybridOffloadServing:
                         block_size=self.MAMBA_BLOCK,
                         shapes=((1, 1),),
                         dtypes=(torch.float32,),
-                        mamba_cache_mode="align",
+                        enable_prefix_caching=True,
                     ),
                 ),
             ],
@@ -7617,12 +7617,12 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     config.scheduler_config.async_scheduling = False
     config.cache_config.prefix_match_unit = 4
     config.cache_config.prefix_cache_retention_interval = 16
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
     set_mtp_config(config, lookahead)
     caches = make_kv_cache_config(
         block_size=16,
         mamba_enabled=True,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_blocks=32,
     )
     caches.cache_hit_alignment_tokens = 4

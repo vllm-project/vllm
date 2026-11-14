@@ -355,7 +355,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 m.block_table_tensor,
                 m.seq_lens,
                 self.kv_cache_spec,
-                self.vllm_config.cache_config.mamba_cache_mode,
+                self.vllm_config.cache_config.enable_prefix_caching,
                 self.num_speculative_blocks,
             )
 
@@ -769,7 +769,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if m.checkpoint is not None
             else None
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if self.vllm_config.cache_config.enable_prefix_caching:
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
         masks = m.spec_sequence_masks_cpu

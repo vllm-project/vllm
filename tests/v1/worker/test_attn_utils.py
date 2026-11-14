@@ -201,6 +201,7 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
     layers = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in specs}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    vllm_config.cache_config.enable_prefix_caching = False
     assert vllm_config.cache_config.kv_cache_layout is None
 
     resolved = attn_utils_module.resolve_hisparse_specs(vllm_config, specs, layers)

@@ -80,9 +80,10 @@ def _cuda_ints(values):
     return torch.tensor(values, dtype=torch.int32, device="cuda")
 
 
-def _replayssm_mixer(kv_cache, ring_start, committed, A):
+def _replayssm_mixer(kv_cache, ring_start, committed, A, enable_prefix_caching=True):
     return SimpleNamespace(
         kv_cache=kv_cache,
+        cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
         _replayssm_ring_start=ring_start,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
@@ -155,7 +156,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         [
             KVCacheGroup.from_layers(
                 {
-                    name: MambaManager.layer_config(spec, mamba_cache_mode="align")
+                    name: MambaManager.layer_config(spec, enable_prefix_caching=True)
                     for name in names
                 }
             )
@@ -606,6 +607,7 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
             ring_start[group_idx],
             committed[group_idx],
             torch.empty(1, device="cuda"),
+            enable_prefix_caching=False,
         )
         grouped.append(([mixer], spec, table))
     context = ReplaySSMModelContext.create(
@@ -685,7 +687,9 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
+    mixer.cache_config = SimpleNamespace(
+        mamba_block_size=16, enable_prefix_caching=False
+    )
     mixer.conv_weights = torch.empty(0)
     mixer.conv1d = SimpleNamespace(bias=None)
     mixer.activation = "silu"

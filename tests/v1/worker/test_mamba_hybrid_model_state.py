@@ -55,7 +55,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
     state.model_config = SimpleNamespace(max_model_len=8192)
-    state._align_mode = False
+    state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
 
@@ -99,7 +99,7 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     block size; the seeded column must still be in mamba blocks."""
     state = object.__new__(MambaHybridModelState)
     state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
-    state._align_mode = True
+    state.prefix_caching = True
     state.mm_prefix_ranges = None
     state.rope_state = None
     state.prompt_embeds_state = None
@@ -123,7 +123,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
-    state._align_mode = False
+    state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
@@ -188,7 +188,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     state.model_config = SimpleNamespace(max_model_len=8192)
-    state._align_mode = False
+    state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
     # A request that accepted 3 drafts (plus the bonus token) on the previous
@@ -269,6 +269,7 @@ def test_replayssm_uses_built_mamba_decode_split(
     state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
     state_config.speculative_config = config.speculative_config
     state_config.cache_config.use_replayssm = True
+    state_config.cache_config.enable_prefix_caching = False
     state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
     state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
     # The groups use these backend types without instantiating them.
@@ -498,7 +499,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
     state.num_accepted_tokens_gpu = torch.full(
         (4,), 9, dtype=torch.int32, device=GPU_DEVICE
     )
-    state._align_mode = False
+    state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
     state._mamba_ctx = None
@@ -515,7 +516,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
     state = object.__new__(MambaHybridModelState)
-    state._align_mode = True
+    state.prefix_caching = True
     state._use_replayssm_trackers = True
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
@@ -587,7 +588,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
     computed: int, sampled: int, expected_column: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
-    state._align_mode = True
+    state.prefix_caching = True
     state._use_replayssm_trackers = False
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full(

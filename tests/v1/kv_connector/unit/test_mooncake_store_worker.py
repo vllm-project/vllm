@@ -474,7 +474,7 @@ def _make_hybrid_gdn_kv_cache_config(
         shapes=(conv_shape, (local_factor, 2, 2)),
         dtypes=(torch.uint8, torch.uint8),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     return KVCacheConfig(
         num_blocks=10,
@@ -516,7 +516,7 @@ def _make_qsa_hybrid_kv_cache_config():
                     block_size=800,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
+                    enable_prefix_caching=True,
                 ),
             ),
         ],
@@ -1434,7 +1434,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -1572,7 +1572,7 @@ def test_normal_save_excludes_mamba_group_and_null_blocks():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -4034,7 +4034,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
         block_size=8,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
@@ -4700,7 +4700,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
                 block_size=mamba_block_size,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -4774,7 +4774,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
                 block_size=32,
                 shapes=(1, 1),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -4892,7 +4892,7 @@ def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], fa),
@@ -4932,7 +4932,7 @@ def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], mla),
@@ -5103,7 +5103,7 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["l0"], fa),
@@ -5154,7 +5154,7 @@ def test_lookup_requires_all_attention_chunks_in_page(
                 block_size=mamba_block_size,
                 shapes=((1, 1),),
                 dtypes=(torch.float32,),
-                mamba_cache_mode="align",
+                enable_prefix_caching=True,
             ),
         ),
     ]
@@ -5220,7 +5220,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),
@@ -5328,7 +5328,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),
@@ -5397,7 +5397,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     worker._kv_cache_groups = [
         make_kv_cache_group(["full"], full),

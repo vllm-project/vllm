@@ -31,8 +31,8 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
-    is_mamba_align_group,
     is_mamba_group,
+    is_mamba_prefix_caching_group,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -180,8 +180,8 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(map(is_mamba_align_group, mamba_groups.values())), (
-                "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert all(map(is_mamba_prefix_caching_group, mamba_groups.values())), (
+                "MooncakeStoreScheduler requires prefix caching for Mamba layers"
             )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size

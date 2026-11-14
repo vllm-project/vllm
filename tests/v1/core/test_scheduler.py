@@ -119,7 +119,7 @@ def test_mamba_decode_checkpoint_publication(
         block_size=block_size,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
     )
@@ -1384,7 +1384,7 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         cache_aware_admission_threshold=0.0,
         kv_cache_layer_config=MambaManager.layer_config(
             MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
     )
     assert scheduler.cache_aware_window == 4
@@ -8281,7 +8281,6 @@ def _create_hybrid_mamba_connector_scheduler(
         cache_config=CacheConfig(
             block_size=block_size,
             enable_prefix_caching=True,
-            mamba_cache_mode="align",
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="MockKVConnector",
@@ -8314,7 +8313,7 @@ def _create_hybrid_mamba_connector_scheduler(
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                 ),
-                MambaManager.config(mamba_cache_mode="align"),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )

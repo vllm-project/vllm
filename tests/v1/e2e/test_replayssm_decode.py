@@ -190,7 +190,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         mamba_backend="flashinfer",
         tensor_parallel_size=tensor_parallel_size,
         speculative_config=speculative_config,
@@ -279,7 +278,6 @@ def _check_replayssm_prefix_caching(
         max_model_len=8192,
         trust_remote_code=True,
         enable_chunked_prefill=True,
-        mamba_cache_mode="align",
         mamba_backend=mamba_backend,
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
@@ -532,7 +530,6 @@ def test_flashinfer_replayssm_mtp_preemption_and_boundary_reuse(vllm_runner):
             dtype="bfloat16",
             mamba_backend="flashinfer",
             mamba_ssm_cache_dtype="float16",
-            mamba_cache_mode="align",
             enable_prefix_caching=True,
             # Retain decode checkpoints for the same-history probe.
             prefix_cache_retention_interval=None,

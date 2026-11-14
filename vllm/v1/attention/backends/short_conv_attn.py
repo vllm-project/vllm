@@ -297,7 +297,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             m.block_table_tensor,
             m.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
             self.num_speculative_blocks,
         )
 
