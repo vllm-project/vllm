@@ -132,6 +132,26 @@ When no backend is specified (the default):
 4. If no backend is compatible, an error is raised listing all backends and
    their incompatibility reasons
 
+### FlashInfer on Turing (SM75)
+
+FlashInfer is available for automatic selection on NVIDIA Turing GPUs (SM75),
+including Tesla T4 and GeForce RTX 20-series GPUs, for compatible FP16 models
+with head sizes 64, 128, or 256. No attention override is needed:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --dtype half
+```
+
+To select it explicitly, add `--attention-backend FLASHINFER`.
+Head sizes above 256 exceed SM75's 64 KiB shared-memory limit and are rejected
+for FlashInfer; automatic selection can choose another compatible backend.
+
+The official FlashInfer JIT-cache providers do not currently cover SM75.
+FlashInfer automatically compiles missing kernels with JIT, even when
+`flashinfer-jit-cache` and providers for other architectures are installed.
+Keep JIT enabled and make `nvcc` and `ninja` available; uninstalling the cache
+packages is unnecessary. First use can take several minutes to compile kernels.
+
 ## Backend Priority (CUDA)
 
 When no backend is explicitly selected, vLLM chooses the first

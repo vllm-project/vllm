@@ -613,6 +613,36 @@ def test_flash_attn_accepts_handled_fp8_variants(
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
+@pytest.mark.parametrize(
+    "head_size,capability,supported",
+    [
+        (256, DeviceCapability(7, 5), True),
+        (512, DeviceCapability(7, 5), False),
+        (512, DeviceCapability(8, 0), True),
+    ],
+)
+def test_flashinfer_rejects_head_size_above_256_on_sm75(
+    head_size, capability, supported
+):
+    """SM75's 64 KiB opt-in smem ceiling cannot hold head_size > 256, so
+    auto-selection must not pick FlashInfer for such models on Turing."""
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    reason = FlashInferBackend.supports_combination(
+        head_size=head_size,
+        dtype=torch.float16,
+        kv_cache_dtype=None,
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=capability,
+    )
+    assert (reason is None) == supported
+
+
 blackwell_only = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FA4 is CUDA-only"
 )
