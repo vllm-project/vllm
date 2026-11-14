@@ -283,7 +283,7 @@ def online_quantization_timing_context(
         if isinstance(quant_config, OnlineQuantizationConfig)
         else quant_config.online_quantization_config
     )
-    # reload/layerwise.py's _layerwise_process calls this for experts_int8,
+    # reload/online.py's _process calls this for experts_int8,
     # whose online MoE method has no OnlineQuantizationConfig.
     if online_quantization_config is None:
         yield

@@ -25,7 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
-from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.model_loader.reload.online import drop_online_buffers
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -112,10 +112,13 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
-    # Never loaded: a new param sharing the source storage, never a copy of it.
+    # Never loaded: keep it out of online reloads, which would re-run
+    # process_weights_after_loading on the already-quantized weight.
+    drop_online_buffers(head)
+    # A new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
-    # The copy is never loaded. The online loader wrapper captures the layer,
+    # The copy is never loaded. A loader may capture the layer,
     # so keeping it would leave each copy to the cycle collector.
     for param in head.parameters(recurse=False):
         if hasattr(param, "weight_loader"):
@@ -140,9 +143,6 @@ def quantized_lm_head_copy(
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """
     head = _quantize_copy(lm_head, quantization)
-    # Keep it out of layerwise reload, which would re-run
-    # process_weights_after_loading on the already-quantized weight.
-    get_layerwise_info(head).reset()
     _SOURCES[head] = (lm_head, quantization)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",

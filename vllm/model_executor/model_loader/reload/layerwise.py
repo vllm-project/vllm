@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
-from contextlib import nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
@@ -24,6 +23,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .online import begin_online_reload, finalize_online, has_online_buffers
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -112,12 +112,17 @@ def initialize_layerwise_reload(
     4. Copy processed values back to original tensor storage
 
     With defer_processing=True, only finalize_layerwise_reload triggers processing.
+
+    Online-quantized layers load through their own buffers (`online.py`).
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
+    begin_online_reload(model, defer=defer_processing)
 
     for layer in model.modules():
+        if has_online_buffers(layer):
+            continue
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
@@ -139,8 +144,7 @@ def initialize_layerwise_reload(
 
 def initialize_online_processing(layer: torch.nn.Module):
     """Wrap a layer's weight loaders with online processing loaders.
-    Called by either `initialize_layerwise_reload` or an online quantization scheme,
-    prevents double wrapping in the case of online quantization + reloading
+    Called by `initialize_layerwise_reload`.
 
     Args:
         layer: layer whose parameter weight loaders will be wrapped
@@ -260,6 +264,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
+    finalize_online(model, strict=False)
 
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
@@ -345,21 +350,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
     if quant_method is not None:
-        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-        from vllm.model_executor.layers.quantization.online.moe_base import (
-            OnlineMoEMethodBase,
-        )
-        from vllm.model_executor.model_loader.utils import (
-            online_quantization_timing_context,
-        )
-
-        timing_context = (
-            online_quantization_timing_context(layer, quant_method)
-            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
-            else nullcontext()
-        )
-        with timing_context:
-            quant_method.process_weights_after_loading(layer)
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -399,29 +390,14 @@ def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> N
     which loads a layer's weights by scattering into it instead of through the
     buffered loaders but finishes it exactly the same way.
     """
-    # Reset online quantization flag so process_weights_after_loading
-    # will run again during reload
+    # Reset the one-shot guard so process_weights_after_loading runs again
     if hasattr(layer, "_already_called_process_weights_after_loading"):
         delattr(layer, "_already_called_process_weights_after_loading")
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-        from vllm.model_executor.layers.quantization.online.moe_base import (
-            OnlineMoEMethodBase,
-        )
-        from vllm.model_executor.model_loader.utils import (
-            online_quantization_timing_context,
-        )
-
-        timing_context = (
-            online_quantization_timing_context(layer, quant_method)
-            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
-            else nullcontext()
-        )
-        with timing_context:
-            quant_method.process_weights_after_loading(layer)
+        quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.

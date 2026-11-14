@@ -590,11 +590,11 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
+        ("direct", {"quant_config": _ONLINE}, None),
         (
             "direct",
             {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
-            "online quantization",
+            None,
         ),
         ("direct", {"lora_config": object()}, "LoRA"),
         (

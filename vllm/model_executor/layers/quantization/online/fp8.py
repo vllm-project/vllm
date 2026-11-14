@@ -66,9 +66,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
 )
-from vllm.model_executor.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
+from vllm.model_executor.model_loader.reload.online import install_online_buffers
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
@@ -196,7 +194,7 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
         )
         layer.register_parameter("weight", weight)
 
-        initialize_online_processing(layer)
+        install_online_buffers(layer)
 
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
