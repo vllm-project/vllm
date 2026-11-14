@@ -3,7 +3,7 @@
 import inspect
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
@@ -404,9 +404,15 @@ class Executor(ABC):
         )
         return all(worker_support)
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
+    def add_lora(
+        self, lora_request: LoRARequest, in_use_lora_ids: Collection[int] = ()
+    ) -> bool:
+        """Load an adapter into the workers without evicting `in_use_lora_ids`.
+        Returns whether every worker has it cached."""
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return all(self.collective_rpc("add_lora", args=(lora_request,)))
+        return all(
+            self.collective_rpc("add_lora", args=(lora_request, tuple(in_use_lora_ids)))
+        )
 
     def remove_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
