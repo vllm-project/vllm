@@ -53,7 +53,7 @@ def _rmsnorm_row(
 class FusedMTPInputRMSNormKernel(
     VllmTritonJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         hidden: int
@@ -234,7 +234,7 @@ class FusedMTPInputRMSNormKernel(
 class MTPSharedHeadRMSNormKernel(
     VllmTritonJitKernel["MTPSharedHeadRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         hidden: int

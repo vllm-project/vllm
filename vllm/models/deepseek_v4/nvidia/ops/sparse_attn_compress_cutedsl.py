@@ -81,7 +81,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
     min_scale = 1.0e-4
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -588,7 +588,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 ):
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -1097,7 +1097,7 @@ class SparseAttnCompressC128Block8Kernel(
     state_block_size = 8
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -1453,7 +1453,7 @@ class SparseAttnNormRopeStoreKernel(
 ):
     min_scale = 1.0e-4
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         rope_head_dim: int
@@ -1830,7 +1830,7 @@ class SparseAttnNormRopeStoreKernel(
 class SparseAttnNormRopeStoreFullKernel(
     VllmCuTeDSLJitKernel["SparseAttnNormRopeStoreFullKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         rope_head_dim: int

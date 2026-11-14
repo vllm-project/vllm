@@ -347,7 +347,7 @@ class ViTPatchLinear(nn.Linear):
         self.temporal_patch_size = temporal_patch_size
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class MaskMetadata:
     cu_seqlens: torch.Tensor
     max_seqlen: torch.Tensor

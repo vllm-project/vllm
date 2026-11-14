@@ -23,7 +23,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DPSyncState:
     """What a `dispatch_cg_and_sync_dp` call agreed across DP ranks.
 

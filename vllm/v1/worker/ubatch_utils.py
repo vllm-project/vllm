@@ -16,7 +16,7 @@ from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.platform_utils import num_compute_units
 
 
-@dataclass
+@dataclass(slots=True)
 class UBatchSlice:
     request_slice: slice
     token_slice: slice
