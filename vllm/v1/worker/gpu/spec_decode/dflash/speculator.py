@@ -49,6 +49,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             prefill_context_parallel_size=1,
             decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
         )
+        vllm_config.parallel_config.data_parallel_index = (
+            parallel_config.data_parallel_index
+        )
         super().__init__(vllm_config, device)
 
         # See SpeculativeConfig.prefill_context_kv_only.
