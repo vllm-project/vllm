@@ -195,6 +195,19 @@ steps:
       commands:
       - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
 
+- label: ":nvidia: (H100) FlashInfer CuTe-DSL SM90 MoE"
+  key: kernels-flashinfer-cutedsl-sm90-moe-h100
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_sm90_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - tests/kernels/moe/test_flashinfer_cutedsl_sm90_moe.py
+  commands:
+    - pytest -v -s kernels/moe/test_flashinfer_cutedsl_sm90_moe.py
+
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
   automatic_shard: true

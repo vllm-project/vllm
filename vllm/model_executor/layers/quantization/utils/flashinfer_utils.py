@@ -86,6 +86,28 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def interleave_w13_up_gate_for_flashinfer_cutedsl_sm90(
+    w13: torch.Tensor,
+) -> torch.Tensor:
+    """Repack `[gate; up]` weights `[E, 2I, K]` into the up/gate interleave of
+    FlashInfer's SM90 CuTe-DSL gated GEMM1, `[up 0:32 | gate 0:32 | up 32:64 |
+    gate 32:64 | ...]` along dim 1, so each epilogue thread holds an (up, gate)
+    pair."""
+    num_experts, two_inter, hidden = w13.shape
+    inter = two_inter // 2
+    if inter % 32 != 0:
+        raise ValueError(
+            f"intermediate size per partition {inter} must be a multiple of 32"
+        )
+    gate = w13[:, :inter].reshape(num_experts, inter // 32, 32, hidden)
+    up = w13[:, inter:].reshape(num_experts, inter // 32, 32, hidden)
+    return (
+        torch.stack((up, gate), dim=2)
+        .reshape(num_experts, two_inter, hidden)
+        .contiguous()
+    )
+
+
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
