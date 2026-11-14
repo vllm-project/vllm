@@ -1644,6 +1644,24 @@ class ToolArgCoercionTest(unittest.TestCase):
         self.assertEqual(_first_tool_args(without), {"hour": "007", "enabled": True, "label": "wake up"})
         self.assertEqual(_first_tool_args(with_tools), {"hour": 7, "enabled": True, "label": "wake up"})
 
+    def test_too_deeply_nested_argument_stays_a_string(self):
+        # json.loads raises RecursionError past the C scanner's depth, which is not a
+        # ValueError: the value must fall back to text like any other non JSON value,
+        # instead of dropping the whole tool call as malformed.
+        deep = "[" * 20000 + "]" * 20000
+        model_out = (
+            "<tool_call>\n<function=set_alarm>\n"
+            f"<parameter=label>\n{deep}\n</parameter>\n"
+            "<parameter=hour>\n7\n</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        self.assertEqual(_first_tool_args(parse_response(model_out, qwen3_template, prefix="")), {"label": deep, "hour": 7})
+        tools = _set_alarm_tools(label={"type": "array"}, hour={"type": "integer"})
+        self.assertEqual(
+            _first_tool_args(parse_response(model_out, _XML_STRING_ARGS_TEMPLATE, prefix="", tools=tools)),
+            {"label": deep, "hour": 7},
+        )
+
     def test_coercion_never_reworks_already_typed_values(self):
         # Coercion only casts strings: values the value_parser already typed are final
         model_out = "<tool_call>\n<function=set_alarm>\n<parameter=label>\n1.50\n</parameter>\n</tool_call>"

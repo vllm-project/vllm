@@ -72,7 +72,7 @@ def _coerce(raw: str, types: tuple[str, ...]) -> Any:
                 decoded = json.loads(raw)
                 if isinstance(decoded, dict if type_name == "object" else list):
                     return decoded
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
     return raw  # `string` params, unknown types and failed casts all keep the original text
 
@@ -404,7 +404,7 @@ class ResponseParser:
                     f"Field '{field.name}': 'join' requires each match to parse to a string, "
                     f"got {type(value).__name__}."
                 )
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError, RecursionError) as error:
             self._malformed_fields.add(self._current)
             events.append(
                 {"type": "region_malformed", "field": self._current, "start": close_start, "end": close_end, "error": error}

@@ -82,7 +82,7 @@ def _json(text: str, args: dict) -> Any:
 
     try:
         return json.loads(working)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, RecursionError) as e:
         if args.get("allow_non_json"):
             return _text(text, args)
         if working == text:
