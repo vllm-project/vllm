@@ -38,12 +38,12 @@ class StubTokenizer:
         return list(self.token_ids)
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "kimi_k3"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type: str = "generate"
     is_multimodal_model: bool = False
@@ -56,12 +56,12 @@ class MockModelConfig:
     renderer_num_workers: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig

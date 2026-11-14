@@ -128,7 +128,7 @@ def _python_params(fn) -> tuple[str, ...]:
     return tuple(inspect.signature(py).parameters)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KernelAbi:
     names: tuple[str, ...]
 
@@ -176,7 +176,7 @@ class Space(Enum):
     PEER = "peer"  # a peer-symmetric region: system-scope hand-off between GPUs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Access:
     stage: str
     region: str
@@ -184,7 +184,7 @@ class Access:
     kind: str  # "put" | "poll"
 
 
-@dataclass
+@dataclass(slots=True)
 class Record:
     stages: list[str] = field(default_factory=list)  # in the order entered
     accesses: list[Access] = field(default_factory=list)
