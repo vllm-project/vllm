@@ -219,6 +219,17 @@ class SchedulerConfig:
     checking the first chunk. Prevents over-admission and KV cache thrashing
     with chunked prefill."""
 
+    kv_cache_valve_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    """If > 0, enables the KV valve: when a waiting admission stalls on a
+    block shortage the valve can relieve (demand <= pool size), preempt the
+    most-recently-scheduled running request to restore slack — one victim per
+    step, only while requests are waiting. The demand trigger is independent
+    of pool size and workload fill; this fraction adds a proactive trigger
+    (preempt once usage reaches it, before any admission fails) for operators
+    who want earlier preemption, and its value needs no relation to the pool
+    size or workload (0 disables the valve; the reactive allocation-failure
+    path is always active)."""
+
     watermark: float = Field(default=0.0, ge=0.0, lt=1.0)
     """Fraction of total KV cache blocks to keep free (the watermark) when
     admitting waiting or preempted requests into the running queue. This headroom
