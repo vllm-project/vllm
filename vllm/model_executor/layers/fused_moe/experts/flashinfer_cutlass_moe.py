@@ -188,6 +188,14 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
+    def _supports_bias(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # Only the MXFP4 path passes the biases to the kernel.
+        return weight_key == kMxfp4Static
+
+    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,

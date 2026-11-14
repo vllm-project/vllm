@@ -678,6 +678,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"quantization scheme {weight_key}x{executed_key}"
             )
+        elif moe_config.has_bias and not cls._supports_bias(weight_key, activation_key):
+            return False, _make_reason("expert biases")
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
@@ -806,6 +808,18 @@ class FusedMoEExperts(ABC):
     def _supports_shape(hidden_dim: int) -> bool:
         """Whether a kernel supports a particular shape. Can be overridden if a kernel
         has specific shape requirements.
+        """
+        return True
+
+    @staticmethod
+    def _supports_bias(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """Whether the kernel applies the expert biases (`w13_bias`/`w2_bias`).
+
+        A kernel that ignores them would silently drop the bias term, so one
+        that cannot apply them for a quantization scheme must return False.
         """
         return True
 

@@ -681,3 +681,66 @@ def test_quantization_only_backend_falls_back_to_auto(moe_backend):
     assert select_unquantized_moe_backend(
         moe_config=moe_config
     ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_trtllm_bf16_rejects_expert_bias(mock_supports_current_device, has_bias):
+    """The BF16 TRTLLM kernels never apply `w13_bias`/`w2_bias`."""
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+        TrtLlmBf16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.Renormalize
+    moe_config.has_bias = has_bias
+
+    supported, reason = TrtLlmBf16ExpertsMonolithic.is_supported_config(
+        TrtLlmBf16ExpertsMonolithic,
+        moe_config,
+        None,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported != has_bias
+    assert (reason is not None and "expert biases" in reason) == has_bias
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.moonep_experts.MoonEPExperts._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_moonep_rejects_expert_bias(mock_supports_current_device, has_bias):
+    """MoonEP experts never apply `w13_bias`/`w2_bias`."""
+    from vllm.model_executor.layers.fused_moe.experts.moonep_experts import (
+        MoonEPExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+
+    moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+    moe_config.moe_parallel_config.use_ep = True
+    moe_config.moe_parallel_config.dp_size = 2
+    moe_config.moe_parallel_config.ep_size = 2
+    moe_config.moe_parallel_config.all2all_backend = "moonep"
+    moe_config.has_bias = has_bias
+
+    supported, reason = MoonEPExperts.is_supported_config(
+        MoonEPExperts,
+        moe_config,
+        None,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported != has_bias
+    assert (reason is not None and "expert biases" in reason) == has_bias
