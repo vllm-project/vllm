@@ -30,13 +30,27 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 
 def should_ignore_layer(
     layer_name: str | None,
-    ignore: Iterable[str],
+    ignore: Iterable[str] | None,
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
     check_children: bool = False,
 ) -> bool:
-    if layer_name is None:
+    if layer_name is None or not ignore:
         return False
+
+    # Checkpoint quantization configs (e.g. Quark MXFP4) may specify
+    # excluded layers using parameter/tensor names (e.g. "mtp.fc.weight")
+    # rather than module names (e.g. "mtp.fc"). Normalize by stripping
+    # weight/bias suffixes so that module-level and fused-shard matching
+    # succeeds. Regex patterns starting with "re:" are preserved.
+    normalized_ignore: list[str] = [
+        target[: -len(".weight")]
+        if not target.startswith("re:") and target.endswith(".weight")
+        else target[: -len(".bias")]
+        if not target.startswith("re:") and target.endswith(".bias")
+        else target
+        for target in ignore
+    ]
 
     # MoE layers are currently all-or-nothing: if any child is ignored,
     # the parent layer must be ignored as well. For example, the
@@ -47,7 +61,7 @@ def should_ignore_layer(
     # https://huggingface.co/amd/GLM-5.2-MXFP4/blob/main/config.json#L793-L795
     if check_children and any(
         target == layer_name or target.startswith(layer_name + ".")
-        for target in ignore
+        for target in normalized_ignore
         if not target.startswith("re:")
     ):
         return True
@@ -56,7 +70,9 @@ def should_ignore_layer(
     # model.layers.0.self_attn.qkv_proj,
     # ignore=["re:.*qkv_proj.*"] yields [{"re:.*qkv_proj.*"}]. In contrast,
     # ignore=["re:.*[qkv]_proj"] yields one matching set per expanded shard.
-    per_shard_matches = find_matching_patterns(layer_name, ignore, fused_mapping)
+    per_shard_matches = find_matching_patterns(
+        layer_name, normalized_ignore, fused_mapping
+    )
     shards_ignored = [len(matches) > 0 for matches in per_shard_matches]
     if any(shards_ignored) and not all(shards_ignored):
         raise ValueError(
