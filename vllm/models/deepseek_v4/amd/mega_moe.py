@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER MegaMoE experts (fused dispatch, MXFP4 GEMMs, combine) for DeepSeek V4."""
 
+import functools
+import inspect
 from typing import Any
 
 import torch
@@ -55,10 +57,19 @@ def _append_shared_expert_kernel(
     )
 
 
+@functools.cache
+def _takes_max_tokens(mega_cls: type) -> bool:
+    """Whether MegaMoEV2 picks its route from a max_tokens hint."""
+    return "max_tokens" in inspect.signature(mega_cls.forward).parameters
+
+
 class DeepseekV4AiterMegaMoEExperts(nn.Module):
     # MegaMoEV2 owns large symmetric-heap buffers, so every layer shares one
     # instance and passes its own weights per call.
     _runtime_cache: dict[tuple, Any] = {}
+    # Layers sharing an instance each need their own large-input protocol
+    # state, so every layer takes a distinct slot.
+    _num_layer_slots: int = 0
 
     def __init__(
         self,
@@ -95,6 +106,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.prefix = prefix
+        self.layer_slot = DeepseekV4AiterMegaMoEExperts._num_layer_slots
+        DeepseekV4AiterMegaMoEExperts._num_layer_slots += 1
 
         def make_param(rows: int, cols: int) -> nn.Parameter:
             param = nn.Parameter(
@@ -204,6 +217,11 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         if runtime is None:
             from aiter.ops.flydsl.kernels.mega_moe import MegaMoEV2
 
+            extra = (
+                {"large_m_state_slots": max(self._num_layer_slots, 1)}
+                if _takes_max_tokens(MegaMoEV2)
+                else {}
+            )
             runtime = MegaMoEV2(
                 rank=self.ep_rank,
                 world_size=self.ep_size,
@@ -218,24 +236,45 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
                 w2_scale=self.w2_weight_scale,
                 max_tok_per_rank=max_tok_per_rank,
                 swiglu_limit=self.swiglu_limit,
+                **extra,
             )
             self._runtime_cache[key] = runtime
         return runtime
 
-    def select_runtime(self, num_tokens: int) -> Any:
+    def select_runtime(self, num_tokens: int) -> tuple[Any, int | None]:
+        """Return the runtime and the EP-wide max rows of this call, or None
+        when the DP group's row counts are unknown."""
         # Dispatch is collective, so every EP rank must pick the same runtime.
+        max_tokens = None
         if is_forward_context_available():
             dp_metadata = get_forward_context().dp_metadata
             if dp_metadata is not None:
                 num_tokens = max(
                     num_tokens, int(dp_metadata.num_tokens_across_dp_cpu.max())
                 )
+                max_tokens = num_tokens
         for max_tok_per_rank, runtime in self._runtimes:
             if num_tokens <= max_tok_per_rank:
-                return runtime
+                return runtime, max_tokens
         raise ValueError(
             f"{num_tokens} tokens exceeds MegaMoE capacity {self.max_num_tokens}"
         )
+
+    @staticmethod
+    def route_hint(runtime: Any, max_tokens: int | None) -> dict[str, Any]:
+        """forward() kwargs that let MegaMoEV2 pick its staged, small-input or
+        large-input route. Every rank passes the same hint, so every rank takes
+        the same route; the large-input route is never graph-captured."""
+        if max_tokens is None or not _takes_max_tokens(type(runtime)):
+            return {}
+        # The large-input route is never graph-captured: under capture, only
+        # hint a row count the small-input route can serve. A runtime without
+        # small_m_mtpr (an unexpected build) keeps the staged route here.
+        if torch.cuda.is_current_stream_capturing() and (
+            max_tokens > getattr(runtime, "small_m_mtpr", 0)
+        ):
+            return {}
+        return {"max_tokens": max_tokens}
 
     def append_shared_expert(
         self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
@@ -271,7 +310,7 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         assert self._runtimes
-        runtime = self.select_runtime(hidden_states.shape[0])
+        runtime, max_tokens = self.select_runtime(hidden_states.shape[0])
         if self.fuse_shared_expert:
             topk_weights, topk_ids = self.append_shared_expert(topk_weights, topk_ids)
         # MegaMoEV2 reads these per launch; rebind to this layer's experts.
@@ -279,7 +318,14 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         runtime._s1_w1_scale = self.w13_weight_scale
         runtime.w2 = self.w2_weight
         runtime.w2_scale = self.w2_weight_scale
-        return runtime.forward(hidden_states.contiguous(), topk_weights, topk_ids)
+        if getattr(runtime, "large_m_available", False):
+            runtime.select_layer_state(self.layer_slot)
+        return runtime.forward(
+            hidden_states.contiguous(),
+            topk_weights,
+            topk_ids,
+            **self.route_hint(runtime, max_tokens),
+        )
 
 
 DeepseekV4AiterMegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
