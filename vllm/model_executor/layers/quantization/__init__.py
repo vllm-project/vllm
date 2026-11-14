@@ -134,7 +134,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
         deepseek_config = DeepseekV4FP8Config
 
-    from vllm.models.inkling2.quant_config import Inkling2QuantConfig
+    from vllm.models.inkling2 import Inkling2QuantConfig
 
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig

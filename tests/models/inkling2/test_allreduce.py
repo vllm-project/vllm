@@ -12,6 +12,14 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from vllm.platforms import current_platform
+
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="the fused all-reduce and sequence parallelism run on NVLink "
+    "multicast (ROCm all-reduces over the TP group)",
+)
+
 DIM, BLOCK, HEADS, OFFSET = 4608, 16, 2, 256
 WIDTH = DIM // HEADS
 

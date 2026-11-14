@@ -9,16 +9,23 @@ import pytest
 import torch
 
 from tests.models.inkling2.test_attention import shear_rel_logits
-from vllm.models.inkling2.ops.attn_res import attn_res
-from vllm.models.inkling2.ops.conv_mix import conv_mix
-from vllm.models.inkling2.ops.norm import rms_norm
-from vllm.models.inkling2.ops.sconv import (
+from vllm.models.inkling2 import (
     attention_prologue,
+    attn_res,
+    rms_norm,
     shift_rel_proj,
     short_conv,
 )
+from vllm.models.inkling2.ops.conv_mix import conv_mix
+from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+_is_rocm = current_platform.is_rocm()
+
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or (_is_rocm and not current_platform.is_device_capability(95)),
+    reason="needs CUDA or gfx950",
+)
 
 DEVICE = "cuda"
 
@@ -32,6 +39,26 @@ def test_rms_norm_rounds_once_to_bf16(in_dtype, width):
     ref = ref * weight.float()
     out = rms_norm(x, weight, 1e-6, torch.bfloat16)
     torch.testing.assert_close(out, ref.bfloat16(), atol=0, rtol=1e-2)
+
+
+@pytest.mark.skipif(not _is_rocm, reason="CUDA runs flashinfer's fused_add_rmsnorm")
+@pytest.mark.parametrize("rows", [1, 37])
+def test_fused_add_rms_norm_matches_add_then_norm(rows):
+    """In place: `residual += x`, rounded once to bf16, and `x` = the RMSNorm
+    of the fp32 sum."""
+    from vllm.models.inkling2.amd.ops.norm import fused_add_rms_norm
+
+    torch.manual_seed(0)
+    width = 4608
+    x = (torch.randn(rows, width, device=DEVICE) * 3).bfloat16()
+    residual = (torch.randn(rows, width, device=DEVICE) * 3).bfloat16()
+    weight = torch.randn(width, device=DEVICE).bfloat16()
+    total = x.float() + residual.float()
+    ref = total * torch.rsqrt(total.square().mean(-1, keepdim=True) + 1e-6)
+    ref = (ref * weight.float()).bfloat16()
+    fused_add_rms_norm(x, residual, weight, 1e-6)
+    assert torch.equal(residual, total.bfloat16())
+    torch.testing.assert_close(x, ref, atol=0, rtol=1e-2)
 
 
 def _clip(x, threshold, eps=1e-6):
@@ -200,7 +227,9 @@ def _dense_conv(x, weight, dyn):
     width = weight.shape[0] if dyn is not None else weight.shape[1]
     padded = torch.cat([x.new_zeros(width - 1, x.shape[1]), x]).float()
     acc = torch.zeros_like(x, dtype=torch.float32)
-    for lag in range(width):
+    # Sum the taps in the kernel's order; the bf16 products are exact in fp32,
+    # so static-weight outputs match bit for bit.
+    for lag in range(width) if dyn is not None else reversed(range(width)):
         value = padded[width - 1 - lag : width - 1 - lag + x.shape[0]]
         if dyn is None:
             w = weight[:, width - 1 - lag].float()
@@ -291,6 +320,9 @@ def test_short_conv_chunked_matches_full_sequence(fused_residual, steps):
         torch.testing.assert_close(torch.cat(outs[i]), ref, atol=0, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    _is_rocm, reason="conv_mix is a CUDA op (ROCm runs short_conv, then attn_res)"
+)
 @pytest.mark.parametrize(
     "num_stack,num_q,with_last,with_residual",
     [

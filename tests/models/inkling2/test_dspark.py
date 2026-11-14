@@ -4,6 +4,7 @@
 implementation."""
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,22 +12,34 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tests.utils import _test_rendezvous_path
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 requires Blackwell", allow_module_level=True)
+_is_rocm = current_platform.is_rocm()
+if not (
+    current_platform.is_device_capability_family(100)
+    or (_is_rocm and current_platform.is_device_capability(95))
+):
+    pytest.skip("Inkling2 requires Blackwell or gfx950", allow_module_level=True)
 
-from vllm.models.inkling2.dspark import (  # noqa: E402
+from vllm.models.inkling2 import (  # noqa: E402
     Inkling2MarkovHead,
-)
-from vllm.models.inkling2.ops.attention import block_decode_attention  # noqa: E402
-from vllm.models.inkling2.ops.dspark import (  # noqa: E402
-    Inkling2DSparkArgmax,
     add_softcap,
-    dspark_argmax,
+    block_decode_attention,
     markov_gate,
     mix_rmsnorm,
 )
+
+if _is_rocm:
+    from vllm.models.inkling2.amd.ops.dspark import (  # noqa: E402
+        dspark_argmax as amd_dspark_argmax,
+    )
+else:
+    from vllm.models.inkling2.ops.dspark import (  # noqa: E402
+        Inkling2DSparkArgmax,
+        dspark_argmax,
+    )
 from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax  # noqa: E402
 
 DEVICE = "cuda"
@@ -99,19 +112,36 @@ def _sharded_argmax_reference(base, bias, cap, world, valid):
 
 
 def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
-    import vllm._C_stable_libtorch  # noqa: F401
+    if _is_rocm:
+        from tests.utils import init_test_distributed_environment
 
-    os.environ.update(MASTER_ADDR="localhost", MASTER_PORT=str(port))
-    torch.accelerator.set_device_index(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world)
-    group = dist.new_group(backend="gloo")
+        torch.accelerator.set_device_index(rank)
+        init_test_distributed_environment(world, 1, rank, str(port), rank)
+    else:
+        import vllm._C_stable_libtorch  # noqa: F401
+
+        os.environ.update(MASTER_ADDR="localhost", MASTER_PORT=str(port))
+        torch.accelerator.set_device_index(rank)
+        dist.init_process_group("nccl", rank=rank, world_size=world)
+        group = dist.new_group(backend="gloo")
     failures = []
+
+    def workspace(rows, cols):
+        # ROCm all-gathers the logits instead.
+        if _is_rocm:
+            return SimpleNamespace(num_cols=cols)
+        return Inkling2DSparkArgmax(group, rows, cols)
+
+    def argmax(workspace, base, bias, cap, valid, offset):
+        if _is_rocm:
+            return amd_dspark_argmax(base, bias, cap, valid)
+        return dspark_argmax(workspace, base, bias, cap, valid, offset)
 
     def check(name, workspace, base, bias, cap, vocab):
         cols = workspace.num_cols
         valid = [min(cols, vocab - r * cols) for r in range(world)]
         shard = slice(rank * cols, (rank + 1) * cols)
-        out = dspark_argmax(
+        out = argmax(
             workspace, base[:, shard], bias[:, shard], cap, valid[rank], shard.start
         )
         expected = _sharded_argmax_reference(base, bias, cap, world, valid)
@@ -122,7 +152,7 @@ def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
 
     # Real-size shards; the last one is partly padding.
     cols, vocab, cap = 50256, 200058, 30.0
-    big = Inkling2DSparkArgmax(group, 64, cols)
+    big = workspace(64, cols)
     g = torch.Generator().manual_seed(853)  # shared by all ranks
 
     def rand(rows):
@@ -156,7 +186,7 @@ def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
     valid = min(cols, vocab - rank * cols)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        out = dspark_argmax(
+        out = argmax(
             big, static[0][:, shard], static[1][:, shard], cap, valid, shard.start
         )
     for i in range(4):
@@ -171,7 +201,7 @@ def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
             failures.append(f"graph replay {i}")
     # Every bf16 input next to its neighbors, on two ranks in either order:
     # the softcap's rounding of every input matches add_softcap's.
-    small = Inkling2DSparkArgmax(group, 1024, 8)
+    small = workspace(1024, 8)
     x = torch.arange(1 << 16, dtype=torch.int32).short().view(torch.bfloat16)
     for step in (1, 2):
         lo, hi = x.to(DEVICE), x.roll(-step).to(DEVICE)
@@ -191,7 +221,8 @@ def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
                 )
     torch.accelerator.synchronize()
     queue.put((rank, failures[:20]))
-    dist.destroy_process_group()
+    if not _is_rocm:
+        dist.destroy_process_group()
 
 
 def test_sharded_argmax_matches_full_vocab():
@@ -203,7 +234,13 @@ def test_sharded_argmax_matches_full_vocab():
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
     queue = mp.get_context("spawn").Queue()
-    mp.spawn(_sharded_argmax_worker, args=(world, 29650, queue), nprocs=world)
+    # ROCm's workers join vLLM's TP group, which rendezvouses through a file
+    # named by the port.
+    port = get_open_port() if _is_rocm else 29650
+    try:
+        mp.spawn(_sharded_argmax_worker, args=(world, port, queue), nprocs=world)
+    finally:
+        Path(_test_rendezvous_path(port)).unlink(missing_ok=True)
     results = dict(queue.get() for _ in range(world))
     assert all(not f for f in results.values()), results
 
@@ -307,6 +344,11 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
     queue.put((rank, failures, stats))
 
 
+@pytest.mark.skipif(
+    _is_rocm,
+    reason="FlashInfer's fused all-reduce + RMSNorm is CUDA-only (ROCm runs "
+    "all_reduce_add_rmsnorm unfused)",
+)
 @pytest.mark.parametrize("world", [2, 4])
 def test_all_reduce_add_rmsnorm_matches_unfused(world):
     """The fused all-reduce + residual add + RMSNorm keeps the unfused bf16

@@ -10,9 +10,13 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 requires Blackwell", allow_module_level=True)
+if not (
+    current_platform.is_device_capability_family(100)
+    or (current_platform.is_rocm() and current_platform.is_device_capability(95))
+):
+    pytest.skip("Inkling2 requires Blackwell or gfx950", allow_module_level=True)
 
+NUM_LAYERS = 2
 TINY_CONFIG = {
     "architectures": ["Inkling2ForConditionalGeneration"],
     "model_type": "inkling2",
@@ -20,7 +24,7 @@ TINY_CONFIG = {
     "text_config": {
         "torch_dtype": "bfloat16",
         "hidden_size": 512,
-        "num_hidden_layers": 2,
+        "num_hidden_layers": NUM_LAYERS,
         "local_layer_ids": [0],
         "sliding_window_size": 128,
         "vocab_size": 1024,
@@ -52,6 +56,29 @@ TINY_CONFIG = {
         "target_layer_ids": [1, 2],
     },
 }
+# Experts default to NVFP4; ROCm runs MXFP8 experts only.
+MXFP8_QUANT_CONFIG = {
+    "quant_method": "inkling2",
+    "model": {
+        "parameter_groups": [
+            {
+                "compute_dtype": "mxfp8",
+                "tensors": [
+                    f"model.llm.layers.{layer}.mlp.experts.{name}"
+                    for layer in range(NUM_LAYERS)
+                    for name in ("w13_weight", "w2_weight")
+                ],
+            }
+        ]
+    },
+}
+
+
+def _write_model(path) -> str:
+    (path / "config.json").write_text(json.dumps(TINY_CONFIG))
+    if current_platform.is_rocm():
+        (path / "hf_quant_config.json").write_text(json.dumps(MXFP8_QUANT_CONFIG))
+    return str(path)
 
 
 @pytest.mark.parametrize("draft_sample_method", [None, "greedy", "probabilistic"])
@@ -60,7 +87,7 @@ def test_tiny_model_generates(tmp_path, draft_sample_method):
     paged KV and conv-state caches and CUDA graphs, optionally speculating
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
-    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
+    model = _write_model(tmp_path)
     llm = LLM(
         speculative_config=(
             None
@@ -71,7 +98,7 @@ def test_tiny_model_generates(tmp_path, draft_sample_method):
                 "draft_sample_method": draft_sample_method,
             }
         ),
-        model=str(tmp_path),
+        model=model,
         load_format="dummy",
         skip_tokenizer_init=True,
         tokenizer_mode="hf",
@@ -138,8 +165,8 @@ def test_piecewise_graphs_match_eager(tmp_path):
     replayed for any batch of the same token count, so attention must plan
     from the live batch: a chunked prompt prefilling alongside decodes runs
     and matches eager."""
-    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
-    graph = _chunked_mixed_run(str(tmp_path), enforce_eager=False)
-    eager = _chunked_mixed_run(str(tmp_path), enforce_eager=True)
+    model = _write_model(tmp_path)
+    graph = _chunked_mixed_run(model, enforce_eager=False)
+    eager = _chunked_mixed_run(model, enforce_eager=True)
     for g, e in zip(graph, eager):
         torch.testing.assert_close(torch.tensor(g), torch.tensor(e), rtol=0, atol=1e-2)

@@ -716,7 +716,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
-    "Inkling2DSparkModel": ("vllm.models.inkling2.dspark", "Inkling2DSparkModel"),
+    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
