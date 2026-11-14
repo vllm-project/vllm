@@ -16,6 +16,10 @@ import regex as re
 # tensor is loaded and sliced later by RoutedExperts.weight_loader.
 _EXPERT_ID_RE = re.compile(r"\.experts\.(\d+)\.")
 
+# Compressed-tensors transform matrix (`experts.<e>.<proj>.<scheme>_input.weight`):
+# shared by all experts, so it must be kept even if saved under a nonlocal expert.
+_EXPERT_TRANSFORM_RE = re.compile(r"\.experts\.\d+\.[^.]+\.[^.]+_input\.weight$")
+
 
 def parse_expert_id(weight_name: str) -> int | None:
     """Return the expert id embedded in *weight_name*, or `None` if it is
@@ -110,6 +114,8 @@ def should_skip_weight(
     eid = parse_expert_id(weight_name)
     if eid is None:
         # Not an expert weight (dense / shared-expert / embedding) → keep.
+        return False
+    if _EXPERT_TRANSFORM_RE.search(weight_name):
         return False
     # Only skip heavy weight tensors, never scale/metadata tensors.
     # Scale tensors are tiny and some backends need them from ALL experts

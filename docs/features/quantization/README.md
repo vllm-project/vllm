@@ -46,6 +46,8 @@ Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform 
 
 Other transforms, older GPUs, and an explicit `--linear-backend` other than `auto` or `humming` use the generic transform path, which applies the transform separately before the selected kernel.
 
+Routed MoE experts support online input transforms with the Triton and Marlin MoE backends. All experts must share the same non-randomized `hadamard` or `random-hadamard` transform, with identical gate and up transforms. Other MoE backends, output transforms, learned `hadamard` matrices, feature padding, LoRA, and fused shared experts raise an error at load time.
+
 !!! note
     The `fp_quant` quantization method and the QuTLASS backend have been removed. Use a compressed-tensors checkpoint instead.
 
