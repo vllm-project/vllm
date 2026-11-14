@@ -357,6 +357,8 @@ class BatchSharder:
             cu_num_logits_np=local_cu_num_logits_np,
             num_draft_tokens=num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            # local_logits_indices is not the identity over hidden_states.
+            logits_indices_is_identity=False,
         )
         local_grammar_output = None
         if grammar_output is not None:

@@ -28,12 +28,12 @@ CASES = {
     "verify_ragged": ([8, 3, 1, 6], [7, 2, 0, 5], 1, None, 0, True),
     "no_drafts": ([1, 1], [0, 0], 1, None, 0, True),
     "req_and_token_padding": ([8, 8], [7, 7], 1, 4, 16, True),
-    "two_bonus": ([9, 4], [7, 2], 2, None, 3, True),
+    "no_bonus": ([7, 2], [7, 2], 0, 4, 5, True),
     "chunked_prefill": ([8, 100, 8], [7, 0, 7], 1, 4, 8, False),
     "prefill_first": ([50, 8], [0, 7], 1, None, 0, False),
     "prefill_last": ([8, 33], [7, 0], 1, None, 0, False),
     "fewer_drafts": ([8], [3], 1, None, 0, False),
-    "two_bonus_short": ([9, 9], [7, 6], 2, None, 0, False),
+    "no_bonus_short": ([8, 3], [7, 2], 0, None, 0, False),
 }
 
 
@@ -107,8 +107,8 @@ def test_ref_indices_match_combine_kernel(case):
     cu, qsl, num_reqs = _host_batch(num_scheduled, num_drafts, num_bonus, padded)
     device = torch.device("cuda")
     num_tokens = int(sum(num_scheduled))
-    # the placement only reads cu_num_logits: one bonus token for the kernel,
-    # draft rows wide enough for every request's logits
+    # the placement only reads cu_num_logits; draft rows wide enough for
+    # every request's logits
     width = int(np.diff(cu).max())
     indices = combine_sampled_and_draft_tokens(
         torch.zeros(num_tokens, dtype=torch.int32, device=device),
@@ -120,6 +120,6 @@ def test_ref_indices_match_combine_kernel(case):
         torch.zeros(num_reqs, width, dtype=torch.int32, device=device),
         torch.from_numpy(cu).to(device),
         int(cu[num_reqs]),
-        1,
+        num_bonus,
     )
     assert torch.equal(indices.cpu(), _ref_logits_indices(cu, qsl, num_reqs))
