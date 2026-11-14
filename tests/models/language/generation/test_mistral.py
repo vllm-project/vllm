@@ -4,6 +4,7 @@ import copy
 import json
 
 import pytest
+import torch
 
 from vllm.parser.mistral import MistralToolCall
 from vllm.sampling_params import SamplingParams
@@ -177,6 +178,59 @@ def test_models(
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "top_level", [False, True], ids=["nested", "top-level-precedence"]
+)
+def test_ministral3_nested_llama_4_scaling(monkeypatch, dist_init, top_level):
+    """Nested fields scale queries; an explicit top-level mapping takes precedence."""
+    from transformers import Ministral3Config
+
+    from vllm.model_executor.models import llama
+    from vllm.model_executor.models.mistral import MistralAttention
+    from vllm.platforms import current_platform
+
+    # Return queries so the output exposes scaling without an attention backend.
+    monkeypatch.setattr(llama, "Attention", lambda *args, **kwargs: lambda q, k, v: q)
+    config = Ministral3Config(
+        head_dim=64,
+        max_position_embeddings=128,
+        rope_parameters={
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 4.0,
+            "original_max_position_embeddings": 32,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "llama_4_scaling_beta": 0.2 if top_level else 0.1,
+        },
+    )
+    if top_level:
+        config.llama_4_scaling = {"beta": 0.1, "original_max_position_embeddings": 32}
+
+    with torch.device(current_platform.device_type):
+        layer = MistralAttention(
+            config,
+            hidden_size=64,
+            num_heads=1,
+            num_kv_heads=1,
+            max_position_embeddings=128,
+            prefix="model.layers.0.self_attn",
+        )
+        with torch.no_grad():
+            layer.qkv_proj.weight.copy_(torch.eye(64).repeat(3, 1))
+            layer.o_proj.weight.copy_(torch.eye(64))
+        positions = torch.tensor([31, 32, 64])
+        hidden_states = torch.ones(3, 64)
+        output = layer(positions, hidden_states)
+        expected_scale = 1 + 0.1 * torch.log(torch.tensor([1.0, 2.0, 3.0]))
+
+    # RoPE preserves the norm; identity projections leave only query scaling.
+    torch.testing.assert_close(
+        output.norm(dim=-1), hidden_states.norm(dim=-1) * expected_scale
     )
 
 
