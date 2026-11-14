@@ -391,6 +391,11 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # Throttled steps since a capacity-bound backlog lifted the cadence.
+        self.prefill_backlog_interval = (
+            self.scheduler_config.prefill_schedule_backlog_interval
+        )
+        self._num_backlog_steps = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -736,10 +741,18 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
-        # all prefill compute unless saturated.
-        defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+        # all prefill compute unless saturated. A saturated (capacity-bound)
+        # backlog lifts the throttle on every prefill_schedule_backlog_interval-th
+        # step, by default every step.
+        throttled = throttle_prefills
+        if throttled and self.prefill_capacity_bound:
+            self._num_backlog_steps += 1
+            throttled = self._num_backlog_steps % self.prefill_backlog_interval != 0
+        else:
+            self._num_backlog_steps = 0
+        defer_prefills = throttled and any(
+            not r.is_prefill_chunk for r in self.running
+        )
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
