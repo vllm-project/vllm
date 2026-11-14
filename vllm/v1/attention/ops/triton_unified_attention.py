@@ -37,13 +37,14 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 MAX_3D_QUERY_LEN = 8
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
-# (RDNA3).
-is_gfx1201 = is_gfx1100 = False
+# (RDNA3), and the long-prefill query block for gfx1151.
+is_gfx1201 = is_gfx1100 = is_gfx1151 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1151, on_gfx1201
 
     is_gfx1201 = on_gfx1201()
     is_gfx1100 = on_gfx1100()
+    is_gfx1151 = on_gfx1151()
 
 # The tables are keyed by the padded head size (next power of 2), which the kernel's
 # tiles use: head_size 96 runs as 128, 192 as 256.
@@ -1254,7 +1255,7 @@ def unified_attention(
     # threshold). Only launch parameters change; sliding window, sinks, softcap and
     # ALiBi are applied per element inside each tile. Batch-invariant mode keeps the
     # default launch (vLLM then always runs 2D).
-    if (is_gfx1201 or is_gfx1100) and not is_batch_invariant:
+    if (is_gfx1201 or is_gfx1100 or is_gfx1151) and not is_batch_invariant:
         grid_fill = num_seqs * num_kv_heads
         # gfx1100 sliding-window decode: a split-KV batch runs as 2D from this
         # requests x KV heads, and then gets the 2D tuning below.
@@ -1362,6 +1363,15 @@ def unified_attention(
                 )
                 if config is not None:
                     TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+            elif is_gfx1151 and max_seqlen_q >= 512 and num_queries_per_kv <= 16:
+                # Long prefill runs many KV-tile iterations per query block, so
+                # 64 query rows per program amortize that loop and shrink the
+                # grid. Decode and short prefill keep the default block, where
+                # the wider one is slower.
+                BLOCK_M = 64
+                BLOCK_Q = BLOCK_M // num_queries_per_kv
+                total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+                launch_num_warps = 4
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale

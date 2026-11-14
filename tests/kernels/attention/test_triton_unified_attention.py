@@ -108,6 +108,23 @@ def _spy_reduce_segments(monkeypatch):
     return grids
 
 
+def _spy_kernel_launches(monkeypatch):
+    original = attention.kernel_unified_attention
+    launches = []
+
+    def launch(grid):
+        def run(**kwargs):
+            launches.append(kwargs)
+            return original[grid](**kwargs)
+
+        return run
+
+    spy = MagicMock()
+    spy.__getitem__.side_effect = launch
+    monkeypatch.setattr(attention, "kernel_unified_attention", spy)
+    return launches
+
+
 @pytest.mark.parametrize(
     "query_len,options,expected",
     [
@@ -298,6 +315,62 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
     assert len(reduce_grids) == 1
 
 
+@pytest.mark.parametrize(
+    ("is_gfx1151", "batch_invariant", "max_seqlen_q", "nq_per_kv", "expected"),
+    [
+        (True, False, 512, 4, (64, 16, 4)),
+        (True, False, 8192, 5, (64, 12, 4)),
+        (True, False, 8192, 6, (64, 10, 4)),
+        (True, False, 8192, 7, (64, 9, 4)),
+        (True, False, 512, 16, (64, 4, 4)),
+        (True, False, 511, 4, (16, 4, None)),
+        (True, False, 511, 6, (16, 2, None)),
+        (True, False, 8192, 17, (32, 1, None)),
+        (True, True, 8192, 4, (16, 4, None)),
+        (False, False, 8192, 4, (16, 4, None)),
+    ],
+)
+def test_gfx1151_long_prefill_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    is_gfx1151: bool,
+    batch_invariant: bool,
+    max_seqlen_q: int,
+    nq_per_kv: int,
+    expected: tuple[int, int, int | None],
+) -> None:
+    # Pin the other RDNA flags so the host's own tuning cannot replace the launch.
+    monkeypatch.setattr(attention, "is_gfx1100", False)
+    monkeypatch.setattr(attention, "is_gfx1201", False)
+    monkeypatch.setattr(attention, "is_gfx1151", is_gfx1151)
+    monkeypatch.setattr(attention, "is_batch_invariant", batch_invariant)
+    kernel = MagicMock()
+    monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
+    query = torch.empty(
+        (max_seqlen_q, nq_per_kv, 128), dtype=torch.bfloat16, device="cpu"
+    )
+    cache = torch.empty((1, 16, 1, 128), dtype=torch.bfloat16, device="cpu")
+    unified_attention(
+        query,
+        cache,
+        cache,
+        torch.empty_like(query),
+        torch.tensor([0, max_seqlen_q], dtype=torch.int32, device="cpu"),
+        max_seqlen_q,
+        torch.tensor([16], dtype=torch.int32, device="cpu"),
+        16,
+        128**-0.5,
+        True,
+        (-1, -1),
+        torch.zeros((1, 1), dtype=torch.int32, device="cpu"),
+        0.0,
+        None,
+        None,
+        None,
+    )
+    launch = kernel.__getitem__.return_value.call_args.kwargs
+    assert (launch["BLOCK_M"], launch["BLOCK_Q"], launch.get("num_warps")) == expected
+
+
 @triton.jit
 def _compute_clamped_mm_tile_bounds(
     output_ptr,
@@ -440,6 +513,83 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@pytest.mark.parametrize("num_query_heads", [4, 5, 6, 7])
+@torch.inference_mode()
+def test_tuned_long_prefill_matches_dense_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    num_query_heads: int,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+    monkeypatch.setattr(attention, "is_gfx1100", False)
+    monkeypatch.setattr(attention, "is_gfx1201", False)
+    monkeypatch.setattr(attention, "is_gfx1151", True)
+    monkeypatch.setattr(attention, "is_batch_invariant", False)
+    launches = _spy_kernel_launches(monkeypatch)
+
+    query_len, kv_len = 512, 1024
+    num_kv_heads, head_size, block_size = 1, 128, 16
+    num_blocks = kv_len // block_size
+    scale = head_size**-0.5
+    device = torch.device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    query = torch.randn(
+        query_len,
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    cu_seqlens_q = torch.tensor([0, query_len], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([kv_len], dtype=torch.int32, device=device)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device)[None]
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=query_len,
+        seqused_k=seqused_k,
+        max_seqlen_k=kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+    assert [
+        (launch["BLOCK_M"], launch["BLOCK_Q"], launch["num_warps"])
+        for launch in launches
+    ] == [(64, 64 // num_query_heads, 4)]
+
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        [query_len],
+        [kv_len],
+        block_table,
+        scale,
+    )
+    torch.testing.assert_close(output, expected, atol=1.5e-2, rtol=1e-2)
 
 
 @torch.inference_mode()
