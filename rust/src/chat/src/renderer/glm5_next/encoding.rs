@@ -439,7 +439,7 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
 
 pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
     messages.iter().enumerate().map(|(index, message)| match message {
-        ChatMessage::System { content: value } => json!({"role": "system", "content": content(value, index)}),
+        ChatMessage::System { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::Developer { content: value, .. } => json!({"role": "developer", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),

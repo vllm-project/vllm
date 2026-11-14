@@ -289,7 +289,7 @@ impl ContentCapabilities {
                 Some(renders_media) => renders_media,
                 None => self.typed_user,
             },
-            ChatMessage::System { content } => {
+            ChatMessage::System { content, .. } => {
                 self.typed_system && self.renders_media(content) != Some(false)
             }
             ChatMessage::Assistant { .. } => self.typed_assistant,

@@ -262,8 +262,12 @@ impl From<Vec<ChatContentPart>> for ChatContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum ChatMessage {
-    /// System message content.
-    System { content: ChatContent },
+    /// System message content plus optional message-local tools.
+    System {
+        content: ChatContent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<ChatTool>>,
+    },
     /// Developer message content plus optional message-local tools.
     Developer {
         content: ChatContent,
@@ -308,6 +312,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<ChatContent>) -> Self {
         Self::System {
             content: content.into(),
+            tools: None,
         }
     }
 
@@ -322,7 +327,10 @@ impl ChatMessage {
     /// Return message-scoped tool declarations carried by this message.
     pub fn declared_tools(&self) -> Option<&[ChatTool]> {
         match self {
-            Self::Developer {
+            Self::System {
+                tools: Some(tools), ..
+            }
+            | Self::Developer {
                 tools: Some(tools), ..
             } if !tools.is_empty() => Some(tools),
             _ => None,
@@ -380,7 +388,7 @@ impl ChatMessage {
     /// Concatenate the visible text carried by this message.
     pub fn text_content(&self) -> Result<String> {
         match self {
-            Self::System { content }
+            Self::System { content, .. }
             | Self::Developer { content, .. }
             | Self::User { content }
             | Self::ToolResponse { content, .. }
@@ -404,7 +412,7 @@ impl ChatMessage {
     /// Return whether this message contains any multimodal content.
     pub fn has_multimodal(&self) -> bool {
         match self {
-            Self::System { content }
+            Self::System { content, .. }
             | Self::Developer { content, .. }
             | Self::User { content }
             | Self::ToolResponse { content, .. }
@@ -416,7 +424,7 @@ impl ChatMessage {
     /// Return the names of the tools this message references, in order.
     fn tool_references(&self) -> impl Iterator<Item = &str> {
         let content = match self {
-            Self::System { content }
+            Self::System { content, .. }
             | Self::Developer { content, .. }
             | Self::User { content }
             | Self::ToolResponse { content, .. }

@@ -679,7 +679,7 @@ fn extract_media_parts(
                 )
             })?;
             let content = match message {
-                ChatMessage::System { content }
+                ChatMessage::System { content, .. }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
                 | ChatMessage::ToolResponse { content, .. }
@@ -703,7 +703,7 @@ fn extract_media_parts(
         // Fall back to all media in request message and content-part order (e.g. Jinja).
         None => Either::Right(request.messages.iter().flat_map(|message| {
             let content = match message {
-                ChatMessage::System { content }
+                ChatMessage::System { content, .. }
                 | ChatMessage::Developer { content, .. }
                 | ChatMessage::User { content }
                 | ChatMessage::ToolResponse { content, .. }
