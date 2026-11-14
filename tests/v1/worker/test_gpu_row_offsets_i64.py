@@ -172,6 +172,8 @@ def test_rope_positions_high_row():
     rope.num_dims = NUM_DIMS
     rope.max_num_reqs = max_num_reqs
     rope.max_model_len = STRIDE
+    rope.linear_prefill_positions = False
+    rope.text_only = None
     rope.prefill_positions = SimpleNamespace(gpu=prefill_positions)
     rope.positions = torch.zeros(
         (NUM_DIMS, 2 * PREFILL_LEN + 1), dtype=torch.int64, device=device
