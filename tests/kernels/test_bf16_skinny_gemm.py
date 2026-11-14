@@ -1064,6 +1064,37 @@ def test_skinny_gemm_plans_are_valid(
     assert config.static_k in (None, k)
     if config.static_k is not None:
         assert config.static_k >= 2 * k_tile
+@pytest.mark.parametrize(
+    "capability,shape,expected_rows",
+    [
+        pytest.param((12, 0), (19360, 4096), {1, 2, 4, 8}, id="sm120-lm-head"),
+        pytest.param((12, 0), (8192, 1536), None, id="sm120-unlisted"),
+        pytest.param((12, 1), (8192, 1536), {1, 2, 4}, id="sm121-q-b"),
+        pytest.param((9, 0), (4096, 4096), None, id="no-table"),
+    ],
+)
+def test_skinny_gemm_plans_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    shape: tuple[int, int],
+    expected_rows: set[int] | None,
+) -> None:
+    """SM120 and SM121 keep separate tables; unlisted devices fall back to F.linear."""
+    assert (
+        skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY[(12, 0)]
+        is skinny_plans.SM120_SKINNY_GEMM_PLANS
+    )
+    monkeypatch.setattr(
+        skinny_plans.current_platform, "get_device_capability", lambda: capability
+    )
+    monkeypatch.setattr(
+        skinny_plans.shape_dynamic_skinny_gemm, "is_available", lambda: True
+    )
+    plan = skinny_plans.get_skinny_gemm_plan(*shape)
+    if expected_rows is None:
+        assert plan is None
+    else:
+        assert set(plan) == expected_rows
 
 
 @pytest.mark.parametrize(
