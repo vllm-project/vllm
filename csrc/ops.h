@@ -886,6 +886,6 @@ void fused_mqa_topk_prefill(
     torch::stable::Tensor scales, torch::stable::Tensor weights,
     torch::stable::Tensor starts, torch::stable::Tensor ends,
     torch::stable::Tensor out, torch::stable::Tensor counter,
-    torch::stable::Tensor values, torch::stable::Tensor indices,
-    torch::stable::Tensor retained, torch::stable::Tensor retained_indices,
-    torch::stable::Tensor counts, torch::stable::Tensor defer);
+    torch::stable::Tensor codes, torch::stable::Tensor values,
+    torch::stable::Tensor indices, torch::stable::Tensor row_state,
+    torch::stable::Tensor recovery);
