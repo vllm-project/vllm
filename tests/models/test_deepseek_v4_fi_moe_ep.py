@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
@@ -233,6 +234,10 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
         FLASHINFER_MOE_EP_CUTEDSL, routing_method=RoutingMethodType.Renormalize
     )
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=None, w2_scale=None, block_shape=[128, 128]
+    )
+    assert fi_ep.sm90_weight_format(quant_config) == "fp8_block"
     assert _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym) == (
         True,
         "",
@@ -241,6 +246,7 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     assert "NVFP4 weights on this GPU" in reason
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert fi_ep.sm90_weight_format(quant_config) is None
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym)
     assert "FP8_BLOCK weights on this GPU" in reason
 
@@ -252,6 +258,43 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8StaticTensorSym)
     assert "with block FP8" in reason
+
+
+def test_mxfp4_weights_run_packed_on_hopper_without_eplb(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    """Hopper runs MXFP4 checkpoints on the CuTeDSL megakernel as loaded.
+
+    FlashInfer keeps a per-expert scale of those weights that EPLB cannot move,
+    so EPLB is rejected. FlashInfer's DeepGEMM kernel targets Blackwell.
+    """
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    assert _is_supported(cutedsl, kMxfp4Static, None) == (True, "")
+    _, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
+    )
+    assert "FlashInfer DeepGEMM kernel on Hopper" in reason
+
+    tensors = tuple(torch.zeros(2, 2, dtype=torch.uint8) for _ in range(4))
+    weights = fi_ep.mxfp4_moe_ep_weights(FLASHINFER_MOE_EP_CUTEDSL, *tensors)
+    assert all(
+        out is src
+        for out, src in zip(
+            (weights.w13, weights.w2, weights.w13_scale, weights.w2_scale), tensors
+        )
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
+    )
+    assert fi_ep.sm90_weight_format(quant_config) == "mxfp4"
+
+    megakernel_host.parallel_config.enable_eplb = True
+    _, reason = _is_supported(cutedsl, kMxfp4Static, None)
+    assert reason.endswith("EPLB")
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(cutedsl, kMxfp4Static, None) == (True, "")
+    assert fi_ep.sm90_weight_format(quant_config) is None
 
 
 def test_megakernels_are_oracle_backends():
