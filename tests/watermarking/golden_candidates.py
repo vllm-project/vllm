@@ -72,7 +72,7 @@ class GoldenGuardError(ValueError):
     """A candidate is too weak or too unstable to be frozen as a golden."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DeterministicGenerationFixture:
     vocabulary_size: int = 128
     num_tokens: int = 64
@@ -91,7 +91,7 @@ class DeterministicGenerationFixture:
         return (values.to(torch.float32) / self.logit_denominator).unsqueeze(0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkingSchemeConfig:
     context_width: int = 4
     generation_alpha: float = 0.1
@@ -102,7 +102,7 @@ class WatermarkingSchemeConfig:
     p_value_threshold: float = 0.01
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GenerationTrace:
     routing_draws: int
     key_b_routed: int | None
@@ -172,7 +172,7 @@ DETECTOR_FACTORIES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkingCandidate:
     id: str
     scheme: WatermarkingAlgorithm

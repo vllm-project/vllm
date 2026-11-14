@@ -104,7 +104,7 @@ def mask_dcp_empty_shards_(
 
 
 class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         output_dtype: torch.dtype
         lse_dtype: torch.dtype
@@ -220,7 +220,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
 
         tl.store(new_output_ptr + output_offsets, output)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         output_dtype: torch.dtype,
@@ -1692,6 +1692,8 @@ class MLADCPManager:
                 is_base_e=is_lse_base_on_e,
                 return_lse=False,
             )
+        # Largest batch the query gather serves without NCCL; 0 if never.
+        self.direct_query_gather_max_tokens = 0
         self.query_gather = (
             None
             if use_pcp
@@ -1797,6 +1799,7 @@ class MLADCPManager:
         )
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP query gather for MLA.")
+            self.direct_query_gather_max_tokens = direct_workspace.max_num_tokens
             return functools.partial(
                 self._direct_workspace_query_gather,
                 direct_workspace,

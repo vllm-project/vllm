@@ -139,15 +139,22 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `draft_decode_context_parallel_size` | `integer >= 1` | `None` | Decode context parallel size for the draft model: `1` or the target's `decode_context_parallel_size`. Defaults to the target's, except `dflash`/`dspark` drafts, which default to `1` unless they are full-attention MLA. |
+| `draft_enable_eplb` | `boolean` | `true` | Enable EPLB for the draft when target EPLB is enabled. Set to `false` to disable EPLB for the draft. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
-| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
-| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
-| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
+| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
+| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum normalized top-k entropy, in `[0, 1]`, required for FLy to defer a native rejection. |
+| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target scores renormalized for FLy's entropy gate, capped at the vocabulary size. |
+
+For an EPLB-backed MoE draft, set its redundant expert count with
+`eplb_config.draft_num_redundant_experts` in addition to configuring
+speculative decoding; the count setting is ignored without a speculative MoE
+draft. See the
+[EPLB deployment guide](../../serving/expert_parallel_deployment.md#multimodel-eplb-with-speculative-decoding).
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -214,6 +221,10 @@ vllm serve <target-model> \
 - Internal fields such as `target_model_config`, `draft_model_config`,
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
+
+## Speculative Decoding with Pipeline Parallelism
+
+With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage, as it would at `pipeline_parallel_size=1`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.
 
 ## Lossless guarantees of Speculative Decoding
 

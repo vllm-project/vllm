@@ -205,6 +205,97 @@ def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback
         assert rocm_native._select_cfg(num_tokens, n, k) == fallback
 
 
+M31_TP1_SHAPES = [
+    ("fused_qkv", 9856, 6144),
+    ("o_proj", 6144, 8192),
+    ("dense_gate_up", 24576, 6144),
+    ("dense_down", 6144, 12288),
+    ("shared_gate_up", 6144, 6144),
+    ("shared_down", 6144, 3072),
+]
+
+_WIDE_PREFILL_TILE = (256, 256, 128, 4, 2)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,n,k,num_cus,wide",
+    [
+        (16384, 9856, 6144, 256, True),
+        (8192, 6144, 8192, 256, True),
+        (2048, 24576, 6144, 256, True),
+        (8192, 6144, 3072, 256, True),
+        (4096, 9856, 6144, 256, True),
+        (16384, 2560, 6144, 256, True),
+        (9349, 1536, 6144, 256, True),
+        (6144, 6144, 6144, 256, False),
+        (2048, 9856, 6144, 256, False),
+        (5041, 9856, 6144, 256, False),
+        (16384, 1536, 6144, 256, False),
+        # N <= 1024 and short K keep their own tiles.
+        (16384, 1024, 6144, 256, False),
+        (16384, 6144, 768, 256, False),
+        # M <= 1024 is untouched.
+        (1024, 24576, 6144, 256, False),
+        (64, 24576, 6144, 256, False),
+        # The waves follow the device's CU count.
+        (6144, 6144, 6144, 128, True),
+        (8192, 4992, 6144, 256, True),
+        (8192, 4992, 6144, 304, False),
+    ],
+)
+def test_rocm_mxfp8_linear_wide_prefill_tile_follows_cu_waves(
+    monkeypatch, num_tokens, n, k, num_cus, wide
+):
+    """The 256x256x128 tile is taken exactly when the 128x128 grid needs at
+    least 10/3 as many CU waves as the 256x256 one."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", True)
+    monkeypatch.setattr(rocm_native, "num_compute_units", lambda: num_cus)
+    cfg = rocm_native._select_cfg(num_tokens, n, k)
+    assert (cfg == _WIDE_PREFILL_TILE) is wide, cfg
+    assert k % cfg[2] == 0, "the K loop is unmasked"
+
+
+def test_rocm_mxfp8_linear_wide_prefill_tile_is_gfx950_only(monkeypatch):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    for _, n, k in M31_TP1_SHAPES:
+        for num_tokens in (2048, 8192, 16384):
+            assert rocm_native._select_cfg(num_tokens, n, k) != _WIDE_PREFILL_TILE
+
+
+@pytest.mark.parametrize("name,n,k", M31_TP1_SHAPES, ids=lambda v: str(v))
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_wide_prefill_tile_matches_dequant_reference(name, n, k):
+    """A full 16384-token prefill chunk on the 256x256x128 tile matches an
+    exact MXFP8 GEMM of the same inputs."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("the wide prefill tile is gfx950-only")
+    num_tokens = 16384
+    assert rocm_native._select_cfg(num_tokens, n, k) == _WIDE_PREFILL_TILE
+    torch.manual_seed(0)
+    layer = _make_layer(n, k, "cuda")
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+
+    assert out.shape == (num_tokens, n)
+    assert torch.isfinite(out).all(), f"{name}: non-finite output"
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+    )
+    rel = (out.float() - expected).norm() / expected.norm()
+    assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+
 @pytest.mark.parametrize(
     "name,n,k",
     V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,

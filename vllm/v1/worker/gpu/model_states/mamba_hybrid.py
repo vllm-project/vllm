@@ -22,7 +22,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
     ShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -32,7 +32,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
-    get_mamba_group_ids,
     get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
@@ -106,8 +105,6 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self._align_mode or self._use_replayssm_trackers:
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
@@ -135,22 +132,6 @@ class MambaHybridModelState(DefaultModelState):
                 (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
-    def _get_mamba_group_info(
-        self, kv_cache_config: KVCacheConfig
-    ) -> tuple[list[int], MambaSpec]:
-        if self._mamba_spec is None:
-            mamba_groups = get_mamba_groups(kv_cache_config)
-            mamba_spec = next(iter(mamba_groups))
-            assert all(
-                spec.block_size == mamba_spec.block_size
-                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
-                for spec in mamba_groups
-            ), "all mamba groups must share cache scheduling parameters"
-            self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
-            self._mamba_spec = mamba_spec
-        return self._mamba_group_ids, self._mamba_spec
-
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
@@ -161,7 +142,6 @@ class MambaHybridModelState(DefaultModelState):
             )
         if not (self._align_mode or self._use_replayssm_trackers):
             return
-        mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -180,6 +160,7 @@ class MambaHybridModelState(DefaultModelState):
             forward_context=self.vllm_config.compilation_config.static_forward_context,
             device=self.device,
         )
+        mamba_group_ids = self._mamba_ctx.mamba_group_ids
         # Under PP a step's postprocess runs after later steps re-gathered the
         # batch-ordered input tables, so state copies read the per-request-slot
         # tables. Aligned state indices are for the current batch only.
@@ -208,7 +189,6 @@ class MambaHybridModelState(DefaultModelState):
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
-        _, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._mamba_ctx
         assert ctx is not None
 
@@ -228,7 +208,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             num_reqs,
             BLOCK_SIZE=block,
-            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            MAMBA_BLOCK_SIZE=ctx.block_size,
         )
 
         if replayssm is not None:
@@ -321,16 +301,16 @@ class MambaHybridModelState(DefaultModelState):
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         if self._align_mode:
-            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            ctx = self._mamba_ctx
+            assert ctx is not None
             aligned_index_builders = []
-            for group_idx, group_id in enumerate(mamba_group_ids):
+            for group_idx, group_id in enumerate(ctx.mamba_group_ids):
                 for group in attn_groups[group_id]:
                     builder = group.get_metadata_builder(0)
                     if hasattr(builder, "mamba_aligned_state_indices"):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
-                assert self._mamba_ctx is not None
-                all_group_indices = self._mamba_ctx.compute_aligned_state_indices(
+                all_group_indices = ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
                 for group_idx, builder in aligned_index_builders:

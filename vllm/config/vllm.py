@@ -75,13 +75,13 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup
 else:
     PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
-    KVCacheGroupSpec = Any
+    KVCacheGroup = Any
 
 logger = init_logger(__name__)
 
@@ -122,6 +122,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+        "MistralLarge4ForCausalLM",
         "MuseSparkForCausalLM",
         "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
@@ -783,6 +784,9 @@ class VllmConfig:
             return False
 
         architectures = set(model_config.architectures)
+        # Multimodal wrappers (e.g. Pixtral) may host a breakable text model.
+        text_config = getattr(model_config, "hf_text_config", None)
+        architectures.update(getattr(text_config, "architectures", None) or ())
         return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
@@ -1047,15 +1051,18 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
+            # Non-MoE DP ranks run as independent engines with no DP
+            # collectives, so each rank can pick its own K.
+            or (self.model_config is not None and not self.model_config.is_moe)
         ):
             return
 
         logger.warning_once(
             "Dynamic speculative decoding is not supported with data "
-            "parallelism because data-parallel ranks can select different "
-            "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
-            "to static num_speculative_tokens=%d.",
+            "parallelism for MoE models because data-parallel ranks can select "
+            "different speculative-token counts, causing DP divergence and "
+            "deadlocks. Disabling num_speculative_tokens_per_batch_size and "
+            "falling back to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
@@ -1845,7 +1852,7 @@ class VllmConfig:
                     "--no-scheduler-reserve-full-isl."
                 )
             if self.model_config is not None and not hasattr(
-                self.model_config.hf_config, "index_topk"
+                self.model_config.hf_text_config, "index_topk"
             ):
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
@@ -2831,7 +2838,7 @@ class VllmConfig:
                 if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_endpoints.append(x)
         compilation_config.compile_ranges_endpoints = sorted(
-            computed_compile_ranges_endpoints
+            set(computed_compile_ranges_endpoints)
         )
 
     def try_verify_and_update_config(self):
@@ -3249,7 +3256,7 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
+        elif current_platform.is_rocm() and KVCacheAccess.REGISTERS in kv_cache_access:
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
@@ -3490,7 +3497,7 @@ class VllmConfig:
                 )
 
     def adjust_dcp_kv_cache_interleave_size(
-        self, kv_cache_groups: list["KVCacheGroupSpec"]
+        self, kv_cache_groups: list["KVCacheGroup"]
     ) -> None:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
@@ -3526,7 +3533,7 @@ class VllmConfig:
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
         # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(g.kv_cache_spec.block_size for g in kv_cache_groups)
+        local_block_size = min(g.block_size for g in kv_cache_groups)
         if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size

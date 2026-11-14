@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
@@ -51,7 +51,7 @@ class _WorkerRequestState:
     finished: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
