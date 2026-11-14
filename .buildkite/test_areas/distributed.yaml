@@ -916,6 +916,4 @@ steps:
   - >-
     pytest -v -s
     model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
-  - >-
-    pytest -v -s
     model_executor/model_loader/test_weight_cache.py::test_d2d_weight_seeding_cross_host
