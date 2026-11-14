@@ -594,7 +594,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
 
     fn preprocess(
         &self,
-        images: &[DynamicImage],
+        images: &[&DynamicImage],
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
@@ -733,7 +733,7 @@ mod tests {
         }))
         .unwrap();
         let processor = MuseSparkVisionProcessor::from_config(&image_config);
-        let output = processor.preprocess(&[image(112, 112, Rgb([128; 3]))]).unwrap();
+        let output = processor.preprocess(&[&image(112, 112, Rgb([128; 3]))]).unwrap();
         assert_eq!(output.feature_token_counts, vec![4]);
 
         let video_config = serde_json::from_value(serde_json::json!({
@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn preprocess_outputs_flat_pixels_with_patch_counts() {
         let processor = MuseSparkVisionProcessor::default();
-        let result = processor.preprocess(&[image(112, 56, Rgb([255, 255, 255]))]).unwrap();
+        let result = processor.preprocess(&[&image(112, 56, Rgb([255, 255, 255]))]).unwrap();
 
         // 112x56 -> grid 4x2 of 28px token patches -> 112x56 unchanged.
         assert_eq!(result.feature_token_counts, vec![8]);

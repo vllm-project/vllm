@@ -960,8 +960,8 @@ impl MultimodalModelInfo {
         let video = self.video.as_ref()?;
         let config = &video.config;
         Some((
-            video.spec.raw.video_frame_sampling_with(Some(config)),
-            video.spec.raw.default_video_sample_fps_with(Some(config)),
+            video.spec.raw.video_frame_sampling_with(config),
+            video.spec.raw.default_video_sample_fps_with(config),
         ))
     }
 
@@ -1299,8 +1299,8 @@ mod tests {
     #[test]
     fn video_sampling_policy_comes_from_the_video_spec() {
         // GLM-5.3-Flash: the GLM-5 family's own loader rule walks the clip
-        // at the configured rate (`RateWalk`), and the processor resamples
-        // at the video config's `fps` (default 2.0).
+        // at its fixed rate (`RateWalk`); the processor config's `fps` does
+        // not change the loader's sampling rate.
         let info = glm53_flash_info(glm53_flash_video_config());
         assert_eq!(
             info.video_sampling_policy(),
@@ -1309,7 +1309,7 @@ mod tests {
                     max_frames: 2048,
                     temporal_patch_size: 2
                 },
-                Some(1.0)
+                Some(2.0)
             ))
         );
         let info = glm53_flash_info(PreProcessorConfig::default());

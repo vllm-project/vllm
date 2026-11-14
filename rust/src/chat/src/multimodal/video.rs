@@ -359,8 +359,7 @@ mod tests {
             let frames = (0..8)
                 .map(|_| DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([128; 3]))))
                 .collect::<Vec<_>>();
-            // The tracker samples at the spec's configured default rate
-            // (the video config's `fps`: 1), so the clip carries it.
+            // Use a clip sampled at 1 fps to exercise the fallback timestamp path.
             Arc::new(
                 VideoClip::new_with_sample_fps(
                     frames,
