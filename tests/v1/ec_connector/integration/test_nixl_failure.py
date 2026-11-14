@@ -32,6 +32,7 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
+PRODUCER_EC_CPU_BYTES = 1 << 20
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +62,9 @@ def servers():
                 "ec_role": role,
                 "ec_connector_extra_config": {
                     "ec_enable_nixl": True,
-                    "ec_cpu_bytes": 64 << 20,
+                    "ec_cpu_bytes": (
+                        PRODUCER_EC_CPU_BYTES if role == "ec_producer" else 64 << 20
+                    ),
                 },
             }
         )
@@ -196,5 +199,30 @@ async def test_missing_remote_encoding_is_request_scoped(servers, local_image):
         # the fault, not just pass a frontend health check or hit a local cache.
         _, healthy, _ = await _encode(session, encoder)
         status, result = await _post(session, consumer, healthy)
+        assert status == 200, result
+        assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+async def test_producer_republishes_runner_hit_after_cpu_eviction(servers):
+    """A fresh consumer can fetch a repeated image after producer CPU eviction."""
+    encoder, consumer = servers
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=120)
+    ) as session:
+        original, rewritten, item_uuid = await _encode(session, encoder)
+        size_bytes = original["ec_transfer_params"][item_uuid]["size_bytes"]
+        assert 0 < size_bytes <= PRODUCER_EC_CPU_BYTES
+        for _ in range(PRODUCER_EC_CPU_BYTES // size_bytes + 1):
+            await _encode(session, encoder)
+
+        original.pop("ec_transfer_params")
+        status, result = await _post(session, encoder, original)
+        assert status == 200, result
+        (handle,) = result["ec_transfer_params"].values()
+        assert handle["metadata"] and handle.get("peer_host"), result
+        rewritten["ec_transfer_params"] = {item_uuid: handle}
+
+        status, result = await _post(session, consumer, rewritten)
         assert status == 200, result
         assert result["choices"][0]["message"]["content"], result
