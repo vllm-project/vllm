@@ -65,6 +65,15 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         multiprocess_mode: bool = False,
     ) -> None:
+        if (
+            not multiprocess_mode
+            and vllm_config.model_config.checkpoint_prepare_on_startup
+        ):
+            # Only an engine core in its own process prepares at startup.
+            raise ValueError(
+                "checkpoint_prepare_on_startup requires "
+                "VLLM_ENABLE_V1_MULTIPROCESSING=1"
+            )
         configure_logging_if_needed(vllm_config.logging_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

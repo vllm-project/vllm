@@ -395,10 +395,18 @@ class Worker(WorkerBase):
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
+        # Connectors are created after the communicators, so release them first.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().checkpoint_prepare()
         checkpoint_prepare_distributed_state()
 
-    def checkpoint_restore(self) -> None:
+    def checkpoint_restore(self, kv_engine_id: str | None = None) -> None:
+        if kv_engine_id is not None:
+            assert self.vllm_config.kv_transfer_config is not None
+            self.vllm_config.kv_transfer_config.engine_id = kv_engine_id
         checkpoint_restore_distributed_state()
+        if has_kv_transfer_group():
+            get_kv_transfer_group().checkpoint_restore()
 
     def _weight_checksum_prefix(self) -> str:
         # data_parallel_rank is 0 in dense workers; only the index is unique.
