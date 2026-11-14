@@ -14,7 +14,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import cached_property, partial
+from functools import partial
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
@@ -22,6 +22,10 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
+from vllm.connections import (
+    MediaRequestDownloadBudget,
+    MediaRequestDownloadSizeExceededError,
+)
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -32,6 +36,8 @@ from vllm.multimodal.media import (
     MEDIA_CONNECTOR_REGISTRY,
     ImageMediaIO,
     MediaConnector,
+    MediaDecodedBudget,
+    MediaDecodedSizeExceededError,
     MediaIO,
     VideoMediaIO,
 )
@@ -153,14 +159,15 @@ class ReadStrategy(ABC):
     def __init__(self, context: ReadContext):
         self.context = context
 
-    @cached_property
-    def _connector(self) -> MediaConnector:
+    def _make_connector(self) -> MediaConnector:
         model_config = self.context.engine_client.model_config
         return MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
             allowed_local_media_path=model_config.allowed_local_media_path,
             allowed_media_domains=model_config.allowed_media_domains,
+            decoded_budget=MediaDecodedBudget(),
+            download_budget=MediaRequestDownloadBudget(),
         )
 
     @abstractmethod
@@ -327,8 +334,9 @@ class NextTokenStrategy(ReadStrategy):
         question reads the same pictures."""
         if not urls:
             return []
+        connector = self._make_connector()
         try:
-            images = await asyncio.gather(*map(self._connector.fetch_image_async, urls))
+            images = await asyncio.gather(*map(connector.fetch_image_async, urls))
         except ValueError as e:
             raise StructuredDecisionError(f"media: {e}") from e
         if self.max_image_pixels is not None:
@@ -908,23 +916,27 @@ class JointSchemaStrategy(ReadStrategy):
         return self.tokenizer.encode(text, add_special_tokens=False)
 
     async def _fetch(
-        self, urls: Sequence[str], media_io: MediaIO[_M], timeout: int
+        self,
+        connector: MediaConnector,
+        urls: Sequence[str],
+        media_io: MediaIO[_M],
+        timeout: int,
     ) -> list[_M]:
         return await asyncio.gather(
             *(
-                self._connector.load_from_url_async(
-                    url, media_io, fetch_timeout=timeout
-                )
+                connector.load_from_url_async(url, media_io, fetch_timeout=timeout)
                 for url in urls
             )
         )
 
     async def _soundtrack(
-        self, video_url: str
+        self, connector: MediaConnector, video_url: str
     ) -> tuple[np.ndarray, int | float] | None:
         """The video's soundtrack, or None when it has no decodable one."""
         try:
-            return await self._connector.fetch_audio_async(video_url)
+            return await connector.fetch_audio_async(video_url)
+        except (MediaDecodedSizeExceededError, MediaRequestDownloadSizeExceededError):
+            raise
         except ValueError as e:
             logger.debug("no decodable soundtrack in %s: %s", video_url, e)
             return None
@@ -935,9 +947,9 @@ class JointSchemaStrategy(ReadStrategy):
         """The system prompt and the media, with the media's placeholders
         expanded. A video's soundtrack is heard with it when every video has
         one."""
-        connector = self._connector
+        connector = self._make_connector()
         video_io = VideoMediaIO(
-            ImageMediaIO(),
+            ImageMediaIO(decoded_budget=connector.decoded_budget),
             num_frames=-1,
             fps=self.VIDEO_FPS,
             video_backend="clef_omni",
@@ -951,9 +963,17 @@ class JointSchemaStrategy(ReadStrategy):
                     *map(connector.fetch_audio_async, media.get("audio", ()))
                 ),
                 self._fetch(
-                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                    connector,
+                    media.get("video", ()),
+                    video_io,
+                    envs.VLLM_VIDEO_FETCH_TIMEOUT,
                 ),
-                asyncio.gather(*map(self._soundtrack, media.get("video", ()))),
+                asyncio.gather(
+                    *(
+                        self._soundtrack(connector, url)
+                        for url in media.get("video", ())
+                    )
+                ),
             )
         except ValueError as e:
             raise StructuredDecisionError(f"media: {e}") from e
@@ -1148,15 +1168,22 @@ class ClefFlashStrategy(JointSchemaStrategy):
     async def _render_media(
         self, media: Mapping[str, Sequence[str]], cache_salt: str | None
     ) -> MultiModalInput:
-        connector = self._connector
-        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
+        connector = self._make_connector()
+        video_io = VideoMediaIO(
+            ImageMediaIO(decoded_budget=connector.decoded_budget),
+            num_frames=-1,
+            fps=self.VIDEO_FPS,
+        )
         try:
             images, videos = await asyncio.gather(
                 asyncio.gather(
                     *map(connector.fetch_image_async, media.get("image", ()))
                 ),
                 self._fetch(
-                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                    connector,
+                    media.get("video", ()),
+                    video_io,
+                    envs.VLLM_VIDEO_FETCH_TIMEOUT,
                 ),
             )
         except ValueError as e:
@@ -1307,9 +1334,9 @@ class D3Strategy(ReadStrategy):
     ) -> MultiModalInput:
         """The system prompt and the media placeholders, with the media read
         once for every question of the request."""
-        connector = self._connector
+        connector = self._make_connector()
         video_io = VideoMediaIO(
-            ImageMediaIO(),
+            ImageMediaIO(decoded_budget=connector.decoded_budget),
             num_frames=-1,
             fps=self.VIDEO_FPS,
             max_frames=self.VIDEO_MAX_FRAMES,

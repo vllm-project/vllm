@@ -200,6 +200,15 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
 | `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
 
+Media in one `/v1/systemone` request shares the
+[download and decode budgets](../usage/security.md#5-restrict-media-download-and-decode-sizes),
+including video soundtracks. `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB`
+(default: 256 MB) bounds total HTTP media downloads, and
+`VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` (default: 715,827,880 bytes) bounds
+aggregate decoded media. Decode-budget failures return HTTP 400; HTTP
+download-budget failures return HTTP 422.
+Each request has independent budgets, including concurrent and joint reads.
+
 By default, `/v1/systemone` rejects `chat_template_kwargs.chat_template` with
 HTTP 400. Start the server with `--trust-request-chat-template` to allow
 request-provided chat templates. Other template kwargs, such as

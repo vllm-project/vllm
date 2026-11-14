@@ -19,7 +19,7 @@ from vllm.multimodal.media.audio import (
     load_audio_soundfile,
     load_audio_torchcodec,
 )
-from vllm.multimodal.media.base import MediaDecodedBudget
+from vllm.multimodal.media.base import MediaDecodedBudget, MediaDecodedSizeExceededError
 
 from ...conftest import AudioTestAssets
 
@@ -129,7 +129,9 @@ def test_request_budget_rejects_second_decoded_audio_clip(monkeypatch):
     audio_io = AudioMediaIO(decoded_budget=MediaDecodedBudget())
 
     audio_io.load_bytes(clip)
-    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+    with pytest.raises(
+        MediaDecodedSizeExceededError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
+    ):
         audio_io.load_bytes(clip)
 
 

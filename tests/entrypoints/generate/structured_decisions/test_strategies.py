@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import logging
 import math
@@ -67,6 +68,7 @@ from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
+from vllm.multimodal.utils import encode_audio_url, encode_image_url
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -309,6 +311,76 @@ def serving(engine, strategy) -> ServingStructuredDecisions:
     name = engine.model_config.model
     models = OpenAIServingModels(engine, [BaseModelPath(name=name, model_path=name)])
     return ServingStructuredDecisions(models, strategy)
+
+
+@pytest.fixture
+def media_context(engine_and_renderer):
+    engine, renderer = engine_and_renderer
+    engine.model_config = ModelConfig(
+        model="Qwen/Qwen3.5-4B",
+        dtype="float32",
+        hf_overrides={"decision_config": {"codes": ["A", "B"]}},
+    )
+    return ReadContext(engine, renderer, None, "auto", {})
+
+
+@pytest.mark.asyncio
+async def test_images_are_bounded_before_rendering_and_reset_per_request(
+    media_context, monkeypatch
+):
+    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "384")
+    strategy = NextTokenStrategy(media_context)
+    image = encode_image_url(Image.new("RGB", (8, 8), "red"))
+
+    with pytest.raises(StructuredDecisionError, match="MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        await strategy._image_parts([image, image])
+
+    # A failed request and simultaneous requests must not share their charges.
+    requests = await asyncio.gather(*(strategy._image_parts([image]) for _ in range(2)))
+    assert [parts[0]["image_pil"].size for parts in requests] == [(8, 8), (8, 8)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_type,modality",
+    [
+        (JointSchemaStrategy, "video"),
+        (ClefFlashStrategy, "video"),
+        (D3Strategy, "video"),
+        (JointSchemaStrategy, "audio"),
+    ],
+)
+async def test_modalities_share_the_request_decode_budget(
+    media_context, monkeypatch, strategy_type, modality
+):
+    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "384")
+    strategy = strategy_type(media_context)
+    image = encode_image_url(Image.new("RGB", (8, 8), "red"))
+    frame = encode_image_url(Image.new("RGB", (8, 8), "blue"), format="JPEG")
+    video = "data:video/jpeg;base64," + frame.split(",", 1)[1]
+    other = video if modality == "video" else encode_audio_url(np.zeros(64), 16000)
+    media = {"image": [image], modality: [other]}
+
+    with pytest.raises(StructuredDecisionError, match="MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        if isinstance(strategy, D3Strategy):
+            await strategy._render_media("", media, None)
+        else:
+            await strategy._render_media(media, None)
+
+
+@pytest.mark.asyncio
+async def test_soundtrack_budget_failure_is_not_treated_as_a_silent_video(
+    media_context, monkeypatch
+):
+    monkeypatch.setenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "384")
+    strategy = JointSchemaStrategy(media_context)
+    audio = encode_audio_url(np.zeros(128, dtype=np.float32), 16000)
+    connector = strategy._make_connector()
+    with pytest.raises(ValueError, match="MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        await strategy._soundtrack(connector, audio)
+
+    image = encode_image_url(Image.new("RGB", (8, 8), "red"))
+    assert await strategy._soundtrack(strategy._make_connector(), image) is None
 
 
 @pytest.fixture
@@ -695,7 +767,7 @@ async def test_joint_schema_reads_media_before_the_state(
 ):
     serving, engine, tokenizer = joint_schema
     strategy = serving.strategy
-    strategy.__dict__["_connector"] = MediaConnector()
+    monkeypatch.setattr(strategy, "_make_connector", MediaConnector)
     image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
     rendered: dict[str, Any] = {}
 
@@ -758,6 +830,8 @@ async def test_joint_schema_video_audio_follows_model_modalities(
     rendered: dict[str, Any] = {}
 
     class FakeConnector:
+        decoded_budget = None
+
         async def fetch_image_async(self, url):
             raise AssertionError("no images in this test")
 
@@ -770,7 +844,7 @@ async def test_joint_schema_video_audio_follows_model_modalities(
                 raise ValueError("No audio stream found.")
             return track
 
-    strategy.__dict__["_connector"] = FakeConnector()
+    monkeypatch.setattr(strategy, "_make_connector", FakeConnector)
 
     async def process_for_engine_async(prompt, arrival_time):
         rendered.clear()
@@ -1459,7 +1533,7 @@ def test_bad_top_level_fields_are_a_400(decision_server, endpoint, field, value,
 @pytest.mark.parametrize("joint", [False, True])
 async def test_dgemma_reads_images(dgemma, monkeypatch, joint):
     serving, engine, strategy = dgemma
-    strategy.__dict__["_connector"] = MediaConnector()
+    monkeypatch.setattr(strategy, "_make_connector", MediaConnector)
     prompts = strategy._prompts
     seen: list[list[dict[str, Any]]] = []
 

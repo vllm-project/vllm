@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 import requests
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+MEDIA_MODEL_NAME = "Qwen/Qwen3.5-0.8B"
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +34,73 @@ def server():
 
 def post(server, body):
     return requests.post(server.url_for("v1/systemone"), json=body)
+
+
+@pytest.fixture
+def media_server():
+    args = [
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "2",
+        "--limit-mm-per-prompt",
+        '{"image": 2}',
+    ]
+    with RemoteOpenAIServer(
+        MEDIA_MODEL_NAME,
+        args,
+        env_dict={
+            "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": "1",
+            "VLLM_MEDIA_CACHE": "",
+        },
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture
+def large_png_url(tmp_path):
+    metadata = PngInfo()
+    metadata.add_text("padding", "x" * 700_000)
+    Image.new("RGB", (32, 32), "red").save(tmp_path / "image.png", pnginfo=metadata)
+    handler = partial(SimpleHTTPRequestHandler, directory=str(tmp_path))
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/image.png"
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+def test_media_download_budget_is_per_decision(media_server, large_png_url):
+    """Enforce the HTTP budget before PIL inputs reach the ordinary renderer."""
+    body = {
+        "model": MEDIA_MODEL_NAME,
+        "state": "Describe the image.",
+        "questions": {"colour": choice("Which colour?", "red", "blue")},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    def read(count):
+        return requests.post(
+            media_server.url_for("v1/systemone"),
+            json={**body, "images": [large_png_url] * count},
+            timeout=60,
+        )
+
+    response = read(2)
+    assert response.status_code == 422, response.text
+    assert (
+        "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB" in response.json()["error"]["message"]
+    )
+
+    # A previous rejection and other callers must not consume this request's budget.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for response in pool.map(read, [1, 1]):
+            assert response.status_code == 200, response.text
+            assert "colour" in response.json()["answers"]
 
 
 def choice(instructions, *names):
