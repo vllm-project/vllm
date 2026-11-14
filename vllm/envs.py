@@ -230,6 +230,7 @@ if TYPE_CHECKING:
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
     VLLM_K3_INDEXER_SAMPLED_TOPK: bool = False
     VLLM_K31_BEAT_MARKOV: bool = False
+    VLLM_K31_BEAT_DRAFTMETA: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1803,6 +1804,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # draft step (bias GEMV, bf16 add, Gumbel sample, token copy) as one fused
     # launch over the vocabulary instead of ~9 launches.
     "VLLM_K31_BEAT_MARKOV": lambda: bool(int(os.getenv("VLLM_K31_BEAT_MARKOV", "0"))),
+    # Kimi-K3.1 DSpark on ROCm: the target step skips the attention metadata of
+    # groups that only hold drafter layers (the drafter builds its own), and a
+    # single uniform-qo request's AITER MLA work plan comes from a closed-form
+    # kernel (checked against get_mla_metadata_v1 once per shape) instead of
+    # AITER's one-wavefront serial planner. Both halves are not K3.1-specific:
+    # the first applies to any DFlash-family drafter, the second to any
+    # ROCM_AITER_MLA single-request uniform-qo decode.
+    "VLLM_K31_BEAT_DRAFTMETA": lambda: bool(
+        int(os.getenv("VLLM_K31_BEAT_DRAFTMETA", "0"))
+    ),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
