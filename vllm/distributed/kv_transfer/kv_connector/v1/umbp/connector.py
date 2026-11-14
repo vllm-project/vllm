@@ -116,6 +116,16 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra = kv_transfer_config.kv_connector_extra_config
         return extra.get("key_namespace", "auto") == "auto"
 
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        # Store only compressed KV (e.g. DeepSeek-V4's C4/C128 latents and
+        # indexer); recomputing the hit's last window rebuilds the SWA cache
+        # and compressor states, which would otherwise be many tiny objects.
+        extra = kv_transfer_config.kv_connector_extra_config
+        return bool(extra.get("rebuild_sliding_window", True))
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -132,7 +142,9 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
             )
         # A restored prefix skips the draft model's prefill too, so its KV must
-        # come from the pool along with the target's.
+        # come from the pool along with the target's. DSpark/DFlash drafts are
+        # not EAGLE groups: their window KV derives from the target's hidden
+        # states alone, so SWA replay rebuilds it with the target's.
         cacheable = set(kv_cache_config.prefix_cacheable_group_ids)
         skipped_drafts = [
             group_id
@@ -140,9 +152,18 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if getattr(group, "is_eagle_group", False) and group_id not in cacheable
         ]
         if skipped_drafts:
+            # EAGLE-style MTP groups are not rebuilt by the replay; storing
+            # every group restores them instead.
+            transfer_config = vllm_config.kv_transfer_config
+            assert transfer_config is not None
+            hint = (
+                "; set rebuild_sliding_window: false to store them"
+                if self.requests_sliding_window_replay(transfer_config)
+                else ""
+            )
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP cannot restore draft-model KV cache "
-                f"groups {skipped_drafts}: they are not prefix-cacheable"
+                f"groups {skipped_drafts}: they are not prefix-cacheable{hint}"
             )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         self._runtime = runtime

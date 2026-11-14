@@ -446,7 +446,7 @@ def _swa_forward_mqa_case(
     attn.scale = head_dim**-0.5
     attn.attn_sink = torch.randn(num_heads, device=device)
     attn.kv_cache_dtype = "fp8_ds_mla"
-    attn._has_kv_transfer = False
+    attn._has_foreign_kv_writer = False
     attn.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin_cache)
 
     q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
@@ -858,3 +858,27 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(
             assert (actual[0] == 0).all()
         err = (actual - expected.float()).norm()
         assert err / expected.float().norm() < 0.05
+
+
+def test_dsv4_swa_replay_only_with_a_connector_that_asks() -> None:
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
+
+    def config(connector="UMBPStoreConnector", extra=None, pcp=1):
+        return SimpleNamespace(
+            kv_transfer_config=None
+            if connector is None
+            else KVTransferConfig(
+                kv_connector=connector,
+                kv_role="kv_both",
+                kv_connector_extra_config=extra or {},
+            ),
+            cache_config=SimpleNamespace(swa_bounded_replay=True),
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp),
+        )
+
+    assert dsv4_swa_replay_enabled(config())
+    assert not dsv4_swa_replay_enabled(config(None))
+    assert not dsv4_swa_replay_enabled(config("ExampleConnector"))
+    assert not dsv4_swa_replay_enabled(config(extra={"rebuild_sliding_window": False}))
+    assert not dsv4_swa_replay_enabled(config(pcp=2))

@@ -54,6 +54,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     _StoreBatch,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheTensor,
+    MLAAttentionSpec,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="UMBP requires ROCm"
@@ -1227,3 +1237,44 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
     finally:
         release.set()
         worker.close()
+
+
+def _draft_replay_kv_cache_config(is_eagle_group: bool) -> KVCacheConfig:
+    # Target MLA latents plus a draft sliding-window group that SWA replay
+    # (rebuild_sliding_window) keeps out of prefix caching.
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16
+    )
+    target = FullAttentionManager.layer_config(spec)
+    draft = SlidingWindowManager.layer_config(
+        spec, sliding_window=16, bounded_replay=True
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=["layer1"], layer_stride=8192, block_stride=1024
+            ),
+            KVCacheTensor(
+                size=8192, layers=["draft"], layer_stride=8192, block_stride=1024
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers({"layer1": target}),
+            KVCacheGroup.from_layers({"draft": draft}, is_eagle_group=is_eagle_group),
+        ],
+    )
+
+
+def test_dspark_draft_rebuilt_by_replay_is_accepted(server):
+    # DSpark/DFlash window KV derives from the target's hidden states, so the
+    # replay that rebuilds the target's window rebuilds the draft's too.
+    config = _draft_replay_kv_cache_config(is_eagle_group=False)
+    assert config.prefix_cacheable_group_ids == (0,)
+    UMBPStoreConnector(_standalone_config(), KVConnectorRole.SCHEDULER, config)
+
+
+def test_eagle_draft_rebuilt_by_replay_is_rejected_with_a_hint(server):
+    config = _draft_replay_kv_cache_config(is_eagle_group=True)
+    with pytest.raises(NotImplementedError, match="rebuild_sliding_window: false"):
+        UMBPStoreConnector(_standalone_config(), KVConnectorRole.SCHEDULER, config)
