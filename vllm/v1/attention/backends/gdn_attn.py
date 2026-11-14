@@ -21,6 +21,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_replayssm_align_block_size,
 )
+from vllm.model_executor.layers.mamba.recoverssm_utils import uses_gdn_replayssm
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -290,7 +291,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.use_replayssm: bool = (
-            vllm_config.cache_config.use_replayssm
+            uses_gdn_replayssm(vllm_config.cache_config)
             and not vllm_config.cache_config.use_kda_recoverssm
         )
         self.replayssm_buffer_len: int | None = (

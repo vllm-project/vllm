@@ -24,6 +24,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.mamba.recoverssm_utils import uses_gdn_replayssm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -774,7 +775,7 @@ class Qwen4ExpForCausalLM(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
-            vllm_config.cache_config.use_replayssm,
+            uses_gdn_replayssm(vllm_config.cache_config),
         )
 
     @classmethod
@@ -798,7 +799,9 @@ class Qwen4ExpForCausalLM(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
-            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
+            cache_config.replayssm_buffer_len
+            if uses_gdn_replayssm(cache_config)
+            else None,
         )
 
     @classmethod
@@ -903,6 +906,10 @@ class Qwen4ExpForConditionalGeneration(
     SupportsReplaySSM,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
+
+    # Inherits SupportsReplaySSM from its Qwen3.5 base, but RecoverSSM is not
+    # validated on this platform: keep rejecting --use-replayssm.
+    supports_replayssm = False  # type: ignore[assignment]
 
     requires_raw_input_tokens = True
 

@@ -444,6 +444,10 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
 
 
 class InternS2MobiusMTP(Qwen3_5MoeMTP):
+    # Inherits SupportsReplaySSM from its Qwen3.5 base, but RecoverSSM is not
+    # validated here: keep rejecting --use-replayssm.
+    supports_replayssm = False  # type: ignore[assignment]
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         speculative_config = vllm_config.speculative_config
         if speculative_config is None or speculative_config.draft_model_config is None:
