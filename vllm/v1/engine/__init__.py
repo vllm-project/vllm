@@ -66,6 +66,14 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+class EngineHealthState(enum.StrEnum):
+    """EngineCore answer to a `check_health_gpu` utility call."""
+
+    OK = "ok"
+    BUSY = "busy"
+    SLEEPING = "sleeping"
+
+
 class FinishReason(enum.IntEnum):
     """Reason a request finished - stop, length, abort, error, or repetition.
 

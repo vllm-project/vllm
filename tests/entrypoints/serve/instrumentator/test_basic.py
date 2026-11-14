@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
@@ -13,7 +14,7 @@ from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
 from vllm import envs
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -224,3 +225,36 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_body"),
+    [
+        (EngineDeadError(), {"status": "not_ready", "reason": "engine_dead"}),
+        (
+            EngineUnhealthyError(
+                "timed out", reason="probe_timeout", engine_ranks=[1], timeout_s=20.0
+            ),
+            {
+                "status": "not_ready",
+                "reason": "probe_timeout",
+                "message": "timed out",
+                "engine_ranks": [1],
+                "timeout_s": 20.0,
+            },
+        ),
+    ],
+)
+async def test_health_generate_response(error, expected_body):
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
+
+    mock_request = Mock(spec=Request)
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.side_effect = error
+    mock_request.app.state.engine_client = mock_engine_client
+
+    response = await health_generate(mock_request, timeout_s=20.0)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == expected_body

@@ -49,6 +49,7 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineHealthState,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -242,6 +243,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    def get_engine_ranks(self) -> list[int]:
+        raise NotImplementedError
+
+    async def check_health_gpu_async(self, engine_rank: int) -> EngineHealthState:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1454,6 +1461,15 @@ class AsyncMPClient(MPClient):
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
+
+    def get_engine_ranks(self) -> list[int]:
+        return [int.from_bytes(engine, "little") for engine in self.core_engines]
+
+    async def check_health_gpu_async(self, engine_rank: int) -> EngineHealthState:
+        state = await self._call_utility_async(
+            "check_health_gpu", engine=engine_rank.to_bytes(2, "little")
+        )
+        return EngineHealthState(state)
 
     async def set_weight_version_async(self, weight_version: str) -> None:
         await self.call_utility_async("set_weight_version", weight_version)

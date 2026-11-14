@@ -291,6 +291,10 @@ class EngineClient(ABC):
         """Return shared external Elastic EP operation status, if enabled."""
         return None
 
+    async def check_health_gpu(self, timeout_s: float) -> None:
+        """Raise if the engine is not ready to execute model work."""
+        raise NotImplementedError
+
     async def collective_rpc(
         self,
         method: str,

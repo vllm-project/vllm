@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, Request
-from fastapi.responses import Response
+from typing import Annotated
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 
 logger = init_logger(__name__)
 
@@ -31,3 +33,30 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
+
+
+@router.get("/health_generate", response_class=Response)
+async def health_generate(
+    raw_request: Request, timeout_s: Annotated[float, Query(gt=0)] = 20.0
+) -> Response:
+    """Generation readiness check: 503 when an engine rank cannot run the model.
+
+    `timeout_s` is how long to wait for each engine rank before reporting
+    `probe_timeout`.
+    """
+    client = engine_client(raw_request)
+    if client is None:
+        return Response(status_code=200)
+    try:
+        await client.check_health_gpu(timeout_s)
+        return Response(status_code=200)
+    except EngineDeadError:
+        content = {"status": "not_ready", "reason": "engine_dead"}
+    except EngineUnhealthyError as e:
+        content = {
+            "status": "not_ready",
+            "reason": e.reason,
+            "message": str(e),
+            **e.details,
+        }
+    return JSONResponse(status_code=503, content=content)

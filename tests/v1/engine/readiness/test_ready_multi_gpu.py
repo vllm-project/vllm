@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""`/health_generate` against injected failures across two GPUs (DP=2 and PP=2).
+
+MoE DP ranks step in lockstep waves where idle ranks run dummy batches, and
+must not be probed with an ad-hoc dummy batch; dense DP ranks are independent
+engines that can be probed like a single engine.
+"""
+
+import time
+
+import pytest
+
+from tests.utils import multi_gpu_marks
+from vllm.platforms import current_platform
+
+from .utils import PROBE_TIMEOUT_S, ready_probe_server
+
+# The fault injection launches CUDA kernels.
+pytestmark = [
+    *multi_gpu_marks(num_gpus=2),
+    pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA"),
+]
+
+MOE_MODEL = "ibm-research/PowerMoE-3b"
+DENSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+MOE_DP_ARGS = [
+    "--data-parallel-size",
+    "2",
+    "--enable-expert-parallel",
+    # Weights are dummy; two layers keep startup and memory small.
+    "--hf-overrides",
+    '{"num_hidden_layers": 2}',
+]
+DENSE_DP_ARGS = ["--data-parallel-size", "2"]
+
+
+@pytest.fixture(scope="module")
+def moe_server():
+    with ready_probe_server(MOE_MODEL, MOE_DP_ARGS) as srv:
+        yield srv
+
+
+def test_moe_no_false_positive(moe_server):
+    """Probes on an idle rank inside a wave, and probes racing with wave
+    starts, do not flap."""
+    with moe_server.busy(dp_ranks=(0,)) as statuses:
+        assert moe_server.stays_ready(PROBE_TIMEOUT_S + 3)
+    assert statuses and set(statuses) == {200}
+    for i in range(10):
+        moe_server.generate_in_background(8, dp_rank=i % 2)
+        assert moe_server.status() == 200
+        time.sleep(0.2 * (i % 3))
+
+
+def test_moe_collective_mismatch_while_idle():
+    """#36594 class: rank 0 is wedged in a DP collective inside a control RPC
+    while there is no traffic."""
+    with ready_probe_server(MOE_MODEL, MOE_DP_ARGS) as srv:
+        assert srv.status() == 200
+        srv.rpc("fault_dp_mismatched_collective", "0", background=True)
+        assert srv.wait_until_unready() is not None
+        assert srv.status("/health") == 200
+        assert srv.ready_body()["reason"] == "probe_timeout"
+
+
+def test_dense_latent_cuda_error_while_idle():
+    """A latent CUDA fault on an idle dense DP rank is caught by its probe."""
+    with ready_probe_server(DENSE_MODEL, DENSE_DP_ARGS) as srv:
+        assert srv.status() == 200
+        srv.rpc("fault_ima_now", "1")
+        assert srv.wait_until_unready() is not None
+
+
+def test_cuda_error_on_non_output_pp_stage():
+    """The probe checks every worker, not only the last PP stage that returns
+    model outputs; PP dummy runs do not communicate across stages."""
+    args = ["--pipeline-parallel-size", "2"]
+    with ready_probe_server(DENSE_MODEL, args) as srv:
+        assert srv.status() == 200
+        srv.rpc("fault_ima_now_on_worker", "0")
+        assert srv.status() == 503
+
+
+def test_probe_failure_on_one_worker_keeps_serving():
+    """A probe that fails on one worker reports 503 without leaving its other
+    replies queued for the next RPC. With PP=2 the last stage returns model
+    outputs, so a stale probe reply would be read as the next step's output."""
+    args = ["--pipeline-parallel-size", "2"]
+    with ready_probe_server(DENSE_MODEL, args) as srv:
+        assert srv.status() == 200
+        srv.rpc("fault_raise_on_next_forward_on_worker", "0")
+        assert srv.ready_body()["reason"] == "probe_failed"
+        assert srv.generate() == 200
+        assert srv.status() == 200
