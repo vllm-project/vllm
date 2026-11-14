@@ -176,8 +176,14 @@ def _fused_save_compress_norm_kernel(
                 prev = ring + ((position - 1) % STATE_BLOCK) * STATE_ROW_STRIDE
                 if HAS_PREV_ROWS:
                     prev_idx = tl.load(prev_row_indices + pid)
-                    if prev_idx >= 0:
-                        prev = prev_rows + prev_idx.to(tl.int64) * PREV_ROW_STRIDE
+                    # ROCm's pointer canonicalization fails on an scf.if that
+                    # merges a >2 GiB ring pointer with a smaller tensor's
+                    # (triton-lang/triton#12695).
+                    prev = tl.where(
+                        prev_idx >= 0,
+                        prev_rows + prev_idx.to(tl.int64) * PREV_ROW_STRIDE,
+                        prev,
+                    )
                 current = raw + start.to(tl.int64) * RAW_STRIDE
                 if JOIN_ROW_PTRS:
                     # Joining pointers hides row alignment from Triton; restate it.
