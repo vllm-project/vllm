@@ -95,6 +95,7 @@ impl ManagedEngineArgs {
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
         hf_overrides: Option<String>,
+        override_generation_config: Option<String>,
         structured_outputs_config: Option<String>,
         topology: &DataParallelTopology,
         client_handshake_address: Option<String>,
@@ -147,6 +148,10 @@ impl ManagedEngineArgs {
         if let Some(hf_overrides) = hf_overrides {
             python_args.push("--hf-overrides".to_string());
             python_args.push(hf_overrides);
+        }
+        if let Some(override_generation_config) = override_generation_config {
+            python_args.push("--override-generation-config".to_string());
+            python_args.push(override_generation_config);
         }
         if let Some(structured_outputs_config) = structured_outputs_config {
             python_args.push("--structured-outputs-config".to_string());
