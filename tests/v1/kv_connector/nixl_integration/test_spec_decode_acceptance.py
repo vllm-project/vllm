@@ -34,7 +34,7 @@ MODEL_NAME = os.environ.get("TEST_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 SD_METHOD = os.environ.get("SD_METHOD", "eagle3").lower()
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelConfig:
     model: str
     method: str

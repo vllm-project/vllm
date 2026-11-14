@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.cpu.input_batch import InputBatch
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingRecv:
     sampled_tokens: torch.Tensor  # [num_reqs, 1]
     num_sampled: torch.Tensor  # [num_reqs]

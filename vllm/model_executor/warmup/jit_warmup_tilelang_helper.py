@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
@@ -26,7 +26,7 @@ TileLangLaunchSpec: TypeAlias = (
 
 
 @contextmanager
-def _quiet_tilelang_warmup_logs() -> Iterator[None]:
+def _quiet_tilelang_warmup_logs() -> Generator[None]:
     loggers = [
         logging.getLogger("tilelang.cache.kernel_cache"),
         logging.getLogger("tilelang.jit.kernel"),
@@ -41,7 +41,7 @@ def _quiet_tilelang_warmup_logs() -> Iterator[None]:
             logger.setLevel(level)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TileLangWarmupTensor:
     """Minimal tensor-like object accepted by TileLang compile().
 

@@ -41,7 +41,7 @@ def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
     return torch.tensor(peers, dtype=torch.int64, device="cpu")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IndexerCpPeers:
     """The buffers the CP selector exchanges through.
 

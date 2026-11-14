@@ -158,6 +158,47 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
     assert schema.input_scale_group_size == expected_group_size
 
 
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+@pytest.mark.parametrize(
+    "capability,strict,honors",
+    [
+        # Hopper has no FP4 activations: falls back, and strict cannot run it.
+        ((9, 0), False, False),
+        ((9, 0), True, False),
+        # Slow on SM10x, so it falls back unless strict mode forbids that.
+        ((10, 3), False, False),
+        ((10, 3), True, True),
+        ((12, 1), False, True),
+    ],
+)
+def test_humming_nvfp4_linear_declares_executed_activation(
+    monkeypatch, capability, strict, honors
+):
+    """Humming picks its NVFP4 input schema at weight load, per device. Kernel
+    selection needs the same answer up front so VLLM_STRICT_QUANT_SCHEME can
+    move on to another kernel instead of failing at load."""
+    import humming.schema.humming as humming_schema
+
+    from vllm.model_executor.kernels.linear import HummingNvFp4LinearKernel
+    from vllm.platforms import current_platform
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(*capability),
+    )
+    monkeypatch.setattr(
+        type(humming_schema.current_device),
+        "sm_version",
+        property(lambda self: capability[0] * 10 + capability[1]),
+    )
+
+    executed = HummingNvFp4LinearKernel.executed_activation_key(kNvfp4Dynamic)
+    assert executed == (kNvfp4Dynamic if honors else None)
+
+
 def _mxfp6_weight_schema():
     from vllm.utils.humming import BaseWeightSchema
 

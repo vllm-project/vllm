@@ -12,7 +12,7 @@ from ...utils import compare_all_settings
 ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestSetting:
     model: str
     model_args: list[str]

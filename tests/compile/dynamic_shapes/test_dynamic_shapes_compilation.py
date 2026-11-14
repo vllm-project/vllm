@@ -30,7 +30,7 @@ def get_test_models():
     return models
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DynamicShapesTestCase:
     model_name: str
     shapes_type: DynamicShapesType

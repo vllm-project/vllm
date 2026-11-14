@@ -214,7 +214,7 @@ def _mhc_post_collapse_rms_norm_kernel(
 class MHCPostCollapseRMSNormKernel(
     VllmTritonJitKernel["MHCPostCollapseRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         block_h: int
@@ -222,9 +222,7 @@ class MHCPostCollapseRMSNormKernel(
 
     kernel = staticmethod(_mhc_post_collapse_rms_norm_kernel)
 
-    def dispatch(  # type: ignore[override]
-        self, *, hidden_size: int, weight_dtype: torch.dtype
-    ) -> CompileKey:
+    def dispatch(self, *, hidden_size: int, weight_dtype: torch.dtype) -> CompileKey:
         return self.CompileKey(
             hidden_size=hidden_size,
             block_h=next_power_of_2(hidden_size),

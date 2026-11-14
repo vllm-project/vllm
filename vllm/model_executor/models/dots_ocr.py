@@ -40,12 +40,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -652,7 +652,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+            self.language_model: Qwen3ForCausalLM = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=self.config,
                 prefix=maybe_prefix(prefix, "language_model"),

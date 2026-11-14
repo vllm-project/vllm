@@ -40,16 +40,18 @@ if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
             "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
             "materialization APIs, including active_request_indices"
         )
+    required_gpus = int(os.environ.get("VLLM_TEST_REPLAYSSM_NUM_GPUS", "2"))
     if (
         not current_platform.is_cuda()
-        or current_platform.device_count() < 2
+        or current_platform.device_count() < required_gpus
         or any(
             current_platform.get_device_total_memory(device) < 40_000_000_000
-            for device in range(2)
+            for device in range(required_gpus)
         )
     ):
         raise RuntimeError(
-            "Dedicated ReplaySSM CI requires two CUDA GPUs with at least 40 GB each"
+            f"Dedicated ReplaySSM CI requires {required_gpus} CUDA GPU(s) "
+            "with at least 40 GB each"
         )
 
 # Mamba2 (Nemotron-3) hybrid.
@@ -92,6 +94,7 @@ def _check_replayssm_parity(
     mamba_backend: str = "triton",
     prompts: list[str] = PROMPTS,
     name_1: str = "replayssm",
+    speculative_config: dict | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
@@ -102,6 +105,8 @@ def _check_replayssm_parity(
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
+        speculative_config=speculative_config,
+        disable_log_stats=speculative_config is None,
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
@@ -109,6 +114,9 @@ def _check_replayssm_parity(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
         replay = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
+        if speculative_config is not None:
+            accepted = _metric_counts(llm.llm)["vllm:spec_decode_num_accepted_tokens"]
+            assert accepted > 0
 
     check_logprobs_close(
         outputs_0_lst=baseline,
@@ -119,8 +127,24 @@ def _check_replayssm_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_parity(vllm_runner, model_name)
+@pytest.mark.parametrize(
+    ("speculative_config", "prompts"),
+    [
+        pytest.param(None, PROMPTS, id="stp"),
+        pytest.param(
+            {"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_max": 3},
+            # The repetitive prompt gets some ngram drafts accepted.
+            [PROMPTS[0], "a b c d e f g a b c d e f g a b c d e f g a b c"],
+            id="ngram",
+        ),
+    ],
+)
+def test_replayssm_decode_matches_baseline(
+    vllm_runner, model_name, speculative_config, prompts
+):
+    _check_replayssm_parity(
+        vllm_runner, model_name, prompts=prompts, speculative_config=speculative_config
+    )
 
 
 @multi_gpu_test(num_gpus=2)
@@ -369,10 +393,14 @@ def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypa
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_triton_replayssm_align_prefix_cache_matches_baseline(vllm_runner, model_name):
+@pytest.mark.parametrize("speculative_method", [None, "ngram"], ids=["stp", "ngram"])
+def test_triton_replayssm_align_prefix_cache_matches_baseline(
+    vllm_runner, model_name, speculative_method: str | None
+):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
+        speculative_method=speculative_method,
         mamba_backend="triton",
     )
 
@@ -397,13 +425,12 @@ def _metric_counts(llm) -> dict[str, int]:
 
 
 def _stress_mamba_block_size(worker) -> int:
-    from vllm.v1.kv_cache_interface import MambaSpec, iter_layer_specs
+    from vllm.v1.core.kv_cache_utils import is_mamba_group
 
     sizes = {
-        spec.block_size
+        group.block_size
         for group in worker.model_runner.kv_cache_config.kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if isinstance(spec, MambaSpec)
+        if is_mamba_group(group)
     }
     assert len(sizes) == 1, sizes
     return sizes.pop()

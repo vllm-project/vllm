@@ -23,12 +23,12 @@ from vllm.tokenizers.mistral import MistralTokenizer
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -47,12 +47,12 @@ class MockModelConfig:
     renderer_num_workers: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig

@@ -2096,7 +2096,7 @@ def _make_conv_case(
     return rng, state_reference, conv_state, weights
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ConvBatchCase:
     spec_query_lens: tuple[int, ...] = ()
     num_accepted: tuple[int, ...] = ()

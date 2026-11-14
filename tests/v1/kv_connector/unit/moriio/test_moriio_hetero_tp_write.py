@@ -46,10 +46,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -68,7 +67,7 @@ DECODE_BLOCKS = {"full": [5, 2], "swa": [0], "mamba": [3]}
 KEY_DIM, V_HEADS, V_DIM, K_DIM, CONV_ROWS = 4, 4, 2, 2, 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Layer:
     name: str
     kind: str  # "full", "swa", "mla" or "mamba"
@@ -95,20 +94,12 @@ def _groups(model: str, hma: bool) -> list[str]:
 
 
 def _spec(layer: Layer, num_heads: int, tp_size: int):
-    if layer.kind == "full":
-        return FullAttentionSpec(
+    if layer.kind in ("full", "swa"):
+        return AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=num_heads,
             head_size=2,
             dtype=torch.bfloat16,
-        )
-    if layer.kind == "swa":
-        return SlidingWindowSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=num_heads,
-            head_size=2,
-            dtype=torch.bfloat16,
-            sliding_window=8,
         )
     if layer.kind == "mla":
         return MLAAttentionSpec(
@@ -160,7 +151,7 @@ def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
     return torch.cat(parts), ssm[tp_rank * heads : (tp_rank + 1) * heads].reshape(-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class Rank:
     tp_rank: int
     tp_size: int
@@ -238,6 +229,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
         None,
     )
     worker.kv_layer_mr_offset = {}
+    worker.kv_region_mr_offsets = {}
     worker._mamba_offset_templates = {}
     worker._region_session_index = None
     worker.layer_name_to_local_kv_cache_metadata = {

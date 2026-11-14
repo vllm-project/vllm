@@ -36,7 +36,7 @@ def _is_pre_v11(server_config: ServerConfig) -> bool:
     return "7B" in server_config.get("model", "")
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamedToolCallResult:
     r"""Accumulated result from streaming a single tool call."""
 
@@ -84,7 +84,7 @@ async def _collect_streamed_tool_call(
     return result
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamedContentResult:
     r"""Accumulated result from streaming a content-only response."""
 
@@ -126,7 +126,7 @@ async def _collect_streamed_content(
     return result
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamedParallelToolCallResult:
     r"""Accumulated result from streaming parallel tool calls."""
 

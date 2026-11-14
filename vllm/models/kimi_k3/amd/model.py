@@ -79,7 +79,7 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -195,6 +195,10 @@ class KimiK3ForConditionalGeneration(
         return media_features
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        if (image_embeds := kwargs.get("image_embeds")) is not None:
+            assert isinstance(image_embeds, torch.Tensor)
+            num_tokens = cast(torch.Tensor, kwargs["image_num_tokens"])
+            return image_embeds.split(num_tokens.flatten().tolist())
         media_input = self._parse_and_validate_media_input(**kwargs)
         if media_input is None:
             return None

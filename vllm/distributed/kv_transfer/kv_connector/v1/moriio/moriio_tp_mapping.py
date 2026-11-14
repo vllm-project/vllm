@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from functools import cache
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WriteTarget:
     """What one producer rank writes into one consumer rank."""
 
@@ -48,7 +48,7 @@ class WriteTarget:
     num_writers: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MoRIIOWriteTPMapping:
     """Write targets of one producer rank for one consumer engine."""
 

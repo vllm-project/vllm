@@ -611,7 +611,7 @@ def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None)
     return msg
 
 
-@dataclass
+@dataclass(slots=True)
 class TestMessage:
     """Test dataclass for verifying custom type serialization."""
 
@@ -1490,13 +1490,18 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor = MagicMock()
 
         # Only implement the methods that are actually called during init
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        mock_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        mock_layer = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+            )
         )
 
-        mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.get_kv_cache_layer_configs.return_value = [
+            {"default": mock_layer}
+        ]
         mock_executor.get_supported_kv_cache_layouts.return_value = [["LBNHC"]]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
