@@ -33,6 +33,10 @@ class MambaBase(AttentionLayerBase):
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
 
+    def tree_decline_reason(self) -> str | None:
+        """Why forward() cannot verify a tree plan; None if it can."""
+        return "verifies chains"
+
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
 

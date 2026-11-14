@@ -145,6 +145,10 @@ class ModelState(ABC):
         on `stream`: the model graphs' capture stream."""
         return None
 
+    def tree_decline_reason(self) -> str | None:
+        """Why this cannot resume requests from a tree's path; None if it can."""
+        return None
+
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside
         `init_attn_backend` (e.g. encoder-only layers).
@@ -171,7 +175,11 @@ class ModelState(ABC):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor,
         num_computed_tokens: torch.Tensor | None = None,
+        *,
+        accepted_row: torch.Tensor | None = None,
     ) -> None:
+        """Commit the step's per-request state. ``accepted_row[b]``: the verify
+        row batch row ``b`` resumes from, passed on tree steps only."""
         return None
 
     @abstractmethod

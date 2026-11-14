@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -54,7 +54,11 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import (
+    check_stop,
+    remove_all,
+    supports_dynamic_spec_blocks,
+)
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
@@ -74,11 +78,14 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.spec_decode.resources import BudgetView, SpecResources
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -94,6 +101,7 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        spec_resources: SpecResources | None = None,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -318,14 +326,43 @@ class Scheduler(SchedulerInterface):
         # can use the drafts. Only drafters with their own forward pass reserve
         # lookahead slots.
         self.can_skip_drafts = self.num_lookahead_tokens > 0
-        self.dynamic_sd_lookup: list[int] | None = None
+        # The speculator's config (it lives in the workers) answers the
+        # per-step candidate budget here; see SpeculatorConfig.candidate_budget.
+        self.speculator_config: SpeculatorConfig | None = None
+        # Whether that budget can differ from num_speculative_tokens + 1; if
+        # not, schedule() keeps main's fixed draft count without asking.
+        self.candidate_budget_varies = False
+        self.pads_new_decode_rows = False
+        # The drafts each running request verifies this step: the previous
+        # step's num_spec_tokens_to_schedule. A padded new decode matches them.
+        self._num_carried_drafts = self.num_spec_tokens
         if speculative_config is not None:
-            if speculative_config.num_speculative_tokens_per_batch_size:
-                self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
-                    speculative_config.num_speculative_tokens_per_batch_size,
-                    vllm_max_batch_size=self.scheduler_config.max_num_seqs,
-                    vllm_num_speculative_tokens=self.num_spec_tokens,
+            self.speculator_config = speculative_config.speculator_config
+            resources = self.speculator_config.resources(
+                self.scheduler_config.max_num_seqs
+            )
+            # Sized from num_speculative_tokens, which prefill_context_kv_only
+            # keeps though it schedules no drafts.
+            max_rows = speculative_config.num_speculative_tokens + 1
+            if resources.max_rows > max_rows:
+                raise ValueError(
+                    f"SpecResources.max_rows ({resources.max_rows}) must "
+                    f"be at most num_speculative_tokens + 1 ({max_rows}): KV "
+                    "slots and the runner's buffers are sized from "
+                    "num_speculative_tokens."
                 )
+            # The engine core's adaptation of a branching speculator's resources
+            # to the model's layers, else the declared ones. KV slots stay
+            # declared.
+            self.spec_resources = spec_resources or resources
+            self.candidate_budget_varies = (
+                not self.speculator_config.candidate_budget_is_fixed()
+                or self.spec_resources.max_rows <= self.num_spec_tokens
+            )
+            # As on main, not under a Dynamic SD schedule.
+            self.pads_new_decode_rows = (
+                not speculative_config.uses_dynamic_speculative_decoding()
+            )
             self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
@@ -407,6 +444,11 @@ class Scheduler(SchedulerInterface):
         )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
+        # Whether recurrent-state blocks for draft rows follow the drafts each
+        # request verifies (`allocate_slots(num_draft_tokens=)`).
+        self.dynamic_spec_blocks = supports_dynamic_spec_blocks(
+            vllm_config, self.has_mamba_layers
+        )
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
@@ -484,6 +526,29 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
         self._aborted_kv_loads: set[str] = set()
+
+    def _candidate_budget(self, num_scheduled_reqs: int) -> int:
+        """Ask the speculator's config for this step's candidate budget."""
+        assert self.speculator_config is not None
+        view = BudgetView(
+            num_scheduled_reqs=num_scheduled_reqs,
+            num_running=len(self.running),
+            num_waiting=len(self.waiting),
+            num_free_blocks=self.kv_cache_manager.block_pool.get_num_free_blocks(),
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+            block_size=self.block_size,
+        )
+        budget = self.speculator_config.candidate_budget(view)
+        if not isinstance(budget, int):
+            raise ValueError(f"candidate_budget returned {budget!r}; must be an int.")
+        if not 1 <= budget <= self.num_spec_tokens + 1:
+            raise ValueError(
+                f"candidate_budget returned {budget}, outside "
+                f"[1, num_speculative_tokens + 1 = {self.num_spec_tokens + 1}]."
+            )
+        # KV slots are reserved for num_speculative_tokens; the rows run are
+        # capped by the effective resources the engine core set.
+        return min(budget, self.spec_resources.max_rows)
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -876,6 +941,16 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            num_scheduled_spec_tokens = (
+                num_new_tokens
+                + request.num_computed_tokens
+                - request.num_tokens
+                - request.num_output_placeholders
+            )
+            num_draft_tokens = None
+            if self.dynamic_spec_blocks:
+                num_draft_tokens = max(num_scheduled_spec_tokens, 0)
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -883,6 +958,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_draft_tokens=num_draft_tokens,
                     )
 
                     if new_blocks is not None:
@@ -980,12 +1056,6 @@ class Scheduler(SchedulerInterface):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens
-                    + request.num_computed_tokens
-                    - request.num_tokens
-                    - request.num_output_placeholders
-                )
                 if num_scheduled_spec_tokens > 0:
                     spec_token_ids = request.spec_token_ids
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
@@ -1328,13 +1398,13 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        (self._num_carried_drafts > 0 and self.pads_new_decode_rows)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        padded_num_tokens = 1 + self.num_spec_tokens
+                        padded_num_tokens = 1 + self._num_carried_drafts
                         # Pad only when there is room for the sampled token(s).
                         if (
                             num_computed_tokens
@@ -1377,7 +1447,7 @@ class Scheduler(SchedulerInterface):
                             break
                         if (
                             pad_spec_decode
-                            and num_new_tokens != 1 + self.num_spec_tokens
+                            and num_new_tokens != 1 + self._num_carried_drafts
                         ):
                             # Alignment clipped the placeholder rows. The split
                             # aligns prefill chunks, but the padded tail rows are
@@ -1469,6 +1539,11 @@ class Scheduler(SchedulerInterface):
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    num_draft_tokens=(
+                        (self._num_carried_drafts if pad_spec_decode else 0)
+                        if self.dynamic_spec_blocks
+                        else None
+                    ),
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     skip_zeroing_group_ids=(
@@ -1604,10 +1679,10 @@ class Scheduler(SchedulerInterface):
                     request, num_computed_tokens, num_new_tokens
                 )
                 if pad_spec_decode:
-                    assert num_new_tokens == 1 + self.num_spec_tokens
+                    assert num_new_tokens == 1 + self._num_carried_drafts
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
-                    ] * self.num_spec_tokens
+                    ] * self._num_carried_drafts
                 # Track requests still prefilling after this chunk. A promoted load
                 # also stays tracked until _update_after_schedule drops it.
                 if (
@@ -1725,12 +1800,18 @@ class Scheduler(SchedulerInterface):
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
-        # Dynamic speculative decoding: compute optimal K
+        # The drafts proposed after this step take at most `budget` rows per
+        # request (the root included) when they are verified.
         num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
-            ]
+        if self.candidate_budget_varies and len(num_scheduled_tokens) > 0:
+            # Chosen after this step's allocation, which reserved the
+            # drafter's full lookahead, so any budget can be proposed now.
+            budget = self._candidate_budget(len(num_scheduled_tokens))
+            num_spec_tokens_to_schedule = budget - 1
+            # Budget 1 is a plain decode next step: no drafts to propose.
+            if budget == 1 and self.can_skip_drafts:
+                drafts_needed = False
+        self._num_carried_drafts = num_spec_tokens_to_schedule
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -1756,6 +1837,11 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
+            spec_state_block_counts=(
+                self.kv_cache_manager.take_spec_state_block_counts() or None
+                if self.dynamic_spec_blocks
+                else None
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

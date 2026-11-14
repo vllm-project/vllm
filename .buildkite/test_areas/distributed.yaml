@@ -104,7 +104,9 @@ steps:
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/test_round_contract.py
   - tests/v1/e2e/spec_decode/utils.py
+  - tests/plugins/vllm_add_test_speculators/
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -115,6 +117,10 @@ steps:
   # Batch-sharded sampling requires TP=2
   - pytest -v -s v1/e2e/general/test_sharded_sampling.py
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
+  # The round contract on 1 GPU, TP=2 and DP=2
+  - pip install -e ./plugins/vllm_add_test_speculators
+  - pytest -v -s v1/e2e/spec_decode/test_round_contract.py
+  - pip uninstall vllm_add_test_speculators -y
   mirror:
     amd:
       label: ":amd: (MI355) Distributed DP Basic"

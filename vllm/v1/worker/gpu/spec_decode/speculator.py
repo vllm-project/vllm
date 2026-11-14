@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.resources import SpecResources
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -43,6 +44,12 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanInputs,
+    TargetTokens,
+    VerifyPlan,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -74,6 +81,10 @@ class BaseSpeculator(ABC):
     should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
+
+    `propose` is skipped on a step whose next round verifies no drafts unless
+    another data parallel rank drafts; a drafter keeping its own KV may catch
+    up from `input_batch` in its next `propose`.
     """
 
     num_query_per_req: int = 1
@@ -81,6 +92,13 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
+    # What speculation runs with (`bind_resources`); None until then.
+    resources: SpecResources | None = None
+
+    def bind_resources(self, resources: SpecResources) -> None:
+        """Run with ``resources`` (``SpeculatorConfig.adapt_resources``); called
+        once per worker, before capture."""
+        self.resources = resources
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -119,13 +137,48 @@ class BaseSpeculator(ABC):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        pass
+        """Propose up to `num_speculative_tokens` drafts per request (the
+        speculator's K when None), -1 where it proposes fewer.
+
+        With `num_speculative_tokens == 0` it proposes nothing and must run no
+        draft decode step: KV slots exist only at `slot_mappings`.
+        """
 
     def prepare_watermarking(
         self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
     ) -> None:
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
+
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
+        """The rows the target verifies this step (``round_contract.md``, step 2).
+
+        Called eagerly once per batch with drafts, before its inputs are built.
+        None (the default) verifies every scheduled draft as a chain. Request
+        ``r`` verifies ``plan.rows[r] <= inputs.scheduled_rows[r]`` rows; the
+        rest count as rejected. A branching plan needs ``max_branching > 1`` and
+        a batch that is not ``inputs.chain_only``.
+        """
+        return None
+
+    def tree_accept(
+        self, plan: VerifyPlan, target: TargetTokens, width: int
+    ) -> AcceptResult:
+        """The accepted path of each request of a plan that is not a chain
+        (``round_contract.md``, step 4), from the target's token at every row.
+        ``sampled`` is ``[R, width]``. Not overriding it runs every plan as a
+        chain: the model runner lowers the speculator at startup.
+        """
+        raise NotImplementedError
+
+    def overridden_hooks(self) -> frozenset[str]:
+        """The optional hooks this speculator overrides, read once at startup
+        to resolve its capabilities."""
+        return frozenset(
+            name
+            for name in ("plan", "tree_accept")
+            if getattr(type(self), name) is not getattr(BaseSpeculator, name)
+        )
 
     def add_request(self, req_index: int) -> None:
         """A new request was assigned request-state slot `req_index`, e.g. to

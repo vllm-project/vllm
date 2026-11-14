@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
 )
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
 
 
 def _make_input_batch(
@@ -45,6 +46,8 @@ def _make_input_batch(
             )
         ).to(device),
         seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+        verify_plan=None,
+        tree_pos_delta=None,
     )
 
 
@@ -62,6 +65,7 @@ def _make_rejection_sampler(
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
+    rejection_sampler.tree_accept = None
     return rejection_sampler
 
 
@@ -118,7 +122,7 @@ def test_chunked_scores_match_full_batch(
     )
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
-    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors = (
+    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors, _ = (
         rejection_sampler._verify_in_chunks(
             logits,
             input_batch,
@@ -471,7 +475,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     )
 
     rng_before = torch.get_device_module(device).get_rng_state()
-    off_sampled, off_counts, off_logprobs, off_masks = (
+    off_sampled, off_counts, off_logprobs, off_masks, _ = (
         rejection_sampler._verify_in_chunks(
             processed_logits,
             input_batch,
@@ -486,14 +490,16 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert pack_calls == []
 
     sampler.return_sampling_mask = True
-    on_sampled, on_counts, on_logprobs, on_masks = rejection_sampler._verify_in_chunks(
-        processed_logits,
-        input_batch,
-        draft_logits,
-        draft_sampled,
-        pos,
-        max_chunk_logits=8,
-        logprobs_dims=(0, 0),
+    on_sampled, on_counts, on_logprobs, on_masks, _ = (
+        rejection_sampler._verify_in_chunks(
+            processed_logits,
+            input_batch,
+            draft_logits,
+            draft_sampled,
+            pos,
+            max_chunk_logits=8,
+            logprobs_dims=(0, 0),
+        )
     )
     rng_after_on = torch.get_device_module(device).get_rng_state()
 
@@ -553,3 +559,87 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert masks == expected_masks
     assert all(token_id in mask for token_id, mask in zip(emitted, masks))
     torch.testing.assert_close(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
+
+
+def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
+    """Each chunk walks its requests' slice of every plan tensor, sampled
+    requests on the target's draw and greedy ones on the argmax."""
+    import vllm.v1.worker.gpu.spec_decode.rejection_sampler as rs
+
+    # The path check after tree_accept is a Triton kernel, so the batch lives on
+    # the GPU when there is one.
+    has_gpu = current_platform.is_cuda() or current_platform.is_xpu()
+    device = torch.device(current_platform.device_type if has_gpu else "cpu")
+    num_reqs, rows = 3, 3
+    cu_num_logits_np = np.arange(0, num_reqs * rows + 1, rows, dtype=np.int32)
+    input_batch = _make_input_batch(
+        cu_num_logits_np, np.arange(num_reqs, dtype=np.int32), device
+    )
+    input_batch.verify_plan = VerifyPlan(
+        parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32, device=device),
+        tokens=torch.randint(
+            0, 100, (num_reqs, rows), dtype=torch.int32, device=device
+        ),
+        rows=np.array([3, 2, 1], dtype=np.int32),
+    )
+    seen: list[VerifyPlan] = []
+    drawn: list[torch.Tensor] = []
+
+    def tree_accept(plan, target, width):
+        seen.append(plan)
+        num = plan.parent.shape[0]
+        return AcceptResult(
+            path=torch.zeros(num, rows, dtype=torch.int32, device=device),
+            path_len=torch.ones(num, dtype=torch.int32, device=device),
+            sampled=torch.zeros(num, width, dtype=torch.int64, device=device),
+        )
+
+    def gumbel_sample(logits, *args, **kwargs):
+        drawn.append(logits)
+        return logits.argmax(dim=-1)
+
+    monkeypatch.setattr(rs, "gumbel_sample", gumbel_sample)
+    temperature = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    states = SimpleNamespace(
+        temperature=SimpleNamespace(
+            np=temperature, gpu=torch.from_numpy(temperature).to(device)
+        ),
+        seeds=SimpleNamespace(
+            gpu=torch.zeros(num_reqs, dtype=torch.int64, device=device)
+        ),
+    )
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            return_sampling_mask=False,
+            apply_sampling_params=lambda logits, *args: logits,
+            sampling_states=states,
+            use_fp64_gumbel=False,
+        ),
+        num_speculative_steps=rows - 1,
+    )
+    rejection_sampler.tree_accept = tree_accept
+    logits = torch.zeros(num_reqs * rows, 8, device=device)
+    pos = torch.arange(num_reqs * rows, device=device)
+    for max_chunk_logits in (num_reqs * rows, rows):
+        seen.clear()
+        drawn.clear()
+        rejection_sampler._verify_in_chunks(
+            logits,
+            input_batch,
+            draft_logits=None,
+            draft_sampled=pos,
+            pos=pos,
+            max_chunk_logits=max_chunk_logits,
+            logprobs_dims=None,
+        )
+        for name in ("parent", "tokens"):
+            assert torch.equal(
+                torch.cat([getattr(plan, name) for plan in seen]),
+                getattr(input_batch.verify_plan, name),
+            ), name
+        assert np.concatenate([plan.rows for plan in seen]).tolist() == [3, 2, 1]
+        # Only chunks holding the sampled request draw from the target.
+        assert sum(d.shape[0] for d in drawn) == (
+            num_reqs * rows if max_chunk_logits > rows else rows
+        )

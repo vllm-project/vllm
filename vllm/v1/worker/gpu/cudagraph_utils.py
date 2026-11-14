@@ -59,6 +59,7 @@ from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatche
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 
 if TYPE_CHECKING:
+    from vllm.v1.spec_decode.resources import SpecResources
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
@@ -223,6 +224,9 @@ class CudaGraphManager:
             tuple[int, int, int], list[BatchExecutionDescriptor]
         ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        # The speculation resources to capture for; the declared ones until the
+        # engine core sets what the model verifies (set_spec_resources).
+        self.spec_resources: SpecResources | None = None
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
@@ -286,6 +290,34 @@ class CudaGraphManager:
             desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
         )
 
+    def _decode_query_lens(self) -> dict[int, int]:
+        """The uniform decode query lengths to capture, mapped to the most
+        requests each has: one per declared `capture_rows` entry when the decode
+        query length follows the drafts."""
+        speculative_config = self.vllm_config.speculative_config
+        num_new_sampled_tokens_per_step = (
+            self.decode_query_len - self.vllm_config.num_speculative_tokens
+        )
+        if speculative_config is None or num_new_sampled_tokens_per_step <= 0:
+            return self.decode_max_reqs
+        resources = self.spec_resources or (
+            speculative_config.speculator_config.resources(self.max_num_reqs)
+        )
+        query_lens = (
+            n - 1 + num_new_sampled_tokens_per_step
+            for n in sorted(set(resources.capture_rows))
+        )
+        return {q: self.decode_max_reqs.get(q, self.max_num_reqs) for q in query_lens}
+
+    def set_spec_resources(self, resources: "SpecResources") -> None:
+        """Capture the decode shapes of ``resources`` (before any capture)."""
+        assert not self._graphs_captured
+        self.spec_resources = resources
+        self._candidates.clear()
+        self._decode_descs.clear()
+        self._capture_descs.clear()
+        self._init_candidates()
+
     def _init_candidates(self) -> None:
         """Build the descriptors to capture and the dispatch tables."""
         if self.cudagraph_mode == CUDAGraphMode.NONE:
@@ -336,7 +368,7 @@ class CudaGraphManager:
             # cap, record their shapes in the recorded max too.
             decode_shapes = decode_cudagraph_capture_shapes(
                 decode_sizes,
-                self.decode_max_reqs,
+                self._decode_query_lens(),
                 decode_cudagraph_capture_max_tokens(compilation_config),
             )
             for (n, q), num_active_loras in product(

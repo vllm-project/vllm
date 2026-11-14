@@ -115,6 +115,7 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.spec_decode.resources import SpecResources, adapt_spec_resources
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -128,6 +129,9 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
+
+    # What speculation runs with, adapted to the model's layers at startup.
+    spec_resources: SpecResources | None = None
 
     def __init__(
         self,
@@ -199,6 +203,11 @@ class EngineCore:
             kv_cache_config, vllm_config
         )
 
+        # Only a speculator that branches has effective resources to pass; a
+        # scheduler class that runs one must take them.
+        scheduler_kwargs: dict[str, Any] = {}
+        if self.spec_resources is not None:
+            scheduler_kwargs["spec_resources"] = self.spec_resources
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -207,6 +216,7 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            **scheduler_kwargs,
         )
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
@@ -387,6 +397,9 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        self.spec_resources = adapt_spec_resources(
+            vllm_config, self.model_executor.collective_rpc
+        )
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             compilation_times = self.model_executor.compile_or_warm_up_model()

@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import parallel_state
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -455,3 +456,24 @@ def test_draft_budget_kernel_admits_exact_budget_on_ties():
     survival = torch.empty(num_reqs * num_steps, dtype=torch.int32, device="cuda")
     assign_draft_token_budget(confidence_probs, idx_mapping, capacities, 800, survival)
     assert capacities.tolist() == [3] * 266 + [2] + [0] * 33
+
+
+def test_adaptive_verification_reserves_the_full_candidate_budget():
+    """With adaptive verification the config asks for every candidate (the
+    worker trims); the runner captures the variable-length decode graphs."""
+    from vllm.v1.spec_decode.resources import BudgetView
+    from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+
+    spec = fake_speculative_config(
+        DSparkSpeculatorConfig,
+        method="dspark",
+        num_speculative_tokens=4,
+        enable_adaptive_verification=True,
+        uses_dynamic_speculative_decoding=lambda: False,
+    )
+    config = spec.speculator_config
+    resources = config.resources(max_num_seqs=8)
+    assert resources.capture_rows == (5,)
+    for num_reqs in (1, 8):
+        view = BudgetView(num_reqs, num_reqs, 0, 100, 8, 16)
+        assert config.candidate_budget(view) == 5

@@ -119,7 +119,13 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s v1/executor
-    - pytest -v -s v1/worker
+    - pytest -v -s v1/worker --ignore=v1/worker/test_round_contract.py
+    # The KV commit tests compare against the test plugin's reference kernel.
+    - pip install -e ./plugins/vllm_add_test_speculators
+    - pytest -v -s v1/worker/test_round_contract.py
+    # A failed device assert would end the GPU process: check it interpreted.
+    - TRITON_INTERPRET=1 pytest -v -s v1/worker/test_round_contract.py -k test_check_accept_result
+    - pip uninstall vllm_add_test_speculators -y
     - pytest -v -s v1/streaming_input
   mirror:
     amd:

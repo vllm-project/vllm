@@ -70,6 +70,11 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
+    @classmethod
+    def tree_decline_reason(cls, layer: Any, kv_cache_spec: Any) -> str | None:
+        """Why forward() cannot verify a tree plan on ``layer``; None if it can."""
+        return f"backend {cls.get_name()} verifies chains"
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
@@ -487,6 +492,11 @@ class CommonAttentionMetadata:
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads `rswa_window` from model config."""
+
+    tree_parents: torch.Tensor | None = None
+    """(num_tokens,) int32 for a tree verify: each row's parent row within its
+    request (-1 for the first), ``positions`` holding its plan position (see
+    ``round_contract.md``). None means every request is a chain."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None

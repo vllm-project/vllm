@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Test-only speculators, imported by qualified name in the worker."""
+
+import numpy as np
+import torch
+
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanInputs,
+    TargetTokens,
+    VerifyPlan,
+)
+
+from . import OFF_CHAIN, PLANNED, VerifySteps
+from .reference import walk_tree
+
+
+class NgramTreeSpeculator(NgramGPUSpeculator):
+    """Verifies the n-gram drafts as a tree: the first draft gets a sibling
+    holding another token, and the chain continues from the first draft. Prints
+    ``OFF_CHAIN`` the first time a step committed the first and second drafts
+    (the path skips the sibling's row)."""
+
+    _printed = False
+
+    def tree_accept(
+        self, plan: VerifyPlan, target: TargetTokens, width: int
+    ) -> AcceptResult:
+        return walk_tree(plan, target, width)
+
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
+        if inputs.chain_only:
+            return None
+        assert self.resources is not None
+        num_reqs = len(inputs.req_ids)
+        num_cols = self.resources.max_rows
+        if not hasattr(self, "_parent"):
+            shape = (self.req_states.max_num_reqs, num_cols)
+            self._parent = torch.empty(shape, dtype=torch.int32, device=self.device)
+            self._tokens = torch.empty(shape, dtype=torch.int32, device=self.device)
+            # Per request slot: where the last tree's first draft would commit,
+            # then its first and second drafts (-1: no tree).
+            self._path = torch.full(
+                (3, self.req_states.max_num_reqs), -1, device=self.device
+            )
+        self._check_skip(inputs.idx_mapping)
+        rows = inputs.scheduled_rows.astype(np.int32)
+        parent = np.tile(np.arange(-1, num_cols - 1, dtype=np.int32), (num_reqs, 1))
+        # Row i holds draft i - 1 (row 0, the root, is ignored).
+        src = np.tile(np.arange(-1, num_cols - 1), (num_reqs, 1)).clip(min=0)
+        alt = np.zeros((num_reqs, num_cols), dtype=np.int64)
+        tree = self._branch(rows >= 4, parent, src, alt)
+        drafts = self.req_states.draft_tokens[inputs.idx_mapping]
+        src_gpu = async_tensor_h2d(src, self.device)
+        src_gpu = src_gpu.clamp(max=drafts.shape[1] - 1)
+        tokens = drafts.gather(1, src_gpu)
+        tokens = tokens + async_tensor_h2d(alt, self.device)
+        # Unproposed drafts are -1: any real token verifies the same.
+        tokens = tokens.clamp(min=0) % self.vllm_config.model_config.get_vocab_size()
+        async_tensor_h2d(parent, out=self._parent[:num_reqs])
+        self._tokens[:num_reqs].copy_(tokens.to(torch.int32))
+        # The first committed token lands after the root; the second draft
+        # follows the first only through its child row, past the sibling.
+        root_pos = self.req_states.total_len.gpu[inputs.idx_mapping].long()
+        is_tree = async_tensor_h2d(tree, self.device)
+        is_tree &= tokens[:, 2] != tokens[:, 1]
+        self._path[0, inputs.idx_mapping] = torch.where(is_tree, root_pos, -1)
+        self._path[1, inputs.idx_mapping] = tokens[:, 1]
+        self._path[2, inputs.idx_mapping] = tokens[:, 3]
+        return VerifyPlan(
+            parent=self._parent[:num_reqs], tokens=self._tokens[:num_reqs]
+        )
+
+    def _branch(
+        self, tree: np.ndarray, parent: np.ndarray, src: np.ndarray, alt: np.ndarray
+    ) -> np.ndarray:
+        """Turn the chains of the ``tree`` requests into trees, in place; return
+        the requests whose second draft's row follows a sibling of the first."""
+        # Rows: root, d1, sibling of d1, d2 (child of d1), d3, ...
+        parent[tree, 2] = 0
+        parent[tree, 3] = 1
+        src[tree, 2] = 0
+        src[tree, 3:] -= 1
+        alt[tree, 2] = 1
+        return tree
+
+    def _check_skip(self, slots: torch.Tensor) -> None:
+        if self._printed:
+            return
+        pos, first, second = self._path[:, slots]
+        ids = self.req_states.all_token_ids.gpu
+        at = pos.clamp(min=0)
+        after = (at + 1).clamp(max=ids.shape[1] - 1)
+        hit = (pos >= 0) & (pos + 1 < self.req_states.total_len.gpu[slots])
+        hit &= (ids[slots, at] == first) & (ids[slots, after] == second)
+        # The test reads this line, so the flag must reach the host.
+        with gpu_sync_allowed():
+            hit_any = bool(hit.any())
+        if hit_any:
+            print(OFF_CHAIN, flush=True)
+            self._printed = True
+
+
+class NgramTreeCycleSpeculator(NgramTreeSpeculator):
+    """Cycles the verify plan of each step through two trees and a chain with
+    the same rows, so different topologies replay one captured batch shape:
+    ``NgramTreeSpeculator``'s tree, a tree whose second draft gets a sibling
+    holding another token, and no plan (the runner's chain). Prints ``PLANNED``
+    and the topology the first time it plans each, and records the step's
+    topology in ``VerifySteps``."""
+
+    _TOPOLOGIES = ("sibling_of_first", "sibling_of_second", "chain")
+    _steps = 0
+    _planned: frozenset[str] = frozenset()
+
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
+        if inputs.chain_only:
+            VerifySteps.topology = "chain_only"
+            return None
+        self._topology = self._TOPOLOGIES[self._steps % len(self._TOPOLOGIES)]
+        VerifySteps.topology = self._topology
+        self._steps += 1
+        if self._topology not in self._planned:
+            print(f"{PLANNED} {self._topology}", flush=True)
+            self._planned |= {self._topology}
+        if self._topology == "chain":
+            return None
+        return super().plan(inputs)
+
+    def _branch(
+        self, tree: np.ndarray, parent: np.ndarray, src: np.ndarray, alt: np.ndarray
+    ) -> np.ndarray:
+        if self._topology == "sibling_of_first":
+            return super()._branch(tree, parent, src, alt)
+        # Rows: root, d1, d2, sibling of d2, d3, ...
+        parent[tree, 3] = 1
+        src[tree, 3] = 1
+        src[tree, 4:] -= 1
+        alt[tree, 3] = 1
+        return np.zeros_like(tree)

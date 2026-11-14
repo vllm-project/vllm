@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
+    SingleTypeKVCacheManager,
     SlidingWindowManager,
     create_single_type_manager,
 )
@@ -204,6 +205,7 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
+        num_draft_tokens: int | None = None,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -230,6 +232,9 @@ class KVCacheCoordinator(ABC):
                 retention Mamba reserves a prefill checkpoint only on the chunk
                 reaching it; under dense retention every chunk publishes a
                 state, so it is ignored (0).
+            num_draft_tokens: The drafts the request verifies this step. Mamba
+                groups hold one speculative state block per draft; None holds
+                `num_speculative_blocks`. Other groups ignore it.
 
         Returns:
             The number of blocks to allocate.
@@ -261,8 +266,18 @@ class KVCacheCoordinator(ABC):
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
+                    **self._draft_kwargs(manager, num_draft_tokens),
                 )
         return num_blocks_to_allocate
+
+    @staticmethod
+    def _draft_kwargs(
+        manager: SingleTypeKVCacheManager, num_draft_tokens: int | None
+    ) -> dict[str, int | None]:
+        """`num_draft_tokens` for the managers that size blocks by it (Mamba)."""
+        if isinstance(manager, MambaManager):
+            return {"num_draft_tokens": num_draft_tokens}
+        return {}
 
     def allocate_new_computed_blocks(
         self,
@@ -320,6 +335,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        num_draft_tokens: int | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """Allocate new blocks for the request to give it at least `num_tokens`
         token slots.
@@ -333,6 +349,7 @@ class KVCacheCoordinator(ABC):
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            num_draft_tokens: See `get_num_blocks_to_allocate`.
 
         Returns:
             The new allocated blocks.
@@ -345,6 +362,7 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
+                **self._draft_kwargs(manager, num_draft_tokens),
             )
             for manager in self.single_type_managers
         )

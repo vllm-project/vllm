@@ -220,6 +220,29 @@ class Sampler:
         )
         return sampler_output
 
+    def reads_row_prefix(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether a request of the batch has logits processing that reads the
+        tokens before each row (penalties, bad words, a thinking budget, custom
+        processors), which only a chain lays out as the row's prefix."""
+        if not np.any(self.needs_logits_processing[idx_mapping_np]):
+            return False
+        for processor in self.logits_processors:
+            if isinstance(processor, PenaltiesState):
+                uses = processor.use_penalty[idx_mapping_np]
+            elif isinstance(processor, BadWordsState):
+                uses = processor.num_bad_words.np[idx_mapping_np] > 0
+            elif isinstance(processor, LogitBiasState):
+                continue
+            else:
+                return True
+            if np.any(uses):
+                return True
+        thinking = self.thinking_budget_state
+        # Its per-request flags exist only with a reasoning config.
+        return thinking.enabled and bool(
+            np.any(thinking.use_thinking_budget[idx_mapping_np])
+        )
+
     def apply_sampling_params(
         self,
         logits: torch.Tensor,

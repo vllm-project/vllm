@@ -7,7 +7,10 @@ import os
 import pytest
 
 from tests.models.utils import check_logprobs_close
-from tests.v1.e2e.spec_decode.utils import compute_acceptance_len
+from tests.v1.e2e.spec_decode.utils import (
+    compute_acceptance_len,
+    require_test_speculators,
+)
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -166,3 +169,38 @@ def test_speculator_smoke(model: str, speculative_config: dict):
         )
     finally:
         del llm
+
+
+_NGRAM = {"prompt_lookup_max": 5, "prompt_lookup_min": 3, "num_speculative_tokens": 3}
+
+
+@pytest.mark.skipif(
+    not HAS_TRITON, reason="the V2 runner needs triton-cpu, which CI builds"
+)
+@pytest.mark.parametrize(
+    "method, drafts",
+    [("test_ngram_budget_one", False), ("test_ngram_tree", True)],
+    ids=["budget-one", "tree-runs-chains"],
+)
+def test_v2_round_contract_matches_baseline(baseline_refs, method, drafts):
+    """A budget of 1 is plain decode with no drafts; a tree speculator, on a
+    backend that verifies chains, runs as a chain, accepts drafts and decodes
+    like no speculation."""
+    require_test_speculators()
+    llm = _make_llm(speculative_config={"method": method, **_NGRAM})
+    try:
+        got = _tuples(llm.generate(PROMPTS, SP))
+        drafted = _spec_metric(llm, "vllm:spec_decode_num_draft_tokens")
+        acceptance = compute_acceptance_len(llm.get_metrics()) if drafted else 1.0
+    finally:
+        del llm
+    if drafts:
+        assert drafted > 0 and acceptance > 1
+    else:
+        assert drafted == 0
+    check_logprobs_close(
+        outputs_0_lst=baseline_refs,
+        outputs_1_lst=got,
+        name_0="no_spec_decode",
+        name_1=method,
+    )

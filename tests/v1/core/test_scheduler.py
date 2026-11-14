@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import random
+from collections.abc import Callable
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -57,6 +58,7 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.utils import supports_dynamic_spec_blocks
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
@@ -84,13 +86,17 @@ from vllm.v1.outputs import (
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
+from .test_async_scheduler import PipelinedEngine
 from .utils import (
     EOS_TOKEN_ID,
     create_requests,
     create_scheduler,
+    held_spec_blocks,
     mock_kv,
     new_kv_cache_group,
+    new_mamba_layer,
     new_sliding_window_layer,
+    runner_output,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -3260,18 +3266,22 @@ def _model_output(scheduler, output, sampled):
     )
 
 
-def test_spec_decode_padding_first_decode_step():
+@pytest.mark.parametrize("budget", [None, 2])
+def test_spec_decode_padding_first_decode_step(budget):
     """A request taking its first decode step (whole prompt already computed via
     a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
-    the worker with the same 1 + num_spec_tokens shape as the other speculative
-    decodes, keeping the batch uniform.
+    the worker with the same shape as the other speculative decodes, keeping the
+    batch uniform: the drafts they verify, which a candidate budget can cap.
     """
-    num_spec = 3
     scheduler = create_scheduler(
-        num_speculative_tokens=num_spec,
+        num_speculative_tokens=3,
         enable_prefix_caching=True,
         block_size=16,
     )
+    num_spec = 3
+    if budget is not None:
+        _set_candidate_budget(scheduler, lambda view: budget)
+        num_spec = budget - 1
     # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
     # second identical request hits num_computed == num_prompt_tokens - 1.
     r1, r2 = create_requests(
@@ -3284,14 +3294,15 @@ def test_spec_decode_padding_first_decode_step():
     out = scheduler.schedule()
     assert out.num_scheduled_tokens[r1.request_id] == 33
     _model_output(scheduler, out, [[100]])
-    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+    drafts = [1, 2, 3][:num_spec]
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [drafts]))
 
     # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
     scheduler.add_request(r2)
     out = scheduler.schedule()
 
     # r1 verifies its real drafts.
-    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == drafts
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
@@ -9020,3 +9031,355 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def _set_candidate_budget(scheduler, candidate_budget):
+    """Patch a varying candidate budget onto a built scheduler."""
+    scheduler.speculator_config.candidate_budget = candidate_budget
+    scheduler.candidate_budget_varies = True
+
+
+def test_fixed_candidate_budget_is_never_asked():
+    """A speculator whose budget cannot vary schedules K drafts, as on main,
+    without calling candidate_budget."""
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    assert not scheduler.candidate_budget_varies
+
+    def candidate_budget(view):
+        raise AssertionError("candidate_budget called on the fixed path")
+
+    scheduler.speculator_config.candidate_budget = candidate_budget
+    for request in create_requests(2, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    for _ in range(2):
+        output = scheduler.schedule()
+        assert output.num_spec_tokens_to_schedule == 3
+        scheduler.update_from_output(
+            output, runner_output(list(output.num_scheduled_tokens))
+        )
+
+
+def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
+    """(num_spec_tokens_to_schedule, skip_drafts, views) per step, for decode
+    requests under a fixed candidate budget."""
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    scheduler.can_skip_drafts = True
+    views = []
+
+    def candidate_budget(view):
+        views.append(view)
+        return budget
+
+    _set_candidate_budget(scheduler, candidate_budget)
+    for request in create_requests(num_requests, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    steps = []
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        steps.append((output.num_spec_tokens_to_schedule, output.skip_drafts))
+        scheduler.update_from_output(
+            output, runner_output(list(output.num_scheduled_tokens))
+        )
+    return steps, views
+
+
+def test_candidate_budget_one_is_a_plain_decode():
+    """Budget 1 is today's suspension outcome: no drafts proposed (skip_drafts),
+    so the next step is one row per request and replays the plain-decode graph.
+    """
+    steps, views = _budget_steps(1)
+    assert steps == [(0, True), (0, True)]
+    assert len(views) == 2
+
+
+@pytest.mark.parametrize("budget", [0, 2, 5])
+def test_candidate_budget_caps_the_drafts(budget):
+    """A budget in 2..C caps the drafts at budget - 1; outside 1..C it is
+    rejected."""
+    if budget in (0, 5):
+        with pytest.raises(ValueError, match="candidate_budget returned"):
+            _budget_steps(budget)
+        return
+    steps, views = _budget_steps(budget)
+    assert steps == [(1, False), (1, False)]
+    view = views[0]
+    assert (view.num_scheduled_reqs, view.max_num_seqs) == (2, 16)
+    assert view.num_free_blocks >= 0
+
+
+@pytest.mark.parametrize("budget", [1.5, 2.0, "2", None])
+def test_candidate_budget_must_be_an_int(budget):
+    with pytest.raises(ValueError, match="candidate_budget returned.*must be an int"):
+        _budget_steps(budget)
+
+
+def test_candidate_budget_is_not_asked_without_scheduled_requests():
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    views = []
+
+    def candidate_budget(view):
+        views.append(view)
+        return 4
+
+    _set_candidate_budget(scheduler, candidate_budget)
+    scheduler.schedule()
+    assert views == []
+
+
+def _scheduler_steps(
+    budgets: list[int],
+    num_lookahead: int = 0,
+    on_scheduler: Callable[[Scheduler], None] | None = None,
+):
+    """Drive two decode requests of a recurrent model through one step per
+    candidate budget, every draft accepted. Returns per step the scheduled
+    drafts, the requests' recurrent block counts, the held sum, and the
+    output's `spec_state_block_counts`."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_batched_tokens=64,
+        max_model_len=256,
+        block_size=256,
+        kv_cache_layer_config=new_mamba_layer(
+            mamba_cache_mode="none",
+            num_speculative_blocks=3,
+            block_size=256,
+            shapes=((1, 1),),
+        ),
+    )
+    # Draft KV slots a drafter like EAGLE reserves; n-gram reserves none.
+    scheduler.num_lookahead_tokens = num_lookahead
+    if on_scheduler is not None:
+        on_scheduler(scheduler)
+    budget_iter = iter(budgets)
+    views = []
+
+    def candidate_budget(view):
+        views.append(view)
+        return next(budget_iter)
+
+    _set_candidate_budget(scheduler, candidate_budget)
+    for request in create_requests(2, num_tokens=8, max_tokens=64):
+        scheduler.add_request(request)
+    manager = scheduler.kv_cache_manager
+    steps = []
+    for _ in budgets:
+        output = scheduler.schedule()
+        req_ids = list(output.num_scheduled_tokens)
+        drafts = {
+            req_id: len(output.scheduled_spec_decode_tokens.get(req_id, ()))
+            for req_id in req_ids
+        }
+        steps.append(
+            (
+                drafts,
+                {req_id: len(manager.get_block_ids(req_id)[0]) for req_id in req_ids},
+                held_spec_blocks(*manager.coordinator.single_type_managers),
+                output.spec_state_block_counts,
+            )
+        )
+        scheduler.update_from_output(
+            output, runner_output(req_ids, [[100] * (1 + drafts[r]) for r in req_ids])
+        )
+        k = output.num_spec_tokens_to_schedule
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(req_ids, [[7] * k for _ in req_ids])
+        )
+    return steps, views
+
+
+def _run_budget_policy(
+    budget_at: Callable[[int], int], async_scheduling: bool, seed: int = 0
+) -> tuple[dict[int, int], list[SchedulerOutput], MambaManager]:
+    """Run two requests of a recurrent model to completion under a candidate
+    budget that depends only on the step, with an EAGLE-like draft lookahead
+    and random acceptance. Async keeps one step in flight: each step is
+    scheduled before the previous one's output is known.
+
+    Returns the budget asked at each step, every step's output, and the
+    recurrent group's manager.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+        max_num_batched_tokens=64,
+        max_model_len=256,
+        block_size=256,
+        kv_cache_layer_config=new_mamba_layer(
+            mamba_cache_mode="none",
+            num_speculative_blocks=num_spec,
+            block_size=256,
+            shapes=((1, 1),),
+        ),
+        async_scheduling=async_scheduling,
+    )
+    scheduler.num_lookahead_tokens = num_spec
+    assert scheduler.dynamic_spec_blocks
+    outputs: list[SchedulerOutput] = []
+    asked: dict[int, int] = {}
+    schedule = scheduler.schedule
+
+    def recording_schedule() -> SchedulerOutput:
+        output = schedule()
+        outputs.append(output)
+        return output
+
+    def candidate_budget(view) -> int:
+        # Called inside schedule(), before its output is recorded.
+        asked[len(outputs)] = budget_at(len(outputs))
+        return asked[len(outputs)]
+
+    scheduler.schedule = recording_schedule
+    _set_candidate_budget(scheduler, candidate_budget)
+    for request in create_requests(2, num_tokens=8, max_tokens=120, ignore_eos=True):
+        scheduler.add_request(request)
+    rng = random.Random(seed)
+
+    def accept(step: int, req_id: str, num_drafts: int) -> int:
+        return rng.randint(0, num_drafts)
+
+    if async_scheduling:
+        PipelinedEngine(scheduler, queue_size=2, accept_drafts=accept).run()
+    else:
+        while scheduler.has_requests():
+            output = scheduler.schedule()
+            req_ids = list(output.num_scheduled_tokens)
+            sampled = []
+            for req_id in req_ids:
+                num_drafts = len(output.scheduled_spec_decode_tokens.get(req_id, ()))
+                sampled.append([100] * (1 + accept(len(outputs), req_id, num_drafts)))
+            scheduler.update_from_output(output, runner_output(req_ids, sampled))
+            k = output.num_spec_tokens_to_schedule
+            scheduler.update_draft_token_ids(
+                DraftTokenIds(req_ids, [[7] * k for _ in req_ids])
+            )
+    (manager,) = scheduler.kv_cache_manager.coordinator.single_type_managers
+    assert isinstance(manager, MambaManager)
+    return asked, outputs, manager
+
+
+def _random_budgets(seed: int) -> Callable[[int], int]:
+    rng = random.Random(seed)
+    budgets = [rng.randint(1, 4) for _ in range(512)]
+    return budgets.__getitem__
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        pytest.param(lambda t: 4 if t % 2 == 0 else 1, id="alternate-K+1-1"),
+        pytest.param(lambda t: 1 if t % 3 == 2 else 4, id="K+1-K+1-1"),
+        pytest.param(lambda t: 1 if t % 2 == 0 else 4, id="alternate-1-K+1"),
+        pytest.param(lambda t: [4, 2, 1][t % 3], id="K+1-2-1"),
+        *(pytest.param(_random_budgets(s), id=f"random-{s}") for s in range(2)),
+    ],
+)
+def test_scheduler_honors_every_budget(
+    policy: Callable[[int], int], async_scheduling: bool
+):
+    """The drafts a step verifies are the ones the previous step's budget
+    asked for, whatever the budget was the step before (no step is forced to
+    budget 1 after a budget-1 step), with rejected drafts rolled back."""
+    asked, outputs, manager = _run_budget_policy(policy, async_scheduling)
+    num_checked = num_drafting = 0
+    for step in range(1, len(outputs)):
+        prev, output = outputs[step - 1], outputs[step]
+        for req_id in output.num_scheduled_tokens:
+            if req_id not in prev.num_scheduled_tokens:
+                continue
+            drafts = len(output.scheduled_spec_decode_tokens.get(req_id, ()))
+            assert drafts == asked[step - 1] - 1, (step, req_id, asked, drafts)
+            num_checked += 1
+            num_drafting += drafts > 0
+    assert num_checked > 40 and num_drafting > 10
+    assert held_spec_blocks(manager) == 0
+
+
+def test_scheduler_reserves_draft_lookahead_after_budget_one():
+    """Every step reserves the drafter's lookahead slots, including one after a
+    budget-1 step: its budget is chosen after allocation and may ask for
+    drafts, which the drafter writes KV for in that same step."""
+    lookaheads = []
+
+    def record(scheduler):
+        manager = scheduler.kv_cache_manager
+        allocate_slots = manager.allocate_slots
+
+        def recording_allocate_slots(request, num_new_tokens, *args, **kwargs):
+            lookaheads.append(kwargs.get("num_lookahead_tokens"))
+            return allocate_slots(request, num_new_tokens, *args, **kwargs)
+
+        manager.allocate_slots = recording_allocate_slots
+
+    steps, _ = _scheduler_steps(
+        [4, 1, 4, 1, 1, 4, 4], num_lookahead=3, on_scheduler=record
+    )
+    assert [set(d.values()) for d, *_ in steps] == [
+        {0},
+        {3},
+        {0},
+        {3},
+        {0},
+        {0},
+        {3},
+    ]
+    assert lookaheads and all(n == 3 for n in lookaheads)
+
+
+def test_scheduler_keeps_static_spec_blocks():
+    """Dynamic spec blocks are off on a model without recurrent layers."""
+    for k in (3, None):
+        kwargs = {} if k is None else {"num_speculative_tokens": k}
+        scheduler = create_scheduler(**kwargs)
+        assert not scheduler.dynamic_spec_blocks
+        # The runner nulls dropped recurrent-state rows by the same rule,
+        # so a recurrent model without speculation keeps main's tables.
+        assert supports_dynamic_spec_blocks(scheduler.vllm_config, True) == (
+            k is not None
+        )
+
+
+def test_overridden_candidate_budget_is_asked(monkeypatch):
+    """A config class that overrides candidate_budget is asked every step."""
+    config_cls = type(create_scheduler(num_speculative_tokens=3).speculator_config)
+    monkeypatch.setattr(config_cls, "candidate_budget", lambda self, view: 2)
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    assert scheduler.candidate_budget_varies
+    for request in create_requests(2, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_spec_tokens_to_schedule == 1
+
+
+def test_scheduler_rejects_spec_resources_beyond_k(monkeypatch):
+    """Declared resources may not run more rows than num_speculative_tokens + 1:
+    KV slots and buffers are sized from K."""
+    from vllm.v1.spec_decode.resources import SpecResources
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+
+    monkeypatch.setattr(
+        SpeculatorConfig, "resources", lambda self, n: SpecResources(capture_rows=(5,))
+    )
+    with pytest.raises(ValueError, match=r"SpecResources.max_rows \(5\)"):
+        create_scheduler(num_speculative_tokens=3)
+
+
+def test_scheduler_takes_effective_spec_resources():
+    """The engine core passes a branching speculator's effective resources at
+    construction; without them the scheduler runs with the declared ones."""
+    from functools import partial
+
+    from vllm.v1.spec_decode.resources import SpecResources
+
+    declared = create_scheduler(num_speculative_tokens=3)
+    assert declared.spec_resources == SpecResources(capture_rows=(4,))
+    effective = SpecResources(capture_rows=(2,))
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        scheduler_cls=partial(Scheduler, spec_resources=effective),  # type: ignore[arg-type]
+    )
+    assert scheduler.spec_resources is effective
+    # Fewer rows than K + 1 cap the budget each step.
+    assert scheduler.candidate_budget_varies

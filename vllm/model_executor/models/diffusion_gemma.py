@@ -956,7 +956,7 @@ class DiffusionGemmaModelState(ModelState):
         return {"inputs_embeds": self._inputs_embeds_buf[:num_tokens]}
 
     def postprocess_state(
-        self, idx_mapping, num_sampled, num_computed_tokens=None
+        self, idx_mapping, num_sampled, num_computed_tokens=None, *, accepted_row=None
     ) -> None:
         return None
 
@@ -1010,6 +1010,8 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+            positions=input_batch.positions,
+            tree_parents=input_batch.tree_parents,
         )
 
     num_new_sampled_tokens_per_step: int = 0

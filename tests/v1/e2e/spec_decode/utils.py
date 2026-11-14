@@ -229,3 +229,17 @@ def compute_acceptance_len(
         if n_drafts <= 0:
             return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+def require_test_speculators() -> None:
+    """Fail unless the test-only speculators' general plugin is installed: it
+    registers their `test_*` methods in every vLLM process."""
+    from importlib.metadata import entry_points
+
+    plugins = entry_points(group="vllm.general_plugins").names
+    if "register_test_speculators" not in plugins:
+        pytest.fail(
+            "The test speculators plugin is not installed: "
+            "pip install -e tests/plugins/vllm_add_test_speculators",
+            pytrace=False,
+        )

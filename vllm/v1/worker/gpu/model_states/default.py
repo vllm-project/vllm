@@ -263,5 +263,6 @@ class DefaultModelState(ModelState):
             ubatch_idx=ubatch_idx,
             fast_prefill=input_batch.fast_prefill,
             model_specific_attn_metadata=model_specific_attn_metadata,
+            tree_parents=input_batch.tree_parents,
         )
         return attn_metadata

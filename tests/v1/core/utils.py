@@ -48,6 +48,7 @@ from vllm.v1.kv_cache_interface import (
     ManagerConfig,
     MLAAttentionSpec,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -467,6 +468,16 @@ def new_kv_cache_group(
     )
 
 
+def held_spec_blocks(*managers) -> int:
+    """Spec blocks the requests hold past their state block, over the managers."""
+    return sum(
+        len(manager.req_to_blocks[req_id]) - 1 - state_idx
+        for manager in managers
+        if isinstance(manager, MambaManager)
+        for req_id, state_idx in manager._spec_state_idx.items()
+    )
+
+
 def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
@@ -489,4 +500,17 @@ def get_kv_cache_configs(
         layer_configs,
         available_memory,
         kv_cache_planning.get_global_kv_cache_groups(vllm_config, layer_configs),
+    )
+
+
+def runner_output(
+    req_ids: list[str], sampled_token_ids: list[list[int]] | None = None
+) -> ModelRunnerOutput:
+    """A model output for ``Scheduler.update_from_output``: one sampled token
+    (100) per request unless ``sampled_token_ids`` says otherwise."""
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        sampled_token_ids=(
+            [[100] for _ in req_ids] if sampled_token_ids is None else sampled_token_ids
+        ),
     )

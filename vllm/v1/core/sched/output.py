@@ -324,6 +324,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Requests whose recurrent-state tail for draft rows was shortened this
+    # step: request id -> {kv cache group id: new block count}. The worker
+    # shortens those block table rows before appending this step's new blocks.
+    spec_state_block_counts: dict[str, dict[int, int]] | None = None
+
     # Whether no scheduled request can use the drafts proposed after this step
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
