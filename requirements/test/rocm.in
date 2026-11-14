@@ -1,7 +1,7 @@
 -r ../common.txt
 
 # testing
-pytest
+pytest >= 9.2.0 # monkeypatch.setattr undo must not shadow class attributes (pytest-dev/pytest#10644)
 tensorizer==2.12.1
 pytest-forked
 pytest-asyncio
