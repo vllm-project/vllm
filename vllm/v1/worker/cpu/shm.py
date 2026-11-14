@@ -83,6 +83,11 @@ def async_tensor_h2d(
 ) -> torch.Tensor:
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
+        if out is None:
+            # Triton specializes on pointer alignment, so a tensor aliasing a
+            # numpy view recompiles the first time a batch arrives unaligned.
+            # Torch allocations are always aligned, so warmup stays valid.
+            return data.to(dtype=dtype, copy=True)
     if not isinstance(data, torch.Tensor):
         data = torch.tensor(data, dtype=dtype, device="cpu")
     elif out is None:
