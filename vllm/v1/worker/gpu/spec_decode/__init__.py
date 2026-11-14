@@ -29,6 +29,12 @@ def init_speculator(
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if getattr(speculative_config, "remote_draft", None) is not None:
+        raise NotImplementedError(
+            "speculative_config.remote_draft is configured but no remote "
+            "drafter runtime is implemented for this model runner yet; "
+            "remove remote_draft to use the local drafter."
+        )
     speculator_config = speculative_config.speculator_config
     qualname = speculator_config.speculator_class
     if qualname is None:
