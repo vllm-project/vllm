@@ -167,6 +167,21 @@ def test_architecture_without_replayssm_support_is_rejected():
         _validator()(cfg)
 
 
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_plain_mamba_replayssm_lane_is_unaffected(num_spec):
+    # Neither GDN nor KDA: --use-replayssm keeps the ReplaySSM-tracker path with
+    # or without speculative decoding, and the GDN check does not fire.
+    cfg = _config("Mamba2ForCausalLM", num_spec=num_spec)
+    # the ReplaySSM speculative path also reads these
+    cfg.parallel_config.use_ubatching = False
+    cfg.cache_config.replayssm_buffer_len = 16
+    cfg.model_config.dtype = torch.bfloat16
+    _validator()(cfg)
+    assert cfg.cache_config.use_gdn_recoverssm is False
+    assert cfg.cache_config.use_kda_recoverssm is False
+    assert not uses_recoverssm(cfg.cache_config, num_spec)
+
+
 def test_uses_recoverssm_predicate():
     on = SimpleNamespace(use_gdn_recoverssm=True)
     assert uses_recoverssm(on, 3)
