@@ -767,6 +767,7 @@ def test_dummy_run_leaves_a_token_per_request_after_draft_slots(
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_num_tokens = max_num_tokens
     runner.max_num_reqs = max_num_reqs
+    runner.max_model_len = max_num_tokens
     runner.speculator = SimpleNamespace(num_query_per_req=num_query_per_req)
     runner.speculative_config = SimpleNamespace(
         max_num_new_slots_for_drafting=draft_slots
