@@ -14,6 +14,7 @@ import inspect
 import os
 import shutil
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, NoReturn
 
 import requests
@@ -34,6 +35,41 @@ def is_flashinfer_autotuning() -> bool:
     from flashinfer.autotuner import AutoTuner
 
     return AutoTuner.get().is_tuning_mode
+
+
+_bf16_tuning_files_loaded = False
+
+
+def is_flashinfer_bf16_tuning_loaded() -> bool:
+    return _bf16_tuning_files_loaded
+
+
+@functools.cache
+def load_flashinfer_bf16_tuning_dir() -> None:
+    """Load every FlashInfer autotune JSON in VLLM_CACHE_ROOT/flashinfer_bf16_tuning."""
+    directory = Path(envs.VLLM_CACHE_ROOT) / "flashinfer_bf16_tuning"
+    files = sorted(directory.glob("*.json"))
+    if not files:
+        return
+    from flashinfer.autotuner import AutoTuner
+
+    tuner = AutoTuner.get()
+    loaded = []
+    for file in files:
+        try:
+            if tuner.load_configs(str(file)):
+                loaded.append(file.name)
+        except Exception as e:
+            logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
+    global _bf16_tuning_files_loaded
+    _bf16_tuning_files_loaded = bool(loaded)
+    logger.info(
+        "Loaded %d of %d FlashInfer tuning files from %s: %s",
+        len(loaded),
+        len(files),
+        directory,
+        ", ".join(loaded),
+    )
 
 
 # M values (CUDA graph capture sizes) at which FlashInfer's bf16 GEMM autotuner
@@ -1567,6 +1603,8 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
+    "load_flashinfer_bf16_tuning_dir",
+    "is_flashinfer_bf16_tuning_loaded",
     "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
