@@ -287,6 +287,23 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
+def mxfp8_e4m3fn_to_e4m3fnuz(
+    w: torch.Tensor, scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reinterpret MXFP8 e4m3fn weights as e4m3fnuz without changing values.
+
+    The same bits read as fnuz are worth half, so each E8M0 exponent goes up
+    by one. 0x80 is -0 in fn but NaN in fnuz, so it becomes 0. The weight is
+    updated in place. Exponents 254 and 255 cannot be bumped and become 0xFF
+    (NaN); real checkpoints never use them.
+    """
+    assert w.dtype == torch.float8_e4m3fn and scale.dtype == torch.uint8
+    w_i8 = w.view(torch.int8)
+    w_i8.masked_fill_(w_i8 == -128, 0)
+    scale = torch.where(scale >= 254, 255, scale + 1)
+    return w_i8.view(torch.float8_e4m3fnuz), scale
+
+
 def mxfp8_e4m3_quantize_fake(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,

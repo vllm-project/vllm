@@ -24,6 +24,8 @@ _SUPPORTED_BACKENDS = (
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    # AITER moe_gemm_a8w8 (gfx942): FP8 MFMA with per-32-K E8M0 scaling.
+    Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
@@ -35,6 +37,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
+    "aiter_triton_mxfp8_mxfp8": Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
     "humming": Fp8MoeBackend.HUMMING,
 }
@@ -61,6 +64,12 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [AiterMxfp8Experts]
+    if backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+            AiterTritonMxfp8ExpertsMonolithic,
+        )
+
+        return [AiterTritonMxfp8ExpertsMonolithic]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
             Mxfp8NativeTritonExperts,

@@ -55,6 +55,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     _backend_activation_key,
@@ -252,30 +253,33 @@ def test_online_linear_methods_resolve_activation_quant_key(
 
 
 @pytest.mark.parametrize(
-    ("layer_kind", "layer_cls", "weight_key", "raises"),
+    ("layer_kind", "layer_cls", "weight_key", "accepted", "error"),
     [
-        ("linear", _TestLinear, kFp8StaticTensorSym, True),
-        ("linear", _TestLinear, kFp8Static128BlockSym, True),
-        ("linear", _TestLinear, kMxfp8Static, True),
-        ("linear", _TestLinear, kMxfp4Static, False),
-        ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
-        ("moe", _TestRoutedExperts, kFp8Static128BlockSym, True),
-        ("moe", _TestRoutedExperts, kFp8StaticChannelSym, True),
-        ("moe", _TestRoutedExperts, kMxfp8Static, True),
-        ("moe", _TestRoutedExperts, kMxfp4Static, False),
+        ("linear", _TestLinear, kFp8StaticTensorSym, (), "activation override"),
+        ("linear", _TestLinear, kFp8Static128BlockSym, (), "activation override"),
+        ("linear", _TestLinear, kMxfp8Static, (), "activation override"),
+        ("linear", _TestLinear, kMxfp4Static, None, None),
+        ("moe", _TestRoutedExperts, kFp8StaticTensorSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kFp8Static128BlockSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kFp8StaticChannelSym, (), "activation override"),
+        ("moe", _TestRoutedExperts, kMxfp8Static, (kMxfp8Dynamic,), "supports only"),
+        ("moe", _TestRoutedExperts, kMxfp4Static, None, None),
     ],
 )
-@pytest.mark.parametrize("activation_quant_key", [None, kFp8DynamicTensorSym])
+@pytest.mark.parametrize(
+    "activation_quant_key", [None, kFp8DynamicTensorSym, kMxfp8Dynamic]
+)
 def test_online_activation_override(
-    layer_kind, layer_cls, weight_key, activation_quant_key, raises
+    layer_kind, layer_cls, weight_key, accepted, error, activation_quant_key
 ) -> None:
-    """Only MXFP4 online methods honor an activation override, `null` included."""
+    """MXFP4 online methods honor any activation override, `null` included;
+    the MXFP8 MoE method honors only MXFP8 activations; others reject one."""
     args = QuantizationConfigArgs(
         **{layer_kind: QuantSpec(weight=weight_key, activation=activation_quant_key)}
     )
     config = OnlineQuantizationConfig(args)
-    if raises:
-        with pytest.raises(NotImplementedError, match="activation override"):
+    if accepted is not None and activation_quant_key not in accepted:
+        with pytest.raises(NotImplementedError, match=error):
             config.resolve_quant_method_cls(layer_cls, layer_kind)
         return
 
@@ -2077,6 +2081,15 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="targets_activation_override",
         ),
         pytest.param(
+            GRANITE_MODEL_NAME,
+            "online",
+            {"moe": {"weight": "mxfp8", "activation": "mxfp8"}},
+            UnquantizedLinearMethod,
+            Mxfp8OnlineMoEMethod,
+            {},
+            id="mxfp8_moe_mxfp8_activation",
+        ),
+        pytest.param(
             "vllm-project/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
@@ -2141,7 +2154,11 @@ def test_online_quantization(
     if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
-        if not use_rocm_aiter and "activation" in str(online_quant_args):
+        if (
+            not use_rocm_aiter
+            and expected_moe_cls is Mxfp4OnlineMoEMethod
+            and "activation" in str(online_quant_args)
+        ):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
 
     if current_platform.is_xpu():
@@ -2288,10 +2305,14 @@ def test_online_quantization(
     moe_args = (
         online_quant_args.get("moe") if isinstance(online_quant_args, dict) else None
     )
-    if (isinstance(moe_args, dict) and "activation" in moe_args) or isinstance(
-        target_specs.get("*experts*"), dict
-    ):
-        assert moe._quant_method.activation_quant_key is None
+    moe_spec = moe_args if isinstance(moe_args, dict) else target_specs.get("*experts*")
+    if isinstance(moe_spec, dict) and "activation" in moe_spec:
+        activation = moe_spec["activation"]
+        assert moe._quant_method.activation_quant_key == (
+            None if activation is None else QUANT_KEY_NAMES[activation]
+        )
+    if expected_moe_cls is Mxfp8OnlineMoEMethod and on_gfx942() and use_rocm_aiter:
+        assert moe._quant_method.fp8_backend == Fp8MoeBackend.AITER_TRITON_MXFP8_MXFP8
 
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
         o_proj.quant_method.kernel, (MarlinMxfp8LinearKernel, HummingMxfp8LinearKernel)
