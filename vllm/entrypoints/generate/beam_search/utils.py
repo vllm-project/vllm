@@ -175,3 +175,21 @@ def get_beam_search_eos_token_ids(
     params = SamplingParams()
     params.update_from_generation_config(generation_config, eos_token_id)
     return params.all_stop_token_ids
+
+
+def get_watermark_context_start(
+    beam: BeamSearchSequence, watermarking: bool | None
+) -> int | None:
+    """Index into each fresh request's prompt where generated tokens begin.
+
+    Beam search submits one 1-token request per step whose prompt is the
+    original prompt plus the beam-so-far, so the watermark sampler must treat
+    the beam-so-far as generated context rather than prompt. Returns ``None``
+    when watermarking is off, leaving the default prompt-length boundary.
+    """
+    if not watermarking:
+        return None
+    orig_prompt = beam.orig_prompt
+    if orig_prompt["type"] == "enc_dec":
+        return len(orig_prompt["decoder_prompt"]["prompt_token_ids"])
+    return len(orig_prompt["prompt_token_ids"])

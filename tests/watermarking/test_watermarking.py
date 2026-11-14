@@ -21,6 +21,7 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.sbw import SBWWatermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     _resolve_watermark_key,
@@ -29,6 +30,8 @@ from vllm.v1.watermarking.spec_decode import (
     speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
+from vllm.v1.worker.cpu.sampler import CPUWatermarkSampler
+from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
@@ -45,6 +48,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 class StubWatermarker(Watermarker):
     context_width = 1
+    supports_greedy = False
 
     def _sample_watermarked(self, logits, contexts):
         return WatermarkSample(torch.tensor([7, 7]), logits + 10)
@@ -339,8 +343,8 @@ def test_gpu_sampler_warns_about_unexpected_greedy_watermarking(
     assert messages == [
         (
             "Watermarking is enabled, but greedy decoding "
-            "(temperature=0) cannot be watermarked. This request will use "
-            "ordinary greedy sampling."
+            "(temperature=0) is not supported by this watermarker. "
+            "This request will use ordinary greedy sampling."
         )
     ]
     vllm_logger._print_warning_once.cache_clear()
@@ -354,7 +358,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
     sampler.add_request(1, SamplingParams(watermarking=False))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
-        2, 1, dtype=torch.int64
+        len(expanded_idx_mapping), 1, dtype=torch.int64
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
@@ -431,6 +435,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
 
     class CapturingWatermarker:
         context_width = 1
+        supports_greedy = False
         captured_logits = None
 
         def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
@@ -467,6 +472,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
 def test_watermark_context_ignores_prefix_cache_bookkeeping():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=3)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1, -1, -1]))
     sampler.req_states = SimpleNamespace(
         total_len=SimpleNamespace(gpu=torch.tensor([4, 0, 5])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([3, 0, 2])),
@@ -660,6 +666,7 @@ def test_repeated_context_mask_can_skip_partial_contexts():
 def test_gpu_sampler_contexts_are_completion_local_for_all_scopes():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
@@ -679,6 +686,7 @@ def test_gpu_sampler_contexts_are_completion_local_for_all_scopes():
 def test_gpu_sampler_all_history_skips_partial_context():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
@@ -734,6 +742,7 @@ def test_repeated_context_mask_rejects_non_positive_max_history(max_history: int
 
 def test_gpu_sampler_wires_request_history_scope():
     sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(
             gpu=torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
@@ -1023,8 +1032,13 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
 
 
 def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
+    """Watermarkers with supports_greedy=False (e.g. Gumbel) must not run for
+    greedy requests. Watermarkers with supports_greedy=True (e.g. SBW) are
+    included in enabled and handled correctly by gumbel_sample's temp=0 path."""
+
     class StubWatermarker:
         context_width = 1
+        supports_greedy = False
 
         def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
             raise AssertionError("watermarker should not run for greedy requests")
@@ -1060,6 +1074,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
 def test_gpu_sampler_builds_speculative_contexts_from_drafts():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[100, 101, 10, 11, 0, 0]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([2])),
@@ -1078,6 +1093,7 @@ def test_gpu_sampler_builds_speculative_contexts_from_drafts():
 def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.deduplicate_contexts = "single_turn"
     sampler.deduplicate_contexts_max_history = None
     sampler.num_speculative_tokens = 4
@@ -1115,6 +1131,7 @@ def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
 def test_rejection_sampler_skips_only_partial_speculative_contexts(scope):
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.watermarking = SimpleNamespace(gpu=torch.tensor([True]))
     sampler.deduplicate_contexts = scope
     sampler.deduplicate_contexts_max_history = None
@@ -1261,6 +1278,7 @@ def test_draft_context_deduplication_accelerator_parity(
 def test_gpu_sampler_builds_chunked_multi_request_speculative_contexts():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1, -1, -1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(
             gpu=torch.tensor(
@@ -1964,3 +1982,197 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4]))
+
+
+# ---------------------------------------------------------------------------
+# CPU / GPU watermark sampler parity
+# ---------------------------------------------------------------------------
+# Both backends must compute identical watermark contexts and context
+# deduplication masks from identical logical request state. The storage
+# dtype differs by backend (int64 stubs vs int32 CPURequestState) and is
+# normalised before comparison; the logical values must be equal exactly.
+
+
+@pytest.fixture
+def make_parity_samplers(monkeypatch):
+    class CPUUvaBuffer:
+        def __init__(self, size, dtype):
+            self.cpu = torch.zeros(size, dtype=dtype)
+            self.np = self.cpu.numpy()
+
+        def uva(self, n=None):
+            return self.cpu[:n] if n is not None else self.cpu
+
+    monkeypatch.setattr(buffer_utils, "UvaBuffer", CPUUvaBuffer)
+
+    def make(watermarker, num_slots, width):
+        device = torch.device("cpu")
+        gpu_req_states = SimpleNamespace(
+            max_num_reqs=num_slots,
+            vocab_size=watermarker.context_width,
+            device=device,
+            all_token_ids=SimpleNamespace(
+                gpu=torch.zeros(num_slots, width, dtype=torch.int64)
+            ),
+            prompt_len=SimpleNamespace(
+                np=np.zeros(num_slots, dtype=np.int32),
+                gpu=torch.zeros(num_slots, dtype=torch.int32),
+            ),
+            prefill_len=SimpleNamespace(np=np.zeros(num_slots, dtype=np.int32)),
+            total_len=SimpleNamespace(gpu=torch.zeros(num_slots, dtype=torch.int32)),
+        )
+        gpu_sampler = GPUWatermarkSampler(
+            watermarker,
+            vllm_config=VllmConfig(),
+            max_num_reqs=num_slots,
+            vocab_size=64,
+            device=device,
+            req_states=gpu_req_states,
+        )
+        cpu_req_states = CPURequestState(
+            max_num_reqs=num_slots,
+            max_model_len=width,
+            max_num_batched_tokens=width,
+            vocab_size=64,
+            device=device,
+        )
+        cpu_sampler = CPUWatermarkSampler(
+            watermarker,
+            vllm_config=VllmConfig(),
+            max_num_reqs=num_slots,
+            vocab_size=64,
+            device=device,
+            req_states=cpu_req_states,
+        )
+        return gpu_sampler, cpu_sampler
+
+    return make
+
+
+def _seed(sampler, req_idx, tokens, prompt_len, context_start=None):
+    """Admit one request with identical logical state on either backend."""
+    params = SamplingParams(temperature=1.0, watermarking=True)
+    params._watermark_context_start = context_start
+    rs = sampler.req_states
+    if hasattr(rs.all_token_ids, "gpu"):
+        rs.all_token_ids.gpu[req_idx, : len(tokens)] = torch.tensor(tokens)
+        rs.prompt_len.np[req_idx] = prompt_len
+        rs.prompt_len.gpu[req_idx] = prompt_len
+        rs.total_len.gpu[req_idx] = len(tokens)
+    else:
+        rs.all_token_ids[req_idx, : len(tokens)] = torch.tensor(tokens)
+        rs.prompt_len[req_idx] = prompt_len
+        rs.total_len[req_idx] = len(tokens)
+    sampler.add_request(req_idx, params)
+
+
+def _assert_parity(gpu_sampler, cpu_sampler, rows, width=64):
+    gpu_contexts = gpu_sampler._get_contexts(rows)
+    cpu_contexts = cpu_sampler._get_contexts(rows)
+    # Pinned storage difference: GPU buffer utils build int64 gathers, the
+    # CPU request state keeps int32 token ids.
+    assert gpu_contexts.dtype == torch.int64
+    assert cpu_contexts.dtype == torch.int32
+    assert torch.equal(gpu_contexts, cpu_contexts.to(torch.int64))
+
+    gpu_repeated = gpu_sampler._get_repeated_contexts(
+        rows, gpu_contexts.to(torch.int32)
+    )
+    cpu_repeated = cpu_sampler._get_repeated_contexts(rows, cpu_contexts)
+    assert torch.equal(gpu_repeated, cpu_repeated)
+
+    generator = torch.Generator().manual_seed(7)
+    logits = torch.randn(len(rows), width, generator=generator)
+    gpu_biased = gpu_sampler.watermarker.bias(
+        logits,
+        gpu_contexts,
+        torch.full((len(rows),), gpu_sampler.watermarker.delta),
+    )
+    cpu_sample = cpu_sampler.watermarker.sample(logits, cpu_contexts.to(torch.int64))
+    assert torch.equal(gpu_biased, cpu_sample.logits)
+    assert torch.equal(gpu_biased.argmax(dim=-1), cpu_sample.token_ids)
+    return gpu_contexts
+
+
+def test_parity_mid_decode_request(make_parity_samplers):
+    """A normal mid-decode request pins today's completion-local convention."""
+    watermarker = SBWWatermarker(key=42, context_width=4)
+    gpu_sampler, cpu_sampler = make_parity_samplers(watermarker, num_slots=1, width=8)
+    tokens = [100, 101, 102, 103, 7, 8, 9, 10]
+    _seed(gpu_sampler, 0, tokens, prompt_len=4)
+    _seed(cpu_sampler, 0, tokens, prompt_len=4)
+
+    contexts = _assert_parity(gpu_sampler, cpu_sampler, rows=torch.tensor([0]))
+    assert torch.equal(contexts, torch.tensor([[7, 8, 9, 10]]))
+
+
+def test_parity_beam_shaped_fresh_request(make_parity_samplers):
+    """A fresh 1-token beam request carries its beam-so-far in the prompt.
+
+    With the watermark context start marking the original prompt end, both
+    backends must see progressive contexts over the beam-so-far instead of
+    the degenerate all -1 context.
+    """
+    watermarker = SBWWatermarker(key=42, context_width=4)
+    gpu_sampler, cpu_sampler = make_parity_samplers(watermarker, num_slots=1, width=8)
+    tokens = [100, 101, 102, 103, 7, 8, 9, 10]
+    _seed(gpu_sampler, 0, tokens, prompt_len=8, context_start=4)
+    _seed(cpu_sampler, 0, tokens, prompt_len=8, context_start=4)
+    gpu_sampler.apply_staged_writes()
+
+    contexts = _assert_parity(gpu_sampler, cpu_sampler, rows=torch.tensor([0]))
+    assert torch.equal(contexts, torch.tensor([[7, 8, 9, 10]]))
+
+
+def test_parity_beam_shaped_fresh_request_defaults_to_prompt_boundary(
+    make_parity_samplers,
+):
+    """Without the hint both backends keep the prompt-length boundary."""
+    watermarker = SBWWatermarker(key=42, context_width=4)
+    gpu_sampler, cpu_sampler = make_parity_samplers(watermarker, num_slots=1, width=8)
+    tokens = [100, 101, 102, 103, 7, 8, 9, 10]
+    _seed(gpu_sampler, 0, tokens, prompt_len=8)
+    _seed(cpu_sampler, 0, tokens, prompt_len=8)
+
+    contexts = _assert_parity(gpu_sampler, cpu_sampler, rows=torch.tensor([0]))
+    assert torch.equal(contexts, torch.tensor([[-1, -1, -1, -1]]))
+
+
+def test_parity_padding_row(make_parity_samplers):
+    """Padding rows (-1 slot) report not repeated on both backends."""
+    watermarker = SBWWatermarker(key=42, context_width=4)
+    gpu_sampler, cpu_sampler = make_parity_samplers(watermarker, num_slots=2, width=8)
+    tokens = [100, 101, 102, 103, 7, 8, 9, 10]
+    _seed(gpu_sampler, 0, tokens, prompt_len=4)
+    _seed(cpu_sampler, 0, tokens, prompt_len=4)
+
+    contexts = _assert_parity(gpu_sampler, cpu_sampler, rows=torch.tensor([0, -1]))
+    assert torch.equal(contexts, torch.tensor([[7, 8, 9, 10], [-1, -1, -1, -1]]))
+
+
+@pytest.mark.parametrize("scope", ["single_turn", "all"])
+def test_parity_repeated_history_scopes(make_parity_samplers, scope):
+    """Repeated contexts are detected identically under both scopes."""
+    watermarker = SBWWatermarker(key=42, context_width=4)
+    gpu_sampler, cpu_sampler = make_parity_samplers(watermarker, num_slots=2, width=12)
+    tokens = [100, 101, 102, 103, 7, 8, 9, 10, 7, 8, 9, 10]
+    for sampler in (gpu_sampler, cpu_sampler):
+        sampler.deduplicate_contexts = scope
+    _seed(gpu_sampler, 0, tokens, prompt_len=4)
+    _seed(cpu_sampler, 0, tokens, prompt_len=4)
+
+    rows = torch.tensor([0])
+    gpu_contexts = gpu_sampler._get_contexts(rows)
+    cpu_contexts = cpu_sampler._get_contexts(rows)
+    assert torch.equal(gpu_contexts, cpu_contexts.to(torch.int64))
+
+    gpu_repeated = gpu_sampler._get_repeated_contexts(
+        rows, gpu_contexts.to(torch.int32)
+    )
+    cpu_repeated = cpu_sampler._get_repeated_contexts(rows, cpu_contexts)
+    # Known, deliberate consumption divergence (out of scope here): the CPU
+    # sampler folds the dedup mask into its SBW skip mask and gates SBW on
+    # temperature != 0; the GPU SBW bias path does neither. The computation
+    # compared here is shared and must agree.
+    assert torch.equal(gpu_repeated, cpu_repeated)
+    assert gpu_repeated.item()

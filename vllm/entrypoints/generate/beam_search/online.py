@@ -46,7 +46,7 @@ class BeamSearchOnlineMixin(ABC):
         temperature = params.temperature
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
-        self.engine_client.input_processor.resolve_watermarking(params)
+        watermarking = self.engine_client.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
 
@@ -67,9 +67,14 @@ class BeamSearchOnlineMixin(ABC):
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
-            watermarking=False,
+            watermarking=watermarking,
             detokenize=False,
         )
+        if watermarking:
+            # The beam-so-far rides in the prompt of each fresh 1-token
+            # request, so the watermark sampler must treat it as generated
+            # context rather than prompt.
+            sampling_params._watermark_context_start = tokenized_length
         params.configure_logprobs(
             sampling_params, self.engine_client.input_processor.vllm_config
         )
