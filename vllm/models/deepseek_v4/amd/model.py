@@ -953,6 +953,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.fuse_mhc_rmsnorm = HAS_TILELANG_MHC and self.use_fused_mhc
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
+        if self.mono is not None:
+            # its kernel weights (and scale copies) are built once
+            self.supports_direct_reload = False
+            self.direct_reload_unsupported_reason = (
+                "the --monokernel decode caches its weights once"
+            )
 
     def hc_pre(
         self,

@@ -120,6 +120,7 @@ from vllm.v1.kv_cache_interface import (
 
 from .interfaces import (
     MixtureOfExperts,
+    SupportsDirectReload,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -2016,7 +2017,7 @@ class DeepseekForCausalLM(DeepseekV2ForCausalLM):
     pass
 
 
-class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
+class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM, SupportsDirectReload):
     pass
 
 

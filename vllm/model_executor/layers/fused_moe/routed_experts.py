@@ -186,6 +186,9 @@ class RoutedExperts(PluggableLayer):
                 self.moe_config.num_logical_experts,
                 self.expert_map_manager.num_fused_shared_experts,
             )
+            # post-load processing deletes the staging parameters it loads into
+            self.supports_direct_reload = False
+            self.direct_reload_unsupported_reason = "online shared experts"
 
         # Round up hidden size and update moe_config.
         # TODO: move roundup to _get_quant_method?

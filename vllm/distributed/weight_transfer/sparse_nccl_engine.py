@@ -37,10 +37,14 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.nccl_common import (
     trainer_init as open_trainer_endpoint,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     CheckpointWeightPatch,
     load_checkpoint_weight_patches,
 )
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+
+logger = init_logger(__name__)
 
 __all__ = [
     "SparseWeightPatch",
@@ -133,6 +137,13 @@ class SparseNCCLWeightTransferEngine(
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
+        if direct_reload_enabled():
+            logger.warning_once(
+                "sparse_nccl weight updates skip the direct-reload lifecycle "
+                "(no model check, no post-load processing rerun): results may "
+                "be wrong for models whose post-load processing re-lays out "
+                "weights."
+            )
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize the NCCL process group with the trainer."""

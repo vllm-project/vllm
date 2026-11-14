@@ -106,6 +106,10 @@ class _MegaMoEMethod(QuantizeMethodBase):
 
 
 class Step5MegaMoEExperts(nn.Module):
+    # prepare_weights runs once (`ready`): a rerun keeps the cold-start transform
+    supports_direct_reload = False
+    direct_reload_unsupported_reason = "its expert weights are transformed only once"
+
     def __init__(
         self,
         vllm_config,

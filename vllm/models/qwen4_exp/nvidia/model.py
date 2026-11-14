@@ -36,6 +36,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsDirectReload,
     SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
@@ -722,6 +723,7 @@ class Qwen4ExpForCausalLM(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsDirectReload,
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
@@ -971,6 +973,7 @@ class Qwen4ExpForConditionalGeneration(
     Qwen3_5ForConditionalGeneration,
     HasInnerState,
     SupportsHCSP,
+    SupportsDirectReload,
     Qwen4ExpMixtureOfExperts,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
