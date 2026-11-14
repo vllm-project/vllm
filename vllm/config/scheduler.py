@@ -217,7 +217,24 @@ class SchedulerConfig:
     """If True, the scheduler checks whether the full input sequence length
     fits in the KV cache before admitting a new request, rather than only
     checking the first chunk. Prevents over-admission and KV cache thrashing
-    with chunked prefill."""
+    with chunked prefill. This reserves the prompt only; output tokens are
+    not included. See `scheduler_reserve_full_lifecycle`."""
+
+    scheduler_reserve_full_lifecycle: bool = False
+    """If True, admit a waiting request only when its full lifecycle fits.
+
+    The check is prompt tokens + `max_tokens` for the new request, plus the
+    blocks requests already in the pool still need to reach their own
+    prompt + `max_tokens`, against the free KV pool. Blocks are not allocated
+    ahead of time; admission is refused when decode would otherwise have to
+    preempt to make room for that growth.
+
+    This is off by default. `max_tokens` is an upper bound, and a request
+    that omits it is allowed to generate until `max_model_len`, so enabling
+    the check can leave most of the KV pool idle on chat workloads. Enable
+    it when `max_tokens` is close to the real output length and
+    `max_num_seqs` is above the number of full sequences the pool can hold.
+    `--scheduler-reserve-full-isl` still applies when this is left off."""
 
     watermark: float = Field(default=0.0, ge=0.0, lt=1.0)
     """Fraction of total KV cache blocks to keep free (the watermark) when
@@ -337,6 +354,7 @@ class SchedulerConfig:
             "scheduler_cls",
             "disable_hybrid_kv_cache_manager",
             "scheduler_reserve_full_isl",
+            "scheduler_reserve_full_lifecycle",
             "watermark",
             "prefill_schedule_interval",
             "async_scheduling",
