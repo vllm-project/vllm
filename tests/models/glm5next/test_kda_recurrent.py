@@ -265,6 +265,230 @@ def test_fused_recurrent_kda_more_than_65535_programs(num_seqs: int, num_heads: 
     assert torch.equal(full_state, ref_state)
 
 
+def _aiter_kda_decode_runnable() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() >= 4 and rocm_aiter_ops._kda_gluon_decode_importable()
+
+
+@pytest.mark.skipif(
+    not _aiter_kda_decode_runnable(),
+    reason="Needs AITER's Gluon KDA decode kernel (CDNA4+)",
+)
+@pytest.mark.parametrize("dim_first", [False, True])
+@torch.inference_mode()
+def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
+    """AITER's single-launch decode kernel runs on plain decode steps only.
+
+    Breakable PIECEWISE graphs replay ``_forward`` against each step's metadata,
+    so the route is chosen there. Capture on an all-decode batch, then replay a
+    mixed step (stock chain) and a decode step (one fused launch); a route fixed
+    in ``forward`` fails one of the two. The reference is a layer built without
+    AITER, with the same weights and caches, in the same conv-state layout.
+    """
+    from transformers import Glm5NextTextConfig
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import CUDAGraphMode, set_current_vllm_config
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    # 32 heads: one rank's share of GLM-5.3-Flash's 64 at tensor parallel 2. With
+    # hidden_size = heads * D, o_proj can be the identity, so the layer output is
+    # the normed core output the tolerances below are set for.
+    heads, max_tokens, num_slots = 32, 64, 80
+    hidden_size = heads * D
+    config = Glm5NextTextConfig(
+        hidden_size=hidden_size,
+        linear_num_heads=heads,
+        linear_head_dim=D,
+        linear_lower_bound=LOWER_BOUND,
+    )
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", dtype=torch.bfloat16
+    )
+    layers: dict[str, Glm5NextLinearAttention] = {}
+    try:
+        with (
+            set_current_vllm_config(vllm_config),
+            set_default_torch_dtype(torch.bfloat16),
+            torch.device(device),
+        ):
+            for index, (name, use_aiter) in enumerate((("stock", "0"), ("fused", "1"))):
+                with monkeypatch.context() as env:
+                    env.setenv("VLLM_ROCM_USE_AITER", use_aiter)
+                    rocm_aiter_ops.refresh_env_variables()
+                    layers[name] = Glm5NextLinearAttention(
+                        config, vllm_config, prefix=f"model.layers.{index}.linear_attn"
+                    )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+
+    stock = layers["stock"]
+    for name, param in stock.named_parameters():
+        if name.endswith("conv1d.weight"):
+            param.normal_(0, 0.5)
+        elif name == "A_log":
+            param.copy_(torch.log(15 * torch.rand_like(param) + 1))
+        elif name == "dt_bias":
+            param.normal_(0, 0.1)
+        elif name == "o_norm.weight":
+            param.normal_(1, 0.1)
+        elif name == "o_proj.weight":
+            param.copy_(torch.eye(hidden_size))
+        else:  # Input projections.
+            param.normal_(0, param.shape[1] ** -0.5)
+    layers["fused"].load_state_dict(stock.state_dict())
+    # load_state_dict skips the weight loaders and the non-persistent decode
+    # conv weight; vLLM's loaders end with this hook.
+    for layer in layers.values():
+        layer.process_weights_after_loading()
+    # The AITER layer runs f_b and g_b as one batched GEMM over the weights loading
+    # filled; the stock layer, the reference below, runs them one at a time.
+    fused_gate_b = layers["fused"]._gate_b_weight
+    assert stock._gate_b_weight is None and fused_gate_b is not None
+    assert layers["fused"].g_b_proj.weight.data_ptr() == fused_gate_b[1].data_ptr()
+    # get_state_shape orients the conv state by the process-wide layout: (dim,
+    # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
+    conv_shape, state_shape = stock.get_state_shape()
+    if stock._conv_state_dim_first != dim_first:
+        conv_shape = conv_shape[::-1]
+    for layer in layers.values():
+        layer._conv_state_dim_first = dim_first
+    saved_caches = (
+        (0.5 * torch.randn(num_slots, *conv_shape, device=device)).bfloat16(),
+        0.1 * torch.randn(num_slots, *state_shape, device=device),
+    )
+    for layer in layers.values():
+        layer.kv_cache = tuple(cache.clone() for cache in saved_caches)
+
+    def metadata(query_lens: list[int]) -> GDNAttentionMetadata:
+        """One request per entry on slots 1, 2, ..., one-token requests first
+        (the builder counts them as decodes). The state indices are a strided
+        column of the block table, as outside FULL graphs."""
+        num_requests, num_decodes = len(query_lens), query_lens.count(1)
+        block_table = torch.zeros(num_requests, 8, dtype=torch.int32, device=device)
+        block_table[:, 0] = torch.arange(1, num_requests + 1, device=device)
+        cu_seqlens = torch.tensor([0, *query_lens]).cumsum(0, dtype=torch.int32)
+        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+            cu_seqlens, device=device
+        )
+        return GDNAttentionMetadata(
+            num_prefills=num_requests - num_decodes,
+            num_prefill_tokens=sum(query_lens) - num_decodes,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decodes,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=sum(query_lens),
+            has_initial_state=torch.arange(num_requests, device=device) < num_decodes,
+            non_spec_query_start_loc=cu_seqlens.to(device),
+            non_spec_state_indices_tensor=block_table[:, 0],
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
+        )
+
+    def forward_context(step_metadata: GDNAttentionMetadata):
+        # GDNAttentionMetadata does not subclass ForwardContext's AttentionMetadata.
+        return override_forward_context(
+            ForwardContext(
+                {},
+                {layer.prefix: step_metadata for layer in layers.values()},  # type: ignore[misc]
+                {},
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            )
+        )
+
+    launches: list[int] = []
+    launch = rocm_aiter_ops.kda_fused_recurrent_packed_decode
+
+    def record_launch(**kwargs):
+        launches.append(kwargs["mixed_qkv"].shape[0])
+        return launch(**kwargs)
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "kda_fused_recurrent_packed_decode", record_launch
+    )
+
+    stream = torch.cuda.Stream()
+    positions = torch.zeros(max_tokens, dtype=torch.int64, device=device)
+    graphs = {}
+    for name, layer in layers.items():
+        static_hidden = torch.zeros(
+            max_tokens, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        torch.accelerator.synchronize()
+        with torch.cuda.stream(stream), forward_context(metadata([1] * max_tokens)):
+            layer(static_hidden, positions)  # Warm-up, as before every capture.
+            with BreakableCUDAGraphCapture() as capture:
+                output = layer(static_hidden, positions)
+        stream.synchronize()
+        assert capture.num_eager_breaks == 1  # ``_forward`` alone.
+        graphs[name] = (capture, static_hidden, output)
+
+    def replay(name: str, step_metadata: GDNAttentionMetadata, hidden: torch.Tensor):
+        """The outputs, caches and fused launches of one replay of graph ``name``
+        from the saved caches."""
+        capture, static_hidden, output = graphs[name]
+        launches.clear()
+        with torch.cuda.stream(stream), forward_context(step_metadata):
+            for cache, saved in zip(layers[name].kv_cache, saved_caches):
+                cache.copy_(saved)
+            static_hidden.copy_(hidden)
+            capture.replay()
+        stream.synchronize()
+        num_tokens = step_metadata.num_actual_tokens
+        conv, recurrent = (cache.clone() for cache in layers[name].kv_cache)
+        return output[:num_tokens].clone(), conv, recurrent, launches[:]
+
+    # The fused kernel keeps outputs in fp32 where the stock chain rounds to bf16:
+    # 2 bf16 ulp of the largest value. State rtol is Kimi-K3's spec-decode one, as
+    # one of these 41.9M elements reaches 3.8e-3, past its packed-decode 2e-3.
+    fused_rtol = 2 * torch.finfo(torch.bfloat16).eps
+    fused_state_tol = {"atol": 2e-3, "rtol": 3e-2}
+    # (query lengths, expected fused launches (rows each), output rtol, state tol)
+    steps: list[tuple[list[int], list[int], float, dict[str, float]]] = [
+        ([1, 1, 50], [], 0, {"atol": 0, "rtol": 0}),  # Mixed: stock, bit for bit.
+        ([1, 1, 1], [3], fused_rtol, fused_state_tol),  # Decode: one fused launch.
+    ]
+    for query_lens, expected_launches, rtol, state_tol in steps:
+        step_metadata = metadata(query_lens)
+        hidden = torch.randn(max_tokens, hidden_size, device=device).bfloat16()
+        torch.accelerator.synchronize()
+        stock_out, stock_conv, stock_state, stock_launches = replay(
+            "stock", step_metadata, hidden
+        )
+        fused_out, fused_conv, fused_state, fused_launches = replay(
+            "fused", step_metadata, hidden
+        )
+
+        assert stock_launches == []
+        assert fused_launches == expected_launches, (
+            f"{query_lens}: fused launches (rows each) {fused_launches}"
+        )
+        # The requests own slots 1..len(query_lens); every other slot is as saved.
+        untouched = torch.ones(num_slots, dtype=torch.bool, device=device)
+        untouched[1 : len(query_lens) + 1] = False
+        for cache, saved in zip((fused_conv, fused_state), saved_caches):
+            assert torch.equal(cache[untouched], saved[untouched])
+        torch.testing.assert_close(
+            fused_out, stock_out, rtol=rtol, atol=rtol * stock_out.abs().max().item()
+        )
+        torch.testing.assert_close(fused_state, stock_state, **state_tol)
+        torch.testing.assert_close(fused_conv, stock_conv, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("offset", [16, 144, 256])
 @pytest.mark.parametrize("dim_first", [False, True])
 @pytest.mark.parametrize("num_spec", [0, 3])
@@ -284,7 +508,10 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
     from vllm.v1.worker.workspace import WorkspaceManager
 
-    if kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5) != "flashkda":
+    if (
+        kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5, torch.float32)
+        != "flashkda"
+    ):
         pytest.skip("requires FlashKDA")
     import vllm._flashkda_C  # noqa: F401
 
@@ -306,6 +533,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.conv1d = SimpleNamespace(
         weight=torch.randn(width, 1, 4, device=device) * 0.1, bias=None
     )
+    layer._aiter_conv1d_exact = False
     layer.A_log = torch.randn(1, 1, heads, 1, device=device) * 0.1
     layer.dt_bias = torch.randn(heads * D, device=device) * 0.1
     state_shape = (2, heads, D, D)
@@ -431,3 +659,248 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
         actual[:, : length - offset], expected[:, suffix], atol=0.003, rtol=0.03
     )
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
+
+
+@pytest.mark.parametrize("conv", ["vllm", "aiter", "fp32 weights"])
+@pytest.mark.parametrize("num_decodes", [0, 3])
+@torch.inference_mode()
+def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
+    """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
+    the paged state and output in place, and matches the Triton chunk path
+    to bf16 precision (chunk size 32 vs 64). Decodes in the same step take
+    the recurrent kernel, so FlashKDA sees the prefills only. Both paths run
+    with either prefill conv; AITER's takes only conv weights with bf16
+    values."""
+    from types import SimpleNamespace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.glm5next.common import kda
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
+        pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
+    if conv != "vllm" and not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+        pytest.skip("requires AITER's HIP prefill conv")
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    # 32 local heads: the default 64 KDA heads at tensor parallel size 2.
+    heads, prefill_lengths = 32, [37, 100]
+    lengths = [1] * num_decodes + prefill_lengths
+    num_tokens, num_slots = sum(lengths), 4 + num_decodes
+    width, state_len, slot_size = 3 * heads * D, 3, heads * D * D
+    layer = object.__new__(kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer.0"
+    layer.local_num_heads = heads
+    layer.head_dim = D
+    layer.local_projection_size = heads * D
+    layer.kda_safe_gate = True
+    layer.kda_lower_bound = LOWER_BOUND
+    layer._conv_state_dim_first = False
+    # The fp32 conv parameter holds bf16 values when it comes from a bf16
+    # checkpoint.
+    conv_weight = 0.5 * torch.randn(width, 1, 4, device=device)
+    if conv != "fp32 weights":
+        conv_weight = conv_weight.bfloat16().float()
+    layer.conv1d = SimpleNamespace(weight=conv_weight, bias=None)
+    layer.aiter_conv1d_weight = None
+    if conv != "vllm":
+        layer.aiter_conv1d_weight = torch.empty(
+            width, 4, device=device, dtype=torch.bfloat16
+        )
+    layer._aiter_conv1d_exact = False
+    layer._copy_aiter_conv1d_weight()
+    layer.A_log = 0.5 * torch.randn(1, 1, heads, 1, device=device)
+    layer.dt_bias = 0.1 * torch.randn(heads * D, device=device)
+
+    # Padded slot strides, as in the hybrid KV cache.
+    conv_storage = torch.randn(
+        num_slots, width * state_len + 8, device=device, dtype=torch.bfloat16
+    )
+    recurrent_storage = 0.5 * torch.randn(num_slots, slot_size + 8, device=device)
+    projected = torch.randn(
+        num_tokens, width + heads, device=device, dtype=torch.bfloat16
+    )
+    raw_qkv, beta = projected[:, :width], projected[:, width:].unsqueeze(0)
+    gate = torch.randn(1, num_tokens, heads, D, device=device, dtype=torch.bfloat16)
+
+    cu_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    nums, batch_ptr, chunk_offsets = compute_causal_conv1d_metadata(
+        cu_cpu, device=device
+    )
+    # Decode-first, with the prefill-only views the metadata builder adds.
+    slots = torch.tensor(
+        [*range(3, 3 + num_decodes), 1, 2], dtype=torch.int32, device=device
+    )
+    has_initial_state = torch.arange(num_decodes + 2, device=device) <= num_decodes
+    metadata = GDNAttentionMetadata(
+        num_prefills=len(prefill_lengths),
+        num_prefill_tokens=sum(prefill_lengths),
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=num_tokens,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=cu_cpu.to(device),
+        non_spec_state_indices_tensor=slots,
+        prefill_query_start_loc=(cu_cpu[num_decodes:] - num_decodes).to(device),
+        prefill_state_indices=slots[num_decodes:],
+        prefill_has_initial_state=has_initial_state[num_decodes:],
+        nums_dict=nums,
+        batch_ptr=batch_ptr,
+        token_chunk_offset_ptr=chunk_offsets,
+    )
+    monkeypatch.setattr(
+        kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata}),
+    )
+
+    prefill_calls = []
+    kda_flashkda_prefill = rocm_aiter_ops.kda_flashkda_prefill
+
+    def spy(**kwargs):
+        prefill_calls.append(kwargs)
+        return kda_flashkda_prefill(**kwargs)
+
+    monkeypatch.setattr(rocm_aiter_ops, "kda_flashkda_prefill", staticmethod(spy))
+    conv_weight_dtypes = []
+    conv_prefill = rocm_aiter_ops.causal_conv1d_prefill_split_qkv
+
+    def conv_spy(*args, **kwargs):
+        conv_weight_dtypes.append(args[1].dtype)
+        return conv_prefill(*args, **kwargs)
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "causal_conv1d_prefill_split_qkv", staticmethod(conv_spy)
+    )
+    # The step here is far below the size from which the layer takes AITER's conv.
+    monkeypatch.setattr(kda, "_AITER_CONV1D_MIN_TOKENS", 0)
+
+    def run(backend: str):
+        conv_pool, recurrent_pool = conv_storage.clone(), recurrent_storage.clone()
+        conv = conv_pool[:, : width * state_len].view(num_slots, state_len, width)
+        recurrent = recurrent_pool[:, :slot_size].view(num_slots, heads, D, D)
+        layer.kv_cache = (conv, recurrent)
+        layer.kda_prefill_backend = backend
+        out = torch.full(
+            (1, num_tokens, heads, D), float("nan"), device=device, dtype=torch.bfloat16
+        )
+        layer._forward(raw_qkv, gate, beta, out)
+        return out, recurrent
+
+    triton_out, triton_recurrent = run("triton")
+    assert not prefill_calls
+    out, recurrent = run("aiter_flashkda")
+    assert len(prefill_calls) == 1
+    assert prefill_calls[0]["q"].shape[1] == sum(prefill_lengths)
+    assert prefill_calls[0]["cu_seqlens"].tolist() == [0, 37, 137]
+    # Both runs' convs, or none: fp32 weight values keep vLLM's kernel.
+    expected_convs = [torch.bfloat16] * 2 if conv == "aiter" else []
+    assert conv_weight_dtypes == expected_convs
+
+    torch.testing.assert_close(out, triton_out, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(recurrent, triton_recurrent, rtol=2e-2, atol=2e-2)
+    written = slots.tolist()
+    for actual, expected in (
+        (out, triton_out),
+        (recurrent[written], triton_recurrent[written]),
+    ):
+        actual, expected = actual.float(), expected.float()
+        error = (actual - expected).norm() / expected.norm()
+        assert error < 2e-2, f"relative L2 error {error:.2e}"
+
+
+@pytest.mark.parametrize("prefill_len", [700, 5000])
+@pytest.mark.parametrize("dim_first", [False, True])
+@torch.inference_mode()
+def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
+    """AITER's HIP prefill conv, called as the layer calls it, matches
+    ``causal_conv1d_fn`` on the layer's fp32 weights holding bf16 values:
+    q|k|v to bf16 rounding and the conv state exactly. Its 32-token tiles are
+    scheduled from vLLM's 8-token schedule."""
+    from types import SimpleNamespace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    if not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+        pytest.skip("requires AITER's HIP prefill conv (VLLM_ROCM_USE_AITER=1, gfx950)")
+
+    torch.manual_seed(3)
+    device = torch.device("cuda")
+    proj = 16 * D
+    width = 3 * proj
+    # Decodes lead the batch; the last prefill starts without a state.
+    lengths = [1, 1, 1, prefill_len, 37]
+    has_initial_state = torch.tensor([True] * 4 + [False], device=device)
+    num_tokens, num_lines = sum(lengths), len(lengths) + 3
+    # q|k|v is a column block of the wider in_proj output, as in the layer.
+    projected = torch.randn(
+        num_tokens, width + 272, device=device, dtype=torch.bfloat16
+    )
+    x = projected[:, :width].transpose(0, 1)
+    weight = (0.5 * torch.randn(width, 4, device=device)).bfloat16()
+    shape = (num_lines, width, 3) if dim_first else (num_lines, 3, width)
+    pool = torch.randn(shape, device=device, dtype=torch.bfloat16)
+    state = pool if dim_first else pool.transpose(-1, -2)
+    cache_indices = (torch.randperm(num_lines - 1, device=device)[:5] + 1).int()
+    cu_cpu = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    cu = cu_cpu.to(device)
+
+    def metadata():
+        nums, batch_ptr, offsets = compute_causal_conv1d_metadata(cu_cpu, device=device)
+        return SimpleNamespace(
+            nums_dict=nums, batch_ptr=batch_ptr, token_chunk_offset_ptr=offsets
+        )
+
+    initial = pool.clone()
+    expected = causal_conv1d_fn(
+        x,
+        weight.float(),
+        None,
+        activation="silu",
+        conv_states=state,
+        has_initial_state=has_initial_state,
+        cache_indices=cache_indices,
+        query_start_loc=cu,
+        metadata=metadata(),
+    ).transpose(0, 1)
+    expected_pool = pool.clone()
+    pool.copy_(initial)
+    step = metadata()
+    q, k, v = rocm_aiter_ops.causal_conv1d_prefill_split_qkv(
+        x,
+        weight,
+        None,
+        state,
+        cu,
+        proj,
+        proj,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        metadata=step,
+    )
+    assert all(t.is_contiguous() for t in (q, k, v))
+    torch.testing.assert_close(
+        torch.cat([q, k, v], dim=-1), expected, atol=2e-2, rtol=2e-2
+    )
+    assert torch.equal(pool, expected_pool)
+
+    schedule = step.nums_dict[32]
+    chunks = [
+        (seq, chunk)
+        for seq, length in enumerate(lengths)
+        for chunk in range(-(-length // 32))
+    ]
+    assert schedule["tot"] == len(chunks)
+    assert chunks == list(
+        zip(
+            schedule["batch_ptr"].tolist(),
+            schedule["token_chunk_offset_ptr"].tolist(),
+        )
+    )
