@@ -149,6 +149,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        self.validate_requests_on_platform = _engine_validates_requests()
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
@@ -1269,7 +1270,8 @@ class EngineCore:
                 request.mm_features
             )
 
-        _validate_request_on_platform(request)
+        if self.validate_requests_on_platform:
+            _validate_request_on_platform(request)
 
         watermark_config = self.vllm_config.watermark_config
         params = request.sampling_params
@@ -1308,27 +1310,34 @@ class EngineCore:
         raise NotImplementedError
 
 
-def _validate_request_on_platform(request: EngineCoreRequest) -> None:
-    """Run the platform's `validate_request` on a request at the engine.
+def _engine_validates_requests() -> bool:
+    """Whether the engine must run the platform's `validate_request`.
 
-    The Python `InputProcessor` calls it before sending a request, but other
-    frontends (e.g. the Rust frontend) send `EngineCoreRequest`s directly, so
-    the platform's checks would be skipped. Rejections raise
-    `VLLMValidationError`, which is returned to the client as a
-    `validation_error` request error. Platforms that keep the default no-op
-    implementation skip this entirely.
+    The Python `InputProcessor` already calls it before sending a request; the
+    Rust frontend sends `EngineCoreRequest`s directly and skips it. Platforms
+    that keep the default no-op have nothing to check.
     """
-    from vllm.inputs.engine import EngineInput
     from vllm.platforms import current_platform
     from vllm.platforms.interface import Platform
 
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        return False
     platform_cls = (
         current_platform if isclass(current_platform) else type(current_platform)
     )
-    if getattr_static(platform_cls, "validate_request") is getattr_static(
+    return getattr_static(platform_cls, "validate_request") is not getattr_static(
         Platform, "validate_request"
-    ):
-        return
+    )
+
+
+def _validate_request_on_platform(request: EngineCoreRequest) -> None:
+    """Run the platform's `validate_request` on a request at the engine.
+
+    Rejections raise `VLLMValidationError`, which is returned to the client as
+    a `validation_error` request error.
+    """
+    from vllm.inputs.engine import EngineInput
+    from vllm.platforms import current_platform
 
     params = request.sampling_params or request.pooling_params
     assert params is not None

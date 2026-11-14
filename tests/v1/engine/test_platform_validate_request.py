@@ -13,7 +13,10 @@ from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms.interface import Platform
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import _validate_request_on_platform
+from vllm.v1.engine.core import (
+    _engine_validates_requests,
+    _validate_request_on_platform,
+)
 
 
 def make_request(**kwargs) -> EngineCoreRequest:
@@ -80,3 +83,15 @@ def test_rejection_is_a_validation_error(platform, error):
     platform.error = error
     with pytest.raises(VLLMValidationError, match="unsupported option"):
         _validate_request_on_platform(make_request())
+
+
+@pytest.mark.parametrize("rust_frontend", [False, True])
+def test_engine_validates_only_for_rust_frontend(platform, monkeypatch, rust_frontend):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", str(int(rust_frontend)))
+    assert _engine_validates_requests() is rust_frontend
+
+
+def test_default_platform_is_skipped(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    with patch("vllm.platforms.current_platform", Platform):
+        assert not _engine_validates_requests()
