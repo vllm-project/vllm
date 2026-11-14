@@ -130,6 +130,9 @@ class ROLE(Enum):
     NOTINIT = "notinit"
 
 
+MORIIO_HANDSHAKE_VERSION = 1
+
+
 class MoRIIOAgentMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -152,6 +155,14 @@ class MoRIIOAgentMetadata(
     # Layer name -> index of its first region in kv_caches_base_addr. Peers can
     # register different layers (a pipeline stage holds a slice of them).
     layer_base_addr_index: dict[str, int] = {}
+    # Handshake compatibility fields (Gap 12).
+    # Default 0 so omit_defaults=True keeps the field on the wire when set to
+    # MORIIO_HANDSHAKE_VERSION (non-zero). A pre-PR peer omits the field
+    # entirely; msgspec fills 0, which _validate_handshake_compat treats as
+    # legacy (warning, not rejection).
+    handshake_version: int = 0
+    # "read" or "write" — the MoRIIOMode this agent is running in.
+    mode: str = ""
 
 
 class RoleManager:
