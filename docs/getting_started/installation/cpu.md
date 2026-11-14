@@ -295,6 +295,18 @@ See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, support
 
 This value is 0 by default, which means vLLM doesn't override the KV cache size through this variable. When set, the value is in GiB (e.g, `VLLM_CPU_KVCACHE_SPACE`=40 means 40 GiB). Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory. This is a legacy setting; use `--kv-cache-memory-bytes` instead.
 
+### Why does startup fail with "is less than requested memory for kv"?
+
+On the CPU backend, `--gpu-memory-utilization` (default `0.92`) is the fraction of each NUMA memory node's total memory that vLLM reserves, despite its name. If less than that is available on the node, for example because other processes already use much of the memory, startup fails when vLLM allocates the KV cache, with a message such as `Available memory on node 0 (16.05/48.0 GiB) on kv cache allocation is less than requested memory for kv (42.02/44.16 GiB)`.
+
+Lower the value, or free memory used by other processes:
+
+```bash
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --gpu-memory-utilization 0.5
+```
+
+When `--kv-cache-memory-bytes` is set, that size is checked against the available memory instead, so it must also fit.
+
 ### How to do performance tuning for vLLM CPU?
 
 First of all, please make sure the thread-binding and KV cache space are properly set and take effect. You can check the thread-binding by running a vLLM benchmark and observing CPU cores usage via `htop`.
