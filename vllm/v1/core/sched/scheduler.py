@@ -2377,7 +2377,10 @@ class Scheduler(SchedulerInterface):
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
                 # In-flight is settled, so this step's tokens count as done.
-                if request.num_output_tokens == 0:
+                if (
+                    request.num_output_tokens == 0
+                    and self.scheduler_config.enable_prefill_progress
+                ):
                     self._report_prefill_progress(request, prefill_progress)
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
