@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import Generator
@@ -8,6 +10,7 @@ from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     apply_top_k_top_p_pytorch,
 )
 
@@ -137,7 +140,20 @@ def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
 # =============================================================================
 
 
-@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
+def _triton_kernel_available() -> bool:
+    if not HAS_TRITON:
+        return False
+    from vllm.v1.sample.ops.topk_topp_triton import _supported_device
+
+    return _supported_device()
+
+
+TRITON_KERNEL_AVAILABLE = _triton_kernel_available()
+
+
+@pytest.mark.skipif(
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
+)
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -733,38 +749,6 @@ class TestTritonTopkTopp:
             f"{kept_topk_topp.tolist()}"
         )
 
-    @pytest.mark.parametrize("batch_size", [8, 48])
-    def test_skip_split_without_topp_only_rows(
-        self, batch_size: int, monkeypatch: pytest.MonkeyPatch
-    ):
-        """has_topp_only_rows=False skips the split pipeline; the result must
-        not change when every top-p row also has a top-k, grammar rows
-        (k >= #finite logits) included."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
-
-        vocab_size = 32000
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
-        logits[1] = float("-inf")
-        idx = torch.randperm(vocab_size, generator=self.generator)[:30]
-        logits[1, idx] = torch.randn(30, generator=self.generator)
-        k = torch.randint(
-            50, 100, (batch_size,), generator=self.generator, dtype=torch.int32
-        )
-        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
-        k[::4] = vocab_size
-        p[::4] = 1.0
-
-        expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
-        monkeypatch.setattr(
-            tt, "_apply_topp_split", lambda *args: pytest.fail("split launched")
-        )
-        actual = tt.apply_top_k_top_p_triton(
-            logits.clone(), k, p, has_topp_only_rows=False
-        )
-        assert torch.equal(actual, expected)
-
     def test_topp_tie_break_deterministic(self):
         """Boundary-duplicate trimming must be deterministic across calls.
 
@@ -859,6 +843,288 @@ class TestTritonTopkTopp:
         kept_ties = kept[:, tie_idx]
         num_kept_ties = kept_ties.sum(dim=-1, keepdim=True)
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
+
+
+@pytest.mark.skipif(
+    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
+)
+class TestTritonTopkToppExact:
+    """Exact selection on every kernel path: the 32 to 256 logit tiers, the
+    histogram path with a shared gather or refinement (large k, huge nuclei,
+    ties at the cut), and the radix last resort (heavy ties)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device(DEVICE_TYPE)
+        self.generator = Generator(device=DEVICE_TYPE).manual_seed(7)
+
+    @pytest.mark.parametrize(
+        "kind,batch,vocab,k,p",
+        [
+            ("normal", 8, 131072, None, 0.95),
+            ("normal", 16, 248320, 20, 0.95),
+            ("normal", 64, 248320, 200, None),
+            ("normal", 8, 131072, 256, 0.9),
+            ("normal", 8, 131072, 1000, 0.9),
+            ("normal", 8, 131072, 5000, None),
+            ("zipf", 8, 131072, None, 0.9),
+            ("zipf", 8, 131072, 100, 0.9),
+            ("zipf", 1, 248320, None, 0.95),
+            ("normal", 8, 248320, None, 0.99),
+            ("huge", 4, 131072, 1000, None),
+            ("huge", 4, 131072, None, 0.5),
+            ("bf16", 4, 131072, 300, None),
+            ("bf16", 4, 131072, None, 0.99),
+            ("bf16", 64, 65536, "mixed", "mixed"),
+            ("zeros", 8, 65536, 20, 0.5),
+            ("neginf", 8, 32000, 200, 0.9),
+            ("normal", 3, 65537, "mixed", "mixed"),
+            ("normal", 5, 1000, 50, 0.9),
+        ],
+    )
+    def test_exact_selection(self, kind, batch, vocab, k, p):
+        from vllm.v1.sample.ops.topk_topp_triton import (
+            apply_top_k_top_p_triton,
+        )
+
+        source = _make_logits(kind, batch, vocab, self.generator)
+        k = _make_param(k, batch, vocab, self.generator, torch.int32)
+        p = _make_param(p, batch, vocab, self.generator, torch.float32)
+        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        _assert_exact_filter(source, actual, k, p)
+
+    @pytest.mark.parametrize("max_k", [1, 4, 32, 64])
+    @pytest.mark.parametrize("use_p", [True, False])
+    def test_exact_hazards_at_the_cut(self, max_k, use_p):
+        """Exact cut with ties, signed zeros, underflow, -inf or NaN at the cut."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 151936
+        source = torch.randn(12, vocab, generator=self.generator) * 4
+        source = source.bfloat16().float()
+        k = torch.tensor(
+            [1, 64, 17, 20, 20, 20, 20, 20, 20, 20, 0, 0], dtype=torch.int32
+        )
+        k = k.clamp(max=max_k)
+        k[10:] = vocab
+        source[3, ::997] = source[3].topk(int(k[3])).values[-1]
+        source[4] = -30.0
+        source[4, 5:65:3] = 0.5
+        source[4, [9000, 70000, 140000]] = torch.tensor([2.0, 1.5, 1.0])
+        source[5, 7] = 150.0
+        source[6] = float("-inf")
+        source[6, [0, 7, 300]] = torch.tensor([1.0, 3.0, 2.0])
+        source[7] = float("nan")
+        source[8] = -30.0
+        source[8, 0:200:5] = torch.tensor([0.0, -0.0] * 20)
+        source[8, [7, 11]] = torch.tensor([1.0, 0.5])
+        source[9, [3, 50, 500]] = float("nan")
+        p = torch.tensor(
+            [0.9, 1 - 1e-6, 1e-6, 0.95, 0.5, 1, 0.95, 0.95, 0.9, 0.9, 0.9, 1]
+        )
+        p = p if use_p else None
+        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        # NaN is never kept, so the reference orders it as -inf.
+        source, actual = (
+            t.masked_fill(t.isnan(), float("-inf")) for t in (source, actual)
+        )
+        _assert_exact_filter(source, actual, k, p)
+
+    def test_cuda_graph_replay(self):
+        """Device k/p are read at replay time, and the grid barrier resets."""
+        from vllm.v1.sample.ops.topk_topp_triton import (
+            apply_top_k_top_p_triton,
+        )
+
+        batch, vocab = 4, 65536
+        source = torch.randn(batch, vocab, generator=self.generator)
+        k = torch.tensor([1, 20, 2000, vocab], dtype=torch.int32)
+        p = torch.tensor([0.1, 0.5, 0.8, 1.0])
+        logits = source.clone()
+        apply_top_k_top_p_triton(logits, k, p)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            apply_top_k_top_p_triton(logits, k, p)
+        for _ in range(4):
+            k.copy_(k.roll(1))
+            p.copy_(p.roll(-1))
+            logits.copy_(source)
+            graph.replay()
+            _assert_exact_filter(source, logits, k, p)
+
+    def test_warmup_covers_runtime_launch(self):
+        """The startup warmup compiles the variant that every call launches, so
+        no request pays a compile."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        kernels = (tt._levels_kernel, tt._filter_kernel)
+        for kernel in kernels:
+            kernel.device_caches.clear()
+        tt.reset_buffer_cache()
+        vocab = 65536
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(get_vocab_size=lambda: vocab)
+        )
+        for owner in (tt._levels_warmup, tt._filter_warmup):
+            owner.compile_many(owner.get_warmup_keys(vllm_config=config))
+        warmed = [_num_compiled(kernel) for kernel in kernels]
+        assert warmed == [1, 1]
+        for k, p in ((20, 0.9), (None, 0.95), (3000, None)):
+            batch = 8
+            logits = torch.randn(batch, vocab, generator=self.generator)
+            k_rows = None if k is None else torch.full((batch,), k, dtype=torch.int64)
+            p_rows = None if p is None else torch.full((batch,), p)
+            tt.apply_top_k_top_p_triton(logits, k_rows, p_rows)
+        assert [_num_compiled(kernel) for kernel in kernels] == warmed
+
+    def test_high_p_tail_is_refined_by_all_programs(self):
+        """A top-p nucleus that ends below the first histogram span (16 nats under the
+        row max) is refined in further rounds by all programs. It used to fall back to
+        one program's radix select per row, 50x to 100x slower than a nucleus inside
+        the span (p = 0.999 on real rows took 7 ms to 39 ms)."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch = 64
+        source = _make_logits("tail", batch, 131072, self.generator)
+
+        def median_ms(p: float) -> float:
+            p_rows = torch.full((batch,), p)
+            times = []
+            for _ in range(5):
+                logits = source.clone()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                apply_top_k_top_p_triton(logits, None, p_rows)
+                end.record()
+                end.synchronize()
+                times.append(start.elapsed_time(end))
+            return sorted(times)[2]
+
+        assert median_ms(0.9995) < 10 * median_ms(0.9)
+
+    def test_empty_batch(self):
+        """Steps with no rows to filter (e.g. no drafts to verify) return as is."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.empty(0, 32000)
+        k = torch.empty(0, dtype=torch.int32)
+        assert apply_top_k_top_p_triton(logits, k, torch.empty(0)) is logits
+
+    def test_reserved_workspace_covers_the_call(self):
+        """Memory profiling reserves the workspace, so a call within the reserved
+        rows allocates nothing after the KV cache is sized."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        tt.reset_buffer_cache()
+        batch, vocab = 40, 65536
+        logits = torch.randn(batch, vocab, generator=self.generator)
+        k = torch.full((batch,), 20, dtype=torch.int32)
+        tt.reserve_workspace(logits.device, batch, vocab)
+        reserved = torch.accelerator.memory_allocated()
+        tt.apply_top_k_top_p_triton(logits, k, None)
+        assert torch.accelerator.memory_allocated() == reserved
+
+    def test_launch_cache_releases_inputs(self):
+        """Launches are cached per shape, but not their logits, k and p: verification
+        sees hundreds of row counts, and keeping each one's logits ran out of memory.
+        Checked after the first call (cache miss) and after a repeated one (hit)."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        tt.reset_buffer_cache()
+        batch, vocab = 40, 65536
+        tt.reserve_workspace(torch.device(DEVICE_TYPE, 0), batch, vocab)
+        before = torch.accelerator.memory_allocated()
+        for _ in range(2):
+            logits = torch.randn(batch, vocab, generator=self.generator)
+            k = torch.full((batch,), 20, dtype=torch.int32)
+            tt.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
+            del logits, k
+            assert torch.accelerator.memory_allocated() == before
+
+    def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
+        import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
+
+        calls = []
+        real = sampler_ops.apply_top_k_top_p_triton
+
+        def spy(logits, k, p):
+            calls.append(logits.shape)
+            return real(logits, k, p)
+
+        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_triton", spy)
+        logits = torch.randn(8, 32000, generator=self.generator)
+        k = torch.full((8,), 50, dtype=torch.int32)
+        apply_top_k_top_p(logits, k, None)
+        assert calls == [logits.shape]
+
+
+def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Tensor:
+    if kind == "zipf":
+        base = -1.1 * torch.arange(1, vocab + 1, dtype=torch.float32).log()
+        return base[torch.rand(batch, vocab, generator=gen).argsort(dim=-1)]
+    if kind == "zeros":
+        return torch.zeros(batch, vocab)
+    logits = torch.randn(batch, vocab, generator=gen)
+    if kind == "tail":  # top-p 0.9995 cuts 16.7 nats below the max, past the 16
+        logits[:, :4] = 18.0
+    if kind == "huge":  # thinking-budget forcing, at a sampled position
+        logits[:, 0] = 1e9
+    if kind == "neginf":
+        logits[:, 100:] = -float("inf")
+    return logits.bfloat16().float() if kind == "bf16" else logits
+
+
+def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
+    if kind is None:
+        return None
+    if kind != "mixed":
+        return torch.full((batch,), kind, dtype=dtype)
+    if dtype == torch.int32:
+        value = torch.randint(1, 300, (batch,), generator=gen, dtype=dtype)
+        value[::3] = vocab
+    else:
+        value = torch.rand(batch, generator=gen) * 0.9 + 0.1
+        value[1::3] = 1.0
+    return value
+
+
+def _assert_exact_filter(
+    source: torch.Tensor,
+    actual: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+):
+    """Kept tokens are exactly the prefix of the (logit desc, index asc) order
+    that top-k, then top-p on the renormalized top-k mass, selects."""
+    vocab = source.shape[1]
+    order = source.argsort(dim=-1, descending=True, stable=True)
+    kept = actual.isfinite().gather(-1, order)
+    count = kept.sum(-1)
+    ranks = torch.arange(vocab, device=source.device)
+    assert torch.equal(kept, ranks < count[:, None]), "kept set is not a prefix"
+    assert torch.equal(actual[actual.isfinite()], source[actual.isfinite()])
+    finite = source.isfinite().sum(-1)
+    budget = finite if k is None else torch.minimum(k.long(), finite)
+    assert ((count <= budget) & ((count >= 1) | (finite == 0))).all()
+    if p is None:
+        assert torch.equal(count, budget)
+        return
+    values = source.gather(-1, order).double()
+    prefix = values.masked_fill(ranks >= budget[:, None], -float("inf"))
+    prefix = prefix.softmax(-1).cumsum(-1)
+    mass = prefix.gather(-1, (count - 1).clamp_min(0)[:, None]).squeeze(-1)
+    previous = prefix.gather(-1, (count - 2).clamp_min(0)[:, None]).squeeze(-1)
+    previous = torch.where(count <= 1, 0, previous)
+    target = p.double()
+    ok = torch.where(
+        p >= 1, count == budget, (mass >= target - 1e-7) & (previous <= target + 1e-7)
+    )
+    assert (ok | (finite == 0)).all(), "top-p cutoff outside the FP64 mass bounds"
+
+
+def _num_compiled(kernel) -> int:
+    return sum(len(cache[0]) for cache in kernel.device_caches.values())
 
 
 # =============================================================================
