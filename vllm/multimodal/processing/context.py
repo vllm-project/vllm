@@ -529,6 +529,7 @@ class BaseProcessingInfo:
                 key: getattr(sub_processor, key, None)
                 for key in sub_processor.valid_kwargs.__annotations__
             }
+            | getattr(processor, scope, {})
             | processor_defaults.get(scope, {})
             | processor_defaults.get("common_kwargs", {})
             for scope, sub_processor in sub_processors.items()
