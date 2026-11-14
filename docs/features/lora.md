@@ -451,6 +451,58 @@ Classification heads support LoRA A/B weights (matching the base head's output s
 
 ## Using Tips
 
+### MoE LoRA with data and expert parallelism
+
+With data and expert parallelism, MoE tokens are dispatched between ranks along
+with their adapter IDs, and each rank maps the IDs to its own LoRA slots, so an
+adapter may occupy different slots on different ranks. A rank that has not
+loaded the adapter computes those tokens' expert outputs without the LoRA delta,
+so load the adapters on all ranks and keep `max_loras` large enough to hold them.
+
+### Group-wide MoE admission (experimental)
+
+With MRV2 and internal MoE data parallelism, enable
+`--enable-group-lora-admission --all2all-backend allgather_reducescatter`
+alongside `--enable-lora`. Each engine admits requests from the same bounded
+adapter set. Needed adapters are loaded on every receiver before admission;
+`max_loras` bounds this group-wide set, not each engine's independent choice.
+
+Pinned adapters count against the budget. Under contention, engines stop
+admitting new LoRA requests into the current set, drain existing work, then
+select the oldest waiting adapters (respecting priority scheduling). Base-model
+requests do not consume adapter slots. If pins fill the budget, other adapters
+wait until a pin is removed.
+
+The group assigns adapter IDs during registration, so independent frontend
+counters cannot alias different adapters. Successful loads update the submitted
+`LoRARequest` with its canonical ID. An unoccupied slot can be reused while
+unrelated requests continue; workers retire outstanding GPU reads before writing
+the replacement slot.
+
+Use the server or coordinated async client for loads, pins, and removals. Direct
+in-process callers must register an adapter with `add_lora` before generating;
+unregistered IDs and uncoordinated synchronous mutations are refused in this mode.
+
+Loads, pins, and removals use the existing loaders after outstanding GPU work
+retires. Adapter buffer addresses are preserved. Workers must acknowledge the
+same checkpoint fingerprints before a new set is published. A failed load or
+identity mismatch triggers group-wide rollback from retained CPU adapter objects;
+the previous resident set, cache order and pins must be restored on every worker
+before admission resumes. The failed update returns an error without stopping
+healthy engines. Failed promotions reject the affected requests until the unchanged
+adapter files are restored and the adapter is reloaded. GPU buffer addresses stay
+stable; CPU memory can temporarily exceed the cache budget while the previous
+objects are retained. A lost worker, invalid CUDA context or failed restoration
+still stops the engines with admission blocked; rollback is not worker restart
+or fault tolerance. Keep checkpoint files immutable
+and use distinct IDs for distinct versions; in-place updates are refused.
+
+The initial implementation requires PP=1 and does not support external/hybrid
+DP load balancing, elastic EP, fault tolerance, streaming inputs, or structured
+outputs. Coordination adds CPU collectives at scheduling boundaries and GPU
+retirement at adapter-set changes; no per-layer synchronization is added.
+Performance and graph-replay validation are separate from eager correctness.
+
 ### Configuring `max_lora_rank`
 
 The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:

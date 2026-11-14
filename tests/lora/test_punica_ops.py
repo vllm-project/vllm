@@ -9,6 +9,7 @@ import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
+from vllm.lora.ops.triton_ops.lora_kernel_metadata import remap_lora_ids
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -423,6 +424,39 @@ test_params = {
 DTYPES = [torch.float16, torch.bfloat16]
 DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
+
+
+@pytest.mark.parametrize("slots", [[7, 2**40], [2**40, 7], [0, 2**40, 7, 0]])
+def test_dispatched_lora_ids_follow_local_slots(slots):
+    """Adapter ids map to this rank's slots; base and non-resident ids map to -1."""
+    ids = torch.tensor([7, 0, 2**40, 7, -1, 9])
+    expected = [slots.index(7), -1, slots.index(2**40), slots.index(7), -1, -1]
+    assert remap_lora_ids(ids, torch.tensor(slots)).tolist() == expected
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dispatched_lora_metadata_tracks_slot_changes(device):
+    """Slot reassignment and a shorter base batch must not reuse stale identities."""
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=8,
+        max_batches=8,
+        device=device,
+        lora_config=LoRAConfig(max_loras=2),
+    )
+    mapping = LoRAMapping((7, 9, 0), (7, 9, 0), is_prefill=True)
+    for slots in ([7, 9], [9, 7]):
+        wrapper.update_metadata(mapping, slots, 3, 32000)
+        actual = remap_lora_ids(wrapper.token_lora_ids[:3], wrapper.slot_lora_ids)
+        expected = torch.tensor(
+            [slots.index(7), slots.index(9), -1], device=device, dtype=torch.int32
+        )
+        assert torch.equal(actual, expected)
+    wrapper.update_metadata(LoRAMapping((0,), (0,), is_prefill=True), [9, 7], 3, 32000)
+    assert torch.count_nonzero(wrapper.token_lora_ids).item() == 0
 
 
 @pytest.mark.parametrize("batches", test_params["batches"])
