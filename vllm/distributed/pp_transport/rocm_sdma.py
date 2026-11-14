@@ -17,6 +17,11 @@ the side stream by HSA signals. Per step N:
 - the side stream waits for `sent >= N`, so the transport's event recorded on
   it covers the copies, as on CUDA.
 
+The copies sit on their engines' queues, blocked on the dependency signal, until
+the side stream opens it. ROCr gives each engine one queue per process, so only
+other SDMA peer copies from this GPU on the same engines would wait behind them:
+host copies run on engines 0 and 1, and HIP peer copies on blit kernels.
+
 The shared buffers come from `allocate_shared_buffer_and_handle`, which on ROCm
 allocates uncached memory, so a stream wait never reads a stale L2 line.
 """
@@ -32,12 +37,14 @@ import torch
 _SEQ_SOURCES = 8
 # Steps whose signals may be in flight; an entry is reused _RING steps later.
 _RING = 16
+# Two even xGMI engines fill one link direction; odd engines hang on MI355X.
 _ENGINES = (1 << 2, 1 << 4)
 _ALIGN = 256
 
 _HSA_DEVICE_TYPE_GPU = 1
 _HSA_AGENT_INFO_DEVICE = 17
 _HSA_AMD_AGENT_INFO_BDFID = 0xA006
+_HSA_AMD_AGENT_INFO_DOMAIN = 0xA00F
 # GPU_ONLY signals have a value pointer, which a stream can write.
 _HSA_AMD_SIGNAL_AMD_GPU_ONLY = 1
 _HSA_SIGNAL_CONDITION_LT = 2
@@ -72,6 +79,11 @@ class _Hsa:
             _Signal,
             ctypes.POINTER(ctypes.c_void_p),
         ]
+        lib.hsa_amd_memory_copy_engine_status.argtypes = [
+            _Agent,
+            _Agent,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
         lib.hsa_signal_store_relaxed.argtypes = [_Signal, ctypes.c_int64]
         lib.hsa_signal_wait_scacquire.argtypes = [
             _Signal,
@@ -96,25 +108,35 @@ class _Hsa:
         if lib.hsa_init():
             raise RuntimeError("hsa_init failed")
         self.lib = lib
-        self.agents: dict[int, _Agent] = {}
+        self.agents: dict[tuple[int, int], _Agent] = {}
 
         def visit(agent, _) -> int:
             kind = ctypes.c_uint32()
             lib.hsa_agent_get_info(agent, _HSA_AGENT_INFO_DEVICE, ctypes.byref(kind))
             if kind.value == _HSA_DEVICE_TYPE_GPU:
-                bdf = ctypes.c_uint32()
-                lib.hsa_agent_get_info(
-                    agent, _HSA_AMD_AGENT_INFO_BDFID, ctypes.byref(bdf)
-                )
-                self.agents[bdf.value & ~0x7] = _Agent(agent.handle)
+                domain, bdf = ctypes.c_uint32(), ctypes.c_uint32()
+                for attr, out in (
+                    (_HSA_AMD_AGENT_INFO_DOMAIN, domain),
+                    (_HSA_AMD_AGENT_INFO_BDFID, bdf),
+                ):
+                    lib.hsa_agent_get_info(agent, attr, ctypes.byref(out))
+                key = (domain.value, bdf.value & ~0x7)
+                self.agents[key] = _Agent(agent.handle)
             return 0
 
         lib.hsa_iterate_agents(self._visit_type(visit), None)
 
-    def agent(self, bdf: int) -> _Agent:
-        if bdf not in self.agents:
-            raise RuntimeError(f"no HSA GPU agent at PCI {bdf:#x}")
-        return self.agents[bdf]
+    def agent(self, domain: int, bdf: int) -> _Agent:
+        if (domain, bdf) not in self.agents:
+            raise RuntimeError(f"no HSA GPU agent at PCI {domain:#x}:{bdf:#x}")
+        return self.agents[(domain, bdf)]
+
+    def free_engines(self, dst: _Agent, src: _Agent) -> int:
+        """The mask of SDMA engines free for copies from `src` to `dst`."""
+        mask = ctypes.c_uint32()
+        if self.lib.hsa_amd_memory_copy_engine_status(dst, src, ctypes.byref(mask)):
+            return 0
+        return mask.value
 
     def signal(self) -> _Signal:
         s = _Signal()
@@ -196,10 +218,10 @@ def _hsa() -> _Hsa:
     return _Hsa()
 
 
-def _agent(pci: tuple[int, int]) -> _Agent:
-    """The HSA agent at PCI (bus, device)."""
-    bus, device = pci
-    return _hsa().agent((bus << 8) | (device << 3))
+def _agent(pci: tuple[int, int, int]) -> _Agent:
+    """The HSA agent at PCI (domain, bus, device)."""
+    domain, bus, device = pci
+    return _hsa().agent(domain, (bus << 8) | (device << 3))
 
 
 class _StepSignals(NamedTuple):
@@ -239,20 +261,28 @@ class SdmaCopyEngines:
         peer_recv_buf: int,
         peer_full: int,
         words: int,
-        peer_pci: tuple[int, int],
+        peer_pci: tuple[int, int, int],
     ) -> None:
         """`words`: this rank's uncached shared-buffer bytes for `sent` and
         the step-number sources; `peer_pci`: the next stage's PCI address."""
         props = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         )
-        self.agent = _agent((props.pci_bus_id, props.pci_device_id))
+        self.agent = _agent(
+            (props.pci_domain_id, props.pci_bus_id, props.pci_device_id)
+        )
         self.peer_agent = _agent(peer_pci)
+        hsa = _hsa()
+        free = hsa.free_engines(self.peer_agent, self.agent)
+        if any(e & ~free for e in _ENGINES):
+            raise RuntimeError(
+                f"SDMA engines {[e.bit_length() - 1 for e in _ENGINES]} are not "
+                f"free for xGMI copies to the next stage (free mask {free:#x})"
+            )
         self.send_buf = send_buf
         self.peer_recv_buf = peer_recv_buf
         self.peer_full = peer_full
         self.sent, self.seq_sources = words, words + _SEQ_SOURCES
-        hsa = _hsa()
         self.ring = [
             _StepSignals(
                 hsa.signal(),
@@ -274,7 +304,9 @@ class SdmaCopyEngines:
         sig = self.ring[i]
         if seq > _RING:
             # Resetting a signal that a queued copy still uses deadlocks it.
-            hsa.wait_zero(sig.full)
+            # `sent` is the entry's last copy, queued after `full` on the same
+            # engine. This blocks only if the host is _RING steps ahead of the
+            # GPU, more than vLLM keeps batches in flight.
             hsa.wait_zero(sig.sent)
 
         # Each key's rows split across the engines, in 256-byte pieces.

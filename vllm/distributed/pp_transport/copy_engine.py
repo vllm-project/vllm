@@ -155,7 +155,7 @@ class _CudaCopyEngines:
         peer_recv_buf: int,
         peer_full: int,
         words: int,
-        peer_pci: tuple[int, int],
+        peer_pci: tuple[int, int, int],
     ) -> None:
         """`words` and `peer_pci` are for SDMA and unused here."""
         self.send_buf = send_buf
@@ -256,7 +256,7 @@ class CopyEngineTransport(PPTransport):
             owned.append(ptr)
             phys = current_platform.visible_device_id_to_physical_device_id(device)
             props = torch.cuda.get_device_properties(device)
-            pci = (props.pci_bus_id, props.pci_device_id)
+            pci = (props.pci_domain_id, props.pci_bus_id, props.pci_device_id)
             return ptr, handle, layout, phys, pci
 
         ranks = step(allocate_recv)
