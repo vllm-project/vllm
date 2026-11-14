@@ -286,7 +286,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 
 def flashinfer_sample(
     logits: torch.Tensor,
-    k: torch.Tensor | None,
+    k: torch.Tensor | int | None,
     p: torch.Tensor | None,
     generators: dict[int, torch.Generator] = {},  # noqa
 ) -> torch.Tensor:
