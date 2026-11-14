@@ -45,6 +45,8 @@ pub(super) fn from_proto(
             return Err(mixed_media_error());
         };
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
+        encoded_bytes =
+            encoded_bytes.saturating_add(feature.mm_metadata.as_ref().map_or(0, Vec::len));
     }
     check_inline_kwargs_size(encoded_bytes)?;
     let features = media
@@ -69,8 +71,26 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     let Some(pb::media_item::Source::Features(feature)) = item.source else {
         return Err(mixed_media_error());
     };
-    let bytes = feature.kwargs.ok_or_else(|| {
-        Status::invalid_argument("features.kwargs is required; cache-only features are unsupported")
+    let mut data = feature
+        .kwargs
+        .map(|bytes| crate::mm_wire::decode_kwargs(&bytes))
+        .transpose()
+        .map_err(Status::invalid_argument)?;
+    if let Some(metadata) = feature.mm_metadata {
+        let metadata =
+            crate::mm_wire::decode_kwargs(&metadata).map_err(Status::invalid_argument)?;
+        data = Some(match data {
+            Some(mut data) => {
+                data.extend(metadata);
+                data
+            }
+            None => metadata,
+        });
+    }
+    let data = data.ok_or_else(|| {
+        Status::invalid_argument(
+            "features.kwargs or features.mm_metadata is required; cache-only features are unsupported",
+        )
     })?;
     let offset = usize::try_from(feature.offset)
         .map_err(|_| Status::invalid_argument("features.offset exceeds platform limits"))?;
@@ -86,7 +106,7 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     };
     Ok(MmFeatureSpec {
         modality,
-        data: Some(crate::mm_wire::decode_kwargs(&bytes).map_err(Status::invalid_argument)?),
+        data: Some(data),
         identifier: feature.identifier,
         mm_hash: feature.mm_hash,
         mm_position: PlaceholderRange {
@@ -339,6 +359,20 @@ mod tests {
                 tonic::Code::InvalidArgument
             );
         }
+    }
+
+    #[test]
+    fn metadata_only_features_are_accepted() {
+        let mut item = preprocessed();
+        let pb::media_item::Source::Features(feature) = item.source.as_mut().unwrap() else {
+            unreachable!()
+        };
+        feature.mm_metadata = feature.kwargs.take();
+
+        let MultimodalInput::Preprocessed(features) = from_proto(vec![item], None).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(features[0].data.as_ref().unwrap().len(), 1);
     }
 
     fn video(source: pb::media_item::Source) -> pb::MediaItem {
