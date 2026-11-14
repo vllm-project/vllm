@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    WorkerRanks,
 )
 from vllm.distributed.parallel_state import (
     Handle,
@@ -875,11 +876,9 @@ class Worker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
-        """Get KV connector metadata from this worker if available.
-
-        Returned dict is keyed by `(pp_rank, tp_rank)`.
-        """
+    ) -> dict[WorkerRanks, KVConnectorHandshakeMetadata] | None:
+        """Get KV connector metadata from this worker if available, keyed by
+        the ranks of this worker."""
         if not has_kv_transfer_group():
             return None
 
@@ -889,17 +888,12 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        pp_rank = get_pp_group().rank_in_group
-        tp_rank = get_tp_group().rank_in_group
-        parallel_config = self.vllm_config.parallel_config
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.decode_context_parallel_size > 1
-        ):
-            tp_rank += (
-                get_pcp_group().rank_in_group * parallel_config.tensor_parallel_size
-            )
-        return {(pp_rank, tp_rank): metadata}
+        ranks = WorkerRanks(
+            pp_rank=get_pp_group().rank_in_group,
+            pcp_rank=get_pcp_group().rank_in_group,
+            tp_rank=get_tp_group().rank_in_group,
+        )
+        return {ranks: metadata}
 
     def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         return self.model_runner.get_kv_cache_layer_configs()

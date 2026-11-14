@@ -14,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
+    WorkerRanks,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -284,7 +285,7 @@ class Executor(ABC):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[WorkerRanks, KVConnectorHandshakeMetadata] | None]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload

@@ -3,6 +3,7 @@
 import filecmp
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -21,7 +22,9 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     SupportsHMA,
+    WorkerRanks,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
@@ -33,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorHandshakeMetadata,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
@@ -161,6 +165,43 @@ class LookaheadHashingTestConnector(ExampleConnector):
 
 class MockDivergentHMAConnector(MockHMAConnector):
     _supports_divergent_local_hybrid_hits = True
+
+
+@dataclass
+class HandshakeTestMetadata(KVConnectorHandshakeMetadata):
+    agent: str
+
+
+class HandshakeTestConnector(ExampleConnector):
+    """Real connector that reports handshake metadata and accepts it from every
+    PP stage, as NixlConnector does."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return HandshakeTestMetadata(
+            agent=self._kv_transfer_config.get_from_extra_config("agent", "")
+        )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        self.received_handshake_metadata = metadata
+
+
+def _handshake_child(agent: str) -> dict[str, Any]:
+    return {
+        "kv_connector": "HandshakeTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {"agent": agent},
+    }
+
+
+class LastHandshakeMultiConnector(MultiConnector):
+    """Reports only its last sub-connector's handshake metadata, as Dynamo's
+    PdConnector does for NIXL."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return self._connectors[-1].get_handshake_metadata()
 
 
 # Register mock connectors
@@ -404,7 +445,7 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
-        "set_xfer_handshake_metadata_pp_aware",
+        "set_worker_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
@@ -430,7 +471,7 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:7] == [
         "bind_kv_cache_manager",
         "get_finished_count",
-        "set_xfer_handshake_metadata_pp_aware",
+        "set_worker_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
@@ -1269,6 +1310,117 @@ def test_multi_connector_worker_metadata(mc):
     mc.update_connector_output(kv_connector_output)
     assert_update_connector_output_called(mc)
     assert kv_connector_output.kv_connector_worker_meta == mc_worker_meta_01a_01b
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_reaches_only_its_connector():
+    """With PP, the engine core gives the scheduler side the handshake metadata
+    of every stage. Each sub-connector must receive only the metadata it
+    reported. A sibling that reports none, such as a KV store next to NIXL on a
+    PP prefill instance, would reject pp_rank > 0 in the base class, and the
+    engine would fail to start."""
+    children = [
+        _handshake_child("first"),
+        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+        _handshake_child("third"),
+    ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    assert isinstance(scheduler, MultiConnector)
+
+    # What the engine core merges from the workers of two PP stages.
+    scheduler.set_xfer_handshake_metadata_pp_aware(
+        {(pp_rank, 0): worker.get_handshake_metadata() for pp_rank in range(2)}
+    )
+
+    for index, agent in ((0, "first"), (2, "third")):
+        handshake_connector = scheduler.sub_connectors[index]
+        assert isinstance(handshake_connector, HandshakeTestConnector)
+        expected = HandshakeTestMetadata(agent=agent)
+        assert handshake_connector.received_handshake_metadata == {
+            (0, 0): expected,
+            (1, 0): expected,
+        }
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_of_subclass_reaches_every_connector():
+    """If a MultiConnector subclass reports one sub-connector's handshake
+    metadata instead of one entry per sub-connector, every sub-connector
+    receives that metadata."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_handshake_child("store"), _handshake_child("nixl")]
+        },
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+
+    scheduler.set_xfer_handshake_metadata_pp_aware(
+        {(0, 0): worker.get_handshake_metadata()}
+    )
+
+    for connector in scheduler.sub_connectors:
+        assert isinstance(connector, HandshakeTestConnector)
+        assert connector.received_handshake_metadata == {
+            (0, 0): HandshakeTestMetadata(agent="nixl")
+        }
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_of_every_pcp_rank_reaches_its_connector():
+    """With PCP and no DCP, NIXL reports handshake metadata on PCP rank 0 only,
+    while a KV store such as UMBP reports it on every rank. Both workers of the
+    PP stage share `(pp_rank, tp_rank)`, so each worker's metadata is keyed by
+    its ranks; otherwise PCP rank 1 replaces NIXL's metadata."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_handshake_child("nixl"), _handshake_child("store")]
+        },
+        kv_role="kv_both",
+    )
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    scheduler = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    nixl = HandshakeTestMetadata(agent="nixl")
+    store = HandshakeTestMetadata(agent="store")
+
+    scheduler.set_worker_handshake_metadata(
+        {
+            WorkerRanks(0, 0, 0): MultiKVConnectorHandshakeMetadata((nixl, store)),
+            WorkerRanks(0, 1, 0): MultiKVConnectorHandshakeMetadata((None, store)),
+        }
+    )
+
+    nixl_connector, store_connector = scheduler.sub_connectors
+    assert nixl_connector.received_handshake_metadata == {(0, 0): nixl}
+    assert store_connector.received_handshake_metadata == {(0, 0): store}
 
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
