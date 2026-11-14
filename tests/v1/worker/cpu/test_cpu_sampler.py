@@ -411,6 +411,26 @@ def test_cpu_sampling_mask_matches_wide_finite_support(max_num_kept: int) -> Non
     assert mask.tolists().to_nested_list() == expected
 
 
+def test_cpu_sampling_mask_multirow_request_layout() -> None:
+    logits = torch.full((9, 9), -torch.inf, dtype=torch.bfloat16)
+    logits[0, [1, 8]] = 0
+    logits[3, [2]] = 0
+    logits[4, [0, 4, 7]] = 0
+    num_sampled = torch.tensor([1, 2, 0], dtype=torch.int32)
+
+    mask = CPUSamplingMaskTensors.from_logits(
+        logits,
+        torch.tensor([0, 3, 6, 9], dtype=torch.int32),
+        num_sampled,
+        max_num_kept=1,
+        rows_per_request=3,
+    )
+    result = mask.tolists(num_sampled.numpy())
+
+    assert result.to_nested_list() == [[1, 8], [2], [0, 4, 7]]
+    assert result.cu_num_generated_tokens == [0, 1, 3, 3]
+
+
 def _make_sampler(
     sampling_params: list[SamplingParams],
 ) -> tuple[CPUSampler, torch.Tensor]:
