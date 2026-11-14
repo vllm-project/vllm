@@ -11,6 +11,8 @@ from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     # if type checking, eagerly import the module
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+
     import vllm.tokenizers.mistral as mt
 else:
     mt = LazyLoader("mt", globals(), "vllm.tokenizers.mistral")
@@ -26,6 +28,21 @@ def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralToken
         getattr(cls, "IS_MISTRAL_TOKENIZER", False)
         and isinstance(obj, mt.MistralTokenizer)
     )
+
+
+def is_transformers_mistral_common_tokenizer(
+    obj: TokenizerLike | None,
+) -> TypeGuard[MistralCommonBackend]:
+    """Return true if `obj` is transformers' native `MistralCommonBackend`.
+
+    `AutoTokenizer` resolves to this class (instead of vLLM's own
+    `MistralTokenizer` wrapper) for "dual-format" checkpoints that ship both
+    HF tokenizer files and mistral-common files (`tekken.json`/
+    `params.json`), which is common for some Mistral3/Pixtral checkpoints.
+    """
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+
+    return isinstance(obj, MistralCommonBackend)
 
 
 def is_mistral_tool_parser(cls: type | None) -> bool:
