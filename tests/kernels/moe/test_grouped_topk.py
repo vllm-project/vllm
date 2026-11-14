@@ -332,6 +332,28 @@ def test_grouped_topk_single_group_large_batch():
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_grouped_topk_single_group_weights_ignore_batch_size(renormalize: bool):
+    """The block and warp kernels must return the same weights for the same logits."""
+    set_random_seed(0)
+    logits = torch.randn((1025, 288), dtype=torch.float32, device="cuda")
+    bias = torch.zeros(288, dtype=torch.float32, device="cuda")
+    bias[:8] = 8.0
+
+    block_weights, block_ids = _run_single_group_topk(
+        logits[:-1], bias, 8, scoring_func="sigmoid", renormalize=renormalize
+    )
+    warp_weights, warp_ids = _run_single_group_topk(
+        logits, bias, 8, scoring_func="sigmoid", renormalize=renormalize
+    )
+
+    torch.testing.assert_close(warp_ids[:-1], block_ids)
+    torch.testing.assert_close(warp_weights[:-1], block_weights, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
 @pytest.mark.parametrize(
     "num_experts,topk,input_dtype,bias_dtype",
     [
