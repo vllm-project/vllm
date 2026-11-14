@@ -19,6 +19,7 @@ from huggingface_hub.utils import (
     LocalEntryNotFoundError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
+    httpx,
 )
 
 from vllm import envs
@@ -132,9 +133,50 @@ def with_retry(
     raise AssertionError("Should not be reached")
 
 
+def list_repo_files(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> list[str]:
+    """List a model repo's files, from the local path or the Hub.
+
+    If the Hub can't be reached, fall back to the repo's tree listing in the
+    local Hugging Face cache, which `snapshot_download` records. The fallback is
+    not cached, so a later call tries the Hub again.
+    """
+    try:
+        return _list_repo_files(
+            repo_id, revision=revision, repo_type=repo_type, token=token
+        )
+    except httpx.TransportError:
+        cached_files = _list_cached_repo_files(repo_id, revision, repo_type)
+        if cached_files is None:
+            raise
+        logger.warning(
+            "Could not reach the Hugging Face Hub to list the files of %s. "
+            "Using its file list from the local cache instead.",
+            repo_id,
+        )
+        return cached_files
+
+
+def _list_cached_repo_files(
+    repo_id: str, revision: str | None, repo_type: str | None
+) -> list[str] | None:
+    try:
+        tree = huggingface_hub.get_cached_repo_tree(
+            repo_id, repo_type=repo_type, revision=revision
+        )
+    except huggingface_hub.errors.CachedRepoTreeNotFoundError:
+        return None
+    return [file.path for file in tree]
+
+
 # @cache doesn't cache exceptions
 @cache
-def list_repo_files(
+def _list_repo_files(
     repo_id: str,
     *,
     revision: str | None = None,
