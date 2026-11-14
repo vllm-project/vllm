@@ -14,6 +14,15 @@
 
 using namespace vllm;
 
+#if defined ENABLE_SCALED_MM_SM89_BLOCKWISE && ENABLE_SCALED_MM_SM89_BLOCKWISE
+namespace vllm {
+void cutlass_scaled_mm_blockwise_sm89_fp8(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales);
+}  // namespace vllm
+#endif
+
 /*
    This file defines quantized GEMM operations using the CUTLASS 2.x API, for
    NVIDIA GPUs with SM versions prior to sm90 (Hopper).
@@ -188,6 +197,18 @@ void cutlass_scaled_mm_sm89(torch::stable::Tensor& out,
                   torch::headeronly::ScalarType::Float);
   STD_TORCH_CHECK(b_scales.scalar_type() ==
                   torch::headeronly::ScalarType::Float);
+#if defined ENABLE_SCALED_MM_SM89_BLOCKWISE && ENABLE_SCALED_MM_SM89_BLOCKWISE
+  // Same rule as dispatch_scaled_mm (c3x): anything other than per-tensor /
+  // per-token / per-channel scales is treated as blockwise.
+  bool const per_tensor_or_channel =
+      (a_scales.numel() == 1 || a_scales.numel() == a.size(0)) &&
+      (b_scales.numel() == 1 || b_scales.numel() == b.size(1));
+  if (!per_tensor_or_channel) {
+    STD_TORCH_CHECK(!bias, "Bias not yet supported for blockwise scaled_mm");
+    return vllm::cutlass_scaled_mm_blockwise_sm89_fp8(out, a, b, a_scales,
+                                                      b_scales);
+  }
+#endif
   if (bias) {
     STD_TORCH_CHECK(bias->scalar_type() == out.scalar_type(),
                     "currently bias dtype must match output dtype ",
