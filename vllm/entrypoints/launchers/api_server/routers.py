@@ -6,6 +6,12 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.batches.api_router import (
+    attach_router as register_batches_api_router,
+)
+from vllm.entrypoints.openai.files.api_router import (
+    attach_router as register_files_api_router,
+)
 from vllm.tasks import POOLING_TASKS, SupportedTask
 
 
@@ -88,6 +94,13 @@ def register_api_routers(
         from vllm.entrypoints.pooling.factories import register_pooling_api_routers
 
         register_pooling_api_routers(app, supported_tasks, model_config)
+
+    if args.enable_batch_api and (
+        "generate" in supported_tasks
+        or any(task in POOLING_TASKS for task in supported_tasks)
+    ):
+        register_files_api_router(app)
+        register_batches_api_router(app)
 
     if getattr(args, "enable_fault_tolerance", False):
         from vllm.entrypoints.serve.fault_tolerance.api_router import (

@@ -6,6 +6,7 @@ It is kept in a separate file for documentation purposes.
 
 import argparse
 import json
+import os
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
@@ -387,6 +388,16 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
+    enable_batch_api: bool = False
+    """Enable the OpenAI-compatible Files (`/v1/files`) and Batches
+    (`/v1/batches`) endpoints."""
+    batch_storage_dir: str = os.path.expanduser("~/.vllm/batches")
+    """Directory where batch input, output and metadata files are stored."""
+    batch_retention_hours: int = 24
+    """Hours to keep finished batches and their files. 0 disables cleanup."""
+    batch_priority: int = 0
+    """Scheduling priority of batch requests. Higher values mean lower
+    priority. Only takes effect with `--scheduling-policy priority`."""
 
     @classmethod
     def _customize_cli_kwargs(
