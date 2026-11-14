@@ -124,7 +124,8 @@ class QuantSpec:
     along the input dimension of both the weight and the activation before
     quantization (see `InputHadamardLinearMethod`). The GEMM result is
     unchanged up to quantization error, which the rotation shrinks by spreading
-    outliers across each block. Linear layers only; validated with MXFP4."""
+    outliers across each block. Linear layers and MXFP4 MoE; validated with
+    MXFP4."""
 
     fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
     """Names explicitly provided when constructing this spec."""
@@ -292,10 +293,15 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
     ),
-    # MXFP4 linear with a 32-wide Hadamard rotation of weights and activations;
-    # MoE stays unquantized (no `moe` field).
+    # MXFP4 with a 32-wide Hadamard rotation of weights and activations, on
+    # linear and MoE layers. MoE runs W4A4 on Humming.
     "mxfp4_hadamard32": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
+        moe=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
+    ),
+    # The MoE half of `mxfp4_hadamard32`; linear stays unquantized.
+    "mxfp4_hadamard32_moe": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     # TODO: this is broken since at least #41566, as Int8OnlineMoEMethod
@@ -386,9 +392,12 @@ def merge_quantization_config(
     ) -> QuantSpec | None:
         if base_spec is None or override_spec is None:
             return override_spec or base_spec
+        # A null weight disables the layer kind; any other weight would lose
+        # the rotation's pairing with the weight format.
         if (
             base_spec.hadamard_size is not None
             and "weight" in override_spec.fields_set
+            and override_spec.weight is not None
             and override_spec.weight != base_spec.weight
         ):
             raise ValueError(
