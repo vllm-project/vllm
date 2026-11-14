@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{MatchedPath, Request};
 use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
+use http_body::{Frame, SizeHint};
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
 
 /// Endpoints that will be excluded from HTTP metrics tracking.
@@ -54,37 +58,87 @@ pub async fn track_http_metrics(req: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map_or_else(|| "none".to_string(), |path| path.as_str().to_string());
-    let excluded = EXCLUDED_HANDLERS.contains(&handler.as_str());
-    let started_at = Instant::now();
 
-    let response = next.run(req).await;
-
-    if excluded {
-        return response;
+    if EXCLUDED_HANDLERS.contains(&handler.as_str()) {
+        return next.run(req).await;
     }
 
-    let elapsed = started_at.elapsed().as_secs_f64();
-    let status = status_group(response.status().as_u16());
+    let mut guard = HttpMetricsGuard {
+        method,
+        handler,
+        // Match the Python middleware's fallback before response headers exist.
+        status: "5xx",
+        started_at: Instant::now(),
+    };
+    let response = next.run(req).await;
+    guard.status = status_group(response.status().as_u16());
 
-    let metrics = &METRICS.api_server;
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(HttpMetricsBody {
+            inner: body,
+            _guard: guard,
+        }),
+    )
+}
 
-    metrics
-        .http_requests
-        .get_or_create(&HttpRequestLabels {
-            method: method.clone(),
-            status,
-            handler: handler.clone(),
-        })
-        .inc();
+struct HttpMetricsGuard {
+    method: String,
+    handler: String,
+    status: &'static str,
+    started_at: Instant,
+}
 
-    metrics
-        .http_request_duration_seconds
-        .get_or_create(&HttpHandlerLabels { method, handler })
-        .observe(elapsed);
+impl Drop for HttpMetricsGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        let metrics = &METRICS.api_server;
 
-    metrics.http_request_duration_highr_seconds.observe(elapsed);
+        metrics
+            .http_requests
+            .get_or_create(&HttpRequestLabels {
+                method: self.method.clone(),
+                status: self.status,
+                handler: self.handler.clone(),
+            })
+            .inc();
 
-    response
+        metrics
+            .http_request_duration_seconds
+            .get_or_create(&HttpHandlerLabels {
+                method: self.method.clone(),
+                handler: self.handler.clone(),
+            })
+            .observe(elapsed);
+
+        metrics.http_request_duration_highr_seconds.observe(elapsed);
+    }
+}
+
+struct HttpMetricsBody {
+    inner: Body,
+    _guard: HttpMetricsGuard,
+}
+
+impl HttpBody for HttpMetricsBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 fn status_group(status: u16) -> &'static str {
