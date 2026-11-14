@@ -13,12 +13,23 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, use_cuda_graph
+from .op import exp, exp2, store_2d_vec4_16bit
+from .utils import FLA_CHUNK_SIZE, is_rdna, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+# RDNA: the autotuned configs spill VGPRs on Wave32.
+FWD_H_CONFIGS = (
+    [triton.Config({"BV": 32}, num_warps=8, num_stages=1)]
+    if is_rdna
+    else [
+        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+        for BV in [32, 64]
+    ]
+)
 
 
 @triton.heuristics(
@@ -32,13 +43,8 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
-    ],
-    key=["H", "K", "V", "BT"],
+    configs=FWD_H_CONFIGS,
+    key=["H", "K", "V", "BT", "VEC4_STORE"],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -68,6 +74,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    VEC4_STORE: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -176,7 +183,19 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         p_v = v + o_t[:, None] * stride_v + o_v[None, :]
         b_v = tl.load(p_v, mask=m_t[:, None] & m_v[None, :], other=0.0) - b_v
 
-        if SAVE_NEW_VALUE:
+        if SAVE_NEW_VALUE and VEC4_STORE:
+            store_2d_vec4_16bit(
+                v_new,
+                b_v,
+                o_t,
+                i_v * (BV // 4) + tl.arange(0, BV // 4),
+                stride_v,
+                T,
+                V,
+                BT,
+                BV,
+            )
+        elif SAVE_NEW_VALUE:
             p_v = v_new + o_t[:, None] * stride_v + o_v[None, :]
             tl.store(
                 p_v, b_v.to(p_v.dtype.element_ty), mask=m_t[:, None] & m_v[None, :]
@@ -339,5 +358,6 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        VEC4_STORE=is_rdna and V % 4 == 0 and u.element_size() == 2,
     )
     return h, v_new, final_state

@@ -15,8 +15,8 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
-from .op import make_tensor_descriptor
-from .utils import input_guard, is_amd, is_tma_supported
+from .op import make_tensor_descriptor, store_2d_vec4_16bit
+from .utils import input_guard, is_amd, is_rdna, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -214,14 +214,21 @@ def merge_16x16_to_32x32_inverse_kernel(
         )
 
 
-@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
+MERGE_64_CONFIGS = (
+    [triton.Config({}, num_warps=4, num_stages=2)]
+    if is_rdna
+    else [
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
-    ],
-    key=["H", "BT", "IS_VARLEN"],
+    ]
+)
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=MERGE_64_CONFIGS,
+    key=["H", "BT", "IS_VARLEN", "HEAD_FIRST", "VEC4_STORE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_64x64_inverse_kernel(
@@ -235,8 +242,13 @@ def merge_16x16_to_64x64_inverse_kernel(
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+    VEC4_STORE: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    if HEAD_FIRST:
+        i_bh, i_t = tl.program_id(0), tl.program_id(1)
+    else:
+        i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = (
@@ -365,7 +377,36 @@ def merge_16x16_to_64x64_inverse_kernel(
         input_precision=DOT_PRECISION,
     )
 
-    if not USE_TMA:
+    if VEC4_STORE:
+        store_2d_vec4_16bit(Ai, b_Ai_11, o_t, tl.arange(0, 4), H * BT, T, BT, 16, 16)
+        store_2d_vec4_16bit(
+            Ai, b_Ai_22, o_t + 16, 4 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_33, o_t + 32, 8 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_44, o_t + 48, 12 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_21, o_t + 16, tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_31, o_t + 32, tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_32, o_t + 32, 4 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_41, o_t + 48, tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_42, o_t + 48, 4 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+        store_2d_vec4_16bit(
+            Ai, b_Ai_43, o_t + 48, 8 + tl.arange(0, 4), H * BT, T, BT, 16, 16
+        )
+    elif not USE_TMA:
         p_Ai_11 = Ai + o_t[:, None] * (H * BT) + o_i[None, :]
         p_Ai_22 = Ai + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
         p_Ai_33 = Ai + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 32)
@@ -493,14 +534,23 @@ def solve_tril(
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
+    grid = (NT, B * H)
+    extra = {}
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel
     elif BT == 32:
         merge_fn = merge_16x16_to_32x32_inverse_kernel
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
+        # RDNA: co-schedule all heads of a chunk to keep it in the Infinity Cache.
+        if is_rdna:
+            grid = (B * H, NT)
+        extra = dict(
+            HEAD_FIRST=is_rdna,
+            VEC4_STORE=is_rdna and not is_tma_supported and Ai.element_size() == 2,
+        )
 
-    merge_fn[NT, B * H](
+    merge_fn[grid](
         A=A,
         Ai=Ai,
         cu_seqlens=cu_seqlens,
@@ -510,5 +560,6 @@ def solve_tril(
         BT=BT,
         USE_TMA=is_tma_supported,
         DOT_PRECISION=FLA_TRIL_PRECISION,
+        **extra,
     )
     return Ai
