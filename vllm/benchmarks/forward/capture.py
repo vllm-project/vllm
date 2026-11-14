@@ -4,18 +4,24 @@
 
 The graph is captured for a single batch and only replays that batch, so the
 host-side decisions baked in at capture (attention plans, kernel choices by
-query length, chunk splits) are correct by construction. This deliberately
-bypasses vLLM's CUDA graph manager: no capture sizes, padding or dummy
-metadata. Each replay first restores the KV blocks the step writes, so state the
-forward mutates in place (e.g. compressor state) is the same on every replay.
+query length, chunk splits) are correct by construction. The runner's CUDA
+graph manager still dispatches the batch as serving would: padded token and
+request counts, `is_padding`, and the graph mode seen by attention metadata
+and the model. The bench captures that forward itself instead of replaying
+the manager's graphs, which aren't captured. Each replay first restores the
+KV blocks the step writes, so state the forward mutates in place (e.g.
+compressor state) is the same on every replay.
 """
 
 import time
+from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.benchmarks.forward.batch import BenchBatch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_world_group, graph_capture
@@ -47,6 +53,61 @@ def check_sampled(sampled: torch.Tensor, vocab_size: int) -> dict[str, Any]:
     # Rejection sampling leaves rows past each request's accepted tokens unset.
     first = sampled[:, 0]
     return {"valid_token_ids": bool(((first >= 0) & (first < vocab_size)).all())}
+
+
+def as_dispatched(runner: Any) -> tuple[Callable[[], CUDAGraphMode], Callable]:
+    """Make the runner dispatch as serving does but take its eager branch.
+
+    The target's CUDA graph descriptor (padded token and request counts, graph
+    mode) reaches each consumer that reads it before the forward; the runner
+    then calls the model eagerly, and the caller restores the dispatched mode
+    on the forward context. Returns a getter for the dispatched mode and a
+    function that undoes the shadowing.
+    """
+    manager = runner.cudagraph_manager
+    dispatched: list[Any] = [None]
+    if manager is None or manager.cudagraph_mode == CUDAGraphMode.NONE:
+        return lambda: CUDAGraphMode.NONE, lambda: None
+    # (object, method, argument index, descriptor -> argument).
+    consumers: list[tuple[Any, str, int, Callable]] = [
+        (runner.model_state, "prepare_attn", 1, lambda desc: desc.cg_mode)
+    ]
+    if runner.pcp_manager is not None:
+        consumers.append((runner.pcp_manager, "partition_batch", 1, lambda d: d))
+    if runner.fast_prefill is not None:
+        consumers.append((runner.fast_prefill, "prepare", 4, lambda d: d))
+    pending: set[str] = set()
+    dispatch = manager.dispatch
+
+    def eager_dispatch(*args, **kwargs):
+        desc = dispatch(*args, **kwargs)
+        dispatched[0] = desc
+        pending.update(name for _, name, _, _ in consumers)
+        return replace(desc, cg_mode=CUDAGraphMode.NONE)
+
+    def substitute(fn: Callable, name: str, index: int, value: Callable):
+        def wrapper(*args, **kwargs):
+            # Once per dispatch: drafters may share these objects.
+            if name in pending:
+                pending.discard(name)
+                args = (*args[:index], value(dispatched[0]), *args[index + 1 :])
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    manager.dispatch = eager_dispatch
+    for obj, name, index, value in consumers:
+        setattr(obj, name, substitute(getattr(obj, name), name, index, value))
+
+    def undo() -> None:
+        del manager.dispatch
+        for obj, name, _, _ in consumers:
+            delattr(obj, name)
+
+    def mode() -> CUDAGraphMode:
+        return CUDAGraphMode.NONE if dispatched[0] is None else dispatched[0].cg_mode
+
+    return mode, undo
 
 
 def write_input_ids(
@@ -107,8 +168,6 @@ class ForwardBench:
 
     def run(self) -> dict[str, Any]:
         runner, model = self.runner, self.runner.model
-        # The runner's eager branch calls `model(**inputs)`.
-        assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
         assert runner.ubatch_runner is None
         prepare_inputs = runner.prepare_inputs
         self._model_forward = model.forward
@@ -121,17 +180,26 @@ class ForwardBench:
             self.result["num_tokens_after_padding"] = (
                 self._input_batch.num_tokens_after_padding
             )
+            self.result["num_reqs_after_padding"] = (
+                self._input_batch.num_reqs_after_padding
+            )
+            if envs.VLLM_MOE_SKIP_PADDING:
+                self.result["num_padding_tokens"] = int(
+                    self._input_batch.is_padding.sum()
+                )
             self.result["batch_order"] = self._input_batch.req_ids
             return self._input_batch
 
         # Instance attributes shadow the methods for these two steps only.
         runner.prepare_inputs = prepare_and_check
         model.forward = self._forward
+        self._cudagraph_mode, undo_dispatch = as_dispatched(runner)
         try:
             for self.phase in ("warmup", "capture"):
                 runner.execute_model(self.batch.scheduler_output)
         finally:
             del runner.prepare_inputs, model.forward
+            undo_dispatch()
             # No sample_tokens follows.
             runner.execute_model_state = None
         return self.result
@@ -146,8 +214,10 @@ class ForwardBench:
     def _make_forward(self, inputs):
         # Models may update the forward context in place (e.g. sequence
         # parallelism shards is_padding); every call must start from the
-        # context the runner built.
+        # context the runner built, in the mode serving would run.
         context = get_forward_context()
+        context.cudagraph_runtime_mode = self._cudagraph_mode()
+        self.result["cudagraph_mode"] = context.cudagraph_runtime_mode.name
         saved = dict(vars(context))
         if self.include_drafter and self.runner.speculator is not None:
             from vllm.benchmarks.forward.speculator import DraftBench
@@ -211,6 +281,13 @@ class ForwardBench:
             )
         self.sampled = runner.sample(hidden, input_batch, None)[0].sampled_token_ids
 
+    def _real_rows(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Rows of real tokens: CUDA graph padding rows are undefined."""
+        batch = self._input_batch
+        if tensor.shape[0] == batch.num_tokens_after_padding:
+            return tensor[: batch.num_tokens]
+        return tensor
+
     def _check_batch(self, input_batch: InputBatch) -> None:
         """Fail unless the runner built exactly the requested batch."""
         expected = self.batch.expected
@@ -260,9 +337,9 @@ class ForwardBench:
         with graph_capture(self.device) as capture_context:
             stream = capture_context.stream
             # Some kernels set up per-stream state on first use, outside capture.
-            eager = _first_tensor(self._run_model()).clone()
+            eager = self._real_rows(_first_tensor(self._run_model())).clone()
             restore()
-            reference = _first_tensor(self._run_model()).clone()
+            reference = self._real_rows(_first_tensor(self._run_model())).clone()
             draft_reference = self.drafter.tokens.clone() if self.drafter else None
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
@@ -273,7 +350,7 @@ class ForwardBench:
                 self._events[0].record()
                 output = self._run_model()
                 self._events[1].record()
-        hidden = _first_tensor(output)
+        hidden = self._real_rows(_first_tensor(output))
 
         sampled = self.sampled
         graph.replay()
