@@ -40,6 +40,10 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+On SM12x GPUs such as the RTX PRO 6000 and DGX Spark, automatic selection uses
+Humming instead of Marlin for int4 symmetric group-128 weights with bf16
+activations. Pass `--linear-backend marlin` to keep Marlin.
+
 ## Hadamard Input Transforms (QuIP)
 
 Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.
