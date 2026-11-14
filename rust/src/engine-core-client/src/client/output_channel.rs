@@ -212,12 +212,12 @@ mod tests {
         sender.send(output(&[1]));
         sender.send(progress(500));
         // Both arrive now rather than waiting for eight tokens.
-        assert_eq!(
-            deliveries(&mut receiver),
-            vec![vec![vec![1]], vec![vec![]]]
-        );
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![1]], vec![vec![]]]);
         sender.send(output(&[2, 3]));
-        assert!(deliveries(&mut receiver).is_empty(), "tokens stay held back");
+        assert!(
+            deliveries(&mut receiver).is_empty(),
+            "tokens stay held back"
+        );
     }
 
     #[test]
