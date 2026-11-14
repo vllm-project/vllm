@@ -327,7 +327,7 @@ def compute_prompt_logprobs_with_chunking(
                 size = num_tokens, result.logprobs.shape[1]
                 token_ids = prompt_token_ids.new_empty(size, dtype=torch.int32)
                 scores = result.logprobs.new_empty(size)
-                ranks = result.selected_token_ranks.new_empty(num_tokens)
+                ranks = result.selected_token_ranks.new_empty(size)
             assert scores is not None and ranks is not None
             token_ids[rows] = result.logprob_token_ids
             scores[rows] = result.logprobs
