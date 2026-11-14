@@ -60,14 +60,26 @@ class EngramTable:
 class EngramFetch:
     """A started fetch: `wait(i)` returns table i's rows once they landed."""
 
-    def __init__(self, transport, rows: torch.Tensor, state) -> None:
+    def __init__(self, transport, rows: torch.Tensor, state, slots) -> None:
         self.transport, self.rows, self.state = transport, rows, state
+        self.slots = slots
 
     def wait(self, index: int) -> torch.Tensor:
         """Rows `[..., K, row_bytes]` of table `index`; the current stream
         waits for them."""
         self.transport.wait(self.state, index)
         return self.rows[index]
+
+    def wait_index(self, index: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Table `index`'s rows without copying them into place: a buffer of
+        rows and each row's slot in it (int32 per `[..., K]` row, -1 for a
+        zero row), or `wait(index)`'s rows and None. Valid until the next
+        fetch starts."""
+        if self.slots is None:
+            return self.wait(index), None
+        slots = self.slots[index, : self.rows[index].numel() // self.rows.shape[-1]]
+        buffer = self.transport.wait(self.state, index, slots)
+        return (self.rows[index], None) if buffer is None else (buffer, slots)
 
 
 class EngramPool:
@@ -120,6 +132,12 @@ class EngramPool:
             max_items * max_tables * max_row_bytes,
             dtype=torch.uint8,
             device=self.device,
+        )
+        # Where `wait_index` points into rows that landed out of place.
+        self.slots = (
+            torch.empty(max_tables, max_items, dtype=torch.int32, device=self.device)
+            if transport == "rdma"
+            else None
         )
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
@@ -233,7 +251,7 @@ class EngramPool:
         shape = (len(tables), *ids.shape[:-2], ids.shape[-1], row_bytes)
         rows = self.output[: ids.numel() * row_bytes].view(shape)
         state = self.transport.start(meta, ids.contiguous(), rows, row_bytes // 8)  # type: ignore[attr-defined]
-        return EngramFetch(self.transport, rows, state)
+        return EngramFetch(self.transport, rows, state, self.slots)
 
     def lookup(self, tables: list[EngramTable], ids: torch.Tensor) -> torch.Tensor:
         """Rows `[L, ..., K, row_bytes]` (uint8) of `ids`, as `start` takes."""

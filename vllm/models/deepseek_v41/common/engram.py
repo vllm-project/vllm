@@ -1605,6 +1605,7 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
 @triton.jit(do_not_specialize=["num_tokens"])
 def _engram_unpack_fp8_kernel(
     packed,
+    slots,
     values,
     scales,
     num_tokens,
@@ -1617,10 +1618,12 @@ def _engram_unpack_fp8_kernel(
     DIM: tl.constexpr,
     BLOCK: tl.constexpr,
     PEER: tl.constexpr,
+    SLOTS: tl.constexpr,
 ):
     """Split `[rank][token][layer][local head]` packed rows into MXFP8 values and
     F8_128x4 scales, one layer per grid column; `packed` holds per-rank
-    pointers if PEER. Scales past `num_tokens` zero-pad the 128-row tile.
+    pointers if PEER. If SLOTS, row i is row `slots[i]` of `packed` (zeros if
+    -1). Scales past `num_tokens` zero-pad the 128-row tile.
     """
     row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     layer = tl.program_id(1).to(tl.int64)
@@ -1633,16 +1636,20 @@ def _engram_unpack_fp8_kernel(
         src = packed
         source = head // LOCAL_HEADS * num_tokens + token
     source = (source * LAYERS + layer) * LOCAL_HEADS + head % LOCAL_HEADS
+    valid = token < num_tokens
+    live = valid
+    if SLOTS:
+        source = tl.load(slots + source, mask=valid, other=-1).to(tl.int64)
+        live = valid & (source >= 0)
     # Packed rows are only scale-width aligned.
     src += tl.multiple_of(source * (DIM + DIM // 32), DIM // 32)
-    valid = token < num_tokens
     cols = tl.arange(0, DIM)
-    data = tl.load(src[:, None] + cols[None, :], mask=valid[:, None], other=0)
+    data = tl.load(src[:, None] + cols[None, :], mask=live[:, None], other=0)
     values += layer * values_stride + row * DIM
     tl.store(values[:, None] + cols[None, :], data, mask=valid[:, None])
     scale_cols = tl.arange(0, DIM // 32)
     scale = tl.load(
-        src[:, None] + DIM + scale_cols[None, :], mask=valid[:, None], other=0
+        src[:, None] + DIM + scale_cols[None, :], mask=live[:, None], other=0
     )
     group = head[:, None] * (DIM // 32) + scale_cols[None, :]
     offset = mxfp8_scale_offset(token[:, None], group, HEADS * DIM // 32)
@@ -1771,8 +1778,8 @@ class EngramBatch:
                 self.tables, hashes[:, first : first + len(self.tables)]
             )
             for index in range(len(self.tables)):
-                rows = fetch.wait(index)[:, None]
-                self._unpack(rows, num_tokens, 0, False, index, index + 1)
+                rows, slots = fetch.wait_index(index)
+                self._unpack(rows, num_tokens, 0, False, index, index + 1, slots)
                 self._pool_done[index].record(stream)
 
     @eager_break_during_capture
@@ -1807,8 +1814,10 @@ class EngramBatch:
         peer: bool,
         start: int = 0,
         end: int | None = None,
+        slots: torch.Tensor | None = None,
     ) -> None:
-        """Unpack layers [start, end) of `rows` into the MXFP8 WKV inputs."""
+        """Unpack layers [start, end) of `rows` (row i at `slots[i]` if given)
+        into the MXFP8 WKV inputs."""
         if slot == 0:
             return
         end = len(self.layers) if end is None else end
@@ -1817,6 +1826,7 @@ class EngramBatch:
         grid = (triton.cdiv(slot, 128) * 128 * heads // 16, end - start)
         _engram_unpack_fp8_kernel[grid](
             rows,
+            rows if slots is None else slots,
             self.fp8_values[start:end],
             self.fp8_scales[start:end],
             slot,
@@ -1829,6 +1839,7 @@ class EngramBatch:
             DIM=table.dim,
             BLOCK=16,
             PEER=peer,
+            SLOTS=slots is not None,
         )
 
     def wkv_input(self, layer: "Engram", num_tokens: int) -> QuantizedActivation:
@@ -1836,8 +1847,8 @@ class EngramBatch:
         if self.pool is not None and self._async:
             self._wait_fetch(index)
         elif self.pool is not None:
-            rows = self._started.wait(index)[:, None]
-            self._unpack(rows, self._num_tokens, 0, False, index, index + 1)
+            rows, slots = self._started.wait_index(index)
+            self._unpack(rows, self._num_tokens, 0, False, index, index + 1, slots)
         values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
         return QuantizedActivation(
             values,
