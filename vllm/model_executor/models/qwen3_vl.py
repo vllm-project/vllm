@@ -120,7 +120,6 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -145,8 +144,6 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
-    _pad_cumulative_seqlens_buffer,
-    _pad_flashinfer_cu_seqlens_buffer,
 )
 from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
@@ -2141,6 +2138,9 @@ class Qwen3VLForConditionalGeneration(
 
         # Compute max_frames_per_video for budget sizing.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            self.visual.attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -2153,19 +2153,7 @@ class Qwen3VLForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
-            # FlashInfer packs the q/k/o and v offsets into one cu_seqlens
-            # tensor, split at its midpoint. Replays usually pad to a smaller
-            # batch bucket than capture, so each half has to be copied into
-            # its own half of the capture buffer. Other backends repeat the
-            # last offset so padded sequences have zero length, as in
-            # Qwen2.5-VL.
-            padding_logics={
-                "cu_seqlens": (
-                    _pad_flashinfer_cu_seqlens_buffer
-                    if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
-                    else _pad_cumulative_seqlens_buffer
-                )
-            },
+            padding_logics=padding_logics,
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
