@@ -284,10 +284,12 @@ sys.stdin.read()
             deadline = time.monotonic() + 5
             while stat.exists():
                 # A terminated child may await reaping by the container's init.
+                # Once reaped, the open fails with ENOENT, or the read with
+                # ESRCH if the reap happened between open and read.
                 try:
                     if stat.read_text().split(") ")[1].startswith("Z "):
                         break
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     break
                 assert time.monotonic() < deadline, "Orphan heartbeat survived worker"
                 time.sleep(0.01)
