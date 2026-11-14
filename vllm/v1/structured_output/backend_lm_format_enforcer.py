@@ -13,6 +13,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
@@ -103,6 +104,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
         character_level_parser: lmformatenforcer.CharacterLevelParser
         if request_type == StructuredOutputOptions.JSON:

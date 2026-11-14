@@ -16,6 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
@@ -61,6 +62,7 @@ class OutlinesBackend(StructuredOutputBackend):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
             regex = json_schema.build_regex_from_schema(grammar_spec)
