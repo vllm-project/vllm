@@ -87,6 +87,7 @@ The following table describes configurable parameters of the chart in `values.ya
 | livenessProbe.initialDelaySeconds | int | 15 | Number of seconds after the container has started before liveness probe is initiated |
 | livenessProbe.periodSeconds | int | 10 | How often (in seconds) to perform the liveness probe |
 | maxUnavailablePodDisruptionBudget | string | "" | Disruption Budget Configuration |
+| progressDeadlineSeconds | int | 2100 | Seconds before a Deployment rollout is marked failed. Default 2100 is the 30-minute startup budget plus 5 minutes. Increase this when startupProbe.periodSeconds or startupProbe.failureThreshold is increased. A higher deadline also delays ProgressDeadlineExceeded when startup is stuck. |
 | readinessProbe | object | {"failureThreshold":3,"httpGet":{"path":"/health","port":8000},"initialDelaySeconds":5,"periodSeconds":5} | Readiness probe configuration |
 | readinessProbe.failureThreshold | int | 3 | Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not ready |
 | readinessProbe.httpGet | object | {"path":"/health","port":8000} | Configuration of the kubelet http request on the server |
@@ -105,7 +106,72 @@ The following table describes configurable parameters of the chart in `values.ya
 | secrets | object | {} | Secrets configuration |
 | serviceName | string | "" | Service name |
 | servicePort | int | 80 | Service port |
+| startupProbe | object | {"failureThreshold":180,"httpGet":{"path":"/health","port":8000},"periodSeconds":10} | Startup probe configuration. The default budget is periodSeconds * failureThreshold = 1800 seconds (30 minutes), so a slow model load is not restarted. A longer allowance also delays recovery when startup is genuinely stuck. Set to null to omit the probe. When replacing httpGet with exec or tcpSocket, set httpGet to null so Helm's map merge does not keep both handlers. |
+| startupProbe.failureThreshold | int | 180 | Number of failures in a row before Kubernetes treats startup as failed |
+| startupProbe.httpGet | object | {"path":"/health","port":8000} | Configuration of the Kubelet http request on the server |
+| startupProbe.httpGet.path | string | "/health" | Path to access on the HTTP server |
+| startupProbe.httpGet.port | int | 8000 | Name or number of the port to access on the container, on which the server is listening |
+| startupProbe.periodSeconds | int | 10 | How often (in seconds) to perform the startup probe |
 | labels.environment | string | test | Environment name |
+
+## Startup and rollout timing
+
+The default liveness probe can restart a container after only a few failures. That is too short for vLLM startup, which may load checkpoints, allocate the KV cache, compile kernels, and capture CUDA graphs before `/health` responds. The startup probe holds readiness and liveness off until that first successful check.
+
+With the default startup probe, the startup budget is:
+
+```text
+periodSeconds * failureThreshold = 10 * 180 = 1800 seconds (30 minutes)
+```
+
+`progressDeadlineSeconds` defaults to **2100** (35 minutes): that startup budget plus a five-minute margin, so the Deployment is not marked `ProgressDeadlineExceeded` before the startup probe has finished its attempts. Kubernetes reports that condition and does not automatically delete the Pod or roll the Deployment back.
+
+A longer startup allowance also delays recovery when initialization is genuinely stuck. Increase `startupProbe.periodSeconds` or `startupProbe.failureThreshold` for a larger model, and increase `progressDeadlineSeconds` so the rollout deadline stays beyond the startup budget. Decrease them when a stuck start should be restarted sooner.
+
+Disable the startup probe entirely:
+
+```yaml
+startupProbe: null
+```
+
+`startupProbe` is optional in the values schema. Helm can drop null keys while merging values, and a missing key also omits the probe.
+
+Customize the HTTP probe and keep the rollout deadline past the new budget (`20 * 120 = 2400` seconds, plus margin):
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  periodSeconds: 20
+  failureThreshold: 120
+progressDeadlineSeconds: 2700
+```
+
+Helm merges maps with the chart defaults. Replacing the HTTP handler with `exec` or `tcpSocket` must clear `httpGet`, or the rendered probe contains both handlers:
+
+```yaml
+startupProbe:
+  httpGet: null
+  exec:
+    command:
+      - sh
+      - -c
+      - test -f /tmp/model-ready
+  periodSeconds: 5
+  failureThreshold: 360
+```
+
+```yaml
+startupProbe:
+  httpGet: null
+  tcpSocket:
+    port: 8000
+  periodSeconds: 10
+  failureThreshold: 180
+```
+
+Readiness and liveness probes are unchanged. Kubernetes starts them only after the startup probe succeeds.
 
 ## Configuration Examples
 

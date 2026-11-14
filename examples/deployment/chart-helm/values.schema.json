@@ -45,6 +45,10 @@
         "deploymentStrategy": {
             "type": "object"
         },
+        "progressDeadlineSeconds": {
+            "type": "integer",
+            "minimum": 1
+        },
         "resources": {
             "type": "object",
             "properties": {
@@ -52,7 +56,21 @@
                     "type": "object",
                     "properties": {
                         "cpu": {
-                            "type": "integer"
+                            "description": "Kubernetes CPU quantity, such as 4, 500m, or \"1\".",
+                            "anyOf": [
+                                {
+                                    "type": "integer",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "string",
+                                    "minLength": 1
+                                }
+                            ]
                         },
                         "memory": {
                             "type": "string"
@@ -71,7 +89,21 @@
                     "type": "object",
                     "properties": {
                         "cpu": {
-                            "type": "integer"
+                            "description": "Kubernetes CPU quantity, such as 4, 500m, or \"1\".",
+                            "anyOf": [
+                                {
+                                    "type": "integer",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                {
+                                    "type": "string",
+                                    "minLength": 1
+                                }
+                            ]
                         },
                         "memory": {
                             "type": "string"
@@ -223,74 +255,229 @@
             "type": "array"
         },
         "readinessProbe": {
-            "type": "object",
+            "description": "Optional Kubernetes readiness probe. Null disables it. httpGet is not required so exec, tcpSocket, and grpc handlers are valid. httpGet.port accepts a number or a named port.",
+            "type": [
+                "null",
+                "object"
+            ],
             "properties": {
-                "initialDelaySeconds": {
-                    "type": "integer"
-                },
-                "periodSeconds": {
-                    "type": "integer"
-                },
-                "failureThreshold": {
-                    "type": "integer"
+                "exec": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
                 },
                 "httpGet": {
-                    "type": "object",
+                    "type": [
+                        "null",
+                        "object"
+                    ],
                     "properties": {
                         "path": {
                             "type": "string"
                         },
                         "port": {
-                            "type": "integer"
+                            "type": [
+                                "integer",
+                                "string"
+                            ]
+                        },
+                        "host": {
+                            "type": "string"
+                        },
+                        "scheme": {
+                            "type": "string"
                         }
                     },
-                    "required": [
-                        "path",
-                        "port"
+                    "additionalProperties": true
+                },
+                "tcpSocket": {
+                    "type": [
+                        "null",
+                        "object"
+                    ],
+                    "properties": {
+                        "port": {
+                            "type": [
+                                "integer",
+                                "string"
+                            ]
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "grpc": {
+                    "type": [
+                        "null",
+                        "object"
                     ]
+                },
+                "initialDelaySeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "periodSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "failureThreshold": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "successThreshold": {
+                    "type": "integer",
+                    "minimum": 1
                 }
             },
-            "required": [
-                "failureThreshold",
-                "httpGet",
-                "initialDelaySeconds",
-                "periodSeconds"
-            ]
+            "additionalProperties": true
         },
         "livenessProbe": {
-            "type": "object",
+            "description": "Optional Kubernetes liveness probe. Null disables it. httpGet is not required so exec, tcpSocket, and grpc handlers are valid. httpGet.port accepts a number or a named port. successThreshold must be 1.",
+            "type": [
+                "null",
+                "object"
+            ],
             "properties": {
-                "initialDelaySeconds": {
-                    "type": "integer"
-                },
-                "failureThreshold": {
-                    "type": "integer"
-                },
-                "periodSeconds": {
-                    "type": "integer"
+                "exec": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
                 },
                 "httpGet": {
-                    "type": "object",
+                    "type": [
+                        "null",
+                        "object"
+                    ],
                     "properties": {
                         "path": {
                             "type": "string"
                         },
                         "port": {
-                            "type": "integer"
+                            "type": [
+                                "integer",
+                                "string"
+                            ]
+                        },
+                        "host": {
+                            "type": "string"
+                        },
+                        "scheme": {
+                            "type": "string"
                         }
                     },
-                    "required": [
-                        "path",
-                        "port"
+                    "additionalProperties": true
+                },
+                "tcpSocket": {
+                    "type": [
+                        "null",
+                        "object"
+                    ],
+                    "properties": {
+                        "port": {
+                            "type": [
+                                "integer",
+                                "string"
+                            ]
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "grpc": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
+                },
+                "initialDelaySeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "periodSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "failureThreshold": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "successThreshold": {
+                    "type": "integer",
+                    "enum": [
+                        1
                     ]
                 }
             },
-            "required": [
-                "failureThreshold",
-                "httpGet",
-                "initialDelaySeconds",
-                "periodSeconds"
-            ]
+            "additionalProperties": true
+        },
+        "startupProbe": {
+            "description": "Standard Kubernetes probe. httpGet is not required so exec, tcpSocket, and grpc handlers are valid. Null disables the probe. Helm may also drop a null key while merging values, so this property stays optional.",
+            "type": [
+                "null",
+                "object"
+            ],
+            "properties": {
+                "exec": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
+                },
+                "httpGet": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
+                },
+                "tcpSocket": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
+                },
+                "grpc": {
+                    "type": [
+                        "null",
+                        "object"
+                    ]
+                },
+                "initialDelaySeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "periodSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "successThreshold": {
+                    "description": "Kubernetes requires startupProbe.successThreshold to be exactly 1.",
+                    "type": "integer",
+                    "enum": [
+                        1
+                    ]
+                },
+                "failureThreshold": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "terminationGracePeriodSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "additionalProperties": true
         },
         "labels": {
             "type": "object",
@@ -321,9 +508,8 @@
         "gpuModels",
         "image",
         "labels",
-        "livenessProbe",
         "maxUnavailablePodDisruptionBudget",
-        "readinessProbe",
+        "progressDeadlineSeconds",
         "replicaCount",
         "resources",
         "secrets",
