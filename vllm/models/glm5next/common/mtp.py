@@ -46,6 +46,12 @@ from .model import (
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
+from .modelopt_dequant import (
+    alias_mtp_quantized_layers,
+    dequantize_bf16_targets,
+    is_modelopt_mixed,
+    stacked_bf16_target_fn,
+)
 
 if typing.TYPE_CHECKING:
     from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
@@ -255,6 +261,11 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         )
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
+        alias_mtp_quantized_layers(
+            self.quant_config,
+            self.config.num_hidden_layers,
+            self.config.num_nextn_predict_layers,
+        )
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -369,19 +380,34 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         kv_a_pad_size = 0
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
-            # the text-tower weights with "model.language_model."; the MTP head
-            # is built as a text-only model (model.layers.*), so strip the
-            # prefix to match.
-            if name.startswith("model.language_model."):
-                name = name.replace("model.language_model.", "model.", 1)
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is None:
-                continue
-            name = self._rewrite_spec_layer_name(spec_layer, name)
+        spec_layer_of: dict[str, int] = {}
+
+        def mtp_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            for name, loaded_weight in weights:
+                if "rotary_emb.inv_freq" in name:
+                    continue
+                # Multimodal (Glm5NextForConditionalGeneration) checkpoints
+                # prefix the text-tower weights with "model.language_model.";
+                # the MTP head is built as a text-only model (model.layers.*),
+                # so strip the prefix to match.
+                if name.startswith("model.language_model."):
+                    name = name.replace("model.language_model.", "model.", 1)
+                spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+                if spec_layer is None:
+                    continue
+                name = self._rewrite_spec_layer_name(spec_layer, name)
+                spec_layer_of[name] = spec_layer
+                yield name, loaded_weight
+
+        stream = mtp_weights()
+        if is_modelopt_mixed(self.quant_config):
+            # ModelOpt mixed-precision checkpoints quantize the MTP layer's
+            # attention and indexer, which this model holds in BF16.
+            stream = dequantize_bf16_targets(
+                stream, stacked_bf16_target_fn(params_dict, stacked_params_mapping)
+            )
+        for name, loaded_weight in stream:
+            spec_layer = spec_layer_of[name]
             if self.use_mega_moe and ".shared_experts." in name:
                 mlp = self.get_submodule(name.partition(".shared_experts.")[0])
                 loaded_params.add(
