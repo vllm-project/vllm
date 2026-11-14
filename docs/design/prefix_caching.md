@@ -19,7 +19,11 @@ In the example above, the KV cache in the first block can be uniquely identified
 * Extra hashes: Other values required to make this block unique, such as LoRA IDs, multi-modality input hashes (see the example below), and cache salts to isolate caches in multi-tenant environments.
 
 !!! note "Note 1"
-    We only cache full blocks.
+    Only full blocks are cached in the general case. Hybrid models with a Mamba
+    group in `align` mode are an exception: when the hash block size is finer
+    than the group's block size, a partially filled tail block can be cached,
+    keyed by the fine-grained hash at that token boundary. See
+    `BlockPool.cache_partial_block`.
 
 !!! note "Note 2"
     In previous versions, the hash key was not guaranteed to be collision-free. As of v0.11, the default hashing algorithm is `sha256`, which addresses collision risks.
