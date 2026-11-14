@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Octave decode on WMMA for RDNA3 (gfx11). Independent waves, one (split,
+// Octave decode on WMMA for RDNA3 (gfx1100). Independent waves, one (split,
 // 16-query row tile) per wave, transposed orientation, and lane pairs sharing
 // A fragments through a DPP swap. The products:
 //
@@ -14,8 +14,8 @@
 //   PV  O^T[dim][q] = V^T x P^T with the V codebook values fed as x + 1152;
 //       the per-token V scale is folded into P, the bias removed with sum(P).
 //
-// The query is rotated like K while it is staged into LDS; the output stays
-// rotated and octave_reduce rotates it back.
+// The query is rotated like K while staged into LDS. Decode writes rotated
+// partials; launch_reduce in octave_attn.cu merges them and undoes V rotation.
 
 #include <cstdint>
 #include <torch/all.h>
@@ -27,13 +27,17 @@
   #include <hip/hip_fp16.h>
 
   #include "octave_format.cuh"
+  #include "octave_decode.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__)
     #define OCTAVE_WMMA_STUB
   #endif
 
-namespace octave_wmma {
+namespace octave_rdna {
+namespace {
 
+// TODO(correctness): Adapt WMMA fragments, swap1/xhalf and output stores
+// for RDNA4's different A/B packing and accumulator rows.
 typedef _Float16 h16v __attribute__((ext_vector_type(16)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
 typedef _Float16 h2v __attribute__((ext_vector_type(2)));
@@ -49,6 +53,8 @@ constexpr int QG = 4;  // query tokens per block
 // Exact recent and leading positions (sparse window mode).
 [[maybe_unused]] constexpr int kWindow = 64;
 [[maybe_unused]] constexpr int kSinks = 4;
+// TODO(tuning): Recheck QROW padding and LDS bank conflicts per target
+// after adapting the WMMA lane mapping.
 [[maybe_unused]] constexpr int QROW = D + 8;  // padded LDS row (bank spread)
 [[maybe_unused]] constexpr float PSCALE = 256.0f;
 [[maybe_unused]] constexpr float BIAS = 1152.0f;  // int8 byte x fed as x + 1152
@@ -536,6 +542,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
           for (int b = 0; b < 4; ++b) {
             const int c = 4 * q + b;
             uint32_t o0 = t0[b], o1 = t1[b];
+            // TODO(tuning): Retune this dependency distance per target;
+            // it limits hoisting, not the ISA's WMMA register-overlap hazards.
             if (c >= 2)
               asm volatile("" : "+v"(o0), "+v"(o1) : "v"(O[c - 2][0]));
             const h16v a = bytes_to_h16(o0, o1, swap1(o0), swap1(o1));
@@ -579,82 +587,53 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
   #endif  // OCTAVE_WMMA_STUB
 }
 
-}  // namespace octave_wmma
-
 // Splits per row group and minimum tokens per split, as in the int8 kernel.
+// TODO(tuning): Tune these split/wave counts with QG per RDNA target.
+// TODO(correctness): Keep eligibility limits and launch geometry consistent
+// with the query tile when porting.
 constexpr int kSqWmmaSplits = 192;
 constexpr int kSqWmmaMinTps = 64;
 constexpr int kSqWmmaNsb = 2;
 
-int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt, int64_t query_group);
+}  // namespace
 
-// Launches the WMMA decode when the shape is covered; returns the number of
-// splits it wrote (for the reduce), or 0 when the caller must use its own
-// kernel.
-// With `indices` ([num_q, topk] int32 logical positions) the sparse variant
-// runs and q_to_klen is ignored.
-int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
-                       int64_t num_kv_splits, int64_t fmt,
-                       const std::optional<torch::Tensor>& indices,
-                       const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask, int64_t query_group) {
-  using namespace octave_wmma;
-  // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
-  // only).
-  static const int arch = [] {
-    const std::string name =
-        at::cuda::getCurrentDeviceProperties()->gcnArchName;
-    if (name.rfind("gfx1100", 0) == 0) return 0;
-    if (name.rfind("gfx942", 0) == 0) return 1;
-    return -1;
-  }();
-  if (arch == 1)
-    return indices.has_value()
-               ? 0
-               : octave_decode_mfma(query, cache, block_table, q_to_req,
-                                    q_to_klen, mid_o, k_signs, sm_scale,
-                                    num_kv_splits, fmt, query_group);
-  const bool arch_ok = arch == 0;
-  const int num_q = query.size(0);
-  const int num_q_heads = query.size(1);
-  const int num_kv_heads = cache.size(1);
+int octave_decode(const octave::DecodeArgs& args,
+                  const octave::SparseDecodeArgs& sparse) {
+  const int num_q = args.query.size(0);
+  const int num_q_heads = args.query.size(1);
+  const int num_kv_heads = args.cache.size(1);
   const int hpk = num_q_heads / num_kv_heads;
   const bool eligible =
-      arch_ok && query.size(2) == D && query.stride(2) == 1 && hpk * QG <= 32 &&
-      cache.size(2) % 16 == 0 &&
-      cache.stride(2) % (fmt & octave::kCompactFlag ? 4 : 8) == 0 &&
-      num_kv_splits >= 1;
+      args.query.size(2) == D && args.query.stride(2) == 1 && hpk * QG <= 32 &&
+      args.cache.size(2) % 16 == 0 &&
+      args.cache.stride(2) % (args.fmt & octave::kCompactFlag ? 4 : 8) == 0 &&
+      args.num_kv_splits >= 1;
   if (!eligible) return 0;
-  const int ns = std::min<int>(kSqWmmaSplits, (int)num_kv_splits);
+  const int ns = std::min<int>(kSqWmmaSplits, (int)args.num_kv_splits);
   if (num_q == 0) return ns;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  const bool sp = indices.has_value();
-  const int* idx = sp ? indices->data_ptr<int>() : nullptr;
-  const int64_t sidx = sp ? indices->stride(0) : 0;
-  const int topk = sp ? (int)indices->size(1) : 0;
+  const bool sp = sparse.indices.has_value();
+  const int* idx = sp ? sparse.indices->data_ptr<int>() : nullptr;
+  const int64_t sidx = sp ? sparse.indices->stride(0) : 0;
+  const int topk = sp ? (int)sparse.indices->size(1) : 0;
   const int nrt = std::min(num_q, QG) * hpk > 16 ? 2 : 1;
   const int spb = 2 * kSqWmmaNsb / nrt;
   dim3 grid((num_q + QG - 1) / QG, num_kv_heads, (ns + spb - 1) / spb);
-  #define SQW_SP(B, KC, T, SP)                                              \
-    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                   \
-        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                             \
-            (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),   \
-            block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),          \
-            q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),             \
-            k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,   \
-            num_kv_heads, cache.size(2), block_table.size(1),               \
-            block_table.size(0), cache.size(0), ns, kSqWmmaMinTps, nrt,     \
-            query.stride(0), query.stride(1), cache.stride(0),              \
-            cache.stride(1), cache.stride(2), mid_o.stride(0),              \
-            mid_o.stride(1), mid_o.stride(2), idx, sidx, topk, qpos, wtags, \
-            wmask, stags, smask)
+  #define SQW_SP(B, KC, T, SP)                                                \
+    decode_wmma<B, KC, kSqWmmaNsb, T, SP>                                     \
+        <<<grid, 64 * kSqWmmaNsb, 0, stream>>>(                               \
+            (const T*)args.query.data_ptr(),                                  \
+            (const uint8_t*)args.cache.data_ptr(),                            \
+            args.block_table.data_ptr<int>(), args.q_to_req.data_ptr<int>(),  \
+            args.q_to_klen.data_ptr<int>(), args.mid_o.data_ptr<float>(),     \
+            args.k_signs.data_ptr<int>(), (float)args.sm_scale, num_q,        \
+            num_q_heads, num_kv_heads, args.cache.size(2),                    \
+            args.block_table.size(1), args.block_table.size(0),               \
+            args.cache.size(0), ns, kSqWmmaMinTps, nrt, args.query.stride(0), \
+            args.query.stride(1), args.cache.stride(0), args.cache.stride(1), \
+            args.cache.stride(2), args.mid_o.stride(0), args.mid_o.stride(1), \
+            args.mid_o.stride(2), idx, sidx, topk, sparse.qpos, sparse.wtags, \
+            sparse.wmask, sparse.stags, sparse.smask)
   #define SQW(B, KC, T)          \
     do {                         \
       if (sp)                    \
@@ -662,13 +641,13 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
       else                       \
         SQW_SP(B, KC, T, false); \
     } while (0)
-  const bool bf = query.dtype() == at::kBFloat16;
-  if (fmt == 4) {
+  const bool bf = args.query.dtype() == at::kBFloat16;
+  if (args.fmt == 4) {
     if (bf)
       SQW(4, false, __hip_bfloat16);
     else
       SQW(4, false, half);
-  } else if (fmt == 3) {
+  } else if (args.fmt == 3) {
     if (bf)
       SQW(3, false, __hip_bfloat16);
     else
@@ -684,4 +663,5 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
   return ns;
 }
 
+}  // namespace octave_rdna
 #endif  // USE_ROCM

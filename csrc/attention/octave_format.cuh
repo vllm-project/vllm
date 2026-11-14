@@ -23,6 +23,8 @@
 
 #include <cstdint>
 
+int octave_slot_bytes(int64_t fmt);
+
 namespace octave {
 
 constexpr int D = 256;       // head size
