@@ -18,11 +18,12 @@ from dataclasses import dataclass, field
 import torch
 
 from vllm.distributed.engram_pool.group import PeerGroup, join_peer_group
+from vllm.distributed.engram_pool.rdma import wait_landed
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-__all__ = ["EngramPool", "EngramTable", "PeerGroup", "join_peer_group"]
+__all__ = ["EngramPool", "EngramTable", "PeerGroup", "join_peer_group", "wait_landed"]
 
 # Rows are copied 8 bytes at a time.
 ROW_ALIGN = 8
@@ -72,7 +73,7 @@ class EngramFetch:
     def unplaced(self, index: int) -> tuple:
         """Table `index`'s rows where they land, for a kernel to read without
         `wait`: `(buffer, slots, ready)`. Such a kernel first calls
-        `rdma.wait_landed(ready, index)`, then reads row `slots[i]` of `buffer`
+        `wait_landed(ready, index)`, then reads row `slots[i]` of `buffer`
         for row i of `[..., K]` (zeros if -1). Rows that SMs moved (NVLink) are
         in place already: `(rows, None, None)`. Launches nothing."""
         got = self.transport.unplaced(self.state, index)

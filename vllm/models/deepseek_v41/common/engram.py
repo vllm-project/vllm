@@ -54,8 +54,8 @@ from vllm.distributed.engram_pool import (
     EngramPool,
     EngramTable,
     join_peer_group,
+    wait_landed,
 )
-from vllm.distributed.engram_pool.rdma import wait_landed
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
