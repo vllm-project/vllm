@@ -126,7 +126,7 @@ class _RequestTokens(NamedTuple):
     num_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmReqContext(ReqContext):
     _scheduler: "OffloadingConnectorScheduler" = field(
         kw_only=True, repr=False, compare=False

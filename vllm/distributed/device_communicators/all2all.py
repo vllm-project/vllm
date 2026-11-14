@@ -430,7 +430,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
 
 
-@dataclass
+@dataclass(slots=True)
 class _NixlEPBufferState:
     buffer: Any
     max_num_ep_ranks: int
@@ -1083,7 +1083,7 @@ def _mori_epv2_arena_bytes(cfg) -> int:
 _MORI_EPV2_WINDOW_ALIGN = 4 << 30
 
 
-@dataclass
+@dataclass(slots=True)
 class _MoriEPv2Window:
     comm: Any
     free_bytes: int

@@ -42,7 +42,13 @@ def test_transformers_image_deepstack(
         model_impl="transformers",
         dtype="float32",
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={
+            "image": {
+                "count": 1,
+                "width": MAX_IMAGE_SIDE,
+                "height": MAX_IMAGE_SIDE,
+            },
+        },
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(
             image_prompts, MAX_TOKENS, images=images

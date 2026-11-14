@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.cpu.model_states.interface import ModelSpecificAttnMetadata
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FastPrefillBatchMetadata:
     """Per-step inputs for the KV-sharing fast prefill path."""
 

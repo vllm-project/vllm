@@ -104,7 +104,7 @@ def mask_dcp_empty_shards_(
 
 
 class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         output_dtype: torch.dtype
         lse_dtype: torch.dtype

@@ -26,13 +26,13 @@ def _force_cpu_default_device():
     torch.set_default_device(original)
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyVisionConfig:
     spatial_merge_size: int = 2
     patch_size: int = 14
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyConfig:
     image_token_id: int = 151655
     video_token_id: int = 151654

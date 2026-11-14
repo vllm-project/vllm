@@ -17,7 +17,7 @@ from vllm.distributed.aux_output_connector.store import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class _RequestTail:
     slot: int
     block_start: int

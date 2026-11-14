@@ -99,7 +99,7 @@ _FlashInferBf16RuntimeCheck = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FlashInferBf16Backend:
     flashinfer_backend: str
     is_supported: Callable[[], bool]

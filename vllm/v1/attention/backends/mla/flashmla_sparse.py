@@ -290,21 +290,21 @@ def gathered_prefill_shards(
 
 @dataclass
 class FlashMLASparseMetadata(SparseMLACommonMetadata):
-    @dataclass
+    @dataclass(slots=True)
     class FP8KernelMetadata:
         scheduler_metadata: FlashMLASchedMeta
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    @dataclass
+    @dataclass(slots=True)
     class FP8SeparatePrefillDecode:
-        @dataclass
+        @dataclass(slots=True)
         class Decode:
             seq_lens: torch.Tensor
             kernel_metadata: "FlashMLASparseMetadata.FP8KernelMetadata"
             decode_query_len: int  # needed for reshape in spec decode
 
-        @dataclass
+        @dataclass(slots=True)
         class Prefill:
             # Request ID for each token: -1 for decode tokens, request index
             # (0, 1, 2, ...) for prefill tokens.
@@ -317,7 +317,7 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
             # offsets in convert_logical_index_to_physical_index
             workspace_starts: torch.Tensor
 
-            @dataclass
+            @dataclass(slots=True)
             class Chunk:
                 """Metadata for a chunk of prefill requests.
 

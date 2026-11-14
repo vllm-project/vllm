@@ -42,7 +42,7 @@ PROMPT = " ".join(f"w{i}" for i in range(300))
 SHORT, LONG = 128, 256
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "llama"
 
@@ -64,12 +64,12 @@ class MockModelConfig:
     max_model_len: int = 4096
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig = field(default_factory=MockParallelConfig)

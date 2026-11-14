@@ -327,7 +327,7 @@ class MambaStateShapeCalculator:
         return (conv_state_shape, recurrent_state_shape)
 
 
-@dataclass
+@dataclass(slots=True)
 class MambaCopySpec:
     """Data class specifying the memory-copy parameters for Mamba states used for
     prefix caching in align mode.

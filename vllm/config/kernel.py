@@ -448,6 +448,12 @@ class KernelConfig:
       the budget
     """
 
+    b12x_moe_uncompressed_scales: bool = False
+    """Decode `csf`-compressed NVFP4 MoE block scales at load. By default the
+    B12X MoE backend keeps them compressed on the GPU and expands the routed
+    experts' scales on each call, which saves memory (2.57 GiB on
+    Qwen3.8-Flash-Next-FP4-Local) at some latency at higher batch sizes."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:

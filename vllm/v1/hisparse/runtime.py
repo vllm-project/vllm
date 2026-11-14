@@ -71,7 +71,7 @@ def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PagedCacheView:
     cache: torch.Tensor
     attention_cache: torch.Tensor
@@ -109,7 +109,7 @@ class PagedCacheView:
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
@@ -434,7 +434,7 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
-@dataclass
+@dataclass(slots=True)
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
     row_ids: torch.Tensor
