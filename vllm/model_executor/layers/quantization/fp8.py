@@ -413,6 +413,47 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        """Reconstruct serialized FP8 weights for online requantization."""
+        weight = layer.weight
+        out_dtype = layer.orig_dtype
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            n, k = weight.shape
+            bn, bk = self.weight_block_size
+            expected_scale_shape = (-(-n // bn), -(-k // bk))
+            if tuple(layer.weight_scale_inv.shape) != expected_scale_shape:
+                raise ValueError(
+                    f"FP8 scale grid {tuple(layer.weight_scale_inv.shape)} does "
+                    f"not match block shape {list(self.weight_block_size)} for "
+                    f"a {(n, k)} weight."
+                )
+            scale = layer.weight_scale_inv.to(torch.float32)
+            scale = scale.repeat_interleave(bn, dim=0)[:n]
+            scale = scale.repeat_interleave(bk, dim=1)[:, :k]
+            return (weight.to(torch.float32) * scale).to(out_dtype)
+
+        weight_scale = layer.weight_scale
+        unfused_module_in_checkpoint = (
+            weight_scale.ndim != 0
+            and weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min
+        )
+        if weight_scale.numel() == 1:
+            scale = weight_scale.reshape(()).to(torch.float32)
+        elif (
+            unfused_module_in_checkpoint
+            and len(layer.logical_widths) == weight_scale.numel()
+        ):
+            widths = torch.tensor(
+                layer.logical_widths, device=weight.device, dtype=torch.long
+            )
+            scale = weight_scale.to(torch.float32).repeat_interleave(widths)[:, None]
+        else:
+            # Fused checkpoints populate only weight_scale[0], leaving the
+            # remaining slots at float32.min.
+            scale = weight_scale.max().to(torch.float32)
+        return (weight.to(torch.float32) * scale).to(out_dtype)
+
     def apply(
         self,
         layer: torch.nn.Module,

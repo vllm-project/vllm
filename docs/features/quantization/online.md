@@ -139,6 +139,7 @@ Currently supported combinations are:
 
 | Checkpoint layer | Online target | Requirements |
 | ---------------- | ------------- | ------------ |
+| Serialized FP8 linear | any online linear method | Target-specific hardware requirements |
 | Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |

@@ -86,6 +86,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
     CompressedTensorsW4A4Nvfp4MoEMethod,
 )
+from vllm.model_executor.layers.quantization.fp8 import (
+    Fp8Config,
+    Fp8LinearMethod,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptLinearMethod,
@@ -3512,3 +3516,159 @@ def test_registered_online_config_is_instantiated(
 
     assert type(result) is _OotOnlineConfig
     assert result.args is not None
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float8_e8m0fnu])
+def test_fp8_linear_dequantize_block_scales(
+    scale_dtype: torch.dtype,
+    default_vllm_config,
+) -> None:
+    """Block-scaled FP8 linear weights dequantize accurately, including partial
+    trailing blocks and E8M0 scale exponents."""
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    method = Fp8LinearMethod(Fp8Config(weight_block_size=[128, 128]))
+    n, k = 150, 160
+    layer = torch.nn.Module()
+    layer.orig_dtype = torch.bfloat16
+    layer.logical_widths = [n]
+    raw_w = torch.randn((n, k), dtype=torch.float32).clamp(-4, 4)
+    w_fp8 = raw_w.to(torch.float8_e4m3fn)
+    if scale_dtype == torch.float8_e8m0fnu:
+        scale_inv = torch.tensor([[126, 127], [128, 127]], dtype=torch.uint8).view(
+            torch.float8_e8m0fnu
+        )
+    else:
+        scale_inv = torch.tensor([[0.5, 1.25], [2.0, 0.75]], dtype=torch.float32)
+    layer.register_parameter("weight", torch.nn.Parameter(w_fp8, requires_grad=False))
+    layer.register_parameter(
+        "weight_scale_inv", torch.nn.Parameter(scale_inv, requires_grad=False)
+    )
+
+    out = method.dequantize_weight(layer)
+
+    assert out.shape == (n, k)
+    assert out.dtype == torch.bfloat16
+    expected_scale = (
+        scale_inv.to(torch.float32)
+        .repeat_interleave(128, dim=0)[:n]
+        .repeat_interleave(128, dim=1)[:, :k]
+    )
+    expected = (w_fp8.to(torch.float32) * expected_scale).to(torch.bfloat16)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    bad_layer = torch.nn.Module()
+    bad_layer.orig_dtype = torch.bfloat16
+    bad_layer.register_parameter(
+        "weight", torch.nn.Parameter(w_fp8, requires_grad=False)
+    )
+    bad_layer.register_parameter(
+        "weight_scale_inv",
+        torch.nn.Parameter(
+            torch.ones((1, 1), dtype=torch.float32), requires_grad=False
+        ),
+    )
+    with pytest.raises(ValueError, match="FP8 scale grid"):
+        method.dequantize_weight(bad_layer)
+
+
+@pytest.mark.parametrize(
+    "logical_widths,scales,expected_scales",
+    [
+        ([128], [0.5], [0.5]),
+        ([64, 64], [0.25, 1.5], [0.25, 1.5]),
+        # Fused checkpoint loads only slot 0, leaving remaining slots at float32.min.
+        ([64, 64], [0.75, torch.finfo(torch.float32).min], [0.75, 0.75]),
+    ],
+    ids=["single", "unfused_shards", "fused_single_scale"],
+)
+def test_fp8_linear_dequantize_tensor_and_shard_scales(
+    logical_widths: list[int],
+    scales: list[float],
+    expected_scales: list[float],
+    default_vllm_config,
+) -> None:
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    method = Fp8LinearMethod(Fp8Config())
+    n, k = sum(logical_widths), 128
+    layer = torch.nn.Module()
+    layer.orig_dtype = torch.bfloat16
+    layer.logical_widths = logical_widths
+    w_fp8 = (
+        torch.randn((n, k), dtype=torch.float32).clamp(-4, 4).to(torch.float8_e4m3fn)
+    )
+    weight_scale = torch.tensor(scales, dtype=torch.float32)
+    layer.register_parameter("weight", torch.nn.Parameter(w_fp8, requires_grad=False))
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(weight_scale, requires_grad=False)
+    )
+
+    out = method.dequantize_weight(layer)
+
+    assert out.dtype == torch.bfloat16
+    per_row_scale = torch.repeat_interleave(
+        torch.tensor(expected_scales, dtype=torch.float32),
+        torch.tensor(logical_widths, dtype=torch.long),
+    )[:, None]
+    expected = (w_fp8.to(torch.float32) * per_row_scale).to(torch.bfloat16)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("source_block", [False, True], ids=["src_tensor", "src_block"])
+@pytest.mark.parametrize(
+    "target_scheme",
+    ["mxfp8", "fp8_per_block", "fp8_per_tensor", "fp8_per_channel"],
+)
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm())
+    or not is_quant_method_supported("fp8"),
+    reason="Requires FP8 support on CUDA or ROCm.",
+)
+def test_online_fp8_checkpoint_requantization_linear(
+    source_block: bool,
+    target_scheme: str,
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+) -> None:
+    """FP8 checkpoints (per-tensor and 128x128 block-scaled) can be
+    requantized into online linear targets cleanly without stale scales."""
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = Fp8Config(weight_block_size=[128, 128] if source_block else None)
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear=target_scheme)
+    )
+    with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+        layer = ColumnParallelLinear(
+            input_size=256,
+            output_size=256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="model.layers.0.self_attn.o_proj",
+            disable_tp=True,
+        )
+        assert isinstance(layer.quant_method.requantization_source, Fp8LinearMethod)
+        with torch.no_grad():
+            raw = torch.randn((256, 256), device=DEVICE, dtype=torch.float32) * 0.5
+            layer.weight.copy_(raw.to(torch.float8_e4m3fn))
+            if source_block:
+                layer.weight_scale_inv.fill_(0.5)
+                ref_w = (layer.weight.to(torch.float32) * 0.5).to(torch.bfloat16)
+            else:
+                layer.weight_scale.fill_(0.5)
+                ref_w = (layer.weight.to(torch.float32) * 0.5).to(torch.bfloat16)
+
+        layer.quant_method.process_weights_after_loading(layer)
+
+        if target_scheme == "fp8_per_block":
+            assert not hasattr(layer, "weight_scale")
+            assert hasattr(layer, "weight_scale_inv")
+        else:
+            assert not hasattr(layer, "weight_scale_inv")
+            assert layer.weight_block_size is None
+
+        x = torch.randn((4, 256), device=DEVICE, dtype=torch.bfloat16)
+        out, _ = layer(x)
+        expected = torch.nn.functional.linear(x, ref_w)
+        rel_err = ((out - expected).float().norm() / expected.float().norm()).item()
+        assert rel_err < 0.15
