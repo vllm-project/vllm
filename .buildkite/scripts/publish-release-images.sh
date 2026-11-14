@@ -21,6 +21,15 @@ target_enabled() {
   [ "${TARGET}" = "all" ] || [ "${TARGET}" = "$1" ]
 }
 
+# Mirror a published DockerHub image to vllm/vllm, the short alias of every
+# vllm/vllm-openai* repo: alias_vllm <family suffix> <src latest> <src versioned>
+# tags vllm/vllm:latest<suffix> and vllm/vllm:v<ver><suffix>. Registry-side copy,
+# so the digest is kept as long as the source is a manifest list.
+alias_vllm() {
+  docker buildx imagetools create -t "vllm/vllm:latest$1" "$2"
+  docker buildx imagetools create -t "vllm/vllm:v${RELEASE_VERSION}$1" "$3"
+}
+
 # Promote one image family from ECR staging to DockerHub: per-arch tags plus the
 # latest and versioned multi-arch manifests. $1 is the tag suffix shared by both
 # registries: "" for the default CUDA family, else e.g. "-efa".
@@ -51,6 +60,7 @@ publish_image_family() {
     "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64${suffix}"
   docker manifest push "${latest}"
   docker manifest push "${versioned}"
+  alias_vllm "${suffix}" "${latest}" "${versioned}"
 }
 
 # Publish an opt-in family all-or-nothing, like the CPU images below: skip when
@@ -117,7 +127,8 @@ if target_enabled cuda-13-0-efa; then
 fi
 
 # ---- ROCm ----
-# Copied from ECR (publish.sh). The default stack (rocm) also owns the plain :latest / :v<ver> tags.
+# Copied from ECR (publish.sh) to vllm/vllm-openai-rocm and its short name vllm/vllm-rocm.
+# The default stack (rocm) also owns the plain :latest / :v<ver> tags.
 
 # pin_rocm <ref>  — <ref>@<digest>, so what was checked is what is published
 pin_rocm() {
@@ -128,7 +139,7 @@ pin_rocm() {
 }
 
 publish_rocm_stack() {
-  local v s sfx img base ver ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
+  local v s sfx img base ver ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm short=vllm/vllm-rocm
   v=$(buildkite-agent meta-data get "rocm-$1-variant")
   img=$(pin_rocm "$ecr-$v")
   base=$(pin_rocm "$ecr-$v-base")
@@ -140,9 +151,14 @@ publish_rocm_stack() {
     exit 1
   fi
   sfx=("-$v"); if [[ $1 == rocm ]]; then sfx+=(""); fi
+  # One create per image tags every repo: copying the single-arch result again
+  # (alias_vllm) would wrap it in a new manifest list with a different digest.
   for s in "${sfx[@]}"; do
-    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$img"
-    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$base"
+    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" \
+      -t "$short:latest$s" -t "$short:v${RELEASE_VERSION}$s" \
+      -t "vllm/vllm:latest${s:--rocm}" -t "vllm/vllm:v${RELEASE_VERSION}${s:--rocm}" "$img"
+    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" \
+      -t "$short:latest$s-base" -t "$short:v${RELEASE_VERSION}$s-base" "$base"
   done
 }
 
@@ -153,19 +169,24 @@ fi
 # ---- XPU ----
 
 if target_enabled xpu; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu"
+  XPU_TAG=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu
+  docker pull "${XPU_TAG}"
 
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu" vllm/vllm-openai-xpu:latest-x86_64
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-xpu" "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64"
-  docker push vllm/vllm-openai-xpu:latest-x86_64
-  docker push "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64"
+  # vllm/vllm-xpu is the short name of vllm/vllm-openai-xpu, with the same tags.
+  for repo in vllm/vllm-openai-xpu vllm/vllm-xpu; do
+    docker tag "${XPU_TAG}" "${repo}:latest-x86_64"
+    docker tag "${XPU_TAG}" "${repo}:v${RELEASE_VERSION}-x86_64"
+    docker push "${repo}:latest-x86_64"
+    docker push "${repo}:v${RELEASE_VERSION}-x86_64"
 
-  docker manifest rm vllm/vllm-openai-xpu:latest || true
-  docker manifest rm "vllm/vllm-openai-xpu:v${RELEASE_VERSION}" || true
-  docker manifest create vllm/vllm-openai-xpu:latest vllm/vllm-openai-xpu:latest-x86_64 --amend
-  docker manifest create "vllm/vllm-openai-xpu:v${RELEASE_VERSION}" "vllm/vllm-openai-xpu:v${RELEASE_VERSION}-x86_64" --amend
-  docker manifest push vllm/vllm-openai-xpu:latest
-  docker manifest push "vllm/vllm-openai-xpu:v${RELEASE_VERSION}"
+    docker manifest rm "${repo}:latest" || true
+    docker manifest rm "${repo}:v${RELEASE_VERSION}" || true
+    docker manifest create "${repo}:latest" "${repo}:latest-x86_64" --amend
+    docker manifest create "${repo}:v${RELEASE_VERSION}" "${repo}:v${RELEASE_VERSION}-x86_64" --amend
+    docker manifest push "${repo}:latest"
+    docker manifest push "${repo}:v${RELEASE_VERSION}"
+  done
+  alias_vllm -xpu vllm/vllm-openai-xpu:latest "vllm/vllm-openai-xpu:v${RELEASE_VERSION}"
 fi
 
 # ---- CPU ----
@@ -203,6 +224,7 @@ if target_enabled cpu; then
     docker manifest create "vllm/vllm-openai-cpu:v${RELEASE_VERSION}" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64"
     docker manifest push vllm/vllm-openai-cpu:latest
     docker manifest push "vllm/vllm-openai-cpu:v${RELEASE_VERSION}"
+    alias_vllm -cpu vllm/vllm-openai-cpu:latest "vllm/vllm-openai-cpu:v${RELEASE_VERSION}"
   elif [ "$CPU_X86_AVAILABLE" = "false" ] && [ "$CPU_ARM_AVAILABLE" = "false" ]; then
     echo "WARNING: Neither CPU image found in ECR, skipping CPU publish (ensure block-cpu-release-image-build and block-arm64-cpu-release-image-build were unblocked and the builds finished pushing)"
   else

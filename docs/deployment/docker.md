@@ -8,6 +8,31 @@ toc_depth: 2
 
 --8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
 
+### Short image names
+
+Release images (from v0.33.0) and nightly images are also published under the
+shorter `vllm/vllm` name, with the platform as a tag suffix. These are the same
+images (same digests) as the `vllm/vllm-openai*` tags.
+
+| Image | `vllm/vllm` tag |
+| --- | --- |
+| `vllm/vllm-openai:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}` |
+| `vllm/vllm-openai:{latest,v<version>}-efa` | `vllm/vllm:{latest,v<version>}-efa` |
+| `vllm/vllm-openai:cu134-nightly` | `vllm/vllm:nightly-cu134` |
+| `vllm/vllm-openai-rocm:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-rocm` |
+| `vllm/vllm-openai-rocm:{latest,v<version>,nightly}-<variant>` | `vllm/vllm:{latest,v<version>,nightly}-<variant>`, e.g. `-rocm100` |
+| `vllm/vllm-openai-cpu:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-cpu` |
+| `vllm/vllm-openai-xpu:{latest,v<version>,nightly}` | `vllm/vllm:{latest,v<version>,nightly}-xpu` |
+
+For example, `docker pull vllm/vllm:v0.33.0-rocm` pulls the same image as
+`docker pull vllm/vllm-openai-rocm:v0.33.0`. Per-architecture tags, ROCm `-base`
+images and commit-pinned nightly tags (`nightly-<commit>`) are only published
+under the `vllm/vllm-openai*` names.
+
+Release images for ROCm and XPU are also published as `vllm/vllm-rocm` and
+`vllm/vllm-xpu`, with the same tags as `vllm/vllm-openai-rocm` and
+`vllm/vllm-openai-xpu` (e.g. `vllm/vllm-rocm:v0.33.0`, `vllm/vllm-xpu:latest`).
+
 ## Run a vLLM Recipes configuration
 
 [vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
