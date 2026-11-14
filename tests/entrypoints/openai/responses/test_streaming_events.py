@@ -22,6 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.responses import utils as responses_utils
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    SimpleStreamingState,
     StreamingState,
     _StateType,
     emit_browser_tool_events,
@@ -367,3 +368,11 @@ class TestCustomToolStreaming:
         assert delta.delta == "hello"  # full authoritative resend, not a dropped suffix
         assert done_input == "hello"
         assert events[-1].item.input == "hello"
+
+
+def test_failed_text_append_keeps_accumulated_text():
+    """A delta that fails to append must not drop the text streamed so far."""
+    state = SimpleStreamingState(accumulated_text="kept")
+    with pytest.raises(TypeError):
+        state.append_text(None)
+    assert state.accumulated_text == "kept"
