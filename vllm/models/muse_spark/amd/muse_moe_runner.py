@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
+    AiterUnquantizedExperts,
     rocm_aiter_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
@@ -101,9 +102,9 @@ def _validate_tp_post_norm_deployment(
 def validate_bf16_deployment(moe_config: FusedMoEConfig) -> None:
     """Reject deployments whose BF16 finalization is not implemented."""
     _validate_tp_post_norm_deployment(moe_config, "BF16")
-    if moe_config.moe_backend not in ("auto", "triton"):
+    if moe_config.moe_backend not in ("auto", "triton", "aiter"):
         raise NotImplementedError(
-            "Muse Spark BF16 on ROCm requires the Triton MoE backend; got "
+            "Muse Spark BF16 on ROCm uses the AITER unquantized MoE; got "
             f"{moe_config.moe_backend!r}."
         )
 
@@ -387,14 +388,18 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
 
 
 class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
-    """BF16 MoE method pinned to the MuseSpark-aware Triton experts."""
+    """BF16 MoE method pinned to AITER's a16w16 experts.
+
+    AITER selects the kernel from the unquantized fused-MoE table. The
+    generic backend oracle is skipped: it would hand back a summed
+    `[T, H]` tensor, and Muse Spark normalises each route first.
+    """
 
     def __init__(self, moe: FusedMoEConfig) -> None:
         validate_bf16_deployment(moe)
-        # Triton-only: skip the generic constructor's backend oracle.
         FusedMoEMethodBase.__init__(self, moe)
-        self.unquantized_backend = UnquantizedMoeBackend.TRITON
-        self.experts_cls = MuseSparkTritonExperts
+        self.unquantized_backend = UnquantizedMoeBackend.AITER
+        self.experts_cls = MuseSparkAiterUnquantizedExperts
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         base_config = super().get_fused_moe_quant_config(layer)
@@ -411,33 +416,29 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         )
 
 
-class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
-    """AITER experts that return one unweighted output per selected route."""
+class _MusePerRouteAiter:
+    """Run AITER on one row per route and park the unreduced output.
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ) -> None:
-        super().__init__(moe_config, quant_config)
-        if not isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig):
-            raise TypeError(
-                "MuseSparkAiterExperts requires MuseSparkQuarkOCPMXMoEQuantConfig."
-            )
-        if quant_config.post_expert_norm_fn is None:
-            raise ValueError("Muse Spark post-expert norm is not configured.")
-        self._unit_weights_bufs: dict[int, torch.Tensor] = {}
+    `fused_moe` returns a top-k sum. One row per route with `topk=1` and unit
+    weights makes that sum a single route, which the post-expert norm needs.
+    The quant type comes from the AITER expert class this is mixed into, so
+    AITER's own dispatch picks the kernel.
+    """
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
     ) -> torch.Tensor:
         """A cached `[num_routes, width]` fp32 ones buffer (grown on demand)."""
-        buf = self._unit_weights_bufs.get(width)
+        bufs: dict[int, torch.Tensor] | None = getattr(self, "_unit_weights_bufs", None)
+        if bufs is None:
+            bufs = {}
+            self._unit_weights_bufs = bufs
+        buf = bufs.get(width)
         if buf is None or buf.shape[0] < num_routes or buf.device != device:
             buf = torch.ones(
                 (max(num_routes, 1), width), dtype=torch.float32, device=device
             )
-            self._unit_weights_bufs[width] = buf
+            bufs[width] = buf
         return buf[:num_routes]
 
     def workspace_shapes(
@@ -507,8 +508,8 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         num_routes = num_tokens * top_k
         flat_topk_ids = topk_ids.view(num_routes, 1)
         if expert_map is not None:
-            # AITER's EP convention: one extra route per row on the always-masked
-            # last expert_mask slot; its tuned-config lookup subtracts it.
+            # AITER's EP convention: one extra route per row, aimed at the
+            # always-masked last expert_mask slot.
             masked_slot = flat_topk_ids.new_full(
                 (num_routes, 1), expert_map.shape[0] - 1
             )
@@ -542,9 +543,60 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         )
         self._park_route_output(route_output.view_as(output))
 
+
+class MuseSparkAiterExperts(_RouteOutputHandoff, _MusePerRouteAiter, AiterMxfp4Experts):
+    """MXFP4 AITER experts that return one unweighted output per route."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        super().__init__(moe_config, quant_config)
+        if not isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig):
+            raise TypeError(
+                "MuseSparkAiterExperts requires MuseSparkQuarkOCPMXMoEQuantConfig."
+            )
+        if quant_config.post_expert_norm_fn is None:
+            raise ValueError("Muse Spark post-expert norm is not configured.")
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         quant_config = self.quant_config
         assert isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig)
+        assert quant_config.post_expert_norm_fn is not None
+        return MuseSparkTopKWeightAndReduce(
+            quant_config.post_expert_norm_fn,
+            pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
+            take_route_output=self._take_route_output,
+        )
+
+
+class MuseSparkAiterUnquantizedExperts(
+    _RouteOutputHandoff, _MusePerRouteAiter, AiterUnquantizedExperts
+):
+    """BF16 AITER experts that return one unweighted output per route.
+
+    `AiterUnquantizedExperts` sets the a16w16 quant type. AITER then picks the
+    kernel; this class only stops that kernel from summing the routes.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        super().__init__(moe_config, quant_config)
+        if not isinstance(quant_config, MuseSparkUnquantizedMoEQuantConfig):
+            raise TypeError(
+                "MuseSparkAiterUnquantizedExperts requires "
+                "MuseSparkUnquantizedMoEQuantConfig."
+            )
+        if quant_config.post_expert_norm_fn is None:
+            raise ValueError("Muse Spark post-expert norm is not configured.")
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        quant_config = self.quant_config
+        assert isinstance(quant_config, MuseSparkUnquantizedMoEQuantConfig)
         assert quant_config.post_expert_norm_fn is not None
         return MuseSparkTopKWeightAndReduce(
             quant_config.post_expert_norm_fn,
@@ -829,6 +881,7 @@ __all__ = [
     "MuseMoERunner",
     "MuseSparkRouter",
     "MuseSparkAiterExperts",
+    "MuseSparkAiterUnquantizedExperts",
     "MuseSparkQuarkFp8MoEQuantConfig",
     "MuseSparkQuarkOCPMXFusedMoE",
     "MuseSparkQuarkW8A8Fp8FusedMoE",
