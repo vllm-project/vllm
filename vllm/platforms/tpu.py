@@ -13,8 +13,8 @@ try:
 
     TpuPlatform = TpuInferencePlatform  # type: ignore
     USE_TPU_INFERENCE = True
-except ImportError:
-    logger.error(
-        "tpu_inference not found, please install tpu_inference to run vllm on TPU"
-    )
-    pass
+except ImportError as e:
+    raise ImportError(
+        "tpu_inference not found, please install tpu_inference to run "
+        "vLLM on TPU"
+    ) from e
