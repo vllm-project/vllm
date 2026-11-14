@@ -514,7 +514,10 @@ class NixlEplbCommunicator(EplbCommunicator):
         local_metadata = self._nixl_wrapper.get_agent_metadata()
         gathered_metadata: list[bytes | None] = [None] * self._world_size
         torch.distributed.all_gather_object(
-            gathered_metadata, local_metadata, group=self._cpu_group
+            gathered_metadata,
+            local_metadata,
+            group=self._cpu_group,
+            weights_only=True,
         )
         for peer in range(self._world_size):
             if peer == self._rank:
@@ -555,7 +558,10 @@ class NixlEplbCommunicator(EplbCommunicator):
             None
         ] * self._world_size
         torch.distributed.all_gather_object(
-            gathered_meta, local_meta, group=self._cpu_group
+            gathered_meta,
+            local_meta,
+            group=self._cpu_group,
+            weights_only=True,
         )
 
         local_keys = set(local_meta.keys())
@@ -766,6 +772,7 @@ class SymmMemEplbCommunicator(EplbCommunicator):
                 physical_ids,
                 current_platform.visible_device_id_to_physical_device_id(device.index),
                 group=cpu_group,
+                weights_only=True,
             )
             in_nvlink_domain = current_platform.is_fully_connected(physical_ids)
         else:
