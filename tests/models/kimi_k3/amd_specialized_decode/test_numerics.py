@@ -859,6 +859,38 @@ def _k2_inputs(rank: int, device, S: int = 8, seed: int = 0):
     }
 
 
+_COMPILED: set = set()
+
+
+def _together() -> None:
+    """Every TP rank's host gets here before any goes on."""
+    from vllm.distributed import get_tp_group
+
+    dist.barrier(group=get_tp_group().cpu_group)
+
+
+def _launch_together(key) -> None:
+    """Compile `key` if new, then wait for every TP rank, before a launch.
+
+    The engine compiles every build before its first step (`compile_build`
+    in `runtime/decode.py`). Here a first launch would compile in place, for
+    seconds, while the peers already launched spin on this rank's mailbox
+    words: past `WAIT_SECONDS` their waits give up, they finish the step on
+    stale words, and the ranks that read their tagged outputs see wrong
+    values with clean health. In a graph capture nothing runs yet; the
+    graph's first replay calls `_together` instead."""
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
+        compile_build,
+    )
+
+    if torch.cuda.is_current_stream_capturing():
+        return
+    if key not in _COMPILED:
+        compile_build(key)
+        _COMPILED.add(key)
+    _together()
+
+
 def _k2_launch(
     runner,
     w,
@@ -897,6 +929,7 @@ def _k2_launch(
         **fused,
         **runner.fault,
     )
+    _launch_together(key)
     k2.k2_launch(
         key,
         core=w["core"],
@@ -989,6 +1022,7 @@ def _k2_worker(
     with torch.cuda.graph(graph):
         runner.step_begin()
         _k2_launch(runner, w, mw, prefix, out, reset=True)
+    _together()
     graph.replay()
     torch.accelerator.synchronize()
     want_prefix, want_out = prefix.clone(), out.clone()
@@ -1117,6 +1151,7 @@ def _m1_worker(
             peer_off=runner.mla_peer_off,
             qheads=q8.size(1) if q8.size(1) != R * NH else 0,
         )
+        _launch_together(key)
         mla_pre(
             key,
             prefix=prefix,
@@ -1145,6 +1180,7 @@ def _m1_worker(
         key = MlaPostBuild(
             tokens=core.size(0), qlen=q, ranks=ranks, peer_off=runner.mla_post_off
         )
+        _launch_together(key)
         mla_post(
             key,
             o=b["o"],
@@ -1303,6 +1339,7 @@ def _m1_worker(
                         m1b=(m1b_in(b, b["gate"]), q, 1), splits=n,
                         m1c_in=c_in if fused else None,
                     )  # fmt: skip
+            _together()
             graph.replay()
             torch.accelerator.synchronize()
             want = [t.clone() for t in (core, prefix, out)]
@@ -1343,6 +1380,7 @@ def _m1_worker(
                 f = (m1b_in(b, gate), q, R) if fused else None
                 k2w = dict(k, core=core, blocks=blocks)
                 _k2_launch(runner, k2w, mw, prefix, out, False, layer=layer, m1b=f)
+        _together()
         graph.replay()
         torch.accelerator.synchronize()
         want = [t.clone() for t in (prefix, q8, core, out)]
@@ -1409,7 +1447,6 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
             num_kv_heads=1,
             head_size=cp.HEAD_SIZE,
             dtype=config.model_config.dtype,
-            non_causal_multi_token_decode=False,
         )
         L = ctx + qlen
         fp8 = current_platform.fp8_dtype()
