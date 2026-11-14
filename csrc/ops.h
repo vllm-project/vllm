@@ -889,3 +889,9 @@ void fused_mqa_topk_prefill(
     torch::stable::Tensor values, torch::stable::Tensor indices,
     torch::stable::Tensor retained, torch::stable::Tensor retained_indices,
     torch::stable::Tensor counts, torch::stable::Tensor defer);
+
+#ifndef USE_ROCM
+void silu_mul_fp8_sm90(torch::stable::Tensor& out,
+                       const torch::stable::Tensor& input,
+                       torch::stable::Tensor& scales, bool round_silu);
+#endif

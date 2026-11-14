@@ -402,6 +402,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False) -> ()");
 
+#ifndef USE_ROCM
+  ops.def(
+      "silu_mul_fp8_sm90(Tensor! out, Tensor input, Tensor! scales, "
+      "bool round_silu=False) -> ()");
+#endif
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -866,6 +872,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
   ops.impl("silu_and_mul_per_block_quant",
            TORCH_BOX(&silu_and_mul_per_block_quant));
+
+#ifndef USE_ROCM
+  ops.impl("silu_mul_fp8_sm90", TORCH_BOX(&silu_mul_fp8_sm90));
+#endif
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
