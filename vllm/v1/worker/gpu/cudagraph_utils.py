@@ -23,6 +23,7 @@ from vllm.compilation.cudagraph_pool import (
     capture_outside_cumem_pool,
     capture_pool,
 )
+from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import (
@@ -473,6 +474,9 @@ class CudaGraphManager:
         """
         with graph_capture(self.device, stream) as context, ExitStack() as stack:
             self.capture_stream = context.stream
+            # CUDA graph wrappers raise on captures outside this window.
+            set_cudagraph_capturing_enabled(True)
+            stack.callback(set_cudagraph_capturing_enabled, False)
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)

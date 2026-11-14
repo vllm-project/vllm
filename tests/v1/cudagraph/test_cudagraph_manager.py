@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.compilation import monitor
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -42,6 +43,17 @@ def _reset_graph_pool_id():
     pynccl_allocator._graph_pool_id = None
     yield
     pynccl_allocator._graph_pool_id = None
+
+
+@pytest.fixture(autouse=True)
+def _restore_cudagraph_capturing_enabled(monkeypatch):
+    # CudaGraphManager.capture() disables capturing process-wide on exit.
+    monkeypatch.setattr(monitor, "cudagraph_capturing_enabled", True)
+
+
+@contextmanager
+def _fake_graph_capture(*args, **kwargs):
+    yield SimpleNamespace(stream=MagicMock())
 
 
 def _create_vllm_config() -> MagicMock:
@@ -99,10 +111,6 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     def create_forward_fn(desc, warmup):
         return lambda _mode: None
 
-    @contextmanager
-    def fake_graph_capture(*args, **kwargs):
-        yield SimpleNamespace(stream=MagicMock())
-
     fake_offloader = MagicMock()
 
     def cuda_graph_enter(*args, **kwargs):
@@ -113,7 +121,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     mock_cuda_graph_ctx.__exit__ = MagicMock(return_value=False)
 
     with (
-        patch.object(gpu_cudagraph_utils, "graph_capture", fake_graph_capture),
+        patch.object(gpu_cudagraph_utils, "graph_capture", _fake_graph_capture),
         patch.object(gpu_cudagraph_utils, "current_stream", return_value=MagicMock()),
         patch.object(gpu_cudagraph_utils, "get_offloader", lambda: fake_offloader),
         patch.object(gpu_cudagraph_utils.torch.cuda, "CUDAGraph"),
@@ -126,6 +134,41 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+
+
+def test_capture_reenables_cudagraph_capturing(monkeypatch):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    monkeypatch.setattr(gpu_cudagraph_utils, "graph_capture", _fake_graph_capture)
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=_create_decode_vllm_config([4], decode_sizes=[]),
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        decode_query_lens={1: 8},
+    )
+    captured: list[int] = []
+
+    def create_forward_fn(desc, warmup):
+        def forward_fn(cg_mode):
+            if cg_mode == CUDAGraphMode.PIECEWISE:
+                # The check CUDAGraphWrapper runs before capturing a new shape.
+                monitor.validate_cudagraph_capturing_enabled()
+                captured.append(desc.num_tokens)
+
+        return forward_fn
+
+    monitor.set_cudagraph_capturing_enabled(False)
+    manager.capture(create_forward_fn)
+
+    assert captured == [4]
+    with pytest.raises(RuntimeError, match="CUDA graph capturing detected"):
+        monitor.validate_cudagraph_capturing_enabled()
 
 
 def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
