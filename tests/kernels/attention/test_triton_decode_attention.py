@@ -439,7 +439,8 @@ def _verify_reference(q, cache, block_table, seq_lens, real_seq_lens, qlen, scal
     not current_platform.is_rocm(), reason="Only the ROCm AITER MLA backend uses it"
 )
 @pytest.mark.parametrize("num_heads", [8, 16, 128])
-@pytest.mark.parametrize("qlen", [5, 8])
+# 1 and 3: a CDNA3 FP8 cache whose view passes 4 GiB verifies here at any qlen.
+@pytest.mark.parametrize("qlen", [1, 3, 5, 8])
 # 3 requests at 8 or 16 heads stay on the small-tile config; the rest reach
 # the 64-row tiles.
 @pytest.mark.parametrize("batch", [3, 24])
@@ -460,7 +461,7 @@ def test_decode_attention_fwd_verify(
     # Ragged lengths, one shorter than qlen, one long enough for 32 splits,
     # and a graph padding request.
     lens = torch.randint(qlen, 700, (batch,))
-    lens[0] = qlen - 2
+    lens[0] = max(qlen - 2, 0)
     lens[1] = 4500
     lens[-1] = 0
     seq_lens = lens.to(torch.int32).to(DEVICE_TYPE)
