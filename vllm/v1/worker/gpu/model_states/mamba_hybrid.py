@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
@@ -273,10 +274,16 @@ class MambaHybridModelState(DefaultModelState):
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
-            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
-            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
-                input_batch.idx_mapping
-            ]
+            if envs.VLLM_K31_BEAT_EAGERPREP:
+                # One launch for new_ones + gather + scatter-assign (was 3).
+                num_accepted_tokens = gather_num_accepted(
+                    self.num_accepted_tokens_gpu, input_batch.idx_mapping, num_reqs
+                )
+            else:
+                num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+                num_accepted_tokens[: input_batch.num_reqs] = (
+                    self.num_accepted_tokens_gpu[input_batch.idx_mapping]
+                )
 
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel. Decode rows without drafts stay spec rows:
@@ -427,3 +434,38 @@ def _fill_num_accepted_kernel(
     if req_state_idx < 0:
         return
     tl.store(num_accepted_ptr + req_state_idx, num_sampled)
+
+
+@triton.jit
+def _gather_num_accepted_kernel(
+    src_ptr,  # [max_num_reqs]
+    idx_mapping_ptr,  # [num_real]
+    out_ptr,  # [num_padded]
+    num_real,
+    num_padded,
+    src_len,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    real = offs < num_real
+    idx = tl.load(idx_mapping_ptr + offs, mask=real, other=0)
+    # torch advanced indexing wraps negative indices.
+    idx = tl.where(idx < 0, idx + src_len, idx)
+    val = tl.load(src_ptr + idx, mask=real, other=1)
+    tl.store(out_ptr + offs, val, mask=offs < num_padded)
+
+
+def gather_num_accepted(
+    src: torch.Tensor, idx_mapping: torch.Tensor, num_padded: int
+) -> torch.Tensor:
+    """``out = ones(num_padded); out[:n] = src[idx_mapping]`` in one launch."""
+    out = torch.empty(num_padded, dtype=src.dtype, device=src.device)
+    num_real = idx_mapping.shape[0]
+    assert num_real <= num_padded
+    if num_padded == 0:
+        return out
+    block = 256
+    _gather_num_accepted_kernel[(triton.cdiv(num_padded, block),)](
+        src, idx_mapping, out, num_real, num_padded, src.shape[0], BLOCK=block
+    )
+    return out

@@ -122,6 +122,12 @@ class InputBatch:
     # Set only on a PCP rank-local batch.
     pcp: "PCPBatchMetadata | None" = None
 
+    # True when logits_indices == arange(len(logits_indices)) (every scheduled
+    # token is a logits row, e.g. a pure verify batch); lets the sampler slice
+    # hidden_states instead of gathering (``select_logits_rows``). Only set
+    # under VLLM_K31_BEAT_EAGERPREP.
+    logits_indices_is_identity: bool = False
+
     # [num_reqs] prefilling rows that schedule one new prompt token (excluding
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
@@ -511,6 +517,27 @@ def combine_sampled_and_draft_tokens(
         ),
     )
     return logits_indices
+
+
+def logits_indices_is_identity(
+    cu_num_logits_np: np.ndarray, query_start_loc_np: np.ndarray, num_reqs: int
+) -> bool:
+    """Whether ``combine_sampled_and_draft_tokens``'s logits_indices is the
+    identity. It puts request i's num_logits rows at [query_end - num_logits,
+    query_end) from cu_num_logits[i]; when both cumsums coincide, every request's
+    num_logits equals its scheduled tokens and row j is token j."""
+    n = num_reqs + 1
+    return bool(np.array_equal(cu_num_logits_np[:n], query_start_loc_np[:n]))
+
+
+def select_logits_rows(
+    hidden_states: torch.Tensor, logits_indices: torch.Tensor, is_identity: bool
+) -> torch.Tensor:
+    """``hidden_states[logits_indices]``; a view of the leading rows (no
+    gather launch) when logits_indices is the identity."""
+    if is_identity:
+        return hidden_states[: logits_indices.shape[0]]
+    return hidden_states[logits_indices]
 
 
 @triton.jit

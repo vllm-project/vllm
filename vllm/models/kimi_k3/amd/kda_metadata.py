@@ -11,6 +11,7 @@ from dataclasses import replace
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
@@ -26,8 +27,8 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 logger = init_logger(__name__)
 
@@ -99,6 +100,76 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+@triton.jit(do_not_specialize=["num_spec_decodes", "batch_size", "spec_token_size"])
+def _stage_spec_decode_fused_kernel(
+    block_table_ptr,
+    bt_stride_0: tl.int64,
+    bt_stride_1,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    num_accepted_ptr,
+    state_out_ptr,
+    state_out_stride_0,
+    masks_out_ptr,
+    token_indx_out_ptr,
+    qsl_out_ptr,
+    num_accepted_out_ptr,
+    num_spec_decodes,
+    batch_size,
+    spec_token_size,
+    cache_block_size,
+    ALIGN: tl.constexpr,
+    NUM_SLOTS: tl.constexpr,
+    BLOCK_SLOTS: tl.constexpr,
+    NULL_ID: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+    BLOCK_TOK: tl.constexpr,
+):
+    """One launch for GDN's FULL-graph spec-decode staging (pure verify batch).
+
+    Writes exactly what ``GDNAttentionMetadataBuilder.build`` stages through
+    ~9 launches (mamba align gather, mask H2D, arange, 5 copies + fills):
+      state_out[r, :]  = aligned block_table[r] (r < ns), NULL_ID (ns <= r < bs)
+      masks_out[r]     = r < ns                              (r < bs)
+      token_indx[t]    = t                                   (t < spec_token_size)
+      qsl_out[r]       = qsl[min(r, ns)]                     (r <= bs)
+      num_accepted[r]  = num_accepted_in[r] (r < ns), 1      (ns <= r < bs)
+    """
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    real = rows < num_spec_decodes
+    in_batch = rows < batch_size
+
+    slots = tl.arange(0, BLOCK_SLOTS)
+    slot_ok = slots < NUM_SLOTS
+    if ALIGN:
+        seq_len = tl.load(seq_lens_ptr + rows, mask=real, other=1)
+        start = tl.maximum((seq_len - 1) // cache_block_size, 0)
+    else:
+        start = tl.zeros([BLOCK_ROWS], dtype=tl.int32)
+    cols = start[:, None] + slots[None, :]
+    state = tl.load(
+        block_table_ptr + rows[:, None].to(tl.int64) * bt_stride_0 + cols * bt_stride_1,
+        mask=real[:, None] & slot_ok[None, :],
+        other=NULL_ID,
+    )
+    tl.store(
+        state_out_ptr + rows[:, None] * state_out_stride_0 + slots[None, :],
+        state,
+        mask=in_batch[:, None] & slot_ok[None, :],
+    )
+    tl.store(masks_out_ptr + rows, real, mask=in_batch)
+
+    qsl = tl.load(query_start_loc_ptr + tl.minimum(rows, num_spec_decodes))
+    tl.store(qsl_out_ptr + rows, qsl, mask=rows <= batch_size)
+
+    nacc = tl.load(num_accepted_ptr + rows, mask=real, other=1)
+    tl.store(num_accepted_out_ptr + rows, nacc, mask=in_batch)
+
+    toks = pid * BLOCK_TOK + tl.arange(0, BLOCK_TOK)
+    tl.store(token_indx_out_ptr + toks, toks, mask=toks < spec_token_size)
+
+
 def _to_device(t: torch.Tensor, device: torch.device) -> torch.Tensor:
     if PIN_MEMORY:
         t = t.pin_memory()
@@ -152,6 +223,12 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
+        if envs.VLLM_K31_BEAT_EAGERPREP:
+            fused = self._build_spec_decode_fused(
+                common_attn_metadata, num_accepted_tokens, num_decode_draft_tokens_cpu
+            )
+            if fused is not None:
+                return fused
         attn_metadata = super().build(
             common_prefix_len,
             common_attn_metadata,
@@ -191,6 +268,135 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
             ),
         )
+
+    def _build_spec_decode_fused(
+        self,
+        m: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None,
+    ) -> GDNAttentionMetadata | None:
+        """``GDNAttentionMetadataBuilder.build`` for a pure spec-decode batch
+        staged into the FULL-graph buffers, in one launch instead of ~9.
+
+        Returns None (caller falls back to the reference build) unless every
+        real row is a spec decode, padding rows are zero-length and trail the
+        spec rows, and the batch is staged. All decisions are host-side, from
+        the same CPU tensors the reference path uses; no sync is added.
+        """
+        if (
+            not self.use_spec_decode
+            or num_decode_draft_tokens_cpu is None
+            or num_accepted_tokens is None
+            or getattr(self, "mamba_aligned_state_indices", None) is not None
+        ):
+            return None
+        if not m.block_table_tensor.is_cuda:
+            return None
+        mode = self.vllm_config.cache_config.mamba_cache_mode
+        if mode not in ("align", "none"):
+            return None
+        spec_masks_cpu = num_decode_draft_tokens_cpu >= 0
+        num_spec_decodes = int(spec_masks_cpu.sum())
+        if num_spec_decodes == 0:
+            return None
+        batch_size = m.num_reqs
+        query_start_loc_cpu = m.query_start_loc_cpu
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        if spec_masks_cpu.shape[0] != batch_size or query_lens_cpu.shape[0] != (
+            batch_size
+        ):
+            return None
+        # Spec rows first, then only zero-length padding: then the reference
+        # path takes its "num_prefills == 0 and num_decodes == 0" branch and
+        # slices [:num_spec_decodes] exactly as staged here.
+        if not bool(spec_masks_cpu[:num_spec_decodes].all()):
+            return None
+        if num_spec_decodes < batch_size and bool(
+            (query_lens_cpu[num_spec_decodes:] != 0).any()
+        ):
+            return None
+        num_spec_decode_tokens = int(query_lens_cpu.sum())
+        if not self._stage_spec_decode(0, 0, num_spec_decodes, num_spec_decode_tokens):
+            return None
+        num_slots = self.num_spec + 1
+        if mode == "align":
+            assert isinstance(self.kv_cache_spec, MambaSpec)
+            if 1 + self.kv_cache_spec.num_speculative_blocks < num_slots:
+                return None
+        elif m.block_table_tensor.shape[1] < num_slots:
+            return None
+        if num_accepted_tokens.shape[0] < num_spec_decodes:
+            return None
+
+        uniform_spec_sequence_length = None
+        if not self._adaptive_verification:
+            first = int(query_lens_cpu[0])
+            if first > 0 and bool(
+                torch.all(query_lens_cpu[:num_spec_decodes] == first)
+            ):
+                uniform_spec_sequence_length = first
+        spec_token_size = min(
+            num_spec_decodes * num_slots, int(query_start_loc_cpu[-1])
+        )
+
+        block_table = m.block_table_tensor
+        state_out = self.spec_state_indices_tensor
+        block_rows = 32
+        block_tok = block_rows * num_slots
+        grid = (
+            max(
+                triton.cdiv(batch_size + 1, block_rows),
+                triton.cdiv(spec_token_size, block_tok),
+            ),
+        )
+        _stage_spec_decode_fused_kernel[grid](
+            block_table,
+            block_table.stride(0),
+            block_table.stride(1),
+            m.seq_lens,
+            m.query_start_loc,
+            num_accepted_tokens,
+            state_out,
+            state_out.stride(0),
+            self.spec_sequence_masks,
+            self.spec_token_indx,
+            self.spec_query_start_loc,
+            self.num_accepted_tokens,
+            num_spec_decodes,
+            batch_size,
+            spec_token_size,
+            self.kv_cache_spec.block_size,
+            ALIGN=mode == "align",
+            NUM_SLOTS=num_slots,
+            BLOCK_SLOTS=triton.next_power_of_2(num_slots),
+            NULL_ID=NULL_BLOCK_ID,
+            BLOCK_ROWS=block_rows,
+            BLOCK_TOK=block_tok,
+            num_warps=1,
+        )
+        attn_metadata = GDNAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=num_spec_decodes,
+            num_spec_decode_tokens=num_spec_decode_tokens,
+            num_actual_tokens=m.num_actual_tokens,
+            spec_query_start_loc=self.spec_query_start_loc[: batch_size + 1],
+            spec_state_indices_tensor=state_out[:batch_size],
+            spec_sequence_masks=self.spec_sequence_masks[:batch_size],
+            spec_sequence_masks_cpu=spec_masks_cpu,
+            spec_token_indx=self.spec_token_indx[:spec_token_size],
+            non_spec_token_indx=self.non_spec_token_indx[:0],
+            num_accepted_tokens=self.num_accepted_tokens[:batch_size],
+            uniform_spec_sequence_length=uniform_spec_sequence_length,
+        )
+        if (
+            attn_metadata.uniform_spec_sequence_length is not None
+            and _adaptive_verification_enabled(self.vllm_config)
+        ):
+            attn_metadata = replace(attn_metadata, uniform_spec_sequence_length=None)
+        return attn_metadata
 
     def _build_checkpoint_metadata(
         self,

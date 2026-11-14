@@ -124,10 +124,12 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
+    logits_indices_is_identity,
     post_update,
     post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
+    select_logits_rows,
     set_dummy_context,
 )
 from vllm.v1.worker.gpu.kv_connector import (
@@ -1659,6 +1661,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
+        if (
+            envs.VLLM_K31_BEAT_EAGERPREP
+            and adaptive_verification is None
+            and num_draft_tokens_per_req is not None
+            and self.pcp_manager is None
+        ):
+            # Adaptive verification reallocates the drafts on the GPU only (the
+            # host cumsums no longer describe logits_indices); PCP repartitions.
+            input_batch.logits_indices_is_identity = logits_indices_is_identity(
+                cu_num_logits_np, query_start_loc_np, num_reqs
+            )
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
         return input_batch
@@ -1723,7 +1736,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            sample_hidden_states = select_logits_rows(
+                hidden_states,
+                input_batch.logits_indices,
+                input_batch.logits_indices_is_identity,
+            )
             logits = self.model.compute_logits(sample_hidden_states)
 
         invalid_drafts = None

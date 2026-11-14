@@ -229,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
     VLLM_K3_INDEXER_SAMPLED_TOPK: bool = False
+    VLLM_K31_BEAT_EAGERPREP: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1797,6 +1798,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # length (~7 us at 2k, ~40 us at 360k). Wins on long contexts.
     "VLLM_K3_INDEXER_SAMPLED_TOPK": lambda: bool(
         int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0"))
+    ),
+    # Kimi-K3.1 on ROCm: fewer launches in the eager per-step prep: the KDA
+    # spec-decode staging, the sparse-MLA indptr, the num_accepted gather each
+    # as one launch, and a slice for the logits rows when logits_indices is
+    # the identity (a pure verify batch).
+    "VLLM_K31_BEAT_EAGERPREP": lambda: bool(
+        int(os.getenv("VLLM_K31_BEAT_EAGERPREP", "0"))
     ),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
