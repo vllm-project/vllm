@@ -356,14 +356,15 @@ class KVCacheManager:
         Hybrid (Mamba + full-attention) models can have per-group prefix hits
         diverge under block pressure: the full-attention tail may be evicted
         while a deeper Mamba state survives, or vice versa. Report the
-        full-attention hit as the local prefix - the connector transfers the
-        remaining suffix and the Mamba state is transferred unconditionally by
+        full-attention hit as the local prefix only when all attention groups
+        agree. The connector transfers the remaining suffix, and Mamba state
+        is transferred unconditionally by
         nixl's `_apply_prefix_caching` - and flag when that hit ran deeper
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
         `get_computed_blocks` to reconcile when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use `get_computed_blocks`.
+        Non-hybrid models and divergent attention hits use the reconciled lookup.
 
         Returns:
             The `get_computed_blocks` triple (blocks, number of local computed
@@ -386,10 +387,16 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, max_cache_hit_length
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
+        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits) or any(
+            hit < per_group_hits[fa_group_id]
+            for hit, group in zip(
+                per_group_hits, self.kv_cache_config.kv_cache_groups, strict=True
+            )
+            if group.kv_cache_spec.prefix_cacheable
+            and not isinstance(group.kv_cache_spec, MambaSpec)
+        ):
+            # Attention KV must cover the local boundary; only a shorter Mamba
+            # state can be supplied by the connector.
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
