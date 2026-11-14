@@ -287,6 +287,9 @@ def _fp4_indexer(
     k_norm_weight: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
     k_norm_eps: float = 0.0,
+    q_payload: torch.Tensor | None = None,
+    q_scales: torch.Tensor | None = None,
+    q_weights: torch.Tensor | None = None,
 ) -> None:
     metadata = get_forward_context().attn_metadata
     if not isinstance(metadata, dict):
@@ -309,7 +312,13 @@ def _fp4_indexer(
         return
     m = metadata[prefix]
     assert isinstance(m, DeepseekV32IndexerMetadata)
-    if fused_prep:
+    # q_payload: the caller (the specialized decode's D1a) already stored the
+    # keys, reset the top-k rows and quantized the query (MXFP4, with its FP32
+    # head weights times weight_scale) for one tile of every decode row.
+    prepped = q_payload is not None
+    if prepped:
+        assert q_scales is not None and q_weights is not None
+    elif fused_prep:
         # k is the raw projection when k_norm_weight is set.
         store_keys_and_reset(
             k[: m.slot_mapping.numel()],
@@ -364,7 +373,11 @@ def _fp4_indexer(
             end = min(start + tile_rows, m.num_decode_tokens)
             row_ends = ends[start:end]
             quantized = None
-            if fused_prep:
+            if prepped and start == 0 and end == q_payload.shape[0]:
+                # the starts are decode rows' (0 .. end): the clamp is a no-op
+                quantized = (q_payload, q_scales)
+                tile_weights, rel_starts = q_weights, starts
+            elif fused_prep:
                 q_payload, q_scales, tile_weights, rel_starts = (
                     quantize_queries_and_weights(
                         q[start:end],
@@ -418,6 +431,9 @@ def _fp4_indexer_fake(
     k_norm_weight: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
     k_norm_eps: float = 0.0,
+    q_payload: torch.Tensor | None = None,
+    q_scales: torch.Tensor | None = None,
+    q_weights: torch.Tensor | None = None,
 ) -> None:
     return
 

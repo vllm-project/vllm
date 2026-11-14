@@ -14,6 +14,11 @@ records, the MXFP4 indexer's 32 x 128 query).
   sums differ from hipBLASLt's in order only.
 - P3: a CUDA graph (the epoch bump + D1a) replayed over new inputs: every
   replay bit-equal to the eager launch on the same inputs.
+- P4 (``idx``): the MXFP4 indexer's prep, bit for bit: the key in the indexer
+  cache is ``store_keys``'s of D1a's own LayerNormed key (padding slots and
+  neighbouring bytes untouched), the top-k rows reset to -1, the query's MXFP4
+  payload / scales and the FP32 head weights ``quantize_queries_and_weights``'s
+  of D1a's own query and wv rows.
 """
 
 import pytest
@@ -100,7 +105,10 @@ def _inputs(S: int, nb: int, seed: int = 0):
     return w
 
 
-def _launch(key, w, scratch, epoch, health, flags):
+def _launch(key, w, scratch, epoch, health, flags, idx=None):
+    """``idx``: the indexer's cache, slots and top-k rows (``key.idx``); the
+    query's MXFP4 and head weights come back as ``iq_pay``, ``iq_sc``,
+    ``iw``."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre as d
 
     S = key.tokens
@@ -111,6 +119,13 @@ def _launch(key, w, scratch, epoch, health, flags):
         "ik": torch.zeros(S, d.IKD, dtype=bf, device="cuda"),
         "iv": torch.zeros(S, d.IVN, dtype=bf, device="cuda"),
     }
+    extra = {}
+    if idx is not None:
+        u8 = torch.uint8
+        out["iq_pay"] = torch.full((S, d.IVN, 64), 0xAB, dtype=u8, device="cuda")
+        out["iq_sc"] = torch.full((S, 1, 4, 16, 4), 0xAB, dtype=u8, device="cuda")
+        out["iw"] = torch.full((S, d.IVN), float("nan"), device="cuda")
+        extra = dict(idx, iq_pay=out["iq_pay"], iq_sc=out["iq_sc"], iw_out=out["iw"])
     names = (
         ["prefix", "delta", "blocks", "ares_nw", "ares_qk", "in_nw", "w_qkv"]
         + ["w_g", "w_ik", "w_iv", "q_nw", "kv_nw", "ik_nw", "ik_nb", "w_qb"]
@@ -129,8 +144,32 @@ def _launch(key, w, scratch, epoch, health, flags):
         epoch=epoch,
         health=health,
         alarm=flags.data_ptr(),
+        **extra,
     )
     return out
+
+
+IK_LO, IK_HI, PAGE = 41984, 46336, 46592  # an MLA page's indexer section
+
+
+def _indexer_state(S: int, seed: int):
+    """Merged pages with random bytes (the indexer's [pages, 64, 68] sections
+    in them), the indexer's slots (a padding token every third), top-k rows
+    (two past S) of 7s."""
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    pages = 4
+    storage = torch.randint(
+        0, 256, (pages, PAGE), dtype=torch.uint8, device="cuda", generator=g
+    )
+    islots = torch.randperm(pages * 64, device="cuda", generator=g)[:S]
+    islots[1::3] = -1
+    topk = torch.full((S + 2, 2048), 7, dtype=torch.int32, device="cuda")
+    idx = dict(
+        ik_cache=storage[:, IK_LO:IK_HI].view(pages, 64, 68),
+        islots=islots.to(torch.int64),
+        topk=topk,
+    )
+    return storage, idx
 
 
 def _scratch_rows(key, scratch):
@@ -300,8 +339,9 @@ def test_d1a_record_scale_boundaries() -> None:
 
 
 @needs_gfx950
+@pytest.mark.parametrize("idx", [False, True])
 @torch.inference_mode()
-def test_d1a_graph_replay() -> None:
+def test_d1a_graph_replay(idx: bool) -> None:
     """P3: [epoch += 1, D1a] captured once, replayed over new inputs (prefix,
     delta, blocks, slots): each replay bit-equal to an eager launch on the same
     inputs."""
@@ -309,15 +349,16 @@ def test_d1a_graph_replay() -> None:
 
     S, nb = 8, 4
     w = _inputs(S, nb)
-    key = d.DsaPreBuild(tokens=S, nblocks=nb, delta=True)
+    key = d.DsaPreBuild(tokens=S, nblocks=nb, delta=True, idx=idx, iw_scale=0.0125)
     scratch = torch.zeros(d.scratch_bytes(key), dtype=torch.uint8, device="cuda")
     epoch, health, flags = _state()
     live = {k: w[k] for k in ("prefix", "delta", "blocks", "slots", "kv_cache")}
     cache0 = w["kv_cache"].clone()
+    ix = _indexer_state(S, seed=9)[1] if idx else None
 
     def step():
         epoch.add_(1)
-        return _launch(key, w, scratch, epoch, health, flags)
+        return _launch(key, w, scratch, epoch, health, flags, idx=ix)
 
     step()  # compiled and warm
     torch.accelerator.synchronize()
@@ -342,3 +383,53 @@ def test_d1a_graph_replay() -> None:
             assert torch.equal(got[k], eager[k]), (seed, k)
         for k in got_state:
             assert torch.equal(got_state[k], live[k]), (seed, k)
+
+
+@needs_gfx950
+@pytest.mark.parametrize("S", [1, 4, 8, 16])
+@torch.inference_mode()
+def test_d1a_indexer_prep(S: int) -> None:
+    """P4."""
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import (
+        quantize_queries_and_weights,
+        store_keys,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre as d
+
+    nb = 4
+    w = _inputs(S, nb, seed=3)
+    scale = d.IVN**-0.5 * d.IKD**-0.5
+    key = d.DsaPreBuild(tokens=S, nblocks=nb, delta=True, idx=True, iw_scale=scale)
+    storage, idx = _indexer_state(S, seed=7)
+    storage0 = storage.clone()
+    scratch = torch.zeros(d.scratch_bytes(key), dtype=torch.uint8, device="cuda")
+    epoch, health, flags = _state()
+    out = _launch(key, w, scratch, epoch, health, flags, idx=idx)
+    torch.accelerator.synchronize()
+    assert not health.any() and not flags.any()
+
+    ref = storage0.clone()
+    store_keys(out["ik"], ref[:, IK_LO:IK_HI].view(-1, 64, 68), idx["islots"])
+    assert torch.equal(storage, ref)
+    if (idx["islots"] >= 0).any():
+        assert not torch.equal(storage, storage0)
+    assert bool((idx["topk"][:S] == -1).all())
+    assert bool((idx["topk"][S:] == 7).all())
+
+    starts = torch.arange(S + 1, dtype=torch.int32, device="cuda")
+    pay, sc, iw, _ = quantize_queries_and_weights(
+        out["iq"].view(S, d.IVN, d.IKD), out["iv"], scale, starts, 0, S
+    )
+    assert torch.equal(out["iq_pay"], pay)
+    assert torch.equal(out["iq_sc"], sc)
+    assert torch.equal(out["iw"], iw)
+    # the bf16 outputs are the plain launch's
+    plain = _launch(
+        d.DsaPreBuild(tokens=S, nblocks=nb, delta=True),
+        _inputs(S, nb, seed=3),
+        torch.zeros(d.scratch_bytes(key), dtype=torch.uint8, device="cuda"),
+        *_state(),
+    )
+    torch.accelerator.synchronize()
+    for name in plain:
+        assert torch.equal(out[name], plain[name]), name

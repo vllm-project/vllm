@@ -20,6 +20,12 @@ One launch a layer, ``BLOCKS`` CTAs x ``THREADS`` threads:
                         is >= 0; wk's LayerNorm (bias) -> ``ik_out``
     q_b (CTAs 64 ..)    q_nope -> QN (bf16 pairs); q_pe -> ``q_out`` [.., 512:]
     wq (a task a CTA)   the indexer query (q_c normed) -> ``iq_out``
+    indexer prep (``idx``)
+                        the MXFP4 key (norm's token) -> the indexer cache, its
+                        top-k row reset to -1; the MXFP4 query (wq's tasks, a
+                        32 group's two halves swapping amax through IQA) and
+                        wv's FP32 head weights -> ``kimi_fp4_indexer``'s
+                        scoring inputs
     W_UK (CTAs 208 ..)  (head, 128 latent columns) a CTA, a wave 16 of the
                         128 nope rows: bf16 W_UK_T against QN -> ``q_out``
                         [.., :512] bf16
@@ -29,7 +35,8 @@ attention's bf16 query (``concat_mla_q``'s rows), the gate's sigmoid, the cache
 record, and the indexer's projections (``KimiK3DSAIndexer.forward`` before
 ``kimi_fp4_indexer``). Elementwise roundings follow those ops (bf16 hand-offs;
 the record is ``concat_and_cache_ds_mla_kernel``'s bit for bit on the same
-normed row); GEMV sums differ only in their order.
+normed row, the MXFP4 key and query ``fp4_indexer._quantize``'s on the same
+bf16 rows); GEMV sums differ only in their order.
 """
 
 from dataclasses import dataclass
@@ -120,6 +127,10 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv
 IKD = 128  # the indexer's head dim (wk rows)
 IVN = 32  # the indexer's heads (wv rows)
 IQN = IVN * IKD  # 4096: wq rows
+TOPK = 2048  # the indexer's top-k row (int32)
+IK_PAGE = 64  # the indexer cache's slots a page
+IK_SCALES = 4096  # a page's scale bytes past its MXFP4 payload
+FP4_DIV = 6.0  # E2M1's largest magnitude
 REC = KVL + 16 + 2 * ROPE  # 656: an fp8_ds_mla record (bytes)
 REC_SCALE_W = KVL // 4  # the record's scale words (one f32 a 128 tile)
 REC_ROPE_W = (KVL + 16) // 4  # its rope words
@@ -147,7 +158,7 @@ assert GEMV_TASKS <= 2 * GEMV_CTAS and QB0 >= MAX_S and UK0 + UK_TASKS == BLOCKS
 assert IQ_TASKS == BLOCKS and NOPE % WAVES == 0 and QL % (4 * 384) == 0
 
 _STREAM = fx.Stream(None)
-REGIONS = ("part", "wgt", "msq", "xrdy", "qa", "qcr", "qn", "ikr")
+REGIONS = ("part", "wgt", "msq", "xrdy", "qa", "qcr", "qn", "ikr", "iqa")
 _SOURCES = source_digest(".")
 
 
@@ -164,6 +175,10 @@ class DsaPreBuild:
     timeline: bool = False
     # debug: the normed kv_c rows -> scratch ``kvn`` (the record's input)
     dump: bool = False
+    # the indexer's prep (``kimi_fp4_indexer``'s key store, top-k reset, query
+    # quantize and head weights times ``iw_scale``) in this launch
+    idx: bool = False
+    iw_scale: float = 1.0
 
 
 ABI = KernelAbi(
@@ -199,6 +214,13 @@ ABI = KernelAbi(
         "iq_out",
         "ik_out",
         "iv_out",
+        "ik_cache",
+        "ik_cs",
+        "islots",
+        "topk",
+        "iq_pay",
+        "iq_sc",
+        "iw_out",
         "scratch",
         "layer",
         "epoch",
@@ -220,6 +242,7 @@ def scratch_layout(key: DsaPreBuild) -> dict:
         "qcr": s,
         "qn": s * NH * NOPE // 2,
         "ikr": s * IKD // 2,
+        "iqa": s * IQ_TASKS,
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -285,6 +308,16 @@ def stage_proj(c, task, ops, t0, n):
         col = (task - G0) * ROWS + 2 * r2
         g = bf16_pair(sigmoid(v0), sigmoid(v1))
         bo.buffer_store(g, rsrc(a["gate_out"]), (t * GROWS + col) // 2)
+    if const_expr(c["idx"]):  # noqa: SIM102 (compile-time, then traced)
+        if live & (task >= IV0) & (task < G0):
+            # the indexer's head weights: weights.float() * weight_scale
+            col = (task - IV0) * ROWS + 2 * r2
+            ws = fx.Float32(c["iw_scale"])
+            bo.buffer_store(
+                fx.Vector.from_elements([v0 * ws, v1 * ws], fx.Float32),
+                rsrc(a["iw_out"]),
+                t * IVN + col,
+            )
     gpu.barrier()
 
 
@@ -315,6 +348,64 @@ def _fmax(a, b):
 def _absf(v):
     """fabsf: the sign bit cleared."""
     return (v.bitcast(fx.Int32) & fx.Int32(0x7FFFFFFF)).bitcast(fx.Float32)
+
+
+def mxfp4_scale(am):
+    """A 32 group's e8m0 code and 1 / scale from its amax (``fp4_indexer.
+    _quantize``: the power of two >= max(amax / 6, 1e-4))."""
+    sc = fx.max(
+        div_rn(am, fx.Float32(FP4_DIV), fx.Float32(1.0 / FP4_DIV)),
+        fx.Float32(SCALE_MIN),
+    )
+    code = code_ceil(sc)
+    return code, rcp_pow2(code)
+
+
+# E2M1 levels 0, .5, 1, 1.5, 2, 3, 4, 6: the midpoints, ties to the even code
+_E2M1_CUTS = ((0.25, False), (0.75, True), (1.25, False), (1.75, True),
+              (2.5, False), (3.5, True), (5.0, False))  # fmt: skip
+
+
+def mxfp4_code(x):
+    """The E2M1 nibble of ``x`` (already over its group's scale)."""
+    a = _absf(x)
+    code = fx.Int32(0)
+    for cut, ge in _E2M1_CUTS:
+        hit = (a >= fx.Float32(cut)) if ge else (a > fx.Float32(cut))
+        code = code + hit.select(fx.Int32(1), fx.Int32(0))
+    neg = (x < fx.Float32(0.0)) & (code != 0)
+    return code | neg.select(fx.Int32(8), fx.Int32(0))
+
+
+@traced
+def stage_ikey(c, t, y):
+    """Token t's indexer key (``y``: elements 4 (tid % 32) .., LayerNormed bf16)
+    -> MXFP4 in the indexer cache at its slot (``_store_key``'s page layout:
+    4 x 1024 B payload, then AITER's transposed 16 x 4 scale tile), and its
+    top-k row reset to -1 (``store_keys_and_reset``)."""
+    tid, a = c["tid"], c["args"]
+    am = fx.max(fx.max(_absf(y[0]), _absf(y[1])), fx.max(_absf(y[2]), _absf(y[3])))
+    am = butterfly(am, (4, 2, 1), op=_fmax)  # a 32 group: 8 lanes
+    code, inv = mxfp4_scale(am)
+    q = [mxfp4_code(y[j] * inv) for j in range(4)]
+    h = q[0] | (q[1] << 4) | (q[2] << 8) | (q[3] << 12)
+    islot = uniform(ld_i32(a["islots"], t * 2))
+    if (tid < 32) & (islot >= 0):
+        g = tid // 8
+        off = islot % IK_PAGE
+        base = a["ik_cache"] + fx.Int64(islot // IK_PAGE) * a["ik_cs"]
+        bo.buffer_store(
+            fx.Int32(h).to(fx.Uint16), rsrc(base), (g * 1024 + off * 16) // 2 + tid % 8
+        )
+        if tid % 8 == 0:
+            at = IK_SCALES + g * 64 + (off % 16) * 4 + off // 16
+            bo.buffer_store(fx.Int32(code).to(fx.Uint8), rsrc(base), at)
+    m1 = fx.Int32(-1)
+    bo.buffer_store(
+        fx.Vector.from_elements([m1, m1, m1, m1], fx.Int32),
+        rsrc(a["topk"]),
+        t * TOPK + tid * 4,
+    )
 
 
 @traced
@@ -404,6 +495,8 @@ def stage_norm(c, t):
     y = [bf16r(d[j] * rs * lw[j] + lb[j]) for j in range(4)]
     if tid < 32:
         bo.buffer_store(bf4_words(y), rsrc(a["ik_out"]), (t * IKD + kc) // 2)
+    if const_expr(c["idx"]):
+        stage_ikey(c, t, y)
     publish(c["put"], c["qcr"], t, fx.Int32(1), tid == 0)
     gpu.barrier()
 
@@ -470,7 +563,36 @@ def stage_iq(c, task):
         if tid < 8 * n:
             at = (t0 + tt) * IQN + task * ROWS + 2 * r2
             bo.buffer_store(bf16_pair(v0, v1), rsrc(a["iq_out"]), at // 2)
+        if const_expr(c["idx"]):
+            iq_fp4(c, task, t0 + tt, bf16r(v0), bf16r(v1), tid < 8 * n)
         gpu.barrier()
+
+
+@traced
+def iq_fp4(c, task, t, v0, v1, live):
+    """Token t's indexer query rows 16 task .. (two a lane, bf16) -> MXFP4
+    (``_quantize_query``'s layout: [S, 32 heads, 64 B], scales [S, 4 groups,
+    16, 4]). A 32 group is two tasks: each publishes its half's amax (IQA) and
+    takes its partner's. The half-1 task writes the group's pad scale byte
+    (heads 32 .. 63 of the 64-head tile: 0)."""
+    tid, a = c["tid"], c["args"]
+    am = butterfly(fx.max(_absf(v0), _absf(v1)), (4, 2, 1), op=_fmax)
+    half = task % 2
+    if live & (tid % 8 == 0):
+        c["put"](c["iqa"], t * IQ_TASKS + task, am)
+    other = c["poll"]([(c["iqa"], t * IQ_TASKS + task + 1 - 2 * half, 1)])
+    code, inv = mxfp4_scale(fx.max(am, other[0][0].bitcast(fx.Float32)))
+    b = mxfp4_code(v0 * inv) | (mxfp4_code(v1 * inv) << 4)
+    r2 = tid % 8
+    h = task // 8
+    g = (task % 8) // 2
+    if live:
+        at = t * (IQN // 2) + task * 8 + r2
+        bo.buffer_store(fx.Int32(b).to(fx.Uint8), rsrc(a["iq_pay"]), at)
+    if live & (r2 == 0):
+        sc = (half == 0).select(code, fx.Int32(0))
+        at = t * 256 + g * 64 + (h % 16) * 4 + 2 * half + h // 16
+        bo.buffer_store(fx.Int32(sc).to(fx.Uint8), rsrc(a["iq_sc"]), at)
 
 
 # ---------------------------------------------------------------- W_UK (bf16)
@@ -590,6 +712,7 @@ def build(key: DsaPreBuild):
     name = (
         f"k3_mono_dsa_pre_s{s}_nb{key.nblocks}_d{int(key.delta)}"
         f"_t{int(key.timeline)}{'_dump' if key.dump else ''}"
+        f"{'_idx' if key.idx else ''}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -625,6 +748,13 @@ def build(key: DsaPreBuild):
         iq_out: Int64,
         ik_out: Int64,
         iv_out: Int64,
+        ik_cache: Int64,
+        ik_cs: Int64,
+        islots: Int64,
+        topk: Int64,
+        iq_pay: Int64,
+        iq_sc: Int64,
+        iw_out: Int64,
         scratch: Int64,
         layer: Int32,
         epoch: Int64,
@@ -655,6 +785,8 @@ def build(key: DsaPreBuild):
             "kv_eps": key.kv_eps,
             "k_eps": key.k_eps,
             "dump": key.dump,
+            "idx": key.idx,
+            "iw_scale": key.iw_scale,
             "vals_all": vals_all(s, ns),
             "put": mb.put,
             "put_bf": mb.put_bf,
@@ -700,6 +832,13 @@ def build(key: DsaPreBuild):
                 "iq_out": iq_out,
                 "ik_out": ik_out,
                 "iv_out": iv_out,
+                "ik_cache": ik_cache,
+                "ik_cs": ik_cs,
+                "islots": islots,
+                "topk": topk,
+                "iq_pay": iq_pay,
+                "iq_sc": iq_sc,
+                "iw_out": iw_out,
             },
         }
         for region in REGIONS:
@@ -763,6 +902,13 @@ def build(key: DsaPreBuild):
         iq_out: Int64,
         ik_out: Int64,
         iv_out: Int64,
+        ik_cache: Int64,
+        ik_cs: Int64,
+        islots: Int64,
+        topk: Int64,
+        iq_pay: Int64,
+        iq_sc: Int64,
+        iw_out: Int64,
         scratch: Int64,
         layer: Int32,
         epoch: Int64,
@@ -804,6 +950,13 @@ def build(key: DsaPreBuild):
             iq_out,
             ik_out,
             iv_out,
+            ik_cache,
+            ik_cs,
+            islots,
+            topk,
+            iq_pay,
+            iq_sc,
+            iw_out,
             scratch,
             layer,
             epoch,
@@ -819,6 +972,36 @@ def build(key: DsaPreBuild):
 
 def ptr(t):
     return 0 if t is None else t.data_ptr()
+
+
+def idx_reasons(ik_cache, islots, topk, s=None) -> list[str]:
+    """Why D1a cannot run the indexer's prep into these (empty: it can)."""
+    bad = []
+    if (
+        ik_cache is None
+        or ik_cache.dtype != torch.uint8
+        or ik_cache.dim() != 3
+        or tuple(ik_cache.shape[1:]) != (IK_PAGE, 68)
+        or ik_cache.stride()[1:] != (68, 1)
+        or ik_cache.stride(0) < IK_PAGE * 68
+        or ik_cache.data_ptr() % 4
+    ):
+        bad.append(f"an indexer cache not MXFP4 [pages, 64, 68]: {_desc(ik_cache)}")
+    if islots is None or islots.dtype != torch.int64 or islots.stride(-1) != 1:
+        bad.append(f"indexer slots not dense int64: {_desc(islots)}")
+    if (
+        topk is None
+        or topk.dtype != torch.int32
+        or topk.dim() != 2
+        or topk.stride() != (TOPK, 1)
+        or (s is not None and topk.size(0) < s)
+    ):
+        bad.append(f"top-k rows not dense int32 [.., 2048]: {_desc(topk)}")
+    return bad
+
+
+def _desc(t) -> str:
+    return "(none)" if t is None else f"{tuple(t.shape)} {t.dtype} {t.stride()}"
 
 
 def check_inputs(**t) -> list[str]:
@@ -888,12 +1071,23 @@ def dsa_pre(
     health,
     alarm,
     tl=None,
+    ik_cache=None,
+    islots=None,
+    topk=None,
+    iq_pay=None,
+    iq_sc=None,
+    iw_out=None,
 ):
     """Host launcher. ``w_uk`` vLLM's ``W_UK_T`` [12, 128, 512] bf16 (latent
     contiguous); ``kv_cache`` [blocks, block_size, 656] one-byte records;
     ``slots`` [S] int64 (-1: padding); ``q_out`` [S, 12, 576] bf16; ``gate_out``
     [S, 1536]; ``iq_out`` [S, 4096], ``ik_out`` [S, 128], ``iv_out`` [S, 32]
-    bf16, all dense; ``layer`` a slot below ``kda.TAG_SLOTS``."""
+    bf16, all dense; ``layer`` a slot below ``kda.TAG_SLOTS``.
+
+    ``key.idx``: ``ik_cache`` the indexer's uint8 [pages, 64, 68] sections
+    (``fp4_indexer.cache_views``), ``islots`` its [S] int64 slots, ``topk`` [S,
+    2048] int32 rows, ``iq_pay`` [S, 32, 64] / ``iq_sc`` [S, 1, 4, 16, 4]
+    uint8 and ``iw_out`` [S, 32] f32 (the query's MXFP4 and head weights)."""
     bad = check_inputs(
         w_qkv=w_qkv, w_g=w_g, w_ik=w_ik, w_iv=w_iv, w_qb=w_qb, w_iq=w_iq,
         w_uk=w_uk, ik_nw=ik_nw, ik_nb=ik_nb, kv_cache=kv_cache,
@@ -911,6 +1105,15 @@ def dsa_pre(
         assert o.dtype == torch.bfloat16 and o.is_contiguous(), o.dtype
         assert tuple(o.shape) == shape, (tuple(o.shape), shape)
     assert scratch.numel() >= scratch_bytes(key)
+    if key.idx:
+        assert idx_reasons(ik_cache, islots, topk, s) == []
+        for o, shape, dt in (
+            (iq_pay, (s, IVN, IKD // 2), torch.uint8),
+            (iq_sc, (s, 1, 4, 16, 4), torch.uint8),
+            (iw_out, (s, IVN), torch.float32),
+        ):
+            assert o.dtype == dt and o.is_contiguous(), o.dtype
+            assert tuple(o.shape) == shape, (tuple(o.shape), shape)
     f = build(key)
     f(
         prefix.data_ptr(),
@@ -944,6 +1147,13 @@ def dsa_pre(
         iq_out.data_ptr(),
         ik_out.data_ptr(),
         iv_out.data_ptr(),
+        ptr(ik_cache),
+        0 if ik_cache is None else ik_cache.stride(0),
+        ptr(islots),
+        ptr(topk),
+        ptr(iq_pay),
+        ptr(iq_sc),
+        ptr(iw_out),
         scratch.data_ptr(),
         layer,
         epoch.data_ptr(),

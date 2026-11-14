@@ -297,6 +297,24 @@ def prologue_on() -> bool:
     return envs.VLLM_KIMI_SD_DSA_PROLOGUE
 
 
+def indexer_prep_on(w) -> bool:
+    """D1a runs the MXFP4 indexer's prep (``VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER``
+    with ``VLLM_K3_FUSED_INDEXER_PREP``): a layer that runs its own top-k with
+    32 heads."""
+    import vllm.envs as envs
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
+
+    ind = w.indexer
+    return (
+        envs.VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER
+        and getattr(ind, "fused_prep", False)
+        and not w.skip_topk
+        and ind.index_num_heads == dsa_pre.IVN
+        and ind.index_head_dim == dsa_pre.IKD
+        and ind.dcp_scores is None
+    )
+
+
 def pre_weights(w) -> dict:
     """D1a's weights: views of the loaded parameters; the indexer key norm's
     bf16 weight / bias (``KimiK3DSAIndexerKNorm``'s cached copies, or made)."""
@@ -348,9 +366,11 @@ def prologue_reasons(layer, kv_cache=None) -> list[str]:
     return dsa_pre.check_inputs(kv_cache=kv_cache, **t)
 
 
-def indexer_tail(w, iq, ik, iv) -> None:
+def indexer_tail(w, iq, ik, iv, prep=None) -> None:
     """``KimiK3DSAIndexer.forward`` past its projections (D1a's ``iq``, ``ik``,
-    ``iv``): ``kimi_fp4_indexer`` (the key store, scoring, top-k)."""
+    ``iv``): ``kimi_fp4_indexer`` (the key store, scoring, top-k). ``prep``:
+    D1a's MXFP4 query, scales and head weights (it stored the keys and reset
+    the top-k rows), leaving the op its scoring and top-k."""
     from vllm.distributed import get_dcp_group
 
     ind = w.indexer
@@ -368,6 +388,12 @@ def indexer_tail(w, iq, ik, iv) -> None:
         ind.cp_interleave,
         ind.indexer_weight_scale * ind.index_softmax_scale,
         ind.dcp_scores,
+        # D1a already applied the key LayerNorm, so the fused store skips it.
+        ind.fused_prep,
+        None,
+        None,
+        0.0,
+        *(prep if prep is not None else (None, None, None)),
     )
 
 
@@ -389,6 +415,12 @@ class DsaM1Layer(MlaOpsLayer):
                     "Kimi-K3 specialized decode: VLLM_KIMI_SD_DSA_PROLOGUE=1 does "
                     "not support: " + "; ".join(why)
                 )
+        self.idx = self.pre and indexer_prep_on(self.wrapper)
+        if self.pre:
+            logger.info_once(
+                "Kimi-K3 specialized decode: D1a runs the MXFP4 indexer prep: %s",
+                self.idx,
+            )
 
     def _pre_key(self, delta: bool):
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
@@ -403,6 +435,12 @@ class DsaM1Layer(MlaOpsLayer):
             q_eps=w.q_a_layernorm.variance_epsilon,
             kv_eps=w.kv_a_layernorm.variance_epsilon,
             k_eps=w.indexer.k_index_norm.eps,
+            idx=self.idx,
+            iw_scale=(
+                w.indexer.indexer_weight_scale * w.indexer.index_softmax_scale
+                if self.idx
+                else 1.0
+            ),
         )
 
     def builds(self) -> list:
@@ -488,6 +526,7 @@ class DsaM1Layer(MlaOpsLayer):
         """D1a (``dsa_pre``): AttnRes, the projections, norms and the KV write,
         writing ``sd_q`` and ``gate`` as ``prologue`` does; then the indexer's
         scoring and top-k (vLLM's op) on its projections."""
+        from vllm.forward_context import get_forward_context
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
             HIDDEN,
@@ -500,6 +539,30 @@ class DsaM1Layer(MlaOpsLayer):
         iq = prefix.new_empty(s, dsa_pre.IQN)
         ik = prefix.new_empty(s, dsa_pre.IKD)
         iv = prefix.new_empty(s, dsa_pre.IVN)
+        idx, prep = {}, None
+        if self.idx:
+            ind = w.indexer
+            ik_cache = ind.k_cache.kv_cache
+            islots = get_forward_context().attn_metadata[ind.k_cache.prefix]
+            islots = islots.slot_mapping[:s]
+            why = dsa_pre.idx_reasons(ik_cache, islots, ind.topk_indices_buffer, s)
+            assert not why, why
+            u8 = torch.uint8
+            prep = (
+                torch.empty(s, dsa_pre.IVN, dsa_pre.IKD // 2, dtype=u8,
+                            device=prefix.device),
+                torch.empty(s, 1, 4, 16, 4, dtype=u8, device=prefix.device),
+                torch.empty(s, dsa_pre.IVN, dtype=torch.float32,
+                            device=prefix.device),
+            )  # fmt: skip
+            idx = dict(
+                ik_cache=ik_cache,
+                islots=islots,
+                topk=ind.topk_indices_buffer,
+                iq_pay=prep[0],
+                iq_sc=prep[1],
+                iw_out=prep[2],
+            )
         dsa_pre.dsa_pre(
             self._pre_key(delta is not None),
             prefix=prefix,
@@ -518,9 +581,10 @@ class DsaM1Layer(MlaOpsLayer):
             iv_out=iv,
             layer=layer.layer_idx,
             **runner.launch_args(),
+            **idx,
         )
         if not w.skip_topk:
-            indexer_tail(w, iq, ik, iv)
+            indexer_tail(w, iq, ik, iv, prep)
         a.impl.record_logical_topk_ready()
         a.prepare_kv_cache_update(md)
 

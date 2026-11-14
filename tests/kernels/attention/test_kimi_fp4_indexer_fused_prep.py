@@ -114,8 +114,11 @@ def test_query_weights_and_starts_match_unfused(tokens, tile, heads, heads_per_p
 
 @pytest.mark.parametrize("tokens", [4, 64, 192])
 @pytest.mark.parametrize("return_scores", [False, True])
-def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
-    """The registered op, eager reference vs fused prep under a FULL graph."""
+@pytest.mark.parametrize("prepped", [False, True])
+def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
+    """The registered op, eager reference vs fused prep under a FULL graph;
+    ``prepped``: the caller stored the keys, reset the rows and quantized the
+    query (the specialized decode's D1a), the op only scores and selects."""
     from vllm.config import VllmConfig
     from vllm.forward_context import set_forward_context
     from vllm.models.kimi_k3.amd import dsa  # noqa: F401
@@ -165,6 +168,14 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
     scale = HEADS**-0.5 * 128**-0.5
 
     def run(fused, cache, out, scores):
+        prep = {}
+        if fused and prepped:
+            # D1a's part, here with the Triton kernels it matches bit for bit
+            store_keys_and_reset(knorm(k)[:tokens], cache, slots, out[:padded])
+            payload, q_scales, q_weights, _ = quantize_queries_and_weights(
+                q[:tokens], weights[:tokens], scale, starts, 0, tokens
+            )
+            prep = dict(q_payload=payload, q_scales=q_scales, q_weights=q_weights)
         torch.ops.vllm.kimi_fp4_indexer(
             q,
             k if fused else knorm(k),
@@ -179,9 +190,14 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
             k_norm_weight=knorm.weight if fused else None,
             k_norm_bias=knorm.bias if fused else None,
             k_norm_eps=EPS,
+            **prep,
         )
 
-    from vllm.models.kimi_k3.amd.ops.fp4_indexer import store_keys
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import (
+        quantize_queries_and_weights,
+        store_keys,
+        store_keys_and_reset,
+    )
 
     initial, cache = _cache(reqs * pages)
     store_keys(knorm(history), cache, torch.arange(reqs * width, device="cuda"))
@@ -217,3 +233,4 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
             rtol=0,
             atol=0,
         )
+
