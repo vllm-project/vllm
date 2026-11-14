@@ -166,16 +166,125 @@ should split those fields:
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
 
-Callers that need only the token layout and item hashes, such as cache-aware
-routers, can set `"mm_payload": "none"` on the render request. The response
-then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
-`mm_metadata` to null, so the processed tensors are neither serialized nor sent.
-Do not forward such a response to `/inference/v1/generate`, which reads a null
-`kwargs_data` as every item being cached. The default, `"tensors"`, returns
-both fields.
+### `mm_payload` modes
+
+`mm_payload` on the render request sets which fields the response carries:
+
+| `mm_payload` | `mm_hashes`, `mm_placeholders` | `mm_metadata` | `kwargs_data` | Use it when |
+| --- | --- | --- | --- | --- |
+| `"tensors"` (default) | Yes | When available | Yes | The processed tensors should go to a worker. |
+| `"metadata"` | Yes | When available | Null | The encode worker gets the media another way, and prefill loads embeddings through the EC connector. |
+| `"none"` | Yes | Null | Null | Only the token layout and item hashes are needed, such as in a cache-aware router. |
 
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
+
+Choose the mode by where the media goes after render: through the render
+response to the workers (`"tensors"`), straight from the client to the encode
+worker (`"metadata"`), or to whichever worker a router picks (`"none"`).
+
+In the diagrams, `features` also carries `mm_hashes` and `mm_placeholders`.
+
+#### `"tensors"`
+
+Use case: render once and let the workers run without reprocessing the media,
+for example a single worker at `/inference/v1/generate`, or an encode worker
+that should not load or process the media itself. The cost is response size:
+`kwargs_data` holds the processed tensors, about 12 MiB for one 1920x1080
+image and 86 MiB for a 32-frame 1280x720 video on Qwen2-VL.
+
+Render serializes the processed tensors, and the client forwards them to the
+encode worker:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant E as Encode worker
+    participant P as Prefill worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media, serialize tensors
+    R-->>Client: token_ids, features (kwargs_data, mm_metadata)
+    Client->>E: POST /inference/v1/generate (kwargs_data)
+    note over E: run encoder
+    E-->>Client: ec_transfer_params
+    Client->>P: POST /inference/v1/generate (mm_metadata, ec_transfer_params)
+    P-->E: EC connector read (P pulls embeddings from E)
+    note over P: prefill
+    P-->>Client: generated output
+```
+
+A single worker can instead take the full response at
+`/inference/v1/generate`.
+
+#### `"metadata"`
+
+Use case: encode/prefill disaggregation where the client sends the original
+media to the encode worker and the embeddings reach prefill through the EC
+connector. Prefill still needs the token layout and the per-item metadata (for
+example `image_grid_thw` for M-RoPE positions), which is a few integers per
+item, so the processed tensors never pass through the client.
+
+Render does not serialize the tensors, so the encode worker needs the media from
+the client:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant E as Encode worker
+    participant P as Prefill worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media
+    R-->>Client: token_ids, features (mm_metadata)
+    Client->>E: Request with media
+    note over E: process media, run encoder
+    E-->>Client: ec_transfer_params
+    Client->>P: POST /inference/v1/generate (mm_metadata, ec_transfer_params)
+    P-->E: EC connector read (P pulls embeddings from E)
+    note over P: prefill
+    P-->>Client: generated output
+```
+
+`/inference/v1/generate` rejects this response without `ec_transfer_params`.
+
+#### `"none"`
+
+Use case: routing. A cache-aware router reads `token_ids` and `mm_hashes` to
+send the request to the worker that already holds its prefix or encoder cache,
+then forwards the original request with its media. This is the smallest
+response.
+
+The response is for routing only:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant R as Render
+    participant W as Worker
+
+    Client->>R: POST /v1/chat/completions/render
+    note over R: process media
+    R-->>Client: token_ids, features (no kwargs_data or mm_metadata)
+    note over Client: choose a worker
+    Client->>W: Original request with media
+    W-->>Client: generated output
+```
+
+Do not forward this response to `/inference/v1/generate`, which reads a null
+`kwargs_data` as every item being cached.
+
+#### Null `mm_metadata`
+
+`mm_metadata` is null if any modality in the request has no metadata fields,
+for example an image and a video on a model that declares them only for video.
+Do not use the prefill form for such a request. With `"metadata"`, both
+fields are then null, so send the media or render with `"tensors"` instead.
 
 ## Example
 
