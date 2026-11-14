@@ -2065,6 +2065,40 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     assert block_hashes[1] == expected_hash2
 
 
+@pytest.mark.parametrize("num_hash_lookahead_tokens", [0, 1])
+def test_prompt_embeds_block_hashes_match_serial_hashing(
+    monkeypatch, num_hash_lookahead_tokens: int
+):
+    """Hashing a long prompt's embeds blocks in parallel must not change any
+    block hash."""
+    block_size, num_tokens = 4, 4 * 9 + 2  # nine full blocks and a partial one
+    prompt_embeds = torch.randn((num_tokens, 8))
+
+    def request():
+        return make_request(
+            request_id="0",
+            prompt_token_ids=list(range(num_tokens)),
+            block_size=block_size,
+            hash_fn=sha256,
+            prompt_embeds=prompt_embeds,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+        )
+
+    parallel = request()
+    monkeypatch.setattr(
+        kv_cache_utils, "_prehash_prompt_embeds_blocks", lambda *args: None
+    )
+    serial = request()
+
+    assert len(parallel.block_hashes) == 9
+    assert parallel.block_hashes == serial.block_hashes
+    # Prehashing filled exactly the ranges the hashing loop looked up.
+    assert (
+        parallel._prompt_embeds_per_block_hashes
+        == serial._prompt_embeds_per_block_hashes
+    )
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes]):
     block_size = 3

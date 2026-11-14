@@ -8,6 +8,7 @@ import math
 import os
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -617,11 +618,41 @@ def _gen_prompt_embeds_extra_hash_keys(
     block_range = (start_token_idx, end_token_idx)
     embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
     if embeds_hash is None:
-        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+        embeds_hash = _hash_prompt_embeds_rows(request, block_range)
         # Hash prompt embeds once per block and cache on request
-        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
     return [("prompt_embeds", embeds_hash)]
+
+
+def _hash_prompt_embeds_rows(request: Request, block_range: tuple[int, int]) -> bytes:
+    assert request.prompt_embeds is not None
+    start, end = block_range
+    return hashlib.sha256(tensor_data(request.prompt_embeds[start:end])).digest()
+
+
+# hashlib releases the GIL while hashing large buffers, so threads scale with cores.
+_PROMPT_EMBEDS_HASH_THREADS = 8
+_prompt_embeds_hash_pool: ThreadPoolExecutor | None = None
+
+
+def _prehash_prompt_embeds_blocks(
+    request: Request, block_ranges: list[tuple[int, int]]
+) -> None:
+    """Hash the prompt embeds of many blocks at once, in parallel, into the
+    request's per-block cache that `_gen_prompt_embeds_extra_hash_keys` reads.
+    """
+    global _prompt_embeds_hash_pool
+    todo = [r for r in block_ranges if r not in request._prompt_embeds_per_block_hashes]
+    if len(todo) < 2:
+        return
+    if _prompt_embeds_hash_pool is None:
+        _prompt_embeds_hash_pool = ThreadPoolExecutor(
+            _PROMPT_EMBEDS_HASH_THREADS, thread_name_prefix="prompt_embeds_hash"
+        )
+    digests = _prompt_embeds_hash_pool.map(
+        lambda r: _hash_prompt_embeds_rows(request, r), todo
+    )
+    request._prompt_embeds_per_block_hashes.update(zip(todo, digests))
 
 
 def generate_block_hash_extra_keys(
@@ -964,6 +995,23 @@ def get_request_block_hasher(
                     start_token_idx,
                     start_token_idx + hash_block_size,
                 )
+
+        if request.prompt_embeds is not None:
+            # The ranges the loop below passes to the prompt-embeds hashing.
+            num_prompt_blocks = (
+                min(num_tokens, len(request.prompt_embeds)) - start_token_idx
+            ) // hash_block_size
+            _prehash_prompt_embeds_blocks(
+                request,
+                [
+                    (start, start + hash_block_size + num_hash_lookahead_tokens)
+                    for start in range(
+                        start_token_idx,
+                        start_token_idx + num_prompt_blocks * hash_block_size,
+                        hash_block_size,
+                    )
+                ],
+            )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
