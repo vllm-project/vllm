@@ -175,6 +175,63 @@ class TestMCPToolServerUnit:
             f"{set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())}"
         )
 
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_pagination(self, monkeypatch):
+        """Test that list_server_and_tools collects all pages using next_cursor."""
+        from contextlib import asynccontextmanager
+
+        import mcp.types as mcp_types
+
+        from vllm.entrypoints.mcp.tool_server import list_server_and_tools
+
+        tool1 = mcp_types.Tool(name="tool1", input_schema={"type": "object"})
+        tool2 = mcp_types.Tool(name="tool2", input_schema={"type": "object"})
+        tool3 = mcp_types.Tool(name="tool3", input_schema={"type": "object"})
+
+        page1 = mcp_types.ListToolsResult(tools=[tool1], nextCursor="cursor_page2")
+        page2 = mcp_types.ListToolsResult(tools=[tool2, tool3], nextCursor=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(return_value=MagicMock())
+
+        async def mock_list_tools(params=None):
+            if params is None or params.cursor is None:
+                return page1
+            elif params.cursor == "cursor_page2":
+                return page2
+            raise ValueError(f"Unexpected cursor: {params.cursor}")
+
+        mock_session.list_tools = AsyncMock(side_effect=mock_list_tools)
+
+        @asynccontextmanager
+        async def mock_sse_client(url):
+            yield (MagicMock(), MagicMock())
+
+        class MockClientSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return mock_session
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        monkeypatch.setattr("mcp.client.sse.sse_client", mock_sse_client)
+        monkeypatch.setattr("mcp.ClientSession", MockClientSession)
+
+        _, list_tools_response = await list_server_and_tools(
+            "http://localhost:8000/sse"
+        )
+
+        assert [t.name for t in list_tools_response.tools] == [
+            "tool1",
+            "tool2",
+            "tool3",
+        ]
+        assert list_tools_response.next_cursor is None
+        assert mock_session.list_tools.await_count == 2
+
 
 class TestMCPEnabled:
     """Tests that require MCP tools to be enabled via environment variable."""
