@@ -231,7 +231,7 @@ def test_cake_workspace_overflow_falls_back():
         workspace=ws,
         max_reqs=R,
     )
-    assert (R, heads * k, int(seq.max()), bt.shape[1]) in (
+    assert (R, heads * k, int(seq.max()), bt.shape[1], 1) in (
         attention._CAKE_WORKSPACE_TOO_SMALL
     )
     stock = _stock(q, kv, bt, seq, k, ws).float()
@@ -376,7 +376,7 @@ def test_balanced_dcp_decode_matches_one_launch(ctxs):
     assert A.balanced_tiers(args[0].device, rows) == (4, 8, 16)
     policy = A.balanced_tiers
     try:
-        A.balanced_tiers = lambda device, n, q_tiles=1: ()
+        A.balanced_tiers = lambda device, n: ()
         o0, l0 = A.folded_decode(*args, **kwargs, table_cache={})
     finally:
         A.balanced_tiers = policy
@@ -425,25 +425,14 @@ def _causal_reference(q, kv, bt, seq, k):
     return torch.cat(out)
 
 
-def _stock_causal_rows(q, kv, bt, seq, k, ws, dcp=None):
+def _stock_causal_rows(q, kv, bt, seq, k, ws):
     """The stock causal flatten: every draft token its own decode row, its keys
-    ending (k - 1 - i) before the request's (the global limit under DCP)."""
+    ending (k - 1 - i) before the request's."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     n = q.shape[0]
     row_req = torch.arange(n, device="cuda") // k
     trim = (k - 1 - torch.arange(n, device="cuda") % k).to(torch.int32)
-    args = dict(backend="cute-dsl", seq_lens=(seq[row_req] - trim).contiguous())
-    if dcp is not None:
-        args = dict(
-            backend="cute-dsl",
-            seq_lens=seq[row_req].contiguous(),
-            enable_dcp=True,
-            cp_world=dcp[0],
-            cp_rank=0,
-            causal_seqlens_kv_global=(dcp[1][row_req] - trim).contiguous(),
-            return_lse=True,
-        )
     o = trtllm_batch_decode_with_kv_cache_mla(
         query=q.unsqueeze(1),
         kv_cache=kv.unsqueeze(1),
@@ -455,11 +444,9 @@ def _stock_causal_rows(q, kv, bt, seq, k, ws, dcp=None):
         max_seq_len=int(seq.max()),
         bmm1_scale=SCALE,
         bmm2_scale=1.0,
-        **args,
+        backend="cute-dsl",
+        seq_lens=(seq[row_req] - trim).contiguous(),
     )
-    if dcp is not None:
-        o, lse = o
-        return o.reshape(n, q.shape[1], KV_LORA), lse.reshape(q.shape[:2])
     return o.reshape(n, q.shape[1], KV_LORA)
 
 
@@ -499,47 +486,6 @@ def test_causal_block_matches_stock_and_reference(heads, k, ctxs):
     # Different kernels (one [R, k, H] row vs a row per token) round P
     # independently: their distance is up to ~sqrt(2) x each one's own error.
     assert rel(o, stock) < 0.05
-
-
-@pytest.mark.parametrize("reqs", [3, 40])
-def test_causal_dcp_block_matches_stock(reqs):
-    """A causal draft block under DCP (cute-dsl + LSE, 96 draft heads
-    x k=4): one [R, 4, 96] row per request, masked by global position, against
-    the stock one-row-per-token call; 40 skewed requests take the balanced split
-    tiers. CUDA-graph replay equals eager."""
-    from vllm.models.kimi_k3.nvidia.specialized_decode.drafter import attention as A
-
-    heads, k, cp = 96, 4, 8
-    g = torch.Generator().manual_seed(13)
-    lens = torch.randint(64, 3000, (reqs,), generator=g).tolist()
-    lens[0] = 40000
-    if reqs > 8:
-        lens[5], lens[17] = 30000, 25000
-    args, kwargs = _balanced_args(lens, heads, k, cp, seed=9)
-    q, kv, bt, seq = args[:4]
-    q_tiles = -(-k * heads // 128)
-    want = (4, 8) if reqs == 40 else ()
-    assert A.balanced_tiers(q.device, reqs, q_tiles) == want
-    o, lse = A.folded_decode(*args, **kwargs, table_cache={}, causal=True)
-    so, slse = _stock_causal_rows(
-        q, kv, bt, seq, k, torch.zeros_like(kwargs["workspace"]),
-        dcp=(cp, kwargs["dcp_tot_seq_lens"]),
-    )  # fmt: skip
-    assert ((o.float() - so.float()).norm() / so.float().norm()).item() < 0.02
-    assert (lse - slse).abs().max().item() < 1e-2
-    assert torch.isfinite(o.float()).all() and torch.isfinite(lse).all()
-
-    s = torch.cuda.Stream()
-    s.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(s):
-        A.folded_decode(*args, **kwargs, table_cache={}, causal=True)
-    torch.cuda.current_stream().wait_stream(s)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        go, gl = A.folded_decode(*args, **kwargs, table_cache={}, causal=True)
-    graph.replay()
-    torch.accelerator.synchronize()
-    assert torch.equal(go, o) and torch.equal(gl, lse)
 
 
 @pytest.mark.parametrize("ctxs", ["skewed", "uniform"])
