@@ -26,6 +26,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_bf16_fp4,
 )
 
+from ..base import partial_sum_prescaled, store_partial_sum_prescaled
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
@@ -172,6 +173,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
+    supports_partial_sum_dtype = True
+
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
@@ -205,6 +208,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
+        store_partial_sum_prescaled(layer, "partial_sum_alpha", layer.alpha)
 
     def apply_weights(
         self,
@@ -214,21 +218,32 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         qa = self.prepare_input(layer, x)
+        output_dtype = qa.orig_dtype
+
+        # FP16 partial sums of RowParallelLinear, prescaled by 2^-k.
+        alpha = layer.alpha
+        partial_sum_dtype = getattr(layer, "partial_sum_dtype", None)
+        if partial_sum_dtype is not None:
+            output_dtype = partial_sum_dtype
+            if layer.partial_sum_scale != 1.0:
+                alpha = partial_sum_prescaled(layer, "partial_sum_alpha", alpha)
+                if bias is not None:
+                    bias = bias * layer.partial_sum_scale
 
         out = flashinfer_scaled_fp4_mm(
             qa.data,
             layer.weight,
             qa.scale,
             layer.weight_scale,
-            layer.alpha,
-            qa.orig_dtype,
+            alpha,
+            output_dtype,
             backend="cutlass",
         )
 
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
-            out = out + bias
+            out = out + bias.to(out.dtype)
         return out.view(*qa.orig_shape[:-1], output_size)
 
 
