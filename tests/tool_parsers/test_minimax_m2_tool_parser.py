@@ -52,8 +52,8 @@ def _feed(parser, chunks, request=None):
     """Feed chunks through the streaming parser and collect results.
 
     Each element in *chunks* is either:
-    - a ``str``: used as delta_text (current_text accumulates automatically)
-    - a ``(delta_text, delta_token_ids)`` tuple for special-token scenarios
+    - a `str`: used as delta_text (current_text accumulates automatically)
+    - a `(delta_text, delta_token_ids)` tuple for special-token scenarios
 
     Returns a list of non-None DeltaMessage objects.
     """

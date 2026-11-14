@@ -20,7 +20,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .interfaces_base import default_pooling_type
-from .qwen2 import Qwen2Model
+from .qwen3 import Qwen3Model, use_qwen2_attention
 from .utils import AutoWeightsLoader, maybe_prefix
 
 
@@ -28,7 +28,7 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     is_pooling_model = True
     pooler: Pooler
 
-    hf_to_vllm_mapper = Qwen2Model.hf_to_vllm_mapper
+    hf_to_vllm_mapper = Qwen3Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -38,11 +38,12 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        use_qwen2_attention(config)
 
         self.config = config
 
         self.quant_config = quant_config
-        self.model = Qwen2Model(
+        self.model = Qwen3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.head_dtype = vllm_config.model_config.head_dtype

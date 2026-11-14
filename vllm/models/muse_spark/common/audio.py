@@ -75,7 +75,7 @@ class DepthwiseCausalConv(nn.Module):
         x: torch.Tensor,
         cache: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """[B, T, D] -> [B, T, D]; ``cache`` is [B, D, kernel_size - 1] or None."""
+        """[B, T, D] -> [B, T, D]; `cache` is [B, D, kernel_size - 1] or None."""
         x = x.permute(0, 2, 1)  # [B, D, T]
 
         if cache is None:

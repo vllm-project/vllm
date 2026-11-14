@@ -396,7 +396,7 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
+ARG ROCM_TRITON_KERNELS_COMMIT=3ef5021860f07f76820cce2e4c8e92d5e834bf39
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
@@ -407,6 +407,17 @@ RUN mkdir -p /opt/rocm-triton-kernels \
     && test -f /opt/rocm-triton-kernels/__init__.py \
     && rm /tmp/rocm-triton.tar.gz
 ENV TRITON_KERNELS_SRC_DIR=/opt/rocm-triton-kernels ROCM_TRITON_KERNELS_COMMIT=${ROCM_TRITON_KERNELS_COMMIT}
+
+# torchao for the Quantization steps, which put /opt/quantization-deps on PYTHONPATH: off the default
+# path because torchao queries the GPU at import, which breaks tests that fork. CI only, below the
+# marker so a bump does not change the runtime key. py3-none-any: the abi3 wheel's CUDA extensions
+# cannot load on ROCm.
+FROM dev AS build_torchao
+RUN --mount=type=bind,source=requirements/test/quantization_deps_rocm.txt,target=/r.txt \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --python python3 --python-platform x86_64-manylinux_2_17 --require-hashes --no-deps \
+        --target /opt/quantization-deps -r /r.txt \
+    && ! find /opt/quantization-deps -name '*.so' | grep .
 
 # The version every per-commit artifact carries. build.sh builds from an export of HEAD (no .git)
 # and writes .git_archival.txt from the host's `git describe`; without it, e.g. locally, .git and a
@@ -621,6 +632,7 @@ FROM test-base AS test
 # Native fault reporter for AMD CI pytest runs (.buildkite/scripts/hardware_ci/amd_ci_fast_exit.py).
 RUN --mount=type=bind,source=.buildkite/scripts/hardware_ci/amd_ci_fault_trap.c,target=/tmp/trap.c \
     cc -O2 -shared -fPIC -o /usr/local/lib/libamd_ci_fault_trap.so /tmp/trap.c
+COPY --link --from=build_torchao /opt/quantization-deps /opt/quantization-deps
 COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
@@ -632,7 +644,10 @@ RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
     "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
 
 FROM test AS test-smoke
-RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"
+# torchao must stay off the default path (see build_torchao).
+RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)" \
+    && python3 -c "import importlib.util as u; assert u.find_spec('torchao') is None, 'torchao is on the default path'" \
+    && PYTHONPATH=/opt/quantization-deps python3 -c "import importlib.util as u; assert u.find_spec('torchao')"
 
 FROM scratch AS wheels
 COPY --link --from=stack-wheels / /

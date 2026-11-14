@@ -5,7 +5,7 @@
 A FULL CUDA graph replays the forward only: before every replay the runner
 still builds the attention metadata on the host, which refreshes the persistent
 buffers the graph reads. For small decode batches that build costs about as
-much as the replay. ``AttnMetadataCudaGraphs`` records, during CUDA graph
+much as the replay. `AttnMetadataCudaGraphs` records, during CUDA graph
 capture, the build of every uniform decode batch shape that a FULL decode graph
 serves, and replays it on the steps of that shape, returning the metadata
 objects captured with it. A step of a shape without a recording builds its
@@ -84,7 +84,7 @@ class AttnMetadataCudaGraphs:
         """The graph key of a step whose metadata build can be recorded, or None.
 
         Only FULL steps of uniform decodes qualify; their key fixes every host
-        value the build reads. Under adaptive verification (``max_query_len``
+        value the build reads. Under adaptive verification (`max_query_len`
         set) the device splits the drafts, so the host query lengths are only
         bounds.
         """
@@ -108,7 +108,7 @@ class AttnMetadataCudaGraphs:
         """The keys of the decode steps the FULL decode graphs serve, largest
         first.
 
-        The graphs are the ones ``CudaGraphManager`` captures, and a step runs
+        The graphs are the ones `CudaGraphManager` captures, and a step runs
         the smallest graph that holds its requests. Under dynamic speculative
         decoding only the widest query length is recorded; steps of the
         narrower tiers build their metadata eagerly.
@@ -137,7 +137,7 @@ class AttnMetadataCudaGraphs:
         return keys[::-1]
 
     def can_record(self, attn_groups: list[list[AttentionGroup]]) -> bool:
-        """Whether every metadata builder of ``attn_groups`` is recordable."""
+        """Whether every metadata builder of `attn_groups` is recordable."""
         if self._recordable is None:
             self._recordable = all(
                 type(group.get_metadata_builder()) in _RECORDABLE_BUILDERS
@@ -153,7 +153,7 @@ class AttnMetadataCudaGraphs:
         block_tables: Sequence[torch.Tensor],
         build_fn: BuildFn,
     ) -> dict[str, Any]:
-        """Record the build of ``key`` in the global CUDA graph pool, which the
+        """Record the build of `key` in the global CUDA graph pool, which the
         FULL forward graphs and memory profiling use; returns its metadata."""
         self._forked_build(attn_groups, block_tables, build_fn)
         graph = torch.cuda.CUDAGraph()
@@ -168,7 +168,7 @@ class AttnMetadataCudaGraphs:
         return attn_metadata
 
     def replay(self, key: GraphKey) -> dict[str, Any] | None:
-        """Replay the build of ``key`` and return its metadata, or None if the
+        """Replay the build of `key` and return its metadata, or None if the
         key was not recorded."""
         entry = self._graphs.get(key)
         if entry is None:
@@ -192,7 +192,7 @@ class AttnMetadataCudaGraphs:
         The groups share only read-only inputs, with two exceptions. The sparse
         MLA and compressor builders clamp their block table in place, so the
         groups of one block table storage build on one branch, in serial order;
-        the groups that only read the table (``_BLOCK_TABLE_READERS``) then
+        the groups that only read the table (`_BLOCK_TABLE_READERS`) then
         build on branches of their own, each started after that branch. And
         the first group that needs the token-to-request map builds it into its
         own buffer, which later groups reuse. Each branch builds its own map;

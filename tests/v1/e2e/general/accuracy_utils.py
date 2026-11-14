@@ -20,7 +20,7 @@ from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AccuracyTolerance:
     logprob_atol: float
     greedy_atol: float
@@ -461,8 +461,8 @@ class SamplingReference:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return FP32 logits before and after non-grammar sampling transforms.
 
-        ``raw_logits`` scores the next token after the prompt and
-        ``generated_ids``. Returned tensors do not alias the model's tensor.
+        `raw_logits` scores the next token after the prompt and
+        `generated_ids`. Returned tensors do not alias the model's tensor.
         Normalize the first result to check reported completion logprobs;
         the second supplies the greedy decision reference.
         """

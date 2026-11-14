@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Daemon-to-daemon seeding over an authenticated JSON channel.
 
-A :class:`Seedable` is one kind of state a daemon can seed to or from a peer
+A `Seedable` is one kind of state a daemon can seed to or from a peer
 daemon: warmup caches today, weight shards later. The target names what it
 wants by kind and key fields; the source resolves the key to a payload; the
 target validates and installs it:
@@ -13,7 +13,7 @@ target validates and installs it:
 
 Payloads are JSON values. Large binary state (weights) must not be inlined:
 the payload then describes the transfer (e.g. a storage manifest) and the
-kind's ``install`` drives the data plane itself.
+kind's `install` drives the data plane itself.
 
 The connection is unencrypted beyond the shared token; keep the listener on a
 trusted network.
@@ -56,10 +56,10 @@ class Seedable(Protocol):
         ...
 
     def resolve(self, request: dict[str, Any]) -> Any | None:
-        """Source side: produce the payload named by ``request``.
+        """Source side: produce the payload named by `request`.
 
         Validate the wire key first — raise an error on any malformed field
-        (``ValueError`` for bad values, ``KeyError`` for missing ones), before
+        (`ValueError` for bad values, `KeyError` for missing ones), before
         touching local state. The transport turns it into an error response.
         Return None on a miss.
         """
@@ -100,7 +100,7 @@ class SeedTransport:
         self._server: socket.socket | None = None
 
     def adopt(self, seedable: Seedable, ctx: Any) -> None:
-        """Best-effort: fetch and install ``seedable`` from the source daemon.
+        """Best-effort: fetch and install `seedable` from the source daemon.
 
         Any failure degrades to the local path with a log line.
         """
@@ -182,6 +182,8 @@ class SeedTransport:
         listen = self._seed_config.listen
         if listen is None:
             return None
+        if self._server is not None:
+            return self._server.getsockname()[:2]
         family = socket.AF_INET6 if ":" in listen[0] else socket.AF_INET
         self._server = socket.create_server(listen, family=family)
         threading.Thread(

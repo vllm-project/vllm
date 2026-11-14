@@ -249,6 +249,7 @@ pub(crate) async fn unified_event_stream(
             DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             } => {
                 y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
@@ -262,6 +263,7 @@ pub(crate) async fn unified_event_stream(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        ..
                     },
                 finished,
             } => {
@@ -290,6 +292,7 @@ pub(crate) async fn unified_event_stream(
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
                         weight_versions: finished.weight_versions,
+                        routed_experts: finished.routed_experts,
                     })
                     .await;
                 }
@@ -428,9 +431,9 @@ mod tests {
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-                sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 timestamps: Default::default(),
             })),
         }
@@ -761,6 +764,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 },
             ]
         );
@@ -804,6 +808,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 },
             ]
         );
@@ -839,6 +844,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 },
             ]
         );
@@ -894,6 +900,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 },
             ]
         );
@@ -943,6 +950,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             };
             assert_eq!(
                 events,

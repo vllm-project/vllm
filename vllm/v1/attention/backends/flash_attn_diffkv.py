@@ -104,7 +104,6 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             raise NotImplementedError(
                 "Unsupported FP8 Diff-KV configuration; use an unquantized KV cache."
             )
-        self.fa4_hd256 = False
 
     def do_kv_cache_update(
         self,

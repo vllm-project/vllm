@@ -80,7 +80,7 @@ class TierMatcher(NamedTuple):
         return medium_matches and locality_matches
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TierFilter:
     """Per-request filter controlling which tiers participate."""
 
@@ -97,7 +97,7 @@ class TierFilter:
 TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqContext:
     """Per-request offloading state with optional token counts.
 
@@ -161,6 +161,16 @@ class LookupResult(Enum):
     RETRY = auto()
 
 
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = auto()
+
+
 class OffloadPolicy(Enum):
     # Offload only newly-computed chunks as they arrive; prefix-hit
     # chunks (already offloaded by a prior request) are skipped.
@@ -170,7 +180,7 @@ class OffloadPolicy(Enum):
     REQUEST_LEVEL = "request_level"
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
@@ -190,14 +200,14 @@ class LoadStoreSpec:
     """
 
 
-@dataclass
+@dataclass(slots=True)
 class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
 
 
-@dataclass
+@dataclass(slots=True)
 class OffloadingEvent:
     keys: list[OffloadKey]
     medium: Medium
@@ -245,18 +255,18 @@ Exclusion:
 """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingMetricMetadata:
     documentation: str
     labelnames: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingCounterMetadata(OffloadingMetricMetadata):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
     # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
     # written by different API-server processes. Offloading stats reach one
@@ -266,12 +276,12 @@ class OffloadingGaugeMetadata(OffloadingMetricMetadata):
     multiprocess_mode: str = "mostrecent"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingHistogramMetadata(OffloadingMetricMetadata):
     buckets: tuple[float, ...] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingKVEventsConfig:
     # Global vLLM KV event publishing flag. When false, connector-specific
     # event capture must stay inert because take_events() is not drained.
@@ -285,7 +295,7 @@ class OffloadingKVEventsConfig:
 ConfigInfoMapping = Mapping[str, str | int | float | bool]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ConfigInfo:
     """Static facts that one component publishes on vllm:kv_offload_config_info.
 
@@ -353,7 +363,7 @@ class OffloadingManager(ABC):
     ) -> CacheHitSource:
         """Return the cache tier that supplied a successful lookup.
 
-        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        This is queried only after `lookup` resolves to `HIT`. Composing
         managers can override it to retain the origin across asynchronous
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
@@ -397,6 +407,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -405,6 +417,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -419,6 +432,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
         success: bool = True,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
@@ -429,6 +444,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
         """
@@ -523,7 +539,7 @@ class OffloadingManager(ABC):
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources.
 
-        The one exception to the rule that callers hold ``lock``: call this
+        The one exception to the rule that callers hold `lock`: call this
         without it. A manager with a background thread stops that thread here
         and may need the lock to do so.
         """
@@ -577,7 +593,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.block_indices: Sequence[int] = block_indices
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCacheTensor:
     """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
@@ -593,7 +609,7 @@ class CanonicalKVCacheTensor:
     page_size_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CopyRun:
     """A strided byte correspondence between this worker's physical page and
     a canonical page: for i in range(num_fragments), fragment i spans
@@ -608,7 +624,7 @@ class CopyRun:
     canonical_stride: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CanonicalPageMapping:
     """How this worker's page maps into a canonical (parallelism-free) page.
     In-process only, never serialized. Runs cover the full local page in both
@@ -635,7 +651,7 @@ class CanonicalPageMapping:
         return block_id % self.num_writers == self.writer_index
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCacheRef:
     """Per-layer (or group of layers) reference to a specific (by index)
     CanonicalKVCacheTensor and records the un-padded page size used by that layer.
@@ -649,7 +665,7 @@ class CanonicalKVCacheRef:
     mapping: CanonicalPageMapping | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CanonicalKVCaches:
     """Canonicalized block-level representation of the KV caches.
 
@@ -668,7 +684,7 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
-@dataclass
+@dataclass(slots=True)
 class DevicePointers:
     """Pre-resolved device pointers for a transfer.
 
@@ -707,7 +723,7 @@ class IOCompletion(Protocol):
     def result(self, timeout: float | None = None) -> object: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferResult:
     job_id: int
     success: bool

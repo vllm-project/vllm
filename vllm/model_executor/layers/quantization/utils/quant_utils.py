@@ -11,12 +11,16 @@ import numpy
 import torch
 from torch import fx
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
+
+logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -40,14 +44,14 @@ def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
 def weight_amax(
     weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
 ) -> torch.Tensor:
-    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    """`max(|weight|)`, without materializing a full-size `abs()`."""
     lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
     return torch.maximum(lo.abs(), hi.abs())
 
 
 def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
-    """Reduce a weight ``amax`` over the TP group when the weight is sharded
-    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    """Reduce a weight `amax` over the TP group when the weight is sharded
+    along a dim the `amax` reduces over, so each shard derives the same scale
     it would as part of the whole weight.
     """
     if is_sharded:
@@ -60,9 +64,9 @@ def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tens
 
 
 def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
-    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    """Reduce a per-expert weight `amax` over the ranks that tensor-shard the
     MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
-    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    group's span. Under EP `moe_tp_size` is 1 and each rank owns whole
     experts, so no reduction is needed.
     """
     if moe_tp_size > 1:
@@ -141,7 +145,7 @@ GroupShape.PER_TOKEN = GroupShape(1, -1)
 GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScaleDesc:
     """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
@@ -167,7 +171,7 @@ class ScaleDesc:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuantKey:
     """Class for identifying the type of quantization.
     dtype: quantized data type
@@ -219,7 +223,7 @@ kNvfp4DynamicToken = QuantKey(
 
 
 def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
-    """Whether ``key``'s second-level scale is computed per token at runtime."""
+    """Whether `key`'s second-level scale is computed per token at runtime."""
     return (
         key is not None
         and key.scale2 is not None
@@ -355,6 +359,36 @@ def create_fp8_quant_key(
 ) -> QuantKey:
     scale_desc = ScaleDesc(scale_dtype, static, group_shape)
     return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
+
+
+def check_activation_quant_fallback(
+    kernel: str,
+    requested_key: QuantKey | None,
+    executed_key: QuantKey | None,
+) -> str | None:
+    """Check a kernel that runs `executed_key` activations for a layer that
+    requests `requested_key`.
+
+    Running a requested activation quantization as a different one (e.g.
+    Marlin running W8A8 as W8A16) is a fallback. Adding activation
+    quantization to an unquantized request is not.
+
+    Returns:
+        Why VLLM_STRICT_QUANT_SCHEME rejects the fallback, or None if the kernel
+        may be used. Warns once for an allowed fallback, so call this only once
+        the kernel is otherwise selectable.
+
+    """
+    if requested_key is None or executed_key == requested_key:
+        return None
+    executed = "unquantized" if executed_key is None else str(executed_key)
+    msg = f"{kernel} runs {requested_key} activations as {executed}"
+    if envs.VLLM_STRICT_QUANT_SCHEME:
+        return f"{msg}, which VLLM_STRICT_QUANT_SCHEME=1 forbids"
+    logger.warning_once(
+        "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.", msg
+    )
+    return None
 
 
 # Normalize the group_shape to the full extent for any dims that are -1

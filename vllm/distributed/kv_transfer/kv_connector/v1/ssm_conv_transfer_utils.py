@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MambaConvSplitInfo:
     """Per-rank byte sizes of the conv sub-projections.
 

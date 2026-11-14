@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark and regression-test pinned (page-locked) CPU memory for vLLM.
+r"""Benchmark and regression-test pinned (page-locked) CPU memory for vLLM.
 
 Verifies that enabling pinned memory does not regress throughput or latency
-compared to unpinned memory.  Each condition runs in an isolated ``spawn``
+compared to unpinned memory.  Each condition runs in an isolated `spawn`
 subprocess so both start from a cold CUDA context, giving an unbiased
 comparison.
 
@@ -243,7 +243,6 @@ class TestPinnedMemory:
 
         engine_args_kwargs = dict(
             model=model,
-            gpu_memory_utilization=0.88,
             max_model_len=max_model_len,
             enable_prefix_caching=False,
         )
@@ -279,7 +278,6 @@ class TestPinnedMemory:
 
         engine_args_kwargs = dict(
             model=model,
-            gpu_memory_utilization=0.88,
             max_model_len=max_model_len,
             enable_prefix_caching=False,
         )

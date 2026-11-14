@@ -3,7 +3,7 @@
 """Dense MLA draft support for Kimi K3.1 (DSA target).
 
 Dense EAGLE3 and DSpark drafts keep their own fp8 MLA cache and decode with
-FLASHINFER_MLA, or ROCM_AITER_MLA on ROCm (``configure_dense_draft``).
+FLASHINFER_MLA, or ROCM_AITER_MLA on ROCm (`configure_dense_draft`).
 """
 
 from typing import Any
