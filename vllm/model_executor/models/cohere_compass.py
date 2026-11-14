@@ -106,6 +106,11 @@ from vllm.multimodal.video_prune.evs import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.cache import (
+    VISION_ROPE_SHAPE_CACHE_BYTES,
+    LRUCache,
+    tensors_nbytes,
+)
 from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -713,6 +718,12 @@ class Cohere_VisionTransformer(nn.Module):
             else []
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+        self._rot_pos_ids_cache: LRUCache[tuple[int, int, int], torch.Tensor] = (
+            LRUCache(
+                capacity=VISION_ROPE_SHAPE_CACHE_BYTES,
+                getsizeof=tensors_nbytes,
+            )
+        )
 
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -804,9 +815,11 @@ class Cohere_VisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
 
-    @staticmethod
-    @lru_cache(maxsize=1024)
-    def rot_pos_ids(h: int, w: int, spatial_merge_size: int) -> torch.Tensor:
+    def rot_pos_ids(self, h: int, w: int, spatial_merge_size: int) -> torch.Tensor:
+        cache_key = (h, w, spatial_merge_size)
+        if cache_key in self._rot_pos_ids_cache:
+            return self._rot_pos_ids_cache[cache_key]
+
         hpos_ids = np.broadcast_to(np.arange(h).reshape(h, 1), (h, w))
         h_div = h // spatial_merge_size
         w_div = w // spatial_merge_size
@@ -829,7 +842,9 @@ class Cohere_VisionTransformer(nn.Module):
         wpos_ids = wpos_ids.transpose(0, 2, 1, 3)
         wpos_ids = wpos_ids.flatten()
 
-        return torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
+        result = torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
+        self._rot_pos_ids_cache.put_if_fits(cache_key, result)
+        return result
 
     def rot_pos_emb(self, grid_thw: list[list[int]]):
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
