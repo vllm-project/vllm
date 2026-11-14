@@ -135,6 +135,10 @@ class KdaPreBuild:
     timeline: bool = False
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
+    # Per-token recurrent-state snapshots (S*NH*64 KB a layer) stored
+    # non-temporal + device scope: they stream out instead of sitting dirty in
+    # L2 and draining at kernel end (~1.3 us a launch). Bit-exact.
+    stream_states: bool = False
 
 
 ABI = KernelAbi(
@@ -775,7 +779,10 @@ def kda_recur(c, k, req, h, ch):
         if (slot > 0) & live0:
             dst = rsrc(a["rstate"] + fx.Int64(slot) * fx.Int64(a["rs_seq"]) * 4)
             bo.buffer_store(
-                fx.Vector.from_elements(stv, fx.Float32), dst, k["head_off"]
+                fx.Vector.from_elements(stv, fx.Float32),
+                dst,
+                k["head_off"],
+                cache_modifier=c["st_cm"],
             )
         if lane % 32 == 0:
             fx.ptr_store(o, c["ol"] + (j * VCH + v))
@@ -882,7 +889,7 @@ def build(key: KdaPreBuild):
     keyed = key_tuple(key, _SOURCES)
     name = (
         f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
-        f"_t{int(key.timeline)}"
+        f"_t{int(key.timeline)}" + ("_ns" if key.stream_states else "")
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -943,6 +950,7 @@ def build(key: KdaPreBuild):
             "lb": key.lower_bound,
             "kda0": key.kda0,
             "write_idx": key.write_idx,
+            "st_cm": (CM_NT | CM_DEV) if key.stream_states else 0,
             "vals_all": vals_all(s, ns),
             "put": mb.put,
             "poll": mb.poll,

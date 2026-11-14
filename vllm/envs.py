@@ -233,6 +233,7 @@ if TYPE_CHECKING:
     VLLM_K31_BEAT_DRAFTMETA: bool = False
     VLLM_K31_BEAT_K2SYNC: bool = False
     VLLM_K31_BEAT_EAGERPREP: bool = False
+    VLLM_K31_BEAT_KDAK1: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1828,6 +1829,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_K31_BEAT_EAGERPREP": lambda: bool(
         int(os.getenv("VLLM_K31_BEAT_EAGERPREP", "0"))
     ),
+    # Kimi-K3.1 specialized decode on MI355X: KDA's per-token recurrent-state
+    # snapshots (K1) stored non-temporal at device scope so they stream out
+    # instead of draining from L2 at kernel end. Bit-exact.
+    "VLLM_K31_BEAT_KDAK1": lambda: bool(int(os.getenv("VLLM_K31_BEAT_KDAK1", "0"))),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
