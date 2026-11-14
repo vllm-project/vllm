@@ -364,12 +364,12 @@ class InternS1ProMoeDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         # update rope related parameters
-        rope_scaling = config.rope_scaling
+        rope_parameters = config.rope_parameters
         fope_keys = {"fope_init_factor", "fope_sep_head", "num_inv_freq"}
-        use_fope = any(rope_scaling.get(key) is not None for key in fope_keys)
-        fope_init_factor = rope_scaling.get("fope_init_factor", None)
-        fope_sep_head = rope_scaling.get("fope_sep_head", None)
-        num_inv_freq = rope_scaling.get("num_inv_freq", None)
+        use_fope = any(rope_parameters.get(key) is not None for key in fope_keys)
+        fope_init_factor = rope_parameters.get("fope_init_factor", None)
+        fope_sep_head = rope_parameters.get("fope_sep_head", None)
+        num_inv_freq = rope_parameters.get("num_inv_freq", None)
 
         config.rope_parameters["use_fope"] = use_fope
         config.rope_parameters["fope_init_factor"] = fope_init_factor
