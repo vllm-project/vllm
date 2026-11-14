@@ -19,6 +19,67 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
+# vllm-xpu-kernels without #605 prefetch the per-group scales of the int4
+# grouped GEMM with an out-of-spec block-2D descriptor that reads past the end
+# of the scale tensor (vllm-project/vllm-xpu-kernels#605). In device memory the
+# overrun lands in mapped memory; in pinned host memory sized exactly to the
+# tensor it loses the device. Those builds keep MoE scales on the device.
+# #605 merged on 2026-11-06: every 0.1.17 build and the 0.1.18 nightlies dated
+# before that (0.1.18.dev20261105) lack it; nightly 0.1.18.dev20261106 has it.
+_XPU_KERNELS_HOST_SCALES_SAFE = (0, 1, 18)
+_XPU_KERNELS_FIRST_FIXED_NIGHTLY = 20261106
+
+
+def xpu_moe_scales_stay_on_device(kernels_version: str | None) -> bool:
+    """Whether fused-MoE weight scales must not be offloaded on XPU with the
+    installed vllm-xpu-kernels (None: not installed).
+
+    Releases below 0.1.18 are affected, local (`+...`) builds included. On the
+    0.1.18 line, nightly wheels carry their build date as the dev number and
+    count as fixed from the first nightly with #605. Other 0.1.18 pre-releases
+    (rc, alpha, beta, source builds with a commit-count dev number) are not
+    known to carry #605 and keep the scales on the device; unparsable versions
+    do too."""
+    if kernels_version is None:
+        return False
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        version = Version(kernels_version)
+    except InvalidVersion:
+        return True
+    line = version.release[:3]
+    if line < _XPU_KERNELS_HOST_SCALES_SAFE:
+        return True
+    if line > _XPU_KERNELS_HOST_SCALES_SAFE:
+        return False
+    if version.pre is not None:
+        return True
+    if version.dev is not None:
+        build_date = str(version.dev)[:8]
+        return not (
+            len(build_date) == 8 and int(build_date) >= _XPU_KERNELS_FIRST_FIXED_NIGHTLY
+        )
+    return False
+
+
+def is_moe_scale_param(name: str) -> bool:
+    """A fused-MoE expert weight scale, e.g.
+    `model.layers.0.mlp.experts.w13_weight_scale` or `...experts.w2_scales`."""
+    segments = name.split(".")
+    return "experts" in segments[:-1] and segments[-1].endswith(
+        ("_scale", "_scales", "_scale_inv")
+    )
+
+
+def _installed_xpu_kernels_version() -> str | None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("vllm-xpu-kernels")
+    except PackageNotFoundError:
+        return None
+
 
 class UVAOffloader(BaseOffloader):
     """Offloader using Unified Virtual Addressing (UVA) for zero-copy access.
@@ -52,6 +113,22 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+        self.keep_moe_scales_on_device = False
+        if self.uva_offloading:
+            from vllm.platforms import current_platform
+
+            if current_platform.is_xpu():
+                kernels_version = _installed_xpu_kernels_version()
+                self.keep_moe_scales_on_device = xpu_moe_scales_stay_on_device(
+                    kernels_version
+                )
+                if self.keep_moe_scales_on_device:
+                    logger.info_once(
+                        "vllm-xpu-kernels %s reads past the end of int4 MoE "
+                        "scales (vllm-xpu-kernels#605): MoE weight scales stay "
+                        "in device memory.",
+                        kernels_version,
+                    )
 
     def wrap_modules(
         self,
@@ -110,6 +187,9 @@ class UVAOffloader(BaseOffloader):
                 )
                 if not should_offload:
                     continue
+
+            if self.keep_moe_scales_on_device and is_moe_scale_param(prefix + name):
+                continue
 
             cpu_data = p.data.to(device="cpu")
             if self.pin_memory:
