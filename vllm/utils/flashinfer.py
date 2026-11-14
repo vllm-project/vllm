@@ -322,6 +322,10 @@ silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
 scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
+mxfp8_grouped_quantize = _lazy_import_wrapper("flashinfer", "mxfp8_grouped_quantize")
+silu_and_mul_mxfp8_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_mxfp8_experts_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
@@ -1487,6 +1491,8 @@ __all__ = [
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
+    "mxfp8_grouped_quantize",
+    "silu_and_mul_mxfp8_experts_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "has_flashinfer_localized_moe",
