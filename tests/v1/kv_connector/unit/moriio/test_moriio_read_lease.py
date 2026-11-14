@@ -278,6 +278,32 @@ def test_decode_stops_relying_on_a_lease_near_the_renewal_cap(clock):
     assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
 
 
+def test_decode_renews_a_new_lease_in_its_next_step(clock):
+    """Prefill's lease started when the prefill finished, before decode
+    admitted the request, so decode renews it at once, not an interval later."""
+    scheduler = _decode_scheduler()
+    connector = scheduler.connector.connector_scheduler
+    target = ReadLeaseTarget("127.0.0.1", 4789, 1, 2, LEASE)
+    scheduler.add_request(_waiting_request(scheduler, 1, lease=LEASE))
+    connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
+
+    clock.now += 1
+    scheduler.add_request(_waiting_request(scheduler, 2, lease=LEASE))
+    meta = MoRIIOConnectorMetadata()
+    connector._package_read_lease_renewals(meta)
+    assert meta.read_lease_renewals == {target: ["tx-2"]}
+
+
+@pytest.mark.parametrize(
+    "lease", [LEASE, MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT * 2]
+)
+def test_decode_reads_a_new_request_whatever_the_lease_length(clock, lease):
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=lease)
+    scheduler.add_request(request)
+    assert scheduler.schedule().num_scheduled_tokens[request.request_id] == 1
+
+
 def test_decode_abort_while_queued_stops_renewing(clock):
     scheduler = _decode_scheduler()
     request = _waiting_request(scheduler, 1, lease=LEASE)
@@ -303,6 +329,21 @@ def test_malformed_renewal_does_not_stop_the_notify_listener():
     wrapper = _prefill_worker().moriio_wrapper
     _send(wrapper, {"type": "renew_lease", "transfer_ids": [["tx-1"], "tx-2"]})
     assert wrapper.pop_renewed_lease_transfer_ids() == {"tx-2"}
+    # Misrouted to a decode instance.
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
+        wrapper._handle_structured_message(
+            {"type": "renew_lease", "transfer_ids": ["tx-3"]}
+        )
+    assert wrapper.pop_renewed_lease_transfer_ids() == set()
+
+
+def test_decode_tracks_a_lease_with_a_null_dp_rank():
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    request.kv_transfer_params["remote_dp_rank"] = None
+    scheduler.add_request(request)
+    target, _ = scheduler.connector.connector_scheduler._read_leases[request.request_id]
+    assert target.dp_rank == 0
 
 
 def test_decode_tp_rank_0_renews_on_every_prefill_tp_rank():

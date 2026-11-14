@@ -1189,7 +1189,10 @@ class MoRIIOWrapper:
             self._mark_transfer_terminal_locked(transfer_id)
 
     def _handle_lease_renewal_message(self, data: dict):
-        assert get_role() == ROLE.PRODUCER, "Only prefill can get READ lease renewals"
+        if get_role() != ROLE.PRODUCER:
+            # A renewal is advisory; never let a misrouted one stop the listener.
+            logger.warning("Ignoring a READ lease renewal sent to a decode instance")
+            return
         transfer_ids = data.get("transfer_ids")
         if not isinstance(transfer_ids, list):
             # A renewal is advisory; never let a bad one stop the listener.

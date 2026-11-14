@@ -817,6 +817,9 @@ class MoRIIOConnectorScheduler:
         self._read_lease_tracked_at: dict[ReqId, float] = {}
         self._read_lease_renewed_at: dict[ReqId, float] = {}
         self._read_lease_lapsed: set[ReqId] = set()
+        # Leases not renewed yet: renewed in the next step, not the next interval,
+        # since prefill's lease started at its request_finished, before admission.
+        self._unrenewed_read_leases: set[ReqId] = set()
         self._last_read_lease_renewal = 0.0
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
@@ -982,7 +985,7 @@ class MoRIIOConnectorScheduler:
             target = ReadLeaseTarget(
                 host=host,
                 notify_port=notify_port,
-                dp_rank=int(params.get("remote_dp_rank", 0)),
+                dp_rank=int(params.get("remote_dp_rank") or 0),
                 tp_size=int(params.get("remote_tp_size") or params.get("tp_size") or 0),
                 lease_duration=lease_duration,
             )
@@ -997,6 +1000,7 @@ class MoRIIOConnectorScheduler:
         now = time.perf_counter()
         self._read_lease_tracked_at[request.request_id] = now
         self._read_lease_renewed_at[request.request_id] = now
+        self._unrenewed_read_leases.add(request.request_id)
 
     def _read_lease_has_lapsed(self, request: "Request") -> bool:
         """Whether the prefill may have freed this request's blocks.
@@ -1004,7 +1008,8 @@ class MoRIIOConnectorScheduler:
         Renewals only go out while the engine steps (not while paused). A renewal
         extends the lease to READ_LEASE_EXTENSION_FRACTION of its length; one
         renewal interval of that is kept as a margin for the final renewal that
-        covers the read. The renewal cap ends the lease regardless.
+        covers the read. The renewal cap ends the lease regardless, so a request
+        is not read within a lease (at most half the cap) of it.
         """
         request_id = request.request_id
         if request_id in self._read_lease_lapsed:
@@ -1016,14 +1021,11 @@ class MoRIIOConnectorScheduler:
         now = time.perf_counter()
         renewal_gap = now - self._read_lease_renewed_at.get(request_id, now)
         held = now - self._read_lease_tracked_at.get(request_id, now)
-        if (
-            renewal_gap
-            < duration
-            * (
-                MoRIIOConstants.READ_LEASE_EXTENSION_FRACTION
-                - 1 / MoRIIOConstants.READ_LEASE_RENEWALS_PER_LEASE
-            )
-            and held < MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT - duration
+        if renewal_gap < duration * (
+            MoRIIOConstants.READ_LEASE_EXTENSION_FRACTION
+            - 1 / MoRIIOConstants.READ_LEASE_RENEWALS_PER_LEASE
+        ) and held < MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT - min(
+            duration, MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT / 2
         ):
             return False
         logger.warning(
@@ -1041,6 +1043,7 @@ class MoRIIOConnectorScheduler:
         self._read_leases.pop(request_id, None)
         self._read_lease_tracked_at.pop(request_id, None)
         self._read_lease_renewed_at.pop(request_id, None)
+        self._unrenewed_read_leases.discard(request_id)
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token so the prefiller computes
@@ -1697,10 +1700,14 @@ class MoRIIOConnectorScheduler:
             min(target.lease_duration for target, _ in self._read_leases.values())
             / MoRIIOConstants.READ_LEASE_RENEWALS_PER_LEASE
         )
-        if now - self._last_read_lease_renewal < interval:
-            return
-        self._last_read_lease_renewal = now
-        for req_id, (target, transfer_id) in self._read_leases.items():
+        if now - self._last_read_lease_renewal >= interval:
+            self._last_read_lease_renewal = now
+            renew = list(self._read_leases)
+        else:
+            renew = [r for r in self._unrenewed_read_leases if r in self._read_leases]
+        self._unrenewed_read_leases.clear()
+        for req_id in renew:
+            target, transfer_id = self._read_leases[req_id]
             meta.read_lease_renewals.setdefault(target, []).append(transfer_id)
             self._read_lease_renewed_at[req_id] = now
 
