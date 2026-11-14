@@ -5,7 +5,10 @@ import json
 
 import pytest
 
-from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.protocol import (
+    RequestResponseMetadata,
+    StreamOptions,
+)
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.inputs import tokens_input
@@ -113,3 +116,41 @@ def test_non_stream_response_omits_null_prompt_tokens_details():
     )
 
     assert "prompt_tokens_details" not in response.model_dump()["usage"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_stream_chunks_carry_null_usage_when_usage_requested(include_usage):
+    """With ``stream_options.include_usage``, the OpenAI spec sends
+    ``"usage": null`` on every chunk except the final usage chunk."""
+
+    async def results():
+        for i, text in enumerate(TEXT_DELTAS):
+            yield 0, _output(text, [i], finished=i == len(TEXT_DELTAS) - 1)
+
+    request = _request(stream=True)
+    request.stream_options = StreamOptions(include_usage=include_usage)
+    chunks = []
+    async for line in _serving().completion_stream_generator(
+        request,
+        [tokens_input([9], prompt="Hi")],
+        results(),
+        "r",
+        0,
+        "m",
+        num_prompts=1,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="r"),
+    ):
+        data = line.removeprefix("data: ").strip()
+        if data != "[DONE]":
+            chunks.append(json.loads(data))
+
+    choice_chunks = [chunk for chunk in chunks if chunk["choices"]]
+    assert len(choice_chunks) == len(TEXT_DELTAS)
+    if include_usage:
+        assert all(chunk["usage"] is None for chunk in choice_chunks)
+        assert chunks[-1]["choices"] == []
+        assert chunks[-1]["usage"]["total_tokens"] == 4
+    else:
+        assert all("usage" not in chunk for chunk in chunks)
