@@ -557,6 +557,24 @@ class VllmConfig:
         return bool(mm_config and mm_config.mm_encoder_only)
 
     @property
+    def gpu_iteration_timing(self) -> bool:
+        """Whether logged iteration details are timed by the output worker with
+        CUDA events instead of by EngineCore's wall clock."""
+        parallel_config = self.parallel_config
+        return (
+            self.observability_config.enable_logging_iteration_details
+            and self.device_config.device_type == "cuda"
+            and self.model_config is not None
+            and self.model_config.runner_type == "generate"
+            and not self.is_mm_encoder_only
+            and parallel_config.distributed_executor_backend in ("uni", "mp")
+            # With more API servers the frontend does not log iteration details.
+            and parallel_config._api_process_count == 1
+            # Only EngineCoreProc publishes the records a dummy batch returns.
+            and envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        )
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.

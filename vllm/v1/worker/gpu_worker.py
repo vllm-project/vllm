@@ -112,6 +112,13 @@ from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
+from vllm.v1.metrics.iteration_timing import (
+    IterationTimer,
+    finish_iteration_timing,
+    make_iteration_timer,
+    start_iteration_timing,
+    time_dummy_batch,
+)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -226,6 +233,9 @@ _MAX_SPLIT_SIZE_MB = 21
 
 
 class Worker(WorkerBase):
+    # Set in init_device on the worker that times engine iterations.
+    iteration_timer: IterationTimer | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -582,6 +592,7 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         self._init_workspace_and_model_runner()
+        self.iteration_timer = make_iteration_timer(self.vllm_config, self.rank)
 
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
@@ -1480,6 +1491,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @finish_iteration_timing
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1487,6 +1499,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @start_iteration_timing
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
@@ -1624,6 +1637,7 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
+    @time_dummy_batch  # returns the iteration records that have completed
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(
             self.model_runner.decode_query_len,

@@ -624,6 +624,8 @@ class EngineCore:
     ) -> Generator[SchedulerIterationDetails | None, None, None]:
         enable_details = (
             self.vllm_config.observability_config.enable_logging_iteration_details
+            # With GPU timing the worker returns the iteration's record later.
+            and not self.vllm_config.gpu_iteration_timing
         )
         if not self.log_stats or not enable_details:
             yield None
@@ -1858,6 +1860,13 @@ class EngineCoreProc(EngineCore):
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
+
+    def execute_dummy_batch(self) -> None:
+        records = self.model_executor.execute_dummy_batch()
+        # No request output carries the iteration records a dummy batch returns.
+        if records and (stats := self.scheduler.make_stats()) is not None:
+            stats.iteration_records = records
+            self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""

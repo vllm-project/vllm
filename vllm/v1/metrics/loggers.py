@@ -32,6 +32,7 @@ from vllm.v1.metrics.stats import (
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
+    SchedulerIterationDetails,
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -187,10 +188,17 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        details = scheduler_stats.iteration_details
-        if details is None:
-            return
+        for record in scheduler_stats.iteration_records:
+            self._log_iteration(record, scheduler_stats, engine_idx)
+        if (details := scheduler_stats.iteration_details) is not None:
+            self._log_iteration(details, scheduler_stats, engine_idx)
 
+    def _log_iteration(
+        self,
+        details: SchedulerIterationDetails,
+        scheduler_stats: SchedulerStats,
+        engine_idx: int,
+    ) -> None:
         encoder_msg = ""
         if details.num_encoder_inputs:
             encoder_msg = (

@@ -306,6 +306,25 @@ every 5 seconds with some key metrics:
   seconds
 - The prefix cache hit rate over the most recent 1k kv-cache block queries
 
+`--enable-logging-iteration-details` additionally logs every engine iteration
+with its request and token counts and its elapsed time. For generative models
+on CUDA devices run by the built-in `uni` or `mp` executor, the elapsed time
+is measured on the GPU with CUDA events, from the start of model execution to
+the end of sampling and speculative drafting. It is the time the iteration
+occupied the output worker's stream, including host submission gaps, not
+kernel-busy time. With pipeline parallelism it is measured on the last stage
+and includes waiting for the earlier stages. Other configurations, including
+the in-process engine, report the wall-clock time EngineCore waited for the
+iteration.
+
+An iteration's timing is often still pending when its own output is built, so
+its record is logged with the first output built after the timing has
+completed, its own or a later one, and no step waits for its timing. The last
+iterations before the engine runs out of work are therefore logged when it
+next steps, or not at all if it shuts down first. The KV cache usage on a line
+is the usage when the line is logged. Dummy iterations of data-parallel ranks
+are timed and logged as well.
+
 ### Metrics Publishing - Prometheus
 
 The `PrometheusStatLogger` metrics publisher makes the metrics

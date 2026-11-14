@@ -104,6 +104,7 @@ def test_scheduler_iteration_details_serialization():
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
+            iteration_records=[iteration_details],
         )
     )
 
@@ -113,6 +114,7 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+    assert decoded.scheduler_stats.iteration_records == [iteration_details]
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():
