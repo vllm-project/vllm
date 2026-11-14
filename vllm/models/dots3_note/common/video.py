@@ -164,24 +164,30 @@ def _decode_audio(
     video_bytes: bytes,
     sample_rate: int,
 ) -> tuple[np.ndarray | None, float]:
-    from torchcodec.decoders import AudioDecoder
+    from vllm import envs
+    from vllm.multimodal.media.audio import load_audio_torchcodec
 
     try:
-        decoder = AudioDecoder(
-            video_bytes,
-            sample_rate=sample_rate,
-            num_channels=1,
+        array, _sr = load_audio_torchcodec(
+            io.BytesIO(video_bytes),
+            sr=sample_rate,
+            mono=True,
+            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+            max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
         )
-        samples = decoder.get_all_samples()
+    except ValueError as exc:
+        message = str(exc)
+        if (
+            "VLLM_MAX_AUDIO_DECODE_DURATION_S" in message
+            or "VLLM_MAX_AUDIO_DECODE_BYTES" in message
+        ):
+            raise
+        return None, 0.0
     except Exception:
         return None, 0.0
 
-    waveform = samples.data
-    if waveform is None or waveform.numel() == 0:
+    if array.size == 0:
         return None, 0.0
-    if waveform.ndim == 2:
-        waveform = waveform.mean(dim=0) if waveform.shape[0] > 1 else waveform[0]
-    array = waveform.cpu().numpy()
     pcm = (np.clip(array, -1.0, 1.0) * 32767.0).astype(np.int16)
     return pcm, float(pcm.shape[0]) / sample_rate
 
