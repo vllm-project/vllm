@@ -27,6 +27,21 @@ async def list_server_and_tools(server_url: str):
     ):
         initialize_response = await session.initialize()
         list_tools_response = await session.list_tools()
+        tools = list(list_tools_response.tools)
+        cursor = list_tools_response.next_cursor
+        seen_cursors = set()
+        while cursor is not None:
+            if cursor in seen_cursors:
+                raise ValueError(
+                    f"MCP server returned repeated tools pagination cursor: {cursor!r}"
+                )
+            seen_cursors.add(cursor)
+            page = await session.list_tools(cursor=cursor)
+            tools.extend(page.tools)
+            cursor = page.next_cursor
+
+        list_tools_response.tools = tools
+        list_tools_response.next_cursor = None
         return initialize_response, list_tools_response
 
 

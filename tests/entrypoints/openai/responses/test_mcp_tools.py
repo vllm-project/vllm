@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,6 +43,41 @@ _BASE_SERVER_ARGS = [
 _PYTHON_TOOL_INSTRUCTION = (
     "You must use the Python tool to execute code. Never simulate execution."
 )
+
+
+def _mock_mcp_server(monkeypatch, initialize_response, responses):
+    import mcp
+    import mcp.client.sse as mcp_sse
+
+    calls = []
+
+    @asynccontextmanager
+    async def fake_sse_client(*, url):
+        yield (url, url)
+
+    class FakeClientSession:
+        def __init__(self, *_streams):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return initialize_response
+
+        async def list_tools(self, cursor=None):
+            calls.append(cursor)
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    monkeypatch.setattr(mcp_sse, "sse_client", fake_sse_client)
+    monkeypatch.setattr(mcp, "ClientSession", FakeClientSession)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -161,6 +197,223 @@ class TestMCPToolServerUnit:
         post_process_tools_description(result)
 
         assert result.tools == [included]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_single_page(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        tools = [
+            mcp_types.Tool(name=name, input_schema={"type": "object"})
+            for name in ("first", "second")
+        ]
+        response = mcp_types.ListToolsResult(tools=tools)
+        calls = _mock_mcp_server(monkeypatch, initialize_response, [response])
+
+        result_initialize, result_tools = await (
+            tool_server_module.list_server_and_tools("http://mcp.test/sse")
+        )
+
+        assert result_initialize is initialize_response
+        assert [tool.name for tool in result_tools.tools] == ["first", "second"]
+        assert result_tools.next_cursor is None
+        assert calls == [None]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_two_pages(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        responses = [
+            mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name="first", input_schema={"type": "object"})],
+                next_cursor="page2",
+            ),
+            mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name="second", input_schema={"type": "object"})]
+            ),
+        ]
+        calls = _mock_mcp_server(monkeypatch, initialize_response, responses)
+
+        _, result = await tool_server_module.list_server_and_tools(
+            "http://mcp.test/sse"
+        )
+
+        assert [tool.name for tool in result.tools] == ["first", "second"]
+        assert calls == [None, "page2"]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_multiple_pages(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        responses = [
+            mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name="first", input_schema={"type": "object"})],
+                next_cursor="page2",
+            ),
+            mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name="second", input_schema={"type": "object"})],
+                next_cursor="page3",
+            ),
+            mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name="third", input_schema={"type": "object"})]
+            ),
+        ]
+        calls = _mock_mcp_server(monkeypatch, initialize_response, responses)
+        server = MCPToolServer()
+
+        await server.add_tool_server("mcp.test")
+        result = server.get_tool_description("test")
+
+        assert result is not None
+        assert [tool.name for tool in result.tools] == ["first", "second", "third"]
+        assert calls == [None, "page2", "page3"]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_empty_response(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        response = mcp_types.ListToolsResult(tools=[])
+        _mock_mcp_server(monkeypatch, initialize_response, [response])
+
+        _, result = await tool_server_module.list_server_and_tools(
+            "http://mcp.test/sse"
+        )
+
+        assert result.tools == []
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_filters_tools_across_pages(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        responses = [
+            mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="included_first", input_schema={"type": "object"}
+                    ),
+                    mcp_types.Tool(
+                        name="excluded_first",
+                        input_schema={"type": "object"},
+                        meta={"include_in_prompt": False},
+                    ),
+                ],
+                next_cursor="page2",
+            ),
+            mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="included_second", input_schema={"type": "object"}
+                    ),
+                    mcp_types.Tool(
+                        name="excluded_second",
+                        input_schema={"type": "object"},
+                        meta={"include_in_prompt": False},
+                    ),
+                ]
+            ),
+        ]
+        _mock_mcp_server(monkeypatch, initialize_response, responses)
+
+        _, result = await tool_server_module.list_server_and_tools(
+            "http://mcp.test/sse"
+        )
+        post_process_tools_description(result)
+
+        assert [tool.name for tool in result.tools] == [
+            "included_first",
+            "included_second",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_preserves_duplicate_names(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        responses = [
+            mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="duplicate", input_schema={"type": "object"}
+                    )
+                ],
+                next_cursor="page2",
+            ),
+            mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="duplicate", input_schema={"type": "object"}
+                    )
+                ]
+            ),
+        ]
+        _mock_mcp_server(monkeypatch, initialize_response, responses)
+
+        _, result = await tool_server_module.list_server_and_tools(
+            "http://mcp.test/sse"
+        )
+
+        assert [tool.name for tool in result.tools] == ["duplicate", "duplicate"]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_propagates_pagination_error(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        error = RuntimeError("page request failed")
+        responses = [
+            mcp_types.ListToolsResult(tools=[], next_cursor="page2"),
+            error,
+        ]
+        calls = _mock_mcp_server(monkeypatch, initialize_response, responses)
+
+        with pytest.raises(RuntimeError, match="page request failed"):
+            await tool_server_module.list_server_and_tools("http://mcp.test/sse")
+
+        assert calls == [None, "page2"]
+
+    @pytest.mark.asyncio
+    async def test_list_server_and_tools_rejects_repeated_cursor(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        initialize_response = mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="test", version="1"),
+        )
+        responses = [
+            mcp_types.ListToolsResult(tools=[], next_cursor="page2"),
+            mcp_types.ListToolsResult(tools=[], next_cursor="page2"),
+        ]
+        calls = _mock_mcp_server(monkeypatch, initialize_response, responses)
+
+        with pytest.raises(ValueError, match="repeated tools pagination cursor"):
+            await tool_server_module.list_server_and_tools("http://mcp.test/sse")
+
+        assert calls == [None, "page2"]
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
