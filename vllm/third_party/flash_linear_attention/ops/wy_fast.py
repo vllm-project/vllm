@@ -11,9 +11,20 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+
+_RECOMPUTE_W_U_NUM_STAGES = [2, 3, 4]
+# gfx1100 autotunes to num_stages=1 here, which the default space never offers.
+# No other measured arch selects it, so widening the space elsewhere would only
+# lengthen autotuning.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100
+
+    if on_gfx1100():
+        _RECOMPUTE_W_U_NUM_STAGES = [1, *_RECOMPUTE_W_U_NUM_STAGES]
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -21,7 +32,7 @@ from .index import prepare_chunk_indices
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _RECOMPUTE_W_U_NUM_STAGES
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
 )
