@@ -34,6 +34,12 @@ else:
 logger = init_logger(__name__)
 _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
+
+def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int:
+    """Return the minimum R that makes the expert count divisible by EP size."""
+    return (-num_logical_experts) % ep_size
+
+
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
@@ -54,6 +60,7 @@ All2AllBackend = Literal[
     "mori",
     "nixl_ep",
     "allgather_reducescatter",
+    "alltoall_batched",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
@@ -73,6 +80,8 @@ class EPLBConfig:
 
     Note that if this is greater than the EPLB window size, only the metrics
     of the last `lb_window_size` steps will be used for rearranging experts.
+    With async EPLB, the interval starts when the previous rearrangement has
+    committed all layers.
     """
 
     num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
@@ -81,6 +90,14 @@ class EPLBConfig:
     based on the number of logical experts and the expert parallel size.
     The value will be rounded up to the nearest multiple of the expert parallel
     size.
+    """
+
+    draft_num_redundant_experts: int | None = Field(default=None, ge=0)
+    """Redundant expert count for an EPLB-backed MoE draft. If unset, the
+    target count is inherited when target and draft routed expert counts match
+    and the target count is valid for the draft; otherwise, the draft's minimum
+    valid count is computed. Explicit values are validated and rejected if they
+    do not satisfy EP divisibility for every draft routed expert count.
     """
 
     log_balancedness: bool = False
@@ -230,6 +247,8 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "alltoall_batched": All2all based on all_to_all_single, routing each
+      token only to the ranks owning its experts, in batched activation format
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
@@ -672,7 +691,7 @@ class ParallelConfig:
             )
             # Ensure (num_logical_experts + num_redundant_experts) is
             # divisible by ep_size, supporting non-standard ep_size values
-            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            min_redundant = get_min_num_redundant_experts(num_logical_experts, ep_size)
             self.eplb_config.num_redundant_experts = min_redundant
             logger.info_once(
                 "EPLB num_redundant_experts not specified, "
@@ -886,11 +905,13 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Every backend emitting the batched activation format belongs here.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "alltoall_batched",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1

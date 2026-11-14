@@ -701,10 +701,14 @@ class ModelCudaGraphManager(CudaGraphManager):
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
             if self.is_last_pp_rank:
-                # Last PP rank (common case).
-                if self.use_aux_hidden_state_outputs:
+                # Last PP rank (common case). Under PP it may take no aux
+                # hidden states itself and return a bare tensor.
+                if isinstance(model_output, tuple):
                     hidden_states, aux_hidden_states = model_output
                 else:
+                    assert not (
+                        self.use_aux_hidden_state_outputs and self.is_first_pp_rank
+                    ), "The model returned no aux hidden states."
                     hidden_states = model_output
                     aux_hidden_states = []
                 if self.hidden_states is None:
@@ -770,7 +774,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_state,
                     block_tables,
                     input_block_tables,
-                    kv_cache_config,
                 )
                 ubatch_state = self.ubatch_runner.prepare(
                     input_batch,
@@ -868,7 +871,6 @@ def set_dcp_capture_context(
     model_state: ModelState,
     block_tables: BlockTables,
     input_block_tables: Sequence[torch.Tensor],
-    kv_cache_config: KVCacheConfig,
 ) -> None:
     # Capture FULL graphs with KV context so a host-side skip of DCP context
     # attention is not baked into the graph.
@@ -878,7 +880,9 @@ def set_dcp_capture_context(
         input_batch,
         block_tables,
         block_tables.cp_size * block_tables.cp_interleave,
-        kv_cache_config.num_blocks,
+        # Replays read the real block tables, so the context can sit in the
+        # null block: the one an extensible KV cache keeps mapped for capture.
+        1,
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )
@@ -928,7 +932,6 @@ def prepare_inputs_to_capture(
                 model_state,
                 block_tables,
                 input_block_tables,
-                kv_cache_config,
             )
         input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
@@ -1112,10 +1115,9 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
-    kv_cache_spec = runner.get_kv_cache_spec()
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, kv_cache_spec
+        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
     )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
@@ -1136,14 +1138,6 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
-    # Invalidate the align-mode Mamba group metadata cached from the
-    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
-    # place Mamba layers into a different group layout, so it must be
-    # re-derived from the real config.
-    if hasattr(runner.model_state, "_mamba_group_ids"):
-        runner.model_state._mamba_group_ids = []
-    if hasattr(runner.model_state, "_mamba_spec"):
-        runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

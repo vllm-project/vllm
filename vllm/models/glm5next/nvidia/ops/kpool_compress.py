@@ -828,7 +828,7 @@ def append_tail_to_topk(
     tail_count = seq_len - tail_start  # in [0, pool_size)
 
     cols = torch.arange(out_cols, device=topk_result.device)[None, :]
-    history_len = n_cols
+    history_len = tail_start.clamp(max=n_cols)[:, None]
     is_history = cols < history_len
     tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count[:, None])
@@ -868,6 +868,7 @@ def _expand_pools_and_append_tail_kernel(
     out_cols,  # topk + pool_size - 1
     POOL_SIZE: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
+    SEQ_OFFSET: tl.constexpr,
     pid_s0,
     out_s0,
 ):
@@ -878,21 +879,23 @@ def _expand_pools_and_append_tail_kernel(
     cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
     mask = cols < out_cols
 
-    seq_len = tl.load(seq_lens_ptr + row)
+    seq_len = tl.load(seq_lens_ptr + row) + SEQ_OFFSET
     pool_len = seq_len // POOL_SIZE
     tail_start = pool_len * POOL_SIZE
     tail_count = seq_len - tail_start  # in [0, POOL_SIZE)
+    # The tail follows the selected pools: valid entries must form a prefix.
+    history_len = tl.minimum(tail_start, topk)
 
-    # History region [0, topk): expand selected pool g = cols // POOL_SIZE.
-    is_history = cols < topk
+    # History region: expand selected pool g = cols // POOL_SIZE.
+    is_history = cols < history_len
     g = cols // POOL_SIZE
     o = cols % POOL_SIZE
     pid = tl.load(pool_ids_ptr + row * pid_s0 + g, mask=mask & is_history, other=-1)
     hist_val = (pid * POOL_SIZE + o).to(tl.int32)
     hist_out = tl.where(pid >= 0, hist_val, -1)
 
-    # Tail region [topk, out_cols): the request's trailing incomplete pool.
-    tail_off = cols - topk
+    # Tail region: the request's trailing incomplete pool.
+    tail_off = cols - history_len
     is_tail = (tail_off >= 0) & (tail_off < tail_count)
     tail_val = (tail_start + tail_off).to(tl.int32)
     tail_out = tl.where(is_tail, tail_val, -1)
@@ -905,6 +908,9 @@ def expand_pools_and_append_tail(
     pool_ids: torch.Tensor,
     seq_lens: torch.Tensor,
     pool_size: int,
+    *,
+    seq_offset: int = 0,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fuse `expand_pools_to_tokens` + `append_tail_to_topk` (identity path).
 
@@ -914,11 +920,19 @@ def expand_pools_and_append_tail(
     The kernel derives `pool_len = seq_len // pool_size` internally, so the
     caller no longer needs to precompute it. Replaces ~25 elementwise kernels
     with one Triton launch.
+
+    `seq_lens` may be any integer dtype; `seq_offset` is added to each
+    (positions with `seq_offset=1`). `out` is an int32 `[rows, >= topk +
+    pool_size - 1]` buffer to write into; the result is its leading columns.
     """
     rows, n_groups = pool_ids.shape
     topk = n_groups * pool_size
     out_cols = topk + pool_size - 1
-    out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
+    if out is None:
+        out = torch.empty((rows, out_cols), dtype=torch.int32, device=pool_ids.device)
+    else:
+        assert out.dtype == torch.int32 and out.shape[1] >= out_cols
+        out = out[:rows, :out_cols]
     BLOCK_COLS = 128
     n_tiles = triton.cdiv(out_cols, BLOCK_COLS)
     _expand_pools_and_append_tail_kernel[(rows, n_tiles)](
@@ -929,6 +943,7 @@ def expand_pools_and_append_tail(
         out_cols,
         POOL_SIZE=pool_size,
         BLOCK_COLS=BLOCK_COLS,
+        SEQ_OFFSET=seq_offset,
         pid_s0=pool_ids.stride(0),
         out_s0=out.stride(0),
     )

@@ -70,6 +70,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -1906,7 +1909,6 @@ class MuseSparkModel(LlamaModel):
         )
         if sp_active and self.is_sequence_parallel_input:
             x = sp_shard(x)
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if (
             get_pp_group().is_first_rank
@@ -1960,7 +1962,6 @@ class MuseSparkModel(LlamaModel):
             aux_hidden_states = [
                 sp_all_gather(a)[: positions.shape[0]] for a in aux_hidden_states
             ]
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return output, aux_hidden_states
         return output
@@ -1971,8 +1972,12 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         ModelOptNvFp4Config,
+        OnlineQuantizationConfig,
     )
-    supported_quantization_description = "NVFP4 (modelopt_fp4)"
+    supported_quantization_description = (
+        "NVFP4 (modelopt_fp4) or online quantization (routed experts: "
+        "quantization_config={'moe': 'fp8_per_channel'})"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -153,6 +154,14 @@ class DraftModelSpeculator(BaseSpeculator):
     can_reuse_target_attn_metadata: bool = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        parallel_config = vllm_config.parallel_config
+        dcp = vllm_config.speculative_config.draft_decode_context_parallel_size
+        if dcp and dcp != parallel_config.decode_context_parallel_size:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace_config(
+                parallel_config, decode_context_parallel_size=dcp
+            )
         self.vllm_config = vllm_config
         self.device = device
 
@@ -320,6 +329,11 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.device,
             )
 
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """Free the draft weights this instance never reads. The model runner
+        calls this after `load_model` (and its overrides) and EPLB setup."""
+        return
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors
         DraftLogitsCache.row_mapping."""
@@ -385,14 +399,18 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Use the sizes the KV cache was allocated with: draft layers can share a
+        # group with target layers whose backends need smaller kernel blocks.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            kernel_block_sizes=kernel_block_sizes,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft

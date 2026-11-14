@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    _aiter_topk_gating_supported,
+)
 
 # AITER instantiates biased_grouped_topk only for these NUM_GRP values, with at
 # most this many experts per group.
@@ -277,6 +280,44 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
+    if (
+        scoring_func in ("softmax", "sigmoid")
+        and hash_indices_table is None
+        and bias_vl is None
+    ):
+        # Biased softmax and the sigmoid shapes `biased_grouped_topk` cannot take.
+        M = gating_output.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=gating_output.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=gating_output.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=gating_output.device
+        )
+        if rocm_aiter_ops.is_topk_gating_enabled() and _aiter_topk_gating_supported(
+            topk_weights,
+            topk_ids,
+            gating_output,
+            num_shared_experts=0,
+            shared_expert_scoring_func="",
+        ):
+            rocm_aiter_ops.topk_gating(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                score_func=scoring_func,
+                correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
+            )
+            return topk_weights, topk_ids
+
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
         topk_weights = torch.empty(
@@ -407,6 +448,10 @@ class FusedTopKBiasRouter(BaseRouter):
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
         self.num_fused_shared_experts = num_fused_shared_experts
         self.shared_expert_weight = shared_expert_weight
+
+    @property
+    def masks_padding(self) -> bool:
+        return not rocm_aiter_ops.is_fused_moe_enabled()
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
