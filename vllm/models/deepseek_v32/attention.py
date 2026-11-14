@@ -4,13 +4,19 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -44,6 +50,8 @@ from vllm.v1.attention.ops.pcp import (
 )
 from vllm.v1.attention.ops.shardq import shard_q, unshard_out
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -136,6 +144,7 @@ class DeepseekV32Attention(MLAAttention):
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
+        replicate: bool = False,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -148,7 +157,13 @@ class DeepseekV32Attention(MLAAttention):
         kv_lora_rank = config.kv_lora_rank
         num_heads = config.num_attention_heads
 
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
+        # Small steps can still run head-sharded on slices of the full weights.
+        self.replicate = replicate
+        self.tp_min_tokens = envs.VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS if replicate else 0
+        self.tp_heads = num_heads // get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
         assert num_heads % tp_size == 0
         num_local_heads = num_heads // tp_size
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -180,6 +195,7 @@ class DeepseekV32Attention(MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
+            disable_tp=replicate,
         )
         indexer = None
         if not skip_topk or is_mtp_layer:
@@ -212,9 +228,30 @@ class DeepseekV32Attention(MLAAttention):
             index_group_builder=index_group_builder,
             attn_backend=attn_backend,
             # MTP draft steps reuse each token slot's top-k, which ShardQ's
-            # compact per-rank layout would break.
-            shardq_eligible=not is_mtp_layer,
+            # compact per-rank layout would break. ShardQ also splits heads
+            # across TP ranks, so replicated layers keep it off.
+            shardq_eligible=not is_mtp_layer and not replicate,
         )
+        if replicate and hasattr(self.impl, "masked_mha_available"):
+            from vllm.model_executor.layers.attention.sparse_mla_attention import (
+                _is_masked_mha_available,
+            )
+
+            # The impl infers total heads as local * TP; here local is total.
+            self.impl.masked_mha_available = _is_masked_mha_available(
+                num_heads,
+                kv_lora_rank,
+                qk_nope_head_dim,
+                qk_rope_head_dim,
+                v_head_dim,
+                self.kv_cache_dtype,
+            )
+        if self.tp_min_tokens and getattr(self.impl, "masked_mha_available", False):
+            # The masked-MHA path projects KV for all heads; keep it replicated.
+            logger.warning_once(
+                "VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS is ignored with masked MHA."
+            )
+            self.tp_min_tokens = 0
 
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
@@ -262,6 +299,7 @@ class DeepseekV32Attention(MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
+            disable_tp=replicate,
         )
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
@@ -272,6 +310,7 @@ class DeepseekV32Attention(MLAAttention):
             reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
 
         self.rotary_emb = get_rope(
@@ -287,6 +326,18 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
+
+    def _sort_topk_indices(self, num_tokens: int) -> None:
+        """Sort each token's selected indices ascending, invalid (-1) entries last."""
+        assert self.topk_indices_buffer is not None
+        view = self.topk_indices_buffer[:num_tokens]
+        top = torch.iinfo(view.dtype).max
+        ordered = torch.where(view < 0, top, view).sort(dim=-1).values
+        view.copy_(torch.where(ordered == top, -1, ordered))
+
+    def use_tp_path(self, num_tokens: int) -> bool:
+        """Whether a replicated layer runs this step head-sharded (all-reduce after)."""
+        return num_tokens < self.tp_min_tokens
 
     def _should_prepare_mqa_query(
         self,
@@ -336,8 +387,13 @@ class DeepseekV32Attention(MLAAttention):
             index_weights = None
 
         num_tokens = qkv_lora.shape[0]
+        # Same predicate as the decoder layer's all-reduce choice; every TP rank
+        # sees the same padded num_tokens, so they all take the same path.
+        tp_path = self.use_tp_path(num_tokens)
+        heads = self.tp_heads if tp_path else self.num_local_heads
+        head_sl = slice(self.tp_rank * heads, (self.tp_rank + 1) * heads)
         output = torch.empty(
-            (num_tokens, self.num_local_heads * self.v_head_dim),
+            (num_tokens, heads * self.v_head_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -434,10 +490,19 @@ class DeepseekV32Attention(MLAAttention):
                 self._k_scale,
             )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        if tp_path:
+            rows = slice(
+                head_sl.start * self.qk_head_dim, head_sl.stop * self.qk_head_dim
+            )
+            q = F.linear(q_c, self.q_b_proj.weight[rows])
+        else:
+            q = self.q_b_proj(q_c)[0]
+        q = q.view(-1, heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        w_uk_t = self.W_UK_T[head_sl] if tp_path else self.W_UK_T
+        w_uv = self.W_UV[head_sl] if tp_path else self.W_UV
         if prepare_mqa_query:
-            ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+            ql_nope = torch.bmm(q_nope.transpose(0, 1), w_uk_t).transpose(0, 1)
         else:
             ql_nope = q_nope
 
@@ -476,7 +541,14 @@ class DeepseekV32Attention(MLAAttention):
             ql_nope,
             mqa_q,
             output,
+            heads,
+            w_uv,
         )
+        if tp_path:
+            cols = slice(
+                head_sl.start * self.v_head_dim, head_sl.stop * self.v_head_dim
+            )
+            return F.linear(output, self.o_proj.weight[:, cols])
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
@@ -494,6 +566,8 @@ class DeepseekV32Attention(MLAAttention):
         ql_nope: torch.Tensor,
         mqa_q: torch.Tensor,
         output: torch.Tensor,
+        num_heads: int,
+        w_uv: torch.Tensor,
     ) -> None:
         if self.indexer is not None and not self.skip_topk:
             assert index_q_fp8 is not None
@@ -534,6 +608,10 @@ class DeepseekV32Attention(MLAAttention):
                 topk_backend=self.indexer.indexer_op.topk_backend,
                 logits_dtype=self.indexer.indexer_op.logits_dtype,
             )
+            if self.replicate and num_heads == self.num_local_heads:
+                # Replicated step: no all-reduce resyncs ranks, and the top-k
+                # kernel returns the same set in a rank-dependent order.
+                self._sort_topk_indices(q_c.shape[0])
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
@@ -673,14 +751,12 @@ class DeepseekV32Attention(MLAAttention):
         # NOTE(woosuk): While the below does not need to be in the eager region,
         # we put it here to avoid copying the attention output. Move this back to the
         # captured region once forward_mqa supports `out` argument.
-        x = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)
+        x = attn_out.view(num_actual, num_heads, self.kv_lora_rank).transpose(0, 1)
         out = (
             output[:num_actual]
-            .view(num_actual, self.num_local_heads, self.v_head_dim)
+            .view(num_actual, num_heads, self.v_head_dim)
             .transpose(0, 1)
         )
-        torch.bmm(x, self.W_UV, out=out)
+        torch.bmm(x, w_uv, out=out)
         if self.use_pcp and num_actual < output.shape[0]:
             output[num_actual:].zero_()
