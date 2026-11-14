@@ -93,6 +93,9 @@ fn response_model(state: &RenderState, requested_model: Option<&str>) -> String 
         .to_string()
 }
 
+/// Python's `_SAMPLING_EPS`: a temperature below it means greedy sampling.
+const SAMPLING_EPS: f32 = 1e-5;
+
 fn lower_render_request(
     state: &RenderState,
     text_request: TextRequest,
@@ -113,6 +116,17 @@ fn lower_render_request(
         .map(|features| MultiModalFeatures::from_prepared(features, mm_payload))
         .transpose()?;
     let mut text_request = prepared.text_request;
+    // Like Python's render, resolve the model's sampling defaults here:
+    // Python's generate only defaults an absent `max_tokens`.
+    let params = &mut text_request.sampling_params;
+    (state.text.sampling_hints())
+        .map_err(|error| text_submit_error("failed to prepare render request", error))?
+        .apply_defaults(params);
+    // Python's `SamplingParams` resets these for greedy sampling, so its render
+    // leaves them out.
+    if params.temperature.is_some_and(|temperature| temperature < SAMPLING_EPS) {
+        (params.top_p, params.top_k, params.min_p) = (None, None, None);
+    }
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");

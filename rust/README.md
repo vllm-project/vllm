@@ -165,6 +165,10 @@ Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is
 passed through to generate.
 
+A rendered request carries the model's generation-config sampling defaults,
+such as `temperature`, for the fields the request leaves unset. Pass
+`--generation-config vllm` if the engine runs with it.
+
 To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
 in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
 the certificate file. For mTLS, pass `--ssl-ca-certs` with a CA
