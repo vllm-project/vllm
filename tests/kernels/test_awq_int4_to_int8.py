@@ -32,6 +32,14 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
+requires_int4_cpu_ops = pytest.mark.skipif(
+    not (
+        hasattr(torch.ops._C, "convert_weight_packed_scale_zp")
+        and hasattr(torch.ops._C, "int4_scaled_mm_cpu")
+    ),
+    reason="INT4 W4A8 CPU ops require an AVX512-BF16 build",
+)
+
 
 def make_awq_checkpoint_data(K, N, group_size, seed=42):
     """Create synthetic AWQ checkpoint data in packed int32 format.
@@ -83,6 +91,7 @@ def make_awq_checkpoint_data(K, N, group_size, seed=42):
     )
 
 
+@requires_int4_cpu_ops
 class TestConvertWeightPackedScaleZp:
     """Tests for convert_weight_packed_scale_zp weightpacking."""
 
@@ -127,6 +136,7 @@ class TestConvertWeightPackedScaleZp:
         )
 
 
+@requires_int4_cpu_ops
 class TestInt4ScaledMmCpu:
     """Tests for int4_scaled_mm_cpu GEMM kernel."""
 
