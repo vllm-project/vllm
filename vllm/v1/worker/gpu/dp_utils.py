@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DPSyncState:
     """What a `dispatch_cg_and_sync_dp` call agreed across DP ranks.
 

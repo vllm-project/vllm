@@ -75,7 +75,7 @@ def _patch_key_deriver(
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     kernel = _FakeTritonKernel()
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         value: int
 

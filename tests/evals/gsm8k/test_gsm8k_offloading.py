@@ -135,7 +135,7 @@ def _external_kv_tokens(base_url: str) -> float:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class OffloadingModelConfig:
     id: str
     model: str

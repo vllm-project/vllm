@@ -35,7 +35,7 @@ class SchedulerTransferState(Enum):
     CANCELLED = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerTransfer:
     """Track one transfer as observed by the Scheduler."""
 

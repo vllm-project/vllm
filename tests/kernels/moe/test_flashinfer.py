@@ -136,7 +136,7 @@ def check_accuracy(ref_output, actual_output, atol=0.1, rtol=0.85, percent=0.925
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class TestData:
     hidden_states: torch.Tensor
     w13_quantized: torch.Tensor

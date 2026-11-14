@@ -36,7 +36,7 @@ def decoder_layer_index(path: str) -> int | None:
     return indices[0] if len(indices) == 1 else None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExpertSubstitutionSpec:
     # Sorted substituted expert IDs per decoder layer.
     experts: dict[int, tuple[int, ...]]

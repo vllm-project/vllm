@@ -26,7 +26,7 @@ from vllm.platforms import current_platform
 CUDA_DEVICES = ["cuda:0"]
 
 
-@dataclass
+@dataclass(slots=True)
 class RotaryEmbeddingTestCase:
     """Test case configuration for RotaryEmbedding dispatch tests."""
 
