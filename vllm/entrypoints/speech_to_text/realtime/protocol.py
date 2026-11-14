@@ -32,6 +32,10 @@ class SessionUpdate(OpenAIBaseModel):
 
     type: Literal["session.update"] = "session.update"
     model: str | None = None
+    language: str | None = None
+    """ISO-639-1 language of the input audio, as in the Transcriptions API."""
+    prompt: str = ""
+    """Text to guide the model, as in the Transcriptions API."""
 
 
 class SessionCreated(OpenAIBaseModel):

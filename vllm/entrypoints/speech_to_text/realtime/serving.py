@@ -56,6 +56,8 @@ class OpenAIServingRealtime(GenerateBaseServing):
         self,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
+        language: str | None = None,
+        request_prompt: str = "",
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
 
@@ -65,6 +67,8 @@ class OpenAIServingRealtime(GenerateBaseServing):
                 generation outputs. Used for autoregressive multi-turn
                 processing where each generation's output becomes the context
                 for the next iteration.
+            language: Validated language code set in `session.update`.
+            request_prompt: Text prompt set in `session.update`.
 
         Yields:
             StreamingInput objects containing audio prompts for the engine
@@ -78,7 +82,11 @@ class OpenAIServingRealtime(GenerateBaseServing):
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, model_config
+                audio_stream,
+                input_stream,
+                model_config,
+                language=language,
+                request_prompt=request_prompt,
             ),
         )
 

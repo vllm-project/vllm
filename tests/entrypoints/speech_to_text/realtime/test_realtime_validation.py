@@ -346,3 +346,51 @@ async def test_commit_without_session_update_returns_error(model_name):
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert "model_not_validated" in event.get("code", "")
+
+
+@pytest.mark.asyncio
+async def test_qwen3_asr_session_language_and_prompt(mary_had_lamb_audio_chunks):
+    """`language` and `prompt` from session.update must reach the Qwen3-ASR
+    realtime prompt, as they do on /v1/audio/transcriptions."""
+    model_name = "Qwen/Qwen3-ASR-0.6B"
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "2048",
+        "--hf-overrides",
+        json.dumps({"architectures": ["Qwen3ASRRealtimeGeneration"]}),
+    ] + ROCM_EXTRA_ARGS
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        ws_url = _get_websocket_url(remote_server)
+
+        async def transcribe(**session) -> dict:
+            async with websockets.connect(ws_url) as ws:
+                event = await receive_event(ws, timeout=30.0)
+                assert event["type"] == "session.created"
+                await send_event(
+                    ws, {"type": "session.update", "model": model_name, **session}
+                )
+                await send_event(ws, {"type": "input_audio_buffer.commit"})
+                # ~4 s of audio, i.e. a single realtime segment
+                for chunk in mary_had_lamb_audio_chunks[:40]:
+                    await send_event(
+                        ws, {"type": "input_audio_buffer.append", "audio": chunk}
+                    )
+                await send_event(
+                    ws, {"type": "input_audio_buffer.commit", "final": True}
+                )
+                while True:
+                    event = await receive_event(ws, timeout=360.0)
+                    if event["type"] == "transcription.done":
+                        return event
+                    assert event["type"] != "error", event
+
+        default = await transcribe()
+        conditioned = await transcribe(language="en", prompt="Edison's phonograph.")
+
+    # A forced language is part of the prompt, so the model skips its own
+    # `language English<asr_text>` header.
+    assert "<asr_text>" not in conditioned["text"]
+    assert conditioned["text"].strip()
+    assert conditioned["usage"]["prompt_tokens"] > default["usage"]["prompt_tokens"]

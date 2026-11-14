@@ -6,6 +6,7 @@ import contextlib
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
+from typing import cast
 from uuid import uuid4
 
 import numpy as np
@@ -18,12 +19,14 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import SupportsTranscription
 
 from .protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
     SessionCreated,
+    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
 )
@@ -53,6 +56,8 @@ class RealtimeConnection:
 
         self._is_connected = False
         self._is_model_validated = False
+        self._language: str | None = None
+        self._prompt = ""
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -99,21 +104,29 @@ class RealtimeConnection:
         """Route events to handlers.
 
         Supported event types:
-        - session.update: Configure model
+        - session.update: Configure model, language and prompt
         - input_audio_buffer.append: Add audio chunk to queue
         - input_audio_buffer.commit: Start transcription generation
         """
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            model = event.get("model")
-            if model is None:
+            session_update = SessionUpdate(**event)
+            if session_update.model is None:
                 await self.send_error("Missing required field: model", "invalid_event")
                 return
-            err = self._check_model(model)
+            err = self._check_model(session_update.model)
             if err is not None:
                 await self.send_error(err.error.message, "model_not_found")
                 return
+            model_cls = cast(type[SupportsTranscription], self.serving.model_cls)
+            try:
+                language = model_cls.validate_language(session_update.language)
+            except ValueError as e:
+                await self.send_error(str(e), "invalid_language")
+                return
+            self._language = language
+            self._prompt = session_update.prompt
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
@@ -182,7 +195,10 @@ class RealtimeConnection:
 
         # Transform to StreamingInput generator
         streaming_input_gen = self.serving.transcribe_realtime(
-            audio_stream, input_stream
+            audio_stream,
+            input_stream,
+            language=self._language,
+            request_prompt=self._prompt,
         )
 
         # Start generation task
