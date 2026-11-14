@@ -23,12 +23,21 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
-from tests.v1.core.utils import full_layer, new_kv_cache_group, new_kv_cache_spec
+from tests.v1.core.utils import (
+    full_layer,
+    mamba_layer,
+    new_kv_cache_group,
+    new_kv_cache_spec,
+)
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
 )
@@ -42,6 +51,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
     compute_layout_strides,
@@ -53,6 +63,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -99,6 +110,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_config=lambda _, spec=specs[name]: full_layer(spec),
@@ -108,7 +120,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(
-        attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
+        attn_utils_module, "get_hisparse_page_layer_configs", lambda *_: {}
     )
     mamba_fit_inputs: list[dict[str, KVCacheLayerConfig]] = []
 
@@ -135,9 +147,77 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == full_layer(
-        customize_attention_spec(dense_backend, specs["dense"])
+        customize_attention_spec(dense_backend, specs["dense"], "dense")
     )
     assert all(spec.block_size == block_size for spec in specs.values())
+
+
+def test_resolve_hisparse_specs_before_kv_cache_layout():
+    """Workers derive HiSparse's resident/hot specs before the engine core
+    resolves the KV cache layout, even when the other layers have mixed page
+    sizes, and derive the specs the engine core lays out."""
+    specs: dict[str, KVCacheLayerConfig] = {}
+    for i in range(2):
+        specs[f"layers.{i}.attn"] = full_layer(
+            MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                is_index_group_leader=True,
+                topk_buffer_width=128,
+            )
+        )
+        specs[f"layers.{i}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+        specs[f"layers.{i}.tail"] = CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=4,
+                num_kv_heads=2,
+                head_size=128,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+            )
+        )
+        specs[f"layers.{i}.kda"] = mamba_layer(
+            MambaSpec(
+                shapes=((3, 6144), (16, 128, 128)),
+                dtypes=(torch.bfloat16, torch.float32),
+                block_size=64,
+            ),
+            num_speculative_blocks=0,
+        )
+    backend = SimpleNamespace(
+        get_name=lambda: "sparse",
+        get_supported_kernel_block_sizes=lambda _=None: [64],
+    )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in specs}
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    assert vllm_config.cache_config.kv_cache_layout is None
+
+    resolved = attn_utils_module.resolve_hisparse_specs(vllm_config, specs, layers)
+
+    vllm_config.cache_config.kv_cache_layout = KVCacheLayout.BLHNC.name
+    planned = {
+        name: KVCacheLayerConfig(group.manager_config, spec)
+        for group in get_kv_cache_groups(vllm_config, resolved)
+        for name, spec in group.kv_cache_specs.items()
+        if isinstance(spec, HiSparsePageSpec)
+    }
+    assert len(planned) == 4
+    assert {
+        name: lc
+        for name, lc in resolved.items()
+        if isinstance(lc.spec, HiSparsePageSpec)
+    } == planned
 
 
 def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
@@ -149,6 +229,7 @@ def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
     backend = SimpleNamespace(
         customize_spec=AttentionBackend.customize_spec,
         get_supported_kernel_block_sizes=lambda _=None: [16],
+        get_supported_kernel_block_sizes_for_layers=lambda *_: [16],
     )
     layers = {
         name: SimpleNamespace(
@@ -622,6 +703,72 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC])
+@pytest.mark.parametrize("ratio", [1, 2, 4])
+def test_split_padded_pages_preserves_manager_block_boundaries(layout, ratio):
+    # TP8 hybrid attention: 512 tokens occupy 512 KiB in a 1280 KiB page.
+    spec = AttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.bfloat16,
+        page_size_padded=1310720,
+    )
+    num_blocks, num_layers = 3, 2
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    caches = dense_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size=spec.block_size // ratio,
+    )
+    page_bytes = spec.page_size_bytes // ratio
+    content_bytes = spec.real_page_size_bytes // ratio
+    for layer, cache in enumerate(caches):
+        assert cache.shape == (num_blocks * ratio, 1, 512 // ratio, 512)
+        assert cache.stride(0) * cache.element_size() == page_bytes
+        for block in range(num_blocks * ratio):
+            cache[block].fill_(1 + layer * num_blocks * ratio + block)
+    pages = raw.view(-1, page_bytes)
+    assert torch.count_nonzero(pages[:, content_bytes:]) == 0
+    for layer, cache in enumerate(caches):
+        for block in range(num_blocks * ratio):
+            assert torch.all(cache[block] == 1 + layer * num_blocks * ratio + block)
+    expected = [cache[:ratio].clone() for cache in caches]
+    copy_kv_cache_blocks_inplace(
+        caches, num_blocks, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
+    )
+    for cache, want in zip(caches, expected):
+        torch.testing.assert_close(cache[2 * ratio : 3 * ratio], want)
+
+
+def test_split_padded_pages_rejects_nonuniform_kernel_pages():
+    spec = AttentionSpec(
+        block_size=48,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1024,
+    )
+    with pytest.raises(AssertionError, match="equal kernel pages"):
+        compute_layout_strides(spec, 3, 1, KVCacheLayout.LBHNC, kernel_block_size=16)
+
+
+def test_split_padded_pages_rejects_interleaved_layers():
+    spec = AttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=768,
+    )
+    raw = torch.zeros(3 * 2 * spec.page_size_bytes, dtype=torch.int8)
+    with pytest.raises(ValueError, match="contiguous pages"):
+        dense_kv_cache_views(raw, spec, 3, 2, KVCacheLayout.BLHNC, kernel_block_size=8)
+
+
 def test_reshape_padded_kv_cache_strides_by_padded_page():
     num_blocks = 3
     spec = AttentionSpec(
@@ -931,6 +1078,7 @@ def _packed_group(
     backend = SimpleNamespace(
         get_builder_cls=lambda: _TableBuilder,
         get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
+        get_supported_kernel_block_sizes_for_layers=lambda *_: supported_sizes,
         get_name=lambda: "FAKE",
         customize_spec=lambda spec: spec,
     )
@@ -984,6 +1132,47 @@ def test_split_group_maps_manager_block_table():
     assert table.tolist() == [[0, 1, 2, 3, 8, 9, 10, 11]]
 
 
+class _DraftAwareBackend:
+    """Takes 512-token kernel pages, except on the draft layer."""
+
+    @staticmethod
+    def get_supported_kernel_block_sizes_for_layers(kv_cache_spec, layer_names):
+        return [64] if "draft" in layer_names else [64, 512]
+
+    get_builder_cls = staticmethod(lambda: _TableBuilder)
+    get_name = staticmethod(lambda: "DRAFT_AWARE")
+
+
+def test_kernel_block_sizes_follow_each_groups_layers():
+    """A target and a draft attention group share one KV cache group. Kernel
+    block selection asks the backend about each group's own layers."""
+    spec = AttentionSpec(
+        block_size=512, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    target = AttentionGroup(_DraftAwareBackend, ["target"], spec, 0)
+    draft = AttentionGroup(_DraftAwareBackend, ["draft"], spec, 0)
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_specs={"target": spec, "draft": spec},
+                block_size=512,
+                layer_names=[],
+            )
+        ],
+        kv_cache_tensors=[],
+    )
+    assert prepare_kernel_block_sizes(kv_cache_config, [[target]]) == [512]
+    assert prepare_kernel_block_sizes(kv_cache_config, [[target, draft]]) == [64]
+
+    draft.create_metadata_builders(
+        _VLLM_CONFIG,
+        "cpu",
+        kernel_block_size=512,
+        kv_cache_group=_kv_cache_group(draft),
+    )
+    assert draft.kernel_block_size == 64
+
+
 @pytest.mark.parametrize(
     ("block_size", "page_states"), [(1024, 64), (384, 32), (256, 0)]
 )
@@ -991,7 +1180,7 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     """Backends taking only fixed kernel blocks align packed blocks to the kernel
     block the final block size is split into, and not at all when unsplit."""
     group = _packed_group(4, 132, [128, 256])
-    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec, "layer.0")
     spec = spec.copy_with_new_block_size(block_size)
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
@@ -1084,3 +1273,63 @@ def test_pp_stage_without_group_layers_keeps_manager_block_size():
     group = new_kv_cache_group([], new_kv_cache_spec(block_size=64))
     config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[group])
     assert prepare_kernel_block_sizes(config, [[]]) == [64]
+
+
+def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
+    monkeypatch,
+):
+    """Draft layers sharing a KV cache group with the target read its cache in
+    the kernel blocks the target's backend needs, even when the draft's backend
+    alone accepts the larger manager block size."""
+    layers = {}
+    for name, sizes in [("target", [128]), ("draft", [128, 512])]:
+        backend = SimpleNamespace(
+            full_cls_name=lambda name=name: (__name__, name),
+            get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
+        )
+        layers[name] = SimpleNamespace(
+            get_attn_backend=lambda backend=backend: backend,
+            kv_sharing_target_layer_name=None,
+        )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names=None: {n: layers[n] for n in names or layers},
+    )
+    monkeypatch.setattr(attn_utils, "get_attn_cg_support", lambda *_: None)
+    built: dict[str, int | None] = {}
+    monkeypatch.setattr(
+        AttentionGroup,
+        "create_metadata_builders",
+        lambda self, kernel_block_size=None, **_: built.update(
+            dict.fromkeys(self.layer_names, kernel_block_size)
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        parallel_config=SimpleNamespace(use_ubatching=False),
+    )
+    spec = new_kv_cache_spec(block_size=512)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["target", "draft"], spec)],
+    )
+    target_groups, _, kernel_block_sizes = attn_utils.init_attn_backend(
+        kv_cache_config, vllm_config, "cpu"
+    )
+    assert kernel_block_sizes == [128]
+    draft_group = next(g for g in target_groups[0] if g.layer_names == ["draft"])
+    assert prepare_kernel_block_sizes(kv_cache_config, [[draft_group]]) == [512]
+
+    built.clear()
+    drafter = SimpleNamespace(
+        attn_vllm_config=vllm_config,
+        device="cpu",
+        draft_attn_layer_names={"draft"},
+        _configure_decode_metadata_update=lambda: None,
+    )
+    DraftModelSpeculator.set_attn(
+        drafter, None, kv_cache_config, None, None, target_groups, kernel_block_sizes
+    )
+    assert built == {"draft": 128}
