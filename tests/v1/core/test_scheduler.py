@@ -1062,6 +1062,23 @@ def test_local_prefill_interval_holds_prefill_between_bursts(interval: int):
     assert scheduler.last_prefill_step == scheduler.num_executed_steps
 
 
+@pytest.mark.parametrize("no_escape", [False, True])
+def test_local_prefill_cadence_capacity_escape(monkeypatch, no_escape: bool):
+    """A capacity-bound release turns the local hold off unless
+    VLLM_PREFILL_CADENCE_NO_ESCAPE=1, which keeps holding the waiting prefill
+    for the rest of the interval."""
+    monkeypatch.setenv("VLLM_PREFILL_CADENCE_NO_ESCAPE", "1" if no_escape else "0")
+    scheduler = create_scheduler(prefill_schedule_interval=4)
+    _start_decoding(scheduler)
+    scheduler.prefill_capacity_bound = True  # the last release left requests waiting
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    output = scheduler.schedule()
+    assert "run0" in output.num_scheduled_tokens
+    assert ("new0" in output.num_scheduled_tokens) is (not no_escape)
+
+
 def test_empty_schedule_does_not_advance_the_prefill_cadence():
     """An empty schedule() must not consume interval budget.
 
