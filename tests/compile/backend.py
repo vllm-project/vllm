@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 
 from torch import fx
+from torch._functorch import config as functorch_config
 from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
@@ -61,8 +62,12 @@ class TestBackend:
         self.range = Range(1, vllm_config.scheduler_config.max_num_batched_tokens)
         # Deepcopy to allow multiple TestBackend instances to use the same VllmConfig
         self.inductor_config = deepcopy(compile_config.inductor_compile_config)
-        self.inductor_config["force_disable_caches"] = True
+        # The custom passes must run on every compile, so a compiled graph is never
+        # loaded from the FX graph cache. Triton's kernel and autotune caches stay on.
+        self.inductor_config["fx_graph_cache"] = False
+        self.inductor_config["fx_graph_remote_cache"] = False
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
+        self.post_pass_runs = 0
 
         # Add VllmIRInplaceFunctionalizationPass as pre-grad pass by default
         self.inductor_config["pre_grad_custom_pass"] = (
@@ -79,13 +84,23 @@ class TestBackend:
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
 
-        with self.debug_ctx, pass_context(self.range):
-            return compile_fx(
+        post_pass_runs = self.post_pass_runs
+        with (
+            self.debug_ctx,
+            pass_context(self.range),
+            functorch_config.patch(enable_autograd_cache=False),
+        ):
+            compiled = compile_fx(
                 graph, example_inputs, config_patches=self.inductor_config
             )
+        assert self.post_pass_runs > post_pass_runs, (
+            "The custom passes did not run; the graph was loaded from a compile cache"
+        )
+        return compiled
 
     @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
+        self.post_pass_runs += 1
         self.graph_pre_pass = deepcopy(graph)
         lazy_format_graph_code("graph_pre_pass", graph.owning_module)
 
