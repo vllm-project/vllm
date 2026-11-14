@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_K31_BEAT_MARKOV: bool = False
     VLLM_K31_BEAT_DRAFTMETA: bool = False
     VLLM_K31_BEAT_K2SYNC: bool = False
+    VLLM_K31_BEAT_EAGERPREP: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1820,6 +1821,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # single-word sentinel poll loads its word once, and the MoE router ranks
     # its live candidates only instead of all 64 lanes.
     "VLLM_K31_BEAT_K2SYNC": lambda: bool(int(os.getenv("VLLM_K31_BEAT_K2SYNC", "0"))),
+    # Kimi-K3.1 on ROCm: fewer launches in the eager per-step prep: the KDA
+    # spec-decode staging, the sparse-MLA indptr, the num_accepted gather each
+    # as one launch, and a slice for the logits rows when logits_indices is
+    # the identity (a pure verify batch).
+    "VLLM_K31_BEAT_EAGERPREP": lambda: bool(
+        int(os.getenv("VLLM_K31_BEAT_EAGERPREP", "0"))
+    ),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
