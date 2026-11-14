@@ -115,6 +115,13 @@ def _streaming_args_diff(
     return None
 
 
+def _unwrap_cdata(val_text: str) -> str:
+    """Unwrap a regex-matched param value; like lxml, keep it otherwise verbatim."""
+    if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
+        return val_text[len("<![CDATA[") : -len("]]>")]
+    return val_text
+
+
 def _parse_arguments(json_value: str) -> tuple[Any, bool]:
     try:
         try:
@@ -126,6 +133,12 @@ def _parse_arguments(json_value: str) -> tuple[Any, bool]:
         return json_value, False
 
 
+def _decode_padded(value: str) -> Any:
+    """Parse a non-string value, ignoring padding; keep the text if unparseable."""
+    parsed_val, ok = _parse_arguments(value.strip())
+    return parsed_val if ok else value
+
+
 def _coerce_argument_value(
     func_name: str,
     arg_key: str,
@@ -135,7 +148,7 @@ def _coerce_argument_value(
     props, extra = param_types.get(func_name, ({}, None))
     allowed = props.get(arg_key, extra)
     if isinstance(value, str):
-        return convert_value(value, allowed, lambda v: _parse_arguments(v)[0])
+        return convert_value(value, allowed, _decode_padded)
     # Already decoded (wrapped arguments): serialize it where a string is meant.
     text = json.dumps(value, ensure_ascii=False)
     return convert_value(text, allowed, lambda _: value)
@@ -366,11 +379,7 @@ def _parse_function_block(
             allowed_props = name_to_allowed_props.get(func_name or "", set())
             for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
                 key = pm.group(1).strip()
-                val_text = pm.group(2) or ""
-                if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
-                    val_text = val_text[len("<![CDATA[") : -len("]]>")]
-                else:
-                    val_text = val_text.strip()
+                val_text = _unwrap_cdata(pm.group(2) or "")
                 if not _add_argument(
                     func_name or "",
                     key,
@@ -420,11 +429,7 @@ def _parse_partial_params(
         key = pm.group(1).strip()
         if not key or key in seen_keys:
             continue
-        val_text = pm.group(2) or ""
-        if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
-            val_text = val_text[len("<![CDATA[") : -len("]]>")]
-        else:
-            val_text = val_text.strip()
+        val_text = _unwrap_cdata(pm.group(2) or "")
         _add_argument(
             func_name,
             key,
