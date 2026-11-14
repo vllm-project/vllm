@@ -323,6 +323,7 @@ def _create_decode_vllm_config(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    use_gdn_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
     max_model_len: int = 8192,
@@ -349,7 +350,9 @@ def _create_decode_vllm_config(
         max_num_seqs=max_num_seqs
     )
     vllm_config.parallel_config = ParallelConfig()
-    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
+    vllm_config.cache_config = SimpleNamespace(
+        use_kda_recoverssm=use_kda_recoverssm, use_gdn_recoverssm=use_gdn_recoverssm
+    )
     vllm_config.num_speculative_tokens = num_speculative_tokens
     if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
@@ -392,6 +395,7 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    use_gdn_recoverssm: bool = False,
     varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     if num_speculative_tokens is None:
@@ -412,6 +416,7 @@ def _make_spec_decode_manager(
         dynamic_spec_schedule=dynamic_spec_schedule,
         max_num_seqs=max_num_seqs,
         use_kda_recoverssm=use_kda_recoverssm,
+        use_gdn_recoverssm=use_gdn_recoverssm,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
@@ -483,6 +488,26 @@ def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
 
     assert max(mixed_sizes(True)) > 2 * _DECODE_QUERY_LEN
     assert mixed_sizes(True) == mixed_sizes(False)
+
+
+def test_gdn_recoverssm_caps_mixed_graphs_at_the_decode_token_cap(monkeypatch):
+    """GDN RecoverSSM's builder sends every active decode row to the spec path,
+    whatever its width, so mixed graphs stop at max_num_seqs * (num_spec + 1)
+    tokens."""
+
+    def mixed_sizes(use_gdn_recoverssm: bool) -> list[int]:
+        manager = _make_spec_decode_manager(
+            monkeypatch, max_num_seqs=2, use_gdn_recoverssm=use_gdn_recoverssm
+        )
+        return sorted(
+            d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+        )
+
+    assert max(mixed_sizes(False)) > 2 * _DECODE_QUERY_LEN
+    assert max(mixed_sizes(True)) <= 2 * _DECODE_QUERY_LEN
+    assert mixed_sizes(True) == [
+        n for n in mixed_sizes(False) if n <= 2 * _DECODE_QUERY_LEN
+    ]
 
 
 def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch):
