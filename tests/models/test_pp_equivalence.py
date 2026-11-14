@@ -342,3 +342,126 @@ def test_pp_rejects_split_kv_sharing(vllm_runner, monkeypatch, arch: str):
         output = captured.read().decode("utf-8", errors="replace")
     # The engine error does not carry the cause; the workers log it.
     assert "Specified KV sharing target layer" in output
+
+
+def _ernie_vl_pp_overrides(hf_config):
+    num_layers = NUM_LAYERS[2]
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Ernie4_5_VLMoeForConditionalGeneration",
+        num_hidden_layers=num_layers,
+        exist_overrides={
+            "hidden_size": 512,
+            "intermediate_size": 1024,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "moe_num_experts": [4, 4],
+            "moe_k": 2,
+            "moe_intermediate_size": [256, 256],
+            "moe_num_shared_experts": 1,
+            "moe_layer_start_index": [1, 1],
+            "moe_layer_end_index": [num_layers - 1, num_layers - 1],
+            "max_position_embeddings": 4096,
+            "tie_word_embeddings": True,
+        },
+    )
+    # ERNIE's vision tower reads depth, not num_hidden_layers.
+    if (vision_config := getattr(hf_config, "vision_config", None)) is not None:
+        vision_config.depth = 1
+    return hf_config
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+def test_ernie_vl_pp_preserves_visual_routing(vllm_runner, image_assets):
+    """A later stage must keep the visual mask, then clear it for text input."""
+    arch = "Ernie4_5_VLMoeForConditionalGeneration"
+    info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    prompts = [
+        {
+            "prompt": (
+                "<|begin_of_sentence|>User: Describe the image."
+                "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>\n"
+                "Assistant: <think></think>"
+            ),
+            "multi_modal_data": {"image": image_assets[0].pil_image},
+        },
+        {
+            "prompt": (
+                "<|begin_of_sentence|>User: What is two plus three?\n"
+                "Assistant: <think></think>"
+            ),
+        },
+    ]
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        ignore_eos=True,
+        prompt_logprobs=0,
+        logprobs=0,
+        detokenize=False,
+    )
+    results = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            info.default,
+            revision=info.revision,
+            trust_remote_code=info.trust_remote_code,
+            dtype="bfloat16",
+            load_format=LOAD_FORMAT,
+            hf_overrides=_ernie_vl_pp_overrides,
+            worker_extension_cls=f"{__name__}.LoaderInWorkers",
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            max_num_seqs=1,
+            enable_chunked_prefill=False,
+            enable_flashinfer_autotune=False,
+            enable_prefix_caching=False,
+            limit_mm_per_prompt={"image": 1},
+        ) as vllm_model:
+            llm = vllm_model.llm
+            model_config = llm.llm_engine.model_config
+            assert model_config.architecture == arch
+            patch_id = model_config.hf_config.im_patch_id
+            records = []
+            for index, prompt in enumerate(prompts):
+                (output,) = llm.generate([prompt], params, use_tqdm=False)
+                (completion,) = output.outputs
+                token_ids = output.prompt_token_ids
+                assert len(output.prompt_logprobs) == len(token_ids)
+                assert len(completion.logprobs) == len(completion.token_ids) == 4
+                if index == 0:
+                    assert token_ids.count(patch_id) > 1
+                records.append(
+                    {
+                        "prompt_tokens": token_ids,
+                        "prompt_logprobs": [
+                            lp[tok].logprob
+                            for tok, lp in zip(
+                                token_ids[1:], output.prompt_logprobs[1:]
+                            )
+                        ],
+                        "tokens": list(completion.token_ids),
+                        "logprobs": [
+                            lp[tok].logprob
+                            for tok, lp in zip(
+                                completion.token_ids, completion.logprobs
+                            )
+                        ],
+                    }
+                )
+            results[pp_size] = records
+    assert all(
+        math.isfinite(value)
+        for records in results.values()
+        for record in records
+        for key in ("prompt_logprobs", "logprobs")
+        for value in record[key]
+    )
+    assert results[1] == results[2], (
+        "ERNIE-VL PP=2 logprobs differ by up to "
+        f"{_max_logprob_diff(results[1], results[2])}"
+    )
