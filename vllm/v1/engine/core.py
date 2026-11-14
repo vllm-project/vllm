@@ -9,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -74,6 +74,12 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.state_scheduler import (
+    PAUSE_HELD,
+    RELEASE_REFUSED,
+    StateScheduler,
+    get_scheduler_cls,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     get_kv_cache_kind,
@@ -186,7 +192,7 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+        Scheduler = get_scheduler_cls(vllm_config.scheduler_config, kv_cache_config)
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
@@ -932,9 +938,34 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        self._drain_retiring_state_slots()
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def _drain_retiring_state_slots(self) -> None:
+        """With only retiring state slots and no queued request, step until
+        they have retired, so that a cache clear can proceed. Such a step
+        carries cleanups and no request's work."""
+        scheduler = self.scheduler
+        if (
+            not isinstance(scheduler, StateScheduler)
+            or scheduler.has_queued_requests()
+            or scheduler.state_slot_counts()[0]
+        ):
+            return
+        with scheduler.holding_queued_outputs():
+            while scheduler.state_retirements:
+                _, model_executed = self.step_fn()
+                self.post_step(model_executed)
+
+    def _check_state_cache_clear(self, refuse_retiring_if_queued: bool) -> None:
+        scheduler = self.scheduler
+        if isinstance(scheduler, StateScheduler):
+            scheduler.check_cache_clear(
+                PAUSE_HELD,
+                refuse_retiring_if_queued and scheduler.has_queued_requests(),
+            )
 
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
@@ -999,6 +1030,11 @@ class EngineCore:
         # engine FAILED instead of serving, as nothing waits on this pause.
         preparing = self._checkpoint_state == CheckpointState.PREPARING
         try:
+            if clear_cache:
+                # Repeats the pause's entry check. This finish can run after
+                # the pause's entry, once the engine is idle; a resume in
+                # between lets a stream bind or park a slot.
+                self._check_state_cache_clear(refuse_retiring_if_queued=False)
             # A completed pause promises an idle device: nothing else waits on
             # the last dummy batch an idle DP rank launches.
             self.model_executor.collective_rpc("synchronize_device")
@@ -1041,6 +1077,10 @@ class EngineCore:
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        if clear_cache and mode == "keep":
+            # Only retiring slots drain before the reset, unless a request is
+            # queued: stepping would run its work.
+            self._check_state_cache_clear(refuse_retiring_if_queued=True)
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
@@ -1051,11 +1091,19 @@ class EngineCore:
             # Pending connector stores still read the KV cache that a sleep
             # discards. Step until they finish, as EngineCoreProc does before
             # it completes a pause.
-            while self.scheduler.has_requests() or self.batch_queue:
-                _, model_executed = self.step_fn()
-                self.post_step(model_executed)
-                if not model_executed:
-                    time.sleep(0.001)
+            # These steps' outputs are dropped, so the outputs that persistent
+            # state queued, such as a stream's error, stay for the next step.
+            held_outputs = (
+                self.scheduler.holding_queued_outputs()
+                if isinstance(self.scheduler, StateScheduler)
+                else nullcontext()
+            )
+            with held_outputs:
+                while self.scheduler.has_requests() or self.batch_queue:
+                    _, model_executed = self.step_fn()
+                    self.post_step(model_executed)
+                    if not model_executed:
+                        time.sleep(0.001)
         self._finish_pause(clear_cache, reset_connector)
 
         return None
@@ -1176,6 +1224,8 @@ class EngineCore:
         and all executor memory to be resident. Kept requests are recomputed
         after wake-up. `reset_connector` is as for `sleep`.
         """
+        if isinstance(self.scheduler, StateScheduler):
+            raise RuntimeError(RELEASE_REFUSED)
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()
@@ -2434,6 +2484,9 @@ class EngineCoreProc(EngineCore):
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        if clear_cache and mode != "abort":
+            # Retiring slots release before the engine is idle.
+            self._check_state_cache_clear(refuse_retiring_if_queued=False)
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
@@ -2518,6 +2571,11 @@ class EngineCoreProc(EngineCore):
         except Exception as e:
             self._fail_checkpoint(e)
             raise
+
+    def _drain_retiring_state_slots(self) -> None:
+        # The busy loop retires the slots by itself; a utility call must not
+        # step the engine, whose outputs it would drop.
+        pass
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can

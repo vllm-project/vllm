@@ -40,6 +40,49 @@ steps:
       - tests/plugins/
       - vllm/platforms/rocm.py
 
+# Persistent state end to end, on the dummy-model plugin's stub model. Its
+# tests each start an engine, so it has its own step, triggered only by the
+# persistent-state sources.
+- label: ":nvidia: (L4) Persistent State"
+  key: persistent-state-tests-2-gpus
+  timeout_in_minutes: 35
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+  - tests/conftest.py
+  - tests/plugins/vllm_add_dummy_model/
+  - tests/plugins_tests/test_persistent_state_stub_model.py
+  - tests/v1/core/utils.py
+  - vllm/config/cache.py
+  - vllm/config/compilation.py
+  - vllm/config/model.py
+  - vllm/config/scheduler.py
+  - vllm/config/vllm.py
+  - vllm/model_executor/layers/state.py
+  - vllm/model_executor/models/registry.py
+  - vllm/v1/core/kv_cache_coordinator.py
+  - vllm/v1/core/kv_cache_planning.py
+  - vllm/v1/core/sched/output.py
+  - vllm/v1/core/sched/scheduler.py
+  - vllm/v1/core/sched/state_scheduler.py
+  - vllm/v1/core/single_type_kv_cache_manager.py
+  - vllm/v1/core/state_slot_manager.py
+  - vllm/v1/engine/async_llm.py
+  - vllm/v1/engine/__init__.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/output_processor.py
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/outputs.py
+  - vllm/v1/worker/gpu/attn_utils.py
+  - vllm/v1/worker/gpu/cudagraph_utils.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/model_states/interface.py
+  - vllm/v1/worker/gpu/state_slots.py
+  commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s plugins_tests/test_persistent_state_stub_model.py
+
 # The platform and stat logger plugins act on every vLLM process while
 # installed, so they run here, each installed only for its own test.
 - label: ":nvidia: (L4) Platform and Stat Logger Plugins"

@@ -971,6 +971,8 @@ class _ModelInfo:
     supports_transcription: bool
     supports_transcription_only: bool
     supports_kv_cache_grouping: bool
+    # No default: a model-info cache entry without it is inspected again.
+    has_persistent_state: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
     # Fully-qualified name of `SpeculativeDraftModel.speculator_config_class`.
@@ -1008,6 +1010,8 @@ class _ModelInfo:
                 supports_transcription(model) and model.supports_transcription_only
             ),
             supports_kv_cache_grouping=supports_kv_cache_grouping(model),
+            has_persistent_state=getattr(model, "supports_persistent_state", False)
+            is True,
             has_noops=has_noops(model),
             supported_video_pruning_methods=getattr(
                 model, "supported_video_pruning_methods", ()

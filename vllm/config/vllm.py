@@ -1614,8 +1614,18 @@ class VllmConfig:
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
 
+        has_persistent_state = (
+            self.model_config is not None and self.model_config.has_persistent_state
+        )
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
+            if has_persistent_state:
+                # The step after an EOS that parks a stream would run on that
+                # EOS and advance the stream's state.
+                raise ValueError(
+                    "Async scheduling is not yet validated with persistent state. "
+                    "Use --no-async-scheduling."
+                )
             if uses_rocm_deepep_ht_dbo:
                 raise ValueError(
                     "Async scheduling is not compatible with ROCm DeepEP "
@@ -1628,7 +1638,13 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            if (
+            if has_persistent_state:
+                logger.warning(
+                    "Async scheduling is disabled by default for persistent "
+                    "state, with which it is not yet validated."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
                 self.model_config is not None
                 and self.model_config.runner_type == "pooling"
             ):
@@ -1732,6 +1748,22 @@ class VllmConfig:
                     "--kernel_config.enable_jit_warmup=False"
                 )
                 self.kernel_config.enable_jit_warmup = False
+
+        if has_persistent_state:
+            # Checked before platform defaults, which may resolve the mode.
+            mode = self.compilation_config.cudagraph_mode
+            if mode is None:
+                logger.warning(
+                    "cudagraph_mode is NONE by default for persistent state: "
+                    "the runner's CUDA graphs are not yet validated with it."
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            elif mode != CUDAGraphMode.NONE:
+                raise ValueError(
+                    f"CUDA graph mode {mode.name} is not yet validated with "
+                    "persistent state. Use cudagraph_mode NONE; the model can "
+                    "capture its own graphs."
+                )
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -2022,7 +2054,7 @@ class VllmConfig:
 
         self._disable_cudagraphs_for_stock_torch_compile()
         self._validate_model_runner()
-        self._resolve_extensible_kv_cache()
+        self._resolve_extensible_kv_cache(has_persistent_state)
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
@@ -3205,7 +3237,7 @@ class VllmConfig:
 
         return unsupported
 
-    def _resolve_extensible_kv_cache(self) -> None:
+    def _resolve_extensible_kv_cache(self, has_persistent_state: bool = False) -> None:
         """Settle `enable_extensible_kv_cache`: on where supported if unset, an
         error if explicitly requested where unsupported.
 
@@ -3226,7 +3258,12 @@ class VllmConfig:
             else self.kv_transfer_config.kv_cache_access()
         )
         unsupported = None
-        if not current_platform.is_cuda_alike():
+        if has_persistent_state:
+            unsupported = (
+                "persistent state fixes its pool at startup, and the state "
+                "bindings address every page"
+            )
+        elif not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
         elif cache_config.kv_cache_memory_bytes is not None:
             unsupported = (
