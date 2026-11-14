@@ -229,6 +229,12 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
+    def page_components(self) -> dict[str, tuple[int, int]]:
+        """Byte `(offset, size)` of each component of a page, by name, when
+        layers bind its components as separate views; empty to bind it whole."""
+        return {}
+
+    @property
     def page_size_bytes(self) -> int:
         """The size of a page with `block_size` tokens in bytes.
 
@@ -572,6 +578,17 @@ class MambaSpec(KVCacheSpec):
             round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def page_components(self) -> dict[str, tuple[int, int]]:
+        """Each state, by index, packed in order at the state alignment."""
+        components = {}
+        offset = 0
+        for i, (shape, dtype) in enumerate(zip(self.shapes, self.dtypes)):
+            size = prod(shape) * get_dtype_size(dtype)
+            components[str(i)] = (offset, size)
+            offset += round_up(size, self.state_alignment)
+        return components
 
     @property
     def real_page_size_bytes(self) -> int:

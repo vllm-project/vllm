@@ -486,6 +486,36 @@ def map_kv_caches_to_kernel_blocks(
     return mapped
 
 
+def kv_cache_components(
+    kv_cache: torch.Tensor, spec: KVCacheSpec
+) -> dict[str, torch.Tensor]:
+    """Views of the spec's page components in a raw `[B, H, N, C]` view."""
+    return {
+        component: kv_cache[..., offset : offset + size]
+        for component, (offset, size) in spec.page_components.items()
+    }
+
+
+def split_kv_cache_components(
+    kv_caches: dict[str, torch.Tensor], kv_cache_config: KVCacheConfig
+) -> dict[str, torch.Tensor]:
+    """The views to bind to layers, with each component of a page holding
+    several named `"<cache name>:<component>"`. KV connectors keep the whole
+    pages in `kv_caches`."""
+    specs = {
+        name: spec
+        for group in kv_cache_config.kv_cache_groups
+        for name, spec in group.kv_cache_specs.items()
+    }
+    split: dict[str, torch.Tensor] = {}
+    for name, kv_cache in kv_caches.items():
+        components = kv_cache_components(kv_cache, specs[name]) if name in specs else {}
+        split.update((f"{name}:{c}", view) for c, view in components.items())
+        if not components:
+            split[name] = kv_cache
+    return split
+
+
 def customize_attention_spec(
     backend: type[AttentionBackend], spec: AttentionSpec, layer_name: str
 ) -> dict[str, AttentionSpec]:

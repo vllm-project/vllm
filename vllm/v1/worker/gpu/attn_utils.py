@@ -43,6 +43,7 @@ from vllm.v1.worker.utils import (
     groups_with_metadata_builders,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    split_kv_cache_components,
 )
 
 if TYPE_CHECKING:
@@ -445,7 +446,9 @@ def bind_kv_caches(
     for layer_name, target in shared_layers.items():
         kv_caches[layer_name] = kv_caches[target]
     bind_kv_cache_to_layers(
-        map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
+        split_kv_cache_components(
+            map_kv_caches_to_kernel_blocks(kv_caches, attn_groups), kv_cache_config
+        ),
         forward_context,
         shared_layers,
     )

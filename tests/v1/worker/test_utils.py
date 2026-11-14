@@ -56,6 +56,7 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     request_memory,
+    split_kv_cache_components,
 )
 
 
@@ -1494,7 +1495,12 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     pages = {name: pages[name] for name in reversed(names)}
     runner_pages: list[torch.Tensor] = []
-    bind_kv_cache(pages, ctx, runner_pages)
+    bind_kv_cache(
+        pages,
+        ctx,
+        runner_pages,
+        layer_kv_caches=split_kv_cache_components(pages, kv_config),
+    )
     initialize_replayssm_ring_trackers(kv_config, ctx)
     # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
     expected_storage_size = 4096 if current_platform.is_rocm() else budget
@@ -1564,7 +1570,10 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
     def bind(num_blocks):
         config.num_blocks = num_blocks
         bind_kv_cache_to_layers(
-            {n: page[:num_blocks] for n, page in pages.items()}, ctx
+            split_kv_cache_components(
+                {n: page[:num_blocks] for n, page in pages.items()}, config
+            ),
+            ctx,
         )
         initialize_replayssm_ring_trackers(config, ctx)
 
@@ -1619,7 +1628,11 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
         ],
     )
     bind_kv_cache_to_layers(
-        {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names}, ctx
+        split_kv_cache_components(
+            {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names},
+            config,
+        ),
+        ctx,
     )
     initialize_replayssm_ring_trackers(config, ctx)
 
