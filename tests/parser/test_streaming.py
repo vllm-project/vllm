@@ -8,12 +8,14 @@ import pytest
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import (
     GraniteParserToolAdapter,
     Qwen3ParserReasoningAdapter,
 )
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
@@ -876,3 +878,130 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     )
     assert json.loads(tool_args) == {"city": city}
     assert content == ""
+
+
+# ── Constrained answers after a generated reasoning end ──
+#
+# The engine lets a constrained answer start with the newlines chat templates
+# put after the reasoning end, without feeding them to the grammar
+# (StructuredOutputManager). The parser drops them from the content.
+
+SEPARATED_REASONING = "<think>let me think</think>\n\n"
+SEPARATOR_STRUCTURAL_TAG = json.dumps(
+    {"type": "structural_tag", "format": {"type": "const_string", "value": "\\n\\nY"}}
+)
+
+
+def _separator_parsers(tokenizer):
+    return {
+        "think": make_parser(tokenizer, reasoning=True),
+        "qwen3": Qwen3ReasoningNoToolParser(tokenizer),
+        "qwen3_hermes": Qwen3ReasoningHermesToolParser(tokenizer),
+    }
+
+
+def _chat_request(**kwargs) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "hi"}], **kwargs
+    )
+
+
+@pytest.mark.parametrize("parser_name", ["think", "qwen3", "qwen3_hermes"])
+@pytest.mark.parametrize(
+    ("constraint", "answer", "expected"),
+    [
+        pytest.param(
+            {"response_format": {"type": "json_object"}},
+            '{"a": 1}',
+            '{"a": 1}',
+            id="json_object",
+        ),
+        pytest.param(
+            {"structured_outputs": StructuredOutputsParams(choice=["Y", "N"])},
+            "Y",
+            "Y",
+            id="choice",
+        ),
+        pytest.param({}, "Y", "\n\nY", id="unconstrained"),
+        # A structural tag describes the separator itself.
+        pytest.param(
+            {
+                "structured_outputs": StructuredOutputsParams(
+                    structural_tag=SEPARATOR_STRUCTURAL_TAG
+                )
+            },
+            "Y",
+            "\n\nY",
+            id="structural_tag",
+        ),
+    ],
+)
+def test_reasoning_separator_dropped_only_for_constrained_answers(
+    tokenizer, parser_name: str, constraint: dict, answer: str, expected: str
+):
+    request = _chat_request(**constraint)
+    text = SEPARATED_REASONING + answer
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+
+    # Generated ids end with the stop token, a turn boundary for Qwen3.
+    stop_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    parser = _separator_parsers(tokenizer)[parser_name]
+    reasoning, content, _ = parser.parse(
+        text, request, model_output_token_ids=[*token_ids, stop_id]
+    )
+    assert reasoning == "let me think"
+    assert content == expected
+
+    end = token_ids.index(tokenizer.convert_tokens_to_ids("</think>"))
+    newline = tokenizer.convert_tokens_to_ids("Ċ")
+    for chunks in (
+        [[token_id] for token_id in token_ids],
+        # The end, the separator and the answer in one delta.
+        [token_ids[:end], token_ids[end:]],
+        # The separator as two `\n` tokens, from a tokenizer without `\n\n`.
+        [*([t] for t in token_ids[: end + 1]), [newline], [newline]]
+        + [[t] for t in token_ids[end + 2 :]],
+    ):
+        parser = _separator_parsers(tokenizer)[parser_name]
+        _, content, _ = collect_fields(
+            stream_chunks(parser, tokenizer, chunks, request)
+        )
+        assert content == expected
+
+
+def test_constrained_answer_keeps_newline_when_prompt_closed_reasoning(tokenizer):
+    """The engine constrains from the first token, so a newline is the answer's."""
+    request = _chat_request(structured_outputs=StructuredOutputsParams(regex="\n[YN]"))
+    prompt_ids = tokenizer.encode("<think>\n\n</think>\n\n", add_special_tokens=False)
+    token_ids = tokenizer.encode("\nY", add_special_tokens=False)
+
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    parser.set_prompt_token_ids(prompt_ids)
+    _, content, _ = parser.parse("\nY", request, model_output_token_ids=token_ids)
+    assert content == "\nY"
+
+    parser = Qwen3ReasoningNoToolParser(tokenizer)
+    results = [
+        parser.parse_delta(
+            tokenizer.decode([token_id]),
+            [token_id],
+            request,
+            prompt_token_ids=prompt_ids if i == 0 else None,
+            finished=False,
+        )
+        for i, token_id in enumerate(token_ids)
+    ]
+    assert collect_fields(results)[1] == "\nY"
+
+
+def test_responses_constrained_answer_drops_separator(tokenizer):
+    request = ResponsesRequest(
+        model="test-model", input="hi", text={"format": {"type": "json_object"}}
+    )
+    text = SEPARATED_REASONING + '{"a": 1}'
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+
+    _, content, _ = Qwen3ReasoningNoToolParser(tokenizer).parse(
+        text, request, model_output_token_ids=token_ids
+    )
+    assert content == '{"a": 1}'

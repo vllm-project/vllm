@@ -31,6 +31,9 @@ class StructuredOutputRequest:
     # Implicit reasoning-end tokens the grammar rejects as the first content
     # token; masked while the request reasons. Computed on first use.
     masked_reasoning_end_ids: tuple[int, ...] | None = None
+    # Newlines still allowed before the grammar, after a reasoning end the model
+    # generated with only newlines since.
+    separator_newlines: int = 0
 
     @staticmethod
     def from_sampling_params(
