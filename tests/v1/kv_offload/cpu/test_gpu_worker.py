@@ -13,7 +13,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -1004,3 +1004,104 @@ def test_device_fault_does_not_fail_the_next_kernel_launch(
     finally:
         gpu_worker._clear_pending_device_error()
         worker.shutdown()
+
+
+@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+def test_direct_descriptors_match_pointer_formula(
+    monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool, blocks_per_chunk: int
+) -> None:
+    """resolve_device_pointers plus the direct fill emit, in (group, ref, block)
+    order, base + block * row_stride + sub_block * page_size on both sides."""
+    page_sizes = [512, 1024]
+    # Rows wider than the page give row strides larger than the page size
+    gpu_tensors = [torch.empty(16, 2 * p, dtype=torch.int8)[:, :p] for p in page_sizes]
+    cpu_tensors = [
+        torch.empty(8, 2 * blocks_per_chunk * p, dtype=torch.int8)[
+            :, : blocks_per_chunk * p
+        ]
+        for p in page_sizes
+    ]
+    # Refs share tensors and copy less than the full page
+    group_data_refs = [
+        [
+            CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512),
+            CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=1000),
+        ],
+        [
+            CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=1024),
+            CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=500),
+        ],
+    ]
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(tensor=t, page_size_bytes=t.shape[1])
+            for t in gpu_tensors
+        ],
+        group_data_refs=group_data_refs,
+    )
+    # The first group starts mid-chunk
+    group_sizes = (5, 4)
+    block_indices = (blocks_per_chunk - 1, 0)
+    skips = [i % blocks_per_chunk for i in block_indices]
+    chunks_per_group = [
+        cdiv(n + s, blocks_per_chunk) for n, s in zip(group_sizes, skips)
+    ]
+
+    rng = np.random.default_rng(0)
+    gpu_blocks = rng.integers(0, 16, sum(group_sizes)).tolist()
+    cpu_chunks = rng.integers(0, 8, sum(chunks_per_group)).tolist()
+
+    handler = gpu_worker.SingleDirectionOffloadingHandler(
+        cpu_tensors,
+        blocks_per_chunk,
+        group_data_refs,
+        gpu_to_cpu=gpu_to_cpu,
+        host_memory_is_pinned=False,
+    )
+    handler._swap_blocks_batch = MagicMock()
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [MagicMock(), MagicMock()]
+    platform = MagicMock()
+    platform.stream.return_value = contextlib.nullcontext()
+    platform.is_xpu.return_value = False
+    monkeypatch.setattr(gpu_worker, "current_platform", platform)
+
+    device_ptrs = resolve_device_pointers(
+        GPULoadStoreSpec(
+            gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
+        ),
+        kv_caches,
+    )
+    assert handler.transfer_async(1, device_ptrs, CPULoadStoreSpec(cpu_chunks))
+    src, dst, sizes = handler._swap_blocks_batch.call_args.args
+
+    want_src: list[int] = []
+    want_dst: list[int] = []
+    want_sizes: list[int] = []
+    blk_offset = chunk_offset = 0
+    for refs, num_blocks, skip, num_chunks in zip(
+        group_data_refs, group_sizes, skips, chunks_per_group
+    ):
+        for ref in refs:
+            gpu_t = gpu_tensors[ref.tensor_idx]
+            cpu_t = cpu_tensors[ref.tensor_idx]
+            for i in range(num_blocks):
+                chunk, sub_block = divmod(skip + i, blocks_per_chunk)
+                gpu_block = gpu_blocks[blk_offset + i]
+                gpu_ptr = gpu_t.data_ptr() + gpu_block * gpu_t.stride(0)
+                cpu_ptr = (
+                    cpu_t.data_ptr()
+                    + cpu_chunks[chunk_offset + chunk] * cpu_t.stride(0)
+                    + sub_block * page_sizes[ref.tensor_idx]
+                )
+                want_src.append(gpu_ptr if gpu_to_cpu else cpu_ptr)
+                want_dst.append(cpu_ptr if gpu_to_cpu else gpu_ptr)
+                want_sizes.append(ref.page_size_bytes)
+        blk_offset += num_blocks
+        chunk_offset += num_chunks
+
+    assert src.tolist() == want_src
+    assert dst.tolist() == want_dst
+    assert sizes.tolist() == want_sizes
+    assert handler._transfers[-1].num_bytes == sum(want_sizes)

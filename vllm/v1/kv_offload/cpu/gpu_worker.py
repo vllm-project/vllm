@@ -110,33 +110,83 @@ def compute_sub_block_ptrs(
     Args:
         block_ids: array of block IDs at the tensor's native granularity.
         blocks_per_chunk: number of sub-blocks per block.
-        output: pre-allocated pointer array to write pointers into.
+        output: pre-allocated uint64 pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
 
     """
+    assert tensor.shape[1] % blocks_per_chunk == 0
+    compute_group_sub_block_ptrs(
+        block_ids,
+        blocks_per_chunk,
+        output,
+        tensor.data_ptr(),
+        tensor.stride(0),
+        tensor.shape[1] // blocks_per_chunk,
+        skip_count=skip_count,
+    )
+
+
+def compute_group_sub_block_ptrs(
+    block_ids: np.ndarray,
+    blocks_per_chunk: int,
+    output: np.ndarray,
+    base_ptrs: np.ndarray | int,
+    row_strides: np.ndarray | int,
+    block_page_sizes: np.ndarray | int,
+    skip_count: int = 0,
+):
+    """compute_sub_block_ptrs for several tensors at once, writing in place.
+
+    output is uint64 (num_tensors, num_sub_blocks) and the tensor parameters
+    are (num_tensors, 1) columns; scalars with a 1D output describe one tensor.
+    """
     assert skip_count < blocks_per_chunk
 
-    num_sub_blocks = len(output)
-    base_ptr = tensor.data_ptr()
-    row_stride = tensor.stride(0)
-
+    num_sub_blocks = output.shape[-1]
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
-        output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
+        blocks = block_ids.astype(np.uint64)[:num_sub_blocks]
+        np.multiply(blocks, row_strides, out=output)
+        output += base_ptrs
         return
 
-    # Vectorized expansion for blocks_per_chunk > 1.
-    assert tensor.shape[1] % blocks_per_chunk == 0
-    block_page_size = tensor.shape[1] // blocks_per_chunk
-    sub_offsets = np.arange(blocks_per_chunk, dtype=np.uint64) * block_page_size
-    # (num_blocks, 1) + (1, blocks_per_chunk) -> (num_blocks, blocks_per_chunk)
-    all_ptrs = (
-        base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
-    ) + sub_offsets[np.newaxis, :]
-    # Flatten and apply skip_count / truncation
-    flat = all_ptrs.ravel()
-    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+    sub_idx = np.arange(skip_count, skip_count + num_sub_blocks, dtype=np.uint64)
+    blocks = block_ids.astype(np.uint64)[sub_idx // blocks_per_chunk]
+    np.multiply(blocks, row_strides, out=output)
+    output += base_ptrs
+    # Add each sub-block offset to its strided columns, avoiding a temporary
+    for sub_block in range(1, blocks_per_chunk):
+        start = (sub_block - skip_count) % blocks_per_chunk
+        output[..., start::blocks_per_chunk] += sub_block * block_page_sizes
+
+
+class PtrColumns(NamedTuple):
+    """Pointer parameters of a group's per-ref tensors, as (num_refs, 1)
+    uint64 columns for compute_group_sub_block_ptrs."""
+
+    base_ptrs: np.ndarray
+    row_strides: np.ndarray
+    block_page_sizes: np.ndarray
+
+
+def _build_ptr_columns(
+    tensors: list[torch.Tensor],
+    layer_refs: list[CanonicalKVCacheRef],
+    blocks_per_chunk: int,
+) -> PtrColumns:
+    """Gather each ref's tensor base pointer, row stride and page size."""
+    ref_tensors = [tensors[ref.tensor_idx] for ref in layer_refs]
+    assert all(t.shape[1] % blocks_per_chunk == 0 for t in ref_tensors)
+
+    def column(vals: list[int]) -> np.ndarray:
+        return np.array(vals, dtype=np.uint64).reshape(-1, 1)
+
+    return PtrColumns(
+        base_ptrs=column([t.data_ptr() for t in ref_tensors]),
+        row_strides=column([t.stride(0) for t in ref_tensors]),
+        block_page_sizes=column([t.shape[1] // blocks_per_chunk for t in ref_tensors]),
+    )
 
 
 class CopyPlan(NamedTuple):
@@ -338,6 +388,17 @@ class SingleDirectionOffloadingHandler:
         )
         self.blocks_per_chunk = blocks_per_chunk
 
+        # Per-group CPU pointer columns for the direct layout. The handler
+        # holds the CPU tensors for its lifetime, so their pointers are fixed.
+        self._direct_cpu_ptr_columns: list[PtrColumns] | None = (
+            None
+            if canonical_layout
+            else [
+                _build_ptr_columns(cpu_tensors, layer_refs, blocks_per_chunk)
+                for layer_refs in layer_refs_per_group
+            ]
+        )
+
         # Per (group, ref) static copy plans for the canonical layout
         self._canonical_copy_plans: list[list[CopyPlan]] | None = (
             [
@@ -400,28 +461,27 @@ class SingleDirectionOffloadingHandler:
         layout: one whole-page copy per (block, ref).
 
         Returns (op_idx past the filled descriptors, bytes added)."""
-        num_bytes = 0
-        for d, data_ref in enumerate(self.layer_refs_per_group[g_idx]):
-            t_idx = data_ref.tensor_idx
-            end_idx = op_idx + group_size
+        assert self._direct_cpu_ptr_columns is not None
+        cpu_cols = self._direct_cpu_ptr_columns[g_idx]
+        num_refs = len(cpu_cols.base_ptrs)
+        num_ops = num_refs * group_size
+        end_idx = op_idx + num_ops
 
-            ptr_start = dev_ptr_offset + d * group_size
-            gpu_ptrs = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
-            gpu_out, cpu_out = (
-                (all_src, all_dst) if self.gpu_to_cpu else (all_dst, all_src)
-            )
-            gpu_out[op_idx:end_idx] = gpu_ptrs
-            compute_sub_block_ptrs(
-                cpu_block_ids,
-                self.blocks_per_chunk,
-                cpu_out[op_idx:end_idx],
-                self.cpu_tensors[t_idx],
-                skip_count=cpu_skip_count,
-            )
-            all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-            num_bytes += group_size * data_ref.page_size_bytes
-            op_idx = end_idx
-        return op_idx, num_bytes
+        # The device pointers and sizes are already in descriptor order
+        dev_ops = slice(dev_ptr_offset, dev_ptr_offset + num_ops)
+        gpu_out, cpu_out = (all_src, all_dst) if self.gpu_to_cpu else (all_dst, all_src)
+        gpu_out[op_idx:end_idx] = device_ptrs.ptrs[dev_ops]
+        all_sizes[op_idx:end_idx] = device_ptrs.sizes[dev_ops]
+        compute_group_sub_block_ptrs(
+            cpu_block_ids,
+            self.blocks_per_chunk,
+            cpu_out.view(np.uint64)[op_idx:end_idx].reshape(num_refs, group_size),
+            cpu_cols.base_ptrs,
+            cpu_cols.row_strides,
+            cpu_cols.block_page_sizes,
+            skip_count=cpu_skip_count,
+        )
+        return end_idx, int(device_ptrs.sizes[dev_ops].sum())
 
     def _fill_canonical_ops(
         self,
