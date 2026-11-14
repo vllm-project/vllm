@@ -1,0 +1,92 @@
+group: Plugins XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (L4) Plugin Integration'
+  key: plugin-tests-2-gpus
+  device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  optional: true
+  working_dir: "."
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - pip install -e ./plugins/prithvi_io_processor_plugin -e ./plugins/bge_m3_sparse_plugin -e ./plugins/colbert_query_plugin -e ./plugins/vllm_add_dummy_endpoint_plugin -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pytest -v -s plugins_tests/test_scheduler_plugins.py
+  - pytest -v -s distributed/test_distributed_oot.py
+  - pytest -v -s plugins_tests/test_oot_registration_online.py
+  - pytest -v -s plugins_tests/test_oot_registration_offline.py
+  - pytest -v -s plugins_tests/lora_resolvers
+  source_file_dependencies:
+  - vllm/plugins/
+  - tests/plugins/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pip install -e ./plugins/prithvi_io_processor_plugin -e ./plugins/bge_m3_sparse_plugin -e ./plugins/colbert_query_plugin -e ./plugins/vllm_add_dummy_endpoint_plugin -e ./plugins/vllm_add_dummy_model || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_io_processor_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_terratorch_io_processor_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_colbert_query_io_processor_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_endpoint_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_scheduler_plugins.py || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_distributed_oot.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_oot_registration_online.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_oot_registration_offline.py || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/lora_resolvers || true'
+- label: ':nvidia: (L4) Platform and Stat Logger Plugins'
+  key: plugin-platform-stat-logger-tests-2-gpus
+  device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  optional: true
+  soft_fail: true
+  working_dir: "."
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pip install -e ./plugins/vllm_add_dummy_platform
+  - pytest -v -s plugins_tests/test_platform_plugins.py
+  - pip uninstall vllm_add_dummy_platform -y
+  - pip install -e ./plugins/vllm_add_dummy_stat_logger
+  - pytest -v -s plugins_tests/test_stats_logger_plugins.py
+  source_file_dependencies:
+  - vllm/plugins/
+  - tests/plugins/
+  - vllm/__init__.py
+  - vllm/env_override.py
+  - vllm/platforms/__init__.py
+  - vllm/utils/torch_utils.py
+  - vllm/utils/torch_version.py
+  - tests/plugins_tests/test_platform_plugins.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pip install -e ./plugins/vllm_add_dummy_platform || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_platform_plugins.py || true &&
+    pip uninstall vllm_add_dummy_platform -y || true &&
+    pip install -e ./plugins/vllm_add_dummy_stat_logger || true &&
+    pytest --continue-on-collection-errors -v -s plugins_tests/test_stats_logger_plugins.py || true'
