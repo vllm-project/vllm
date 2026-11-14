@@ -63,7 +63,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -521,6 +521,12 @@ class FlashAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
+    # FA2 split-KV decode (see `_fa2_split_kv_decode`): the uniform query
+    # length of an eligible batch, 0 otherwise. Sliding-window groups also get
+    # (seq_lens, block_table) cut to the blocks the window can reach.
+    fa2_split_kv_query_len: int = 0
+    fa2_window_inputs: tuple[torch.Tensor, torch.Tensor] | None = None
+
     causal: bool | torch.Tensor = True
 
     # PrefixLM bidirectional range containing each scheduled query token.
@@ -569,6 +575,48 @@ def _maybe_symmetrize_window(
     if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
         return (window[0], window[0])
     return window
+
+
+def _fa2_split_kv_decode(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    output: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    query_len: int,
+    softmax_scale: float,
+    window_left: int,
+    alibi_slopes: torch.Tensor | None,
+    softcap: float,
+) -> None:
+    """Run a uniform causal decode batch on FA2's paged split-KV kernel."""
+    num_tokens = seq_lens.shape[0] * query_len
+    q = query[:num_tokens].unflatten(0, (-1, query_len))
+    out = output[:num_tokens].unflatten(0, (-1, query_len))
+    torch.ops._vllm_fa2_C.fwd_kvcache(
+        q,
+        key_cache,
+        value_cache,
+        None,  # k
+        None,  # v
+        seq_lens,
+        None,  # rotary_cos
+        None,  # rotary_sin
+        None,  # cache_batch_idx
+        None,  # leftpad_k
+        block_table,
+        alibi_slopes,
+        out,
+        softmax_scale,
+        True,  # is_causal
+        window_left,
+        0,  # window_size_right
+        softcap,
+        False,  # is_rotary_interleaved
+        0,  # num_splits: heuristic over block_table width * block size
+    )
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -655,6 +703,85 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.scheduler_metadata[n:] = 0
             return self.scheduler_metadata[:n]
         return scheduler_metadata
+
+    def _init_fa2_split_kv(
+        self, fa_version: int | None, vllm_config: VllmConfig, layer_names: list[str]
+    ) -> None:
+        """Set up FA2 split-KV decode for small uniform decode batches."""
+        # Varlen splits KV only by swapping a GQA group into q (q_len 1, no window
+        # or ALiBi); otherwise one CTA per (request, head) leaves most SMs idle.
+        # FULL graphs only: outside capture the kernel reads max(seq_lens) on host.
+        self.fa2_split_kv_max_reqs = 0
+        self.fa2_decode_query_len = 1 + vllm_config.num_speculative_tokens
+        self.fa2_window_left = -1
+        spec_config = vllm_config.speculative_config
+        if not (
+            fa_version == 2
+            and current_platform.is_cuda()
+            and self.use_full_cuda_graph
+            and self.dcp_world_size == 1
+            # The split count and the kernel depend on the batch shape.
+            and not envs.VLLM_BATCH_INVARIANT
+            # Trims query lengths on device; this path relies on the host ones.
+            and not (spec_config and spec_config.enable_adaptive_verification)
+        ):
+            return
+        num_sms = current_platform.num_compute_units(self.device.index or 0)
+        # Only while num_reqs * num_heads_q < num_sms.
+        self.fa2_split_kv_max_reqs = (num_sms - 1) // self.num_heads_q
+
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        windows = {
+            getattr(layer.impl, "sliding_window", (-1, -1)) for layer in layers.values()
+        }
+        if len(windows) != 1 or self.fa2_split_kv_max_reqs == 0:
+            return
+        window_left, window_right = windows.pop()
+        if window_left < 0 or window_right != 0:
+            return
+        self.fa2_window_left = window_left
+        # Blocks that can hold a key in the window of any query of the batch.
+        width = cdiv(
+            window_left + self.fa2_decode_query_len + self.block_size - 1,
+            self.block_size,
+        )
+        self._fa2_window_block_table = torch.zeros(
+            (self.fa2_split_kv_max_reqs, width), dtype=torch.int32, device=self.device
+        )
+        self._fa2_window_seq_lens = torch.zeros(
+            self.fa2_split_kv_max_reqs, dtype=torch.int32, device=self.device
+        )
+        self._fa2_window_offsets = torch.arange(width, device=self.device)
+
+    def _fa2_split_kv_query_len(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        causal: bool | torch.Tensor,
+    ) -> int:
+        """The uniform query length if the batch runs FA2 split-KV decode."""
+        eligible = (
+            0 < num_reqs <= self.fa2_split_kv_max_reqs
+            and max_query_len <= self.fa2_decode_query_len
+            and num_actual_tokens == num_reqs * max_query_len
+            and causal is True
+        )
+        return max_query_len if eligible else 0
+
+    def _fill_fa2_window(self, metadata: FlashAttentionMetadata) -> None:
+        """Cut the block table to the window and shift the lengths to match."""
+        num_reqs = metadata.query_start_loc.shape[0] - 1
+        seq_lens = metadata.seq_lens[:num_reqs]
+        first_key = seq_lens - (metadata.fa2_split_kv_query_len + self.fa2_window_left)
+        first_block = first_key.clamp_(min=0) // self.block_size
+        index = first_block.unsqueeze(1) + self._fa2_window_offsets
+        index.clamp_(max=metadata.block_table.shape[1] - 1)
+        block_table = self._fa2_window_block_table[:num_reqs]
+        torch.gather(metadata.block_table[:num_reqs], 1, index, out=block_table)
+        window_seq_lens = self._fa2_window_seq_lens[:num_reqs]
+        torch.sub(seq_lens, first_block * self.block_size, out=window_seq_lens)
+        metadata.fa2_window_inputs = (window_seq_lens, block_table)
 
     def __init__(
         self,
@@ -747,6 +874,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.max_num_splits = (
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
+
+        self._init_fa2_split_kv(fa_version, vllm_config, layer_names)
 
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -952,8 +1081,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_prefill_tokens=num_prefill_tokens,
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
+            fa2_split_kv_query_len=self._fa2_split_kv_query_len(
+                num_reqs, num_actual_tokens, max_query_len, causal
+            ),
             causal=causal,
         )
+        if attn_metadata.fa2_split_kv_query_len and self.fa2_window_left >= 0:
+            self._fill_fa2_window(attn_metadata)
 
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.  Built for every FA
@@ -1009,9 +1143,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
+        # Gathered from the old block table; windowed layers fall back to varlen.
+        new_metadata.fa2_window_inputs = None
         return new_metadata
 
     def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
+        if metadata.fa2_window_inputs is not None:
+            self._fill_fa2_window(metadata)
         if metadata.scheduler_metadata is None:
             return
 
@@ -1293,6 +1431,22 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
         else:
+            split_kv_inputs = self._fa2_split_kv_inputs(attn_metadata)
+            if split_kv_inputs is not None:
+                _fa2_split_kv_decode(
+                    query,
+                    key_cache,
+                    value_cache,
+                    output,
+                    *split_kv_inputs,
+                    query_len=attn_metadata.fa2_split_kv_query_len,
+                    softmax_scale=self.scale,
+                    window_left=self.sliding_window[0],
+                    alibi_slopes=self.alibi_slopes,
+                    softcap=self.logits_soft_cap,
+                )
+                return output
+
             causal = attn_metadata.causal
             is_dynamic_causal = isinstance(causal, torch.Tensor)
 
@@ -1402,6 +1556,32 @@ class FlashAttentionImpl(AttentionImpl):
                 aux_tensors=rswa_aux or mm_aux,
             )
             return output
+
+    def _fa2_split_kv_inputs(
+        self, attn_metadata: FlashAttentionMetadata
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Lengths and block table for `_fa2_split_kv_decode`, or None."""
+        query_len = attn_metadata.fa2_split_kv_query_len
+        # Outside capture the kernel reads max(seq_lens) on the host. Eager and
+        # piecewise steps stay on the varlen path to keep the step async.
+        if (
+            not query_len
+            or self.vllm_flash_attn_version != 2
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        if self.sliding_window[0] >= 0:
+            # Built only when every layer of the group shares this window.
+            return attn_metadata.fa2_window_inputs
+        if (
+            query_len == 1
+            and self.num_heads > self.num_kv_heads
+            and self.alibi_slopes is None
+        ):
+            # Varlen splits this case itself by swapping the GQA group in.
+            return None
+        num_reqs = attn_metadata.query_start_loc.shape[0] - 1
+        return attn_metadata.seq_lens[:num_reqs], attn_metadata.block_table[:num_reqs]
 
     def do_kv_cache_update(
         self,
