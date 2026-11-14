@@ -281,8 +281,15 @@ class MuseSparkMoE(nn.Module):
     def _load_router_weight(
         self, param: nn.Parameter, loaded_weight: torch.Tensor
     ) -> None:
+        # Scale the incoming weight, not the stored one: a sparse patch leaves
+        # the other elements already folded.
+        if self.router_output_multiplier is not None:
+            loaded_weight = (
+                loaded_weight.to(param.dtype) * self.router_output_multiplier
+            )
+            self._router_multiplier_folded = True
+            self.moe_router.router_output_multiplier = None
         self.router.weight_loader(param, loaded_weight)
-        self._router_multiplier_folded = False
 
     def fold_router_output_multiplier(self) -> None:
         """Fold the router output multiplier and split the bf16x3 planes."""
