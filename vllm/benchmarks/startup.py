@@ -294,7 +294,7 @@ def main(args: argparse.Namespace):
 
     # Output JSON results if specified
     if args.output_json:
-        results: dict[str, Any] = {}
+        results: dict[str, Any] = {"model_id": args.model}
         for m in all_metrics:
             results.update(_metric_to_json(m))
         with open(args.output_json, "w") as f:
