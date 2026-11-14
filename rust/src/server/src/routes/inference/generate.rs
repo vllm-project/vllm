@@ -233,6 +233,7 @@ async fn generate_chunk_stream(
 
     while let Some(next) = stream.next().await {
         let (text, sampled, finished) = match next {
+            Ok(DecodedTextEvent::PrefillProgress(_)) => continue,
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: start_prompt_token_ids,
                 ..
@@ -849,6 +850,7 @@ mod tests {
             spec_decode_metrics: None,
             weight_versions,
             routed_experts: Default::default(),
+            prefill_progress: None,
             timestamps: Default::default(),
         }
     }
@@ -914,6 +916,23 @@ mod tests {
         .try_collect()
         .await
         .expect("collect chunks")
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_ignores_prefill_progress() {
+        let mut progress = stream_output(None, Vec::new(), None);
+        progress.prefill_progress = Some(Box::new(
+            vllm_engine_core_client::protocol::output::PrefillProgress {
+                request_id: "raw-stream".to_string(),
+                remaining_prefill_tokens: 16,
+            },
+        ));
+        let output = stream_output(Some(&[11]), vec![33], Some(FinishReason::Length));
+
+        let chunks = collect_chunks(vec![progress, output], true, None).await;
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].choices[0].token_ids, vec![33]);
     }
 
     #[tokio::test]

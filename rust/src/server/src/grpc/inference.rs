@@ -283,6 +283,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         Ok(Response::new(pb::GenerateResponse {
             prompt_info: Some(prompt_info),
             outputs: Some(outputs),
+            prefill_progress: None,
         }))
     }
 
@@ -350,8 +351,14 @@ async fn generate_stream_responses(
                 Ok(pb::GenerateResponse {
                     prompt_info: Some(prompt_info),
                     outputs: None,
+                    prefill_progress: None,
                 })
             }
+            Ok(DecodedTextEvent::PrefillProgress(progress)) => Ok(pb::GenerateResponse {
+                prompt_info: None,
+                outputs: None,
+                prefill_progress: Some(convert::to_prefill_progress(&progress)),
+            }),
             Ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled:
@@ -376,6 +383,7 @@ async fn generate_stream_responses(
                 .map(|outputs| pb::GenerateResponse {
                     prompt_info: None,
                     outputs: Some(outputs),
+                    prefill_progress: None,
                 })
             }
         };

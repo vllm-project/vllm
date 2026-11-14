@@ -1889,6 +1889,65 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_prefill_progress_reports_chunks_and_ends_with_zero():
+    """Report each scheduled chunk of prefill work, ending with a final zero."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    def step() -> list[tuple[str, int]]:
+        scheduler_output = scheduler.schedule()
+        outputs = scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+        )
+        return [
+            (
+                entry.prefill_progress.request_id,
+                entry.prefill_progress.remaining_prefill_tokens,
+            )
+            for batch in outputs.values()
+            for entry in batch.outputs
+            if entry.prefill_progress is not None
+        ]
+
+    assert step() == [(request.request_id, 48)]
+    assert step() == [(request.request_id, 32)]
+    assert step() == [(request.request_id, 16)]
+    assert step() == [(request.request_id, 0)]
+    assert step() == []
+
+
+def test_preempted_request_reports_the_work_it_requeues():
+    """A preemption puts the work it discards back on the queue."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+    )
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    scheduler_output.num_scheduled_tokens.clear()
+    outputs = scheduler.update_from_output(
+        scheduler_output, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
+    )
+    assert [
+        progress.remaining_prefill_tokens
+        for batch in outputs.values()
+        for entry in batch.outputs
+        for progress in ([entry.prefill_progress] if entry.prefill_progress else [])
+    ] == [request.num_tokens]
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()

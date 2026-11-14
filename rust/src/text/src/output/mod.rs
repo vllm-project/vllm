@@ -78,6 +78,7 @@ impl<T: TextOutputStream> T {
                         prompt_token_id_logprobs = start_prompt_token_id_logprobs;
                         prompt_token_ids = start_prompt_token_ids;
                     }
+                    DecodedTextEvent::PrefillProgress(_) => {}
                     DecodedTextEvent::TextDelta {
                         decoded,
                         sampled:

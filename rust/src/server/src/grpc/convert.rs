@@ -7,7 +7,7 @@
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
-use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::output::{PrefillProgress, StopReason};
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::structured_outputs::{
@@ -380,6 +380,13 @@ pub fn to_prompt_info(
         logprobs,
         ranks,
         candidate_tokens,
+    }
+}
+
+pub fn to_prefill_progress(progress: &PrefillProgress) -> pb::PrefillProgress {
+    pb::PrefillProgress {
+        remaining_prefill_tokens: u32::try_from(progress.remaining_prefill_tokens)
+            .unwrap_or(u32::MAX),
     }
 }
 

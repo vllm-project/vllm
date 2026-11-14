@@ -206,6 +206,12 @@ message GenerateResponse {
   // Only present in first response
   optional PromptInfo prompt_info = 1;
   SequenceOutput outputs = 2;
+  PrefillProgress prefill_progress = 3;
+}
+
+message PrefillProgress {
+  // Tokens still to compute for this request's prefill.
+  uint32 remaining_prefill_tokens = 1;
 }
 
 message SequenceOutput {

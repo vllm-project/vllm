@@ -109,6 +109,11 @@ class SchedulerConfig:
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
 
+    enable_prefill_progress: bool = False
+    """Report per-request prefill progress to the frontend, so a router can
+    price a running request by what the worker has left instead of by what it
+    charged at admission."""
+
     long_prefill_token_threshold_adaptive: bool = Field(default=False)
     """Floor the effective long prefill token threshold at a fair share of
     the token budget: max_num_batched_tokens divided by the number of
@@ -326,6 +331,7 @@ class SchedulerConfig:
             "max_num_inflight_kv_loads",
             "long_prefill_token_threshold",
             "long_prefill_token_threshold_adaptive",
+            "enable_prefill_progress",
             "max_num_queued_reqs",
             "max_num_queued_tokens",
             "enable_chunked_prefill",
