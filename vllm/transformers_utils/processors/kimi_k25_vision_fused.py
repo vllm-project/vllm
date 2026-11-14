@@ -155,7 +155,10 @@ def _to_pil(data: Any) -> Image.Image:
         if data.startswith("data:"):
             raw_base64 = data.split(",", 1)[1]
             return open_image(io.BytesIO(base64.b64decode(raw_base64))).convert("RGB")
-        return open_image(data).convert("RGB")
+        raise ValueError(
+            "Local image paths and URLs must be resolved by "
+            "MediaConnector before they reach the processor."
+        )
     if isinstance(data, bytes):
         return open_image(io.BytesIO(data)).convert("RGB")
     raise ValueError(f"Unsupported data type: {type(data)}")
