@@ -259,6 +259,13 @@ runtime and connector. HiSparse validates availability and cache formats before
 allocation. Streams, ordinary events, current-stream queries, and synchronization
 use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
 provides IPC event creation/import/export only for shared host pools.
+For private host pools, backends may override `allocate_host_backing(size)` and
+`host_pool_alignment`. The allocation must own contiguous one-dimensional int8
+CPU storage of the requested size. The common runtime retains its aligned views
+and registers the complete padded range with `pin_tensor`; it does not allocate
+a second pool. CUDA inherits the default CPU allocation and 4096-byte alignment,
+with its existing CUDA host-registration implementation. Shared mmap pools
+bypass the private-allocation hook.
 Without HiSparse, sparse attention keeps its normal stream and event path.
 ROCm does not currently provide a HiSparse backend.
 
