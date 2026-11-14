@@ -2502,14 +2502,14 @@ def test_persistent_state_layout_rejects_invalid_components(change):
 
 
 def _state_planning_error(
-    budget_pages, *, max_num_seqs=2, override=None, auto_fit=False
+    budget_pages, *, max_num_seqs=2, override=None, auto_fit=False, spec=None
 ):
     from tests.v1.core.utils import create_state_spec
 
     config = _state_config(max_num_seqs, override)
     if auto_fit:
         config.model_config.original_max_model_len = -1
-    spec = create_state_spec()
+    spec = spec or create_state_spec()
     with pytest.raises(ValueError) as rejected:
         get_kv_cache_configs(
             config,
@@ -2588,3 +2588,125 @@ def test_persistent_state_override_non_fit_states_the_pages(budget_pages, fit):
     message, _ = _state_planning_error(budget_pages, override=4)
     for figure in (4, fit, 32):
         assert mentions_number(message, figure), (figure, message)
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "override", "pages"),
+    [(2, None, 3), (7, None, 8), (2, 5, 5), (7, 2, 2)],
+    ids=["two-slots", "seven-slots", "override-above", "override-below"],
+)
+def test_planned_persistent_state_pages_follow_the_configuration(
+    max_num_seqs, override, pages
+):
+    """The planned page count is `num_gpu_blocks_override` when it is set and
+    `max_num_seqs + 1` otherwise, which is the pool that planning builds."""
+    from tests.v1.core.utils import create_state_spec
+
+    config = _state_config(max_num_seqs, override)
+    assert kv_cache_planning.planned_persistent_state_pages(config) == pages
+    spec = create_state_spec()
+    planned = get_kv_cache_configs(
+        config, [{"state": state_layer(spec)}], [100 * spec.page_size_bytes]
+    )[0]
+    assert planned.num_blocks == pages
+
+
+# Memory contributors: names of the model options that compete with the state
+# pages for device memory. They are diagnostic only.
+
+_CONTRIBUTORS = ("first_example_option", "second_example_option")
+
+
+@pytest.mark.parametrize("declared", [list(_CONTRIBUTORS), _CONTRIBUTORS, ()])
+def test_persistent_state_spec_stores_memory_contributors_as_a_tuple(declared):
+    """A spec keeps the declared names, in order, as a tuple; without a
+    declaration the tuple is empty. A copy of the spec keeps them."""
+    from tests.v1.core.utils import create_state_spec
+
+    spec = create_state_spec(memory_contributors=declared)
+    assert spec.memory_contributors == tuple(declared)
+    assert isinstance(spec.memory_contributors, tuple)
+    assert create_state_spec().memory_contributors == ()
+    assert copy.deepcopy(spec).memory_contributors == tuple(declared)
+
+
+@pytest.mark.parametrize(
+    ("declared", "error"),
+    [
+        ("first_example_option", TypeError),
+        ("", TypeError),
+        ((1,), TypeError),
+        (("first_example_option", None), TypeError),
+        (("",), ValueError),
+        (("first_example_option", ""), ValueError),
+        (("same", "same"), ValueError),
+    ],
+    ids=[
+        "bare-str",
+        "empty-bare-str",
+        "not-str",
+        "none-element",
+        "empty-name",
+        "empty-second-name",
+        "repeated",
+    ],
+)
+def test_persistent_state_spec_rejects_invalid_memory_contributors(declared, error):
+    """A `str` in place of the sequence, or an element that is not a `str`,
+    is a `TypeError`; an empty or repeated name is a `ValueError`."""
+    from tests.v1.core.utils import create_state_spec
+
+    with pytest.raises(error, match="memory contributor"):
+        create_state_spec(memory_contributors=declared)
+
+
+def test_persistent_state_specs_differing_only_in_contributors_are_equal():
+    """The names are not part of the layout: two specs that differ only in
+    them compare equal and hash alike."""
+    from tests.v1.core.utils import create_state_spec
+
+    named = create_state_spec(memory_contributors=_CONTRIBUTORS)
+    assert named == create_state_spec()
+    assert hash(named) == hash(create_state_spec())
+    assert named != create_state_spec(64)
+
+
+@pytest.mark.parametrize("contributors", [_CONTRIBUTORS, ()], ids=["named", "none"])
+@pytest.mark.parametrize(
+    ("budget_pages", "override"),
+    [(4, None), (1, None), (3, 4)],
+    ids=["one-short", "no-slot", "override"],
+)
+def test_persistent_state_non_fit_names_the_memory_contributors(
+    contributors, budget_pages, override
+):
+    """When the planned pages do not fit, the message also names each memory
+    contributor the spec declares: it is the message of a spec without
+    contributors with the names inserted, so its figures and its advice stay.
+    Without contributors the message is that message."""
+    from tests.v1.core.utils import create_state_spec
+
+    baseline, _ = _state_planning_error(budget_pages, max_num_seqs=4, override=override)
+    message, _ = _state_planning_error(
+        budget_pages,
+        max_num_seqs=4,
+        override=override,
+        spec=create_state_spec(memory_contributors=contributors),
+    )
+    if not contributors:
+        assert message == baseline
+        return
+    assert len(message) > len(baseline), message
+    prefix = 0
+    while prefix < len(baseline) and baseline[prefix] == message[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < len(baseline) - prefix
+        and baseline[-1 - suffix] == message[-1 - suffix]
+    ):
+        suffix += 1
+    assert prefix + suffix == len(baseline), (baseline, message)
+    inserted = message[prefix : len(message) - suffix]
+    for name in _CONTRIBUTORS:
+        assert name in inserted, (name, message)

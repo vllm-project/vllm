@@ -12,18 +12,28 @@ See https://github.com/vllm-project/vllm/issues/49224.
 
 import contextlib
 import gc
+import multiprocessing
+import threading
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import call_in_spawned_process, create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.config import (
+    StandaloneARSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
+    StandaloneARSpeculator,
+)
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
@@ -66,9 +76,11 @@ def _make_profiling_runner(
     )
     runner.speculator = None
     runner.vllm_config = SimpleNamespace()
+    runner.model_config = SimpleNamespace(enforce_eager=False)
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=encoder_only,
         encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
+        needs_cudagraph_capture=lambda: False,
     )
 
     events: list[str] = []
@@ -396,7 +408,9 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 
     runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
     runner.compilation_config.static_forward_context = {}
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, needs_cudagraph_capture=lambda: False
+    )
     runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
     runner.kv_caches = []
     runner.attn_groups = []
@@ -456,6 +470,7 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=False,
         _mamba_ctx=object(),
+        needs_cudagraph_capture=lambda: False,
     )
     runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
     runner.kv_caches = []
@@ -471,3 +486,603 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     cgu._teardown_profiling_state(runner)
 
     assert runner.model_state._mamba_ctx is None
+
+
+# The model-state graph hooks for a model without persistent state, through
+# the real estimate and the real warmup. A scenario is a model-state class and
+# engine arguments for a real model with dummy weights: facebook/opt-125m
+# under the default `cudagraph_mode`, or SmolVLM-256M for encoder graphs,
+# with the extensible KV cache off so that the estimate runs. `_observe_opt`
+# starts it once, in a new process, with the real constructors, and returns
+# plain data that the tests below assert on.
+
+MiB = 1 << 20
+START_TIMEOUT = 900
+
+# (hook, info) per recorded call, in call order.
+_HOOK_CALLS: list[tuple[str, dict]] = []
+# The exceptions the recording model states raised, in order.
+_RAISED: list[BaseException] = []
+# The recording workers built in this process.
+_WORKERS: list[Any] = []
+# (profile_only, bytes) for each `capture_model` call of a recording runner.
+_CAPTURE_RESULTS: list[tuple[bool, int]] = []
+
+
+class _HookError(RuntimeError):
+    """What a recording model state raises when asked to fail."""
+
+
+def _record(hook: str, **info: Any) -> dict:
+    _HOOK_CALLS.append((hook, info))
+    return info
+
+
+class _RecordingModelState(DefaultModelState):
+    """Records the hook calls. It keeps the default capture predicate."""
+
+    captures = False
+    fails: frozenset[str] = frozenset()
+
+    def _maybe_fail(self, hook: str) -> None:
+        if hook in self.fails:
+            error = _HookError(f"{hook} failed")
+            _RAISED.append(error)
+            raise error
+
+    def initialize_kv_cache(self, kv_cache_config, block_tables) -> None:
+        super().initialize_kv_cache(kv_cache_config, block_tables)
+        _record("initialize_kv_cache")
+
+    def capture_inner_cudagraphs(self, *args, **kwargs) -> None:
+        super().capture_inner_cudagraphs(*args, **kwargs)
+        _record("capture_inner_cudagraphs")
+        self._maybe_fail("capture_inner_cudagraphs")
+
+    def needs_cudagraph_capture(self) -> bool:
+        _record("needs_cudagraph_capture")
+        return self.captures
+
+    def capture_cudagraphs(self, *, graph_pool, stream, profile_only) -> None:
+        runner = _WORKERS[-1].model_runner
+        lora_manager = getattr(runner, "lora_manager", None)
+        info = _record(
+            "capture_cudagraphs",
+            profile_only=profile_only,
+            has_bindings=self.state_slots is not None,
+            graphs_captured=compilation_counter.num_cudagraph_captured,
+            stream_is_current=torch.cuda.current_stream(self.device) == stream,
+            dummy_loras=(
+                None if lora_manager is None else sorted(lora_manager.list_adapters())
+            ),
+            encoder_graphs_captured=(
+                self.supports_mm_inputs
+                and self.encoder_runner.cudagraph_manager is not None
+                and self.encoder_runner.cudagraph_manager.is_captured()
+            ),
+        )
+        # A fresh allocation: with the caching allocator emptied, the 64 MiB
+        # cannot come out of memory that an earlier capture left reserved.
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        free = torch.cuda.mem_get_info(self.device)[0]
+        reserved = torch.cuda.memory_reserved(self.device)
+        self._scratch = torch.zeros(64 * MiB, dtype=torch.uint8, device=self.device)
+        torch.cuda.synchronize(self.device)
+        info["device_bytes_taken"] = free - torch.cuda.mem_get_info(self.device)[0]
+        info["reserved_bytes_taken"] = (
+            torch.cuda.memory_reserved(self.device) - reserved
+        )
+
+    def clear_cudagraphs(self) -> None:
+        _record("clear_cudagraphs", has_bindings=self.state_slots is not None)
+        self._scratch = None
+        self._maybe_fail("clear_cudagraphs")
+
+    def dummy_sampler_run(self, sampler, hidden_states) -> bool:
+        _record("dummy_sampler_run")
+        return super().dummy_sampler_run(sampler, hidden_states)
+
+    def post_warmup(self) -> None:
+        from vllm.v1.worker.workspace import current_workspace_manager
+
+        _record("post_warmup", workspace_locked=current_workspace_manager().is_locked())
+
+    def shutdown(self) -> None:
+        _record("shutdown")
+
+
+class _CapturingModelState(_RecordingModelState):
+    """A model state that captures graphs of its own."""
+
+    captures = True
+
+
+class _InnerCaptureFailsModelState(_CapturingModelState):
+    """Its inner graphs, captured with the decoder's, fail."""
+
+    fails = frozenset({"capture_inner_cudagraphs"})
+
+
+class _InnerCaptureAndReleaseFailModelState(_CapturingModelState):
+    fails = frozenset({"capture_inner_cudagraphs", "clear_cudagraphs"})
+
+
+class _RecordingRunner(mrv2.GPUModelRunner):
+    """The standard runner; it records what each `capture_model` returns."""
+
+    def capture_model(self, *, profile_only: bool = False) -> int:
+        captured = super().capture_model(profile_only=profile_only)
+        _CAPTURE_RESULTS.append((profile_only, int(captured)))
+        return captured
+
+
+class _RecordingWorker(gpu_worker.Worker):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        _WORKERS.append(self)
+
+    def _make_model_runner(self) -> mrv2.GPUModelRunner:
+        return _RecordingRunner(self.vllm_config, self.device)
+
+
+class _RecordingSpeculator(StandaloneARSpeculator):
+    """The draft-model speculator; it records when its capture is done."""
+
+    def capture(self) -> None:
+        super().capture()
+        _record("speculator_capture")
+
+
+class _RecordingSpeculatorConfig(StandaloneARSpeculatorConfig):
+    speculator_class = f"{__name__}.{_RecordingSpeculator.__qualname__}"
+
+
+class _OwnCaptureRunner(mrv2.GPUModelRunner):
+    """Replaces capture and its predicate without calling `GPUModelRunner`'s,
+    as the encoder-only runner does."""
+
+    def needs_cudagraph_capture(self) -> bool:
+        return False
+
+    def capture_model(self, *, profile_only: bool = False) -> int:
+        return 0
+
+
+class _OwnCaptureRunnerWorker(_RecordingWorker):
+    def _make_model_runner(self) -> mrv2.GPUModelRunner:
+        return _OwnCaptureRunner(self.vllm_config, self.device)
+
+
+_OPT = dict(
+    model="facebook/opt-125m",
+    base="vllm.model_executor.models.opt.OPTForCausalLM",
+    max_model_len=64,
+)
+# A small model whose vision encoder supports CUDA graphs. `cudagraph_mode`
+# is NONE, so the encoder graphs are the runner's only ones.
+_SMOLVLM = dict(
+    model="HuggingFaceTB/SmolVLM-256M-Instruct",
+    base="vllm.model_executor.models.idefics3.Idefics3ForConditionalGeneration",
+    max_model_len=4096,
+    limit_mm_per_prompt={"image": 1},
+    compilation_config={
+        "cudagraph_mode": "NONE",
+        "cudagraph_mm_encoder": True,
+        "encoder_cudagraph_token_budgets": [4096],
+    },
+)
+
+
+def _opt(state: type[DefaultModelState], *, start: str = "estimate", **engine_args):
+    return dict(state=state, start=start, engine_args={**_OPT, **engine_args})
+
+
+_OPT_SCENARIOS = {
+    "default-predicate": _opt(_RecordingModelState),
+    "own-capture-runner": _opt(
+        _CapturingModelState,
+        worker_cls=f"{__name__}.{_OwnCaptureRunnerWorker.__qualname__}",
+    ),
+    "capturing": _opt(_CapturingModelState),
+    "capturing-lora": _opt(
+        _CapturingModelState, enable_lora=True, max_loras=1, max_lora_rank=8
+    ),
+    # A draft model that speculates for the target, through a registered
+    # speculative method whose speculator records its capture.
+    "capturing-speculator": _opt(
+        _CapturingModelState,
+        speculative_config={
+            "method": "recording_draft_model",
+            "model": "facebook/opt-125m",
+            "num_speculative_tokens": 2,
+        },
+    ),
+    "inner-capture-fails": _opt(_InnerCaptureFailsModelState),
+    "inner-capture-and-release-fail": _opt(_InnerCaptureAndReleaseFailModelState),
+    "capturing-start": _opt(_CapturingModelState, start="engine"),
+    "pooling-start": _opt(
+        _RecordingModelState, start="engine", runner="pooling", convert="embed"
+    ),
+    "encoder-default-predicate": _opt(_RecordingModelState, **_SMOLVLM),
+    "encoder-capturing": _opt(_CapturingModelState, **_SMOLVLM),
+}
+
+
+def _observe_opt(name: str) -> dict:
+    """Start scenario `name` in this process and return what was observed."""
+    import logging
+
+    from vllm import ModelRegistry
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+    from vllm.v1.core.kv_cache_planning import get_global_kv_cache_groups
+    from vllm.v1.engine.core import EngineCore
+    from vllm.v1.executor.uniproc_executor import UniProcExecutor
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        register_speculative_method,
+    )
+
+    scenario = _OPT_SCENARIOS[name]
+    model_state_cls = scenario["state"]
+    engine_args = {
+        "worker_cls": f"{__name__}.{_RecordingWorker.__qualname__}",
+        **scenario["engine_args"],
+    }
+
+    class RecordingModel(resolve_obj_by_qualname(engine_args.pop("base"))):  # type: ignore[misc]
+        @classmethod
+        def get_model_state_cls(cls) -> type[DefaultModelState]:
+            return model_state_cls
+
+    ModelRegistry.register_model("RecordingModel", RecordingModel)
+    register_speculative_method("recording_draft_model", _RecordingSpeculatorConfig)
+    config = EngineArgs(
+        hf_overrides={"architectures": ["RecordingModel"]},
+        load_format="dummy",
+        max_num_seqs=2,
+        enable_extensible_kv_cache=False,
+        **engine_args,
+    ).create_engine_config()
+    seen: dict = dict(
+        error=None,
+        cudagraph_mode=config.compilation_config.cudagraph_mode.name,
+        extensible_kv_cache=config.cache_config.enable_extensible_kv_cache,
+    )
+
+    def failure(error: BaseException) -> dict:
+        raised = [i for i, e in enumerate(_RAISED) if e is error]
+        return dict(type=type(error).__name__, raised=raised[0] if raised else None)
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    logging.getLogger("vllm").addHandler(handler)
+
+    if scenario["start"] == "engine":
+        core = EngineCore(
+            vllm_config=config, executor_class=UniProcExecutor, log_stats=False
+        )
+        seen["startup_calls"] = len(_HOOK_CALLS)
+        core.shutdown()
+        seen["calls"] = list(_HOOK_CALLS)
+    else:
+        executor = UniProcExecutor(config)
+        try:
+            # What the engine core does before it profiles memory.
+            layer_configs = executor.get_kv_cache_layer_configs()
+            layout = resolve_kv_cache_layout(
+                config,
+                executor.get_supported_kv_cache_layouts(),
+                [lc for layers in layer_configs for lc in layers.values()],
+            )
+            groups = get_global_kv_cache_groups(config, layer_configs)
+            config.adjust_dcp_kv_cache_interleave_size(groups)
+            executor.set_kv_cache_layout(
+                layout.name, config.parallel_config.cp_kv_cache_interleave_size
+            )
+            _HOOK_CALLS.clear()
+            try:
+                executor.determine_available_memory()
+            except Exception as error:
+                seen["error"] = failure(error)
+            worker = executor.driver_worker.worker
+            runner = worker.model_runner
+            lora_manager = getattr(runner, "lora_manager", None)
+            seen["after_estimate"] = dict(
+                estimate=getattr(worker, "cudagraph_memory_estimate", None),
+                own_capture_runner=isinstance(runner, _OwnCaptureRunner),
+                runner_needs_capture=runner.needs_cudagraph_capture(),
+                runner_has_bindings=runner.state_slots is not None,
+                loras=(
+                    None
+                    if lora_manager is None
+                    else sorted(lora_manager.list_adapters())
+                ),
+            )
+            # The estimate's calls only: the shutdown below has its own hook.
+            seen["calls"] = list(_HOOK_CALLS)
+        finally:
+            executor.shutdown()
+
+    seen["capture_results"] = list(_CAPTURE_RESULTS)
+    seen["logged_raised"] = sorted(
+        {
+            index
+            for record in records
+            if record.exc_info and record.exc_info[2] is not None
+            for index, error in enumerate(_RAISED)
+            if record.exc_info[1] is error
+        }
+    )
+    return seen
+
+
+@pytest.fixture(scope="module")
+def opt_started():
+    """Returns what `_observe_opt` saw of a scenario. Each scenario starts
+    once per module, in a new process; a start that failed or timed out is
+    not repeated, and every test of its scenario fails with its error."""
+    observed: dict[str, dict | RuntimeError] = {}
+
+    def start(name: str) -> dict:
+        if name not in observed:
+            try:
+                observed[name] = call_in_spawned_process(
+                    _observe_opt, name, timeout=START_TIMEOUT
+                )
+            except RuntimeError as error:
+                observed[name] = error
+        seen = observed[name]
+        if isinstance(seen, RuntimeError):
+            raise RuntimeError(f"scenario {name!r} did not start: {seen}")
+        return seen
+
+    return start
+
+
+def _hooks(seen: dict) -> list[str]:
+    return [hook for hook, _ in seen["calls"]]
+
+
+def _infos(seen: dict, hook: str) -> list[dict]:
+    return [info for called, info in seen["calls"] if called == hook]
+
+
+# `call_in_spawned_process`, which the scenarios above start through.
+
+
+def _double(value: int) -> int:
+    return 2 * value
+
+
+def _refuse(value: int) -> int:
+    raise ValueError(f"refused {value}")
+
+
+def _never_return(value: int) -> int:
+    threading.Event().wait()
+    return value
+
+
+def test_call_in_spawned_process_returns_the_result():
+    assert call_in_spawned_process(_double, 21, timeout=START_TIMEOUT) == 42
+
+
+def test_call_in_spawned_process_raises_with_the_childs_traceback():
+    with pytest.raises(RuntimeError, match="ValueError: refused 3"):
+        call_in_spawned_process(_refuse, 3, timeout=START_TIMEOUT)
+
+
+def test_call_in_spawned_process_ends_a_call_that_does_not_finish():
+    """A call that outlasts its timeout raises, and its process is gone when
+    the helper returns."""
+    with pytest.raises(RuntimeError, match="did not finish within 1 s"):
+        call_in_spawned_process(_never_return, 0, timeout=1)
+    assert multiprocessing.active_children() == []
+
+
+_GRAPH_HOOKS = {"capture_cudagraphs", "clear_cudagraphs"}
+
+_NEEDS_DEVICE = pytest.mark.skipif(
+    not cgu.current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
+
+
+@_NEEDS_DEVICE
+def test_estimate_calls_no_capture_hook_with_the_default_predicate(opt_started):
+    """A model state that keeps the default predicate gets no capture call
+    and no `clear_cudagraphs` call, although the estimate captured the
+    runner's decoder graphs, and its inner graphs, over a temporary KV
+    cache."""
+    seen = opt_started("default-predicate")
+    assert seen["cudagraph_mode"] != "NONE" and not seen["extensible_kv_cache"]
+    assert seen["after_estimate"]["estimate"] > 0
+    assert "initialize_kv_cache" in _hooks(seen)
+    assert "capture_inner_cudagraphs" in _hooks(seen)
+    assert not _GRAPH_HOOKS & set(_hooks(seen))
+
+
+@_NEEDS_DEVICE
+def test_estimate_calls_no_capture_hook_for_a_runner_with_its_own_capture(
+    opt_started,
+):
+    """For a runner that replaces `capture_model` and
+    `needs_cudagraph_capture`, and whose predicate returns `False`, the
+    estimate allocates its temporary KV cache, captures nothing and tears
+    down. No graph-capture hook is called, although the model state's
+    predicate would return `True`."""
+    seen = opt_started("own-capture-runner")
+    assert seen["cudagraph_mode"] != "NONE" and not seen["extensible_kv_cache"]
+    assert seen["after_estimate"]["own_capture_runner"] is True
+    assert seen["after_estimate"]["estimate"] == 0
+    assert "initialize_kv_cache" in _hooks(seen)
+    assert not (_GRAPH_HOOKS | {"needs_cudagraph_capture"}) & set(_hooks(seen))
+
+
+@_NEEDS_DEVICE
+def test_estimate_captures_model_state_graphs_after_the_decoder_graphs(opt_started):
+    """With decoder graphs to capture, `capture_model` calls
+    `capture_cudagraphs` once, with `profile_only=True`, after the decoder
+    graphs and the model state's inner graphs."""
+    seen = opt_started("capturing")
+    (capture,) = _infos(seen, "capture_cudagraphs")
+    assert capture["profile_only"] is True
+    assert capture["graphs_captured"] > 0
+    hooks = _hooks(seen)
+    assert hooks.index("capture_inner_cudagraphs") < hooks.index("capture_cudagraphs")
+
+
+@_NEEDS_DEVICE
+def test_capture_result_includes_what_the_model_state_call_added(opt_started):
+    """The call precedes `capture_model`'s last free-memory reading: the
+    graph memory it returns exceeds what the same capture returns without a
+    model-state call by the 64 MiB the call kept, less an allowance of 8 MiB
+    for allocator rounding between the two starts."""
+    seen = opt_started("capturing")
+    (capture,) = _infos(seen, "capture_cudagraphs")
+    assert capture["reserved_bytes_taken"] >= 64 * MiB
+    assert capture["device_bytes_taken"] >= 64 * MiB
+    ((profile_only, captured),) = seen["capture_results"]
+    ((_, without_call),) = opt_started("default-predicate")["capture_results"]
+    assert profile_only is True
+    # Both figures, for the record of a failure.
+    assert captured - without_call >= (64 - 8) * MiB, (captured, without_call)
+
+
+@_NEEDS_DEVICE
+def test_capture_call_follows_the_speculator_graphs(opt_started):
+    """With a draft-model speculator, `capture_model` calls
+    `capture_cudagraphs` after the speculator's capture has completed."""
+    hooks = _hooks(opt_started("capturing-speculator"))
+    assert hooks.count("speculator_capture") == 1
+    assert hooks.count("capture_cudagraphs") == 1
+    assert hooks.index("speculator_capture") < hooks.index("capture_cudagraphs")
+
+
+@_NEEDS_DEVICE
+def test_encoder_graphs_alone_make_the_runner_capture(opt_started):
+    """Under `cudagraph_mode` NONE, a model state with encoder graphs and the
+    default predicate makes the runner report graphs to capture: the estimate
+    allocates its temporary KV cache and captures, and calls no graph hook of
+    the model state."""
+    seen = opt_started("encoder-default-predicate")
+    assert seen["cudagraph_mode"] == "NONE"
+    assert seen["after_estimate"]["runner_needs_capture"] is True
+    assert seen["after_estimate"]["estimate"] > 0
+    assert "initialize_kv_cache" in _hooks(seen)
+    assert not _GRAPH_HOOKS & set(_hooks(seen))
+
+
+@_NEEDS_DEVICE
+def test_capture_call_follows_the_encoder_graphs(opt_started):
+    """`capture_model` calls `capture_cudagraphs` once the encoder graphs are
+    captured, also when no decoder graph is captured."""
+    seen = opt_started("encoder-capturing")
+    assert seen["cudagraph_mode"] == "NONE"
+    (capture,) = _infos(seen, "capture_cudagraphs")
+    assert capture["encoder_graphs_captured"] is True
+    assert "capture_inner_cudagraphs" not in _hooks(seen)
+
+
+@_NEEDS_DEVICE
+def test_capture_without_state_bindings_runs_without_a_window(opt_started):
+    """A model state without persistent state has no bindings, so its capture
+    call opens no startup-access window; the call runs and the estimate
+    completes."""
+    seen = opt_started("capturing")
+    assert seen["error"] is None
+    (capture,) = _infos(seen, "capture_cudagraphs")
+    assert capture["has_bindings"] is False
+    assert capture["stream_is_current"] is True
+    assert seen["after_estimate"]["runner_has_bindings"] is False
+
+
+@_NEEDS_DEVICE
+def test_estimate_clears_a_model_state_without_persistent_state_once(opt_started):
+    """The estimate's teardown calls `clear_cudagraphs` once, after the
+    capture, for a model state without persistent state too."""
+    hooks = _hooks(opt_started("capturing"))
+    assert hooks.count("clear_cudagraphs") == 1
+    assert hooks.index("capture_cudagraphs") < hooks.index("clear_cudagraphs")
+
+
+@_NEEDS_DEVICE
+def test_capture_call_is_inside_the_dummy_lora_scope(opt_started):
+    """With LoRA enabled, the dummy LoRA of the capture is loaded while
+    `capture_cudagraphs` runs and removed when `capture_model` returns."""
+    seen = opt_started("capturing-lora")
+    (capture,) = _infos(seen, "capture_cudagraphs")
+    assert capture["dummy_loras"] == [1]
+    assert seen["after_estimate"]["loras"] == []
+
+
+@_NEEDS_DEVICE
+def test_estimate_clears_when_the_capture_call_was_not_reached(opt_started):
+    """When the runner's own capture raises before `capture_cudagraphs` is
+    reached, here in the model state's inner graphs, that exception fails the
+    estimate and the teardown still calls `clear_cudagraphs` once."""
+    seen = opt_started("inner-capture-fails")
+    assert seen["error"] == dict(type="_HookError", raised=0)
+    hooks = _hooks(seen)
+    assert "capture_cudagraphs" not in hooks
+    assert hooks.count("clear_cudagraphs") == 1
+    assert hooks.index("capture_inner_cudagraphs") < hooks.index("clear_cudagraphs")
+
+
+@_NEEDS_DEVICE
+def test_runner_capture_failure_outranks_a_failed_release(opt_started):
+    """When the runner's own capture raised and `clear_cudagraphs` then
+    raises too, the capture's exception is the one that propagates, and the
+    exception from `clear_cudagraphs` is logged with its traceback."""
+    seen = opt_started("inner-capture-and-release-fail")
+    assert seen["error"] == dict(type="_HookError", raised=0)
+    assert _hooks(seen).count("clear_cudagraphs") == 1
+    assert seen["logged_raised"] == [1]
+
+
+@_NEEDS_DEVICE
+def test_non_state_start_captures_then_calls_post_warmup_once(opt_started):
+    """A model without persistent state whose state captures gets, in the
+    worker's warmup, one `profile_only=False` capture, then the sampler
+    warmup, then `post_warmup` once, with the workspace locked."""
+    seen = opt_started("capturing-start")
+    startup = seen["calls"][: seen["startup_calls"]]
+    hooks = [hook for hook, _ in startup]
+    serving = [
+        index
+        for index, (hook, info) in enumerate(startup)
+        if hook == "capture_cudagraphs" and not info["profile_only"]
+    ]
+    assert len(serving) == 1
+    assert hooks.count("post_warmup") == 1
+    last_sampler_warmup = len(hooks) - 1 - hooks[::-1].index("dummy_sampler_run")
+    assert serving[0] < last_sampler_warmup < hooks.index("post_warmup")
+    assert _infos(seen, "post_warmup")[0]["workspace_locked"] is True
+
+
+@_NEEDS_DEVICE
+def test_non_state_shutdown_calls_the_hook_once(opt_started):
+    """Shutting the engine down calls `shutdown` once on a model state
+    without persistent state, after startup."""
+    seen = opt_started("capturing-start")
+    assert _hooks(seen)[seen["startup_calls"] :].count("shutdown") == 1
+    assert _hooks(seen)[: seen["startup_calls"]].count("shutdown") == 0
+
+
+@_NEEDS_DEVICE
+def test_pooling_start_calls_post_warmup_once(opt_started):
+    """A pooling model's warmup, which warms no sampler up, still calls
+    `post_warmup` once."""
+    seen = opt_started("pooling-start")
+    hooks = _hooks(seen)
+    assert "dummy_sampler_run" not in hooks
+    assert hooks[: seen["startup_calls"]].count("post_warmup") == 1
+
+
+@_NEEDS_DEVICE
+def test_pooling_shutdown_calls_the_hook_once(opt_started):
+    """Shutting a pooling engine down calls `shutdown` once on its model
+    state."""
+    assert _hooks(opt_started("pooling-start")).count("shutdown") == 1

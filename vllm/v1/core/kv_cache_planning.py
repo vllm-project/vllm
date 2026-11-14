@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     PersistentStateSpec,
     compute_layout_strides,
+    memory_contributors_note,
 )
 
 if TYPE_CHECKING:
@@ -1599,6 +1600,15 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def planned_persistent_state_pages(vllm_config: VllmConfig) -> int:
+    """The page count of the persistent-state pool: `num_gpu_blocks_override`
+    when set, else `max_num_seqs` slots plus the null page."""
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    if override is not None:
+        return override
+    return vllm_config.scheduler_config.max_num_seqs + 1
+
+
 def _plan_persistent_state_pool(
     builder: KVCacheConfigBuilder,
     vllm_config: VllmConfig,
@@ -1611,7 +1621,7 @@ def _plan_persistent_state_pool(
     page = _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
     override = vllm_config.cache_config.num_gpu_blocks_override
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-    planned = max_num_seqs + 1 if override is None else override
+    planned = planned_persistent_state_pages(vllm_config)
     fit = available_memory // page
     if fit >= planned:
         return planned * page
@@ -1623,11 +1633,14 @@ def _plan_persistent_state_pool(
             if fit >= 2
             else "no slot fits, since one page is the null page"
         )
-    raise ValueError(
+    message = (
         f"Persistent state needs {planned} pages of {page} bytes ({source}), but "
         f"the KV cache budget holds {fit} pages: {advice}, or give the KV cache "
         "more memory (gpu_memory_utilization or kv_cache_memory_bytes)."
     )
+    if note := memory_contributors_note(groups):
+        message += f" {note}"
+    raise ValueError(message)
 
 
 def _persistent_state_specs(

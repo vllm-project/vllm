@@ -296,7 +296,11 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
         vllm_config=config,
         randomize_dummy_inputs=True,
         cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
-        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        model_runner=SimpleNamespace(
+            profile_run=profile_run,
+            prepare_execution_memory=lambda: None,
+            model_memory_usage=0,
+        ),
         init_snapshot=SimpleNamespace(free_memory=2),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
     )
@@ -359,6 +363,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
         parallel_config=SimpleNamespace(),
         model_runner=SimpleNamespace(
             profile_run=lambda **kwargs: None,
+            prepare_execution_memory=lambda: None,
             model_memory_usage=0,
             profile_cudagraph_memory=profile_cudagraph_memory,
         ),
@@ -669,6 +674,7 @@ def test_every_pp_rank_runs_a_forward_before_the_sync_check(
             lora_config=None,
             _dummy_run=dummy_run,
             _dummy_sampler_run=lambda hidden_states: log.append("sampler"),
+            model_state=SimpleNamespace(post_warmup=lambda: None),
         ),
         _maybe_activate_jit_monitor=lambda: None,
     )

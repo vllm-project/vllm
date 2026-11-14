@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bounded session views and the state-write completion contract."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -120,6 +121,44 @@ class StateSlotRows:
         return MappingProxyType(slots.views[self.layer]._views)
 
 
+@dataclass(frozen=True)
+class StatePoolLayout:
+    """Where one component pool lives, as plain values."""
+
+    data_ptr: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: torch.dtype
+
+
+@dataclass(frozen=True)
+class StartupPoolAccess:
+    """A state layer's component pools during a `capture_cudagraphs` call.
+
+    It grants no slot ownership and authorizes no stores to resident pages,
+    including the null page. It is valid only inside the window that issued
+    it; tensors already returned are not revoked.
+    """
+
+    _bindings: "StateSlotBindings"
+    _window: object
+    layer: str
+
+    def _live_views(self) -> StateSlotViews:
+        if self._bindings._startup_window is not self._window:
+            raise ValueError("Stale startup pool access")
+        return self._bindings.views[self.layer]
+
+    @property
+    def spec(self) -> PersistentStateSpec:
+        return self._live_views().spec
+
+    @property
+    def component_pools(self) -> Mapping[str, torch.Tensor]:
+        """One tensor per descriptor, covering every page."""
+        return MappingProxyType(self._live_views()._views)
+
+
 class StateSlotBindings:
     def __init__(
         self,
@@ -136,6 +175,53 @@ class StateSlotBindings:
         self._main_stream: torch.cuda.Stream | None = None
         self._cleaning_up = False
         self._step_id: object | None = None
+        self._startup_window: object | None = None
+
+    @contextmanager
+    def _startup_access_window(self) -> Iterator[None]:
+        """Admit `startup_pool_access` for one `capture_cudagraphs` call.
+
+        For the runner only: it opens the window around the call, and a model
+        never opens one. Leaving it invalidates every access object it issued.
+        """
+        if self._startup_window is not None:
+            raise RuntimeError("A startup-access window is already open")
+        self._startup_window = object()
+        try:
+            yield
+        finally:
+            self._startup_window = None
+
+    def startup_pool_access(self, layer: str) -> StartupPoolAccess:
+        """Expose every page of a state layer's pools, including the null page
+        and unbound slots, while a startup-access window is open."""
+        if self._startup_window is None:
+            raise ValueError(
+                "Startup pool access is available only during capture_cudagraphs"
+            )
+        if layer not in self.views:
+            raise ValueError("Unknown state group")
+        return StartupPoolAccess(self, self._startup_window, layer)
+
+    def pool_layout(self, layer: str) -> Mapping[str, StatePoolLayout]:
+        """Snapshot a state layer's pool layout, keyed by descriptor name.
+
+        The snapshot holds plain values only, so a model can compare it with
+        what a capture recorded without keeping the pools alive.
+        """
+        if layer not in self.views:
+            raise ValueError("Unknown state group")
+        return MappingProxyType(
+            {
+                name: StatePoolLayout(
+                    pool.data_ptr(),
+                    tuple(pool.shape),
+                    tuple(pool.stride()),
+                    pool.dtype,
+                )
+                for name, pool in self.views[layer]._views.items()
+            }
+        )
 
     def _validate_rows(
         self,

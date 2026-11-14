@@ -995,13 +995,15 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
 
     Called during memory profiling, *before* the real KV cache is allocated,
     so that `Worker.determine_available_memory` can reserve headroom for
-    graph capture. Bootstraps a minimal KV cache, runs `capture_model()`
-    once, then releases everything so the real init/capture path starts clean.
+    graph capture. Bootstraps a minimal KV cache (a persistent-state pool of
+    the planned size when the model state captures its own graphs), runs
+    `capture_model()` once, then releases everything so the real init/capture
+    path starts clean.
 
     FULL graphs bake in KV cache pointers, so only the largest few are
     captured (into a throwaway pool) and their total cost is extrapolated.
-    PIECEWISE, encoder and speculator graphs are measured in full. All
-    profiling captures are discarded afterwards: replaying graphs recorded
+    PIECEWISE, encoder, speculator and model-state graphs are measured in
+    full. All profiling captures are discarded afterwards: replaying graphs recorded
     against the throwaway profiling state is unsafe (e.g. inductor graph
     partition reclaims the storages of earlier cudagraph recordings once the
     real capture records new ones, leading to use-after-free crashes).
@@ -1070,14 +1072,22 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             with capture_outside_cumem_pool():
                 measured = int(runner.capture_model(profile_only=True))
 
-            # The measured delta covers PIECEWISE, encoder and speculator graphs
-            # plus the sampled FULL graphs; swap the sampled FULL cost for the
-            # extrapolated total. FULL and PIECEWISE share one pool here just as
-            # they share the global pool at runtime, so the overlap is not
-            # double-counted.
+            # The measured delta covers PIECEWISE, encoder, speculator and
+            # model-state graphs plus the sampled FULL graphs; swap the sampled
+            # FULL cost for the extrapolated total. FULL and PIECEWISE share one
+            # pool here just as they share the global pool at runtime, so the
+            # overlap is not double-counted.
             num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
             full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
-            return max(measured - sum(mem_samples) + full_estimate, 0)
+            estimate = max(measured - sum(mem_samples) + full_estimate, 0)
+        except BaseException:
+            # This failure propagates; one from the release is only logged.
+            _clear_model_state_cudagraphs(runner, after_failure=True)
+            raise
+        else:
+            # A failure here propagates once the teardown below has run.
+            _clear_model_state_cudagraphs(runner)
+            return estimate
         finally:
             compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
             compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
@@ -1099,6 +1109,34 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         platform_cls._global_graph_pool = saved_global_pool
 
 
+def _model_state_captures(runner: "GPUModelRunner") -> bool:
+    """Whether the runner's capture_model() calls the model state's
+    `capture_cudagraphs`. A runner with its own capture is asked first, so one
+    that captures nothing never reaches the model state."""
+    return (
+        runner.needs_cudagraph_capture()
+        and runner.model_state_needs_cudagraph_capture()
+    )
+
+
+def _clear_model_state_cudagraphs(
+    runner: "GPUModelRunner", *, after_failure: bool = False
+) -> None:
+    """Have the model state release what it captured against the profiling
+    state, while it still holds the profiling bindings. With `after_failure`,
+    a failure is logged instead of replacing the one already propagating."""
+    try:
+        if _model_state_captures(runner):
+            runner.model_state.clear_cudagraphs()
+    except BaseException:
+        if not after_failure:
+            raise
+        logger.exception(
+            "The model state failed to release its profiling CUDA graphs "
+            "after an earlier failure"
+        )
+
+
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
     """Extrapolate the total FULL capture cost from samples of the largest
     graphs. The first capture allocates the pool baseline; later graphs mostly
@@ -1113,7 +1151,10 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups_from_builder,
+        planned_persistent_state_pages,
+    )
 
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
@@ -1127,6 +1168,14 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     minimal_config = builder.get_kv_cache_config_from_groups(
         runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
     )
+    if minimal_config.state_groups and _model_state_captures(runner):
+        # The model state captures over its state pool, so the profiling
+        # capture needs the pool the serving capture will see.
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            runner.vllm_config,
+            kv_cache_groups,
+            num_blocks=planned_persistent_state_pages(runner.vllm_config),
+        )
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)
     runner.cache_config.num_gpu_blocks = minimal_config.num_blocks

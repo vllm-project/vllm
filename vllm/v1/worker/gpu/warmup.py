@@ -25,7 +25,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroup
+from vllm.v1.kv_cache_interface import KVCacheGroup, PersistentStateSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.extensible_kv_cache import (
     ensure_kv_cache_blocks,
@@ -122,6 +122,18 @@ def _cap_num_warmup_reqs(
     )
 
 
+def _holds_persistent_state(model_runner: GPUModelRunner) -> bool:
+    """Whether a synthetic scheduler step cannot run on this layout: its
+    requests carry no scheduler-issued state handles and assume token prefill
+    and decode, while a persistent-state request's step is model-defined."""
+    kv_cache_config = getattr(model_runner, "kv_cache_config", None)
+    return kv_cache_config is not None and any(
+        isinstance(spec, PersistentStateSpec)
+        for group in kv_cache_config.kv_cache_groups
+        for spec in group.distinct_specs
+    )
+
+
 def _run_step(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any] | None,
@@ -182,6 +194,8 @@ def run_mixed_prefill_decode_warmup(
     """
     with_decode = model_runner.max_num_reqs >= 2
     if model_runner.is_pooling_model or not (with_decode or prefill_only_fallback):
+        return False
+    if _holds_persistent_state(model_runner):
         return False
 
     max_prefill_len = model_runner.max_model_len - 1
@@ -576,6 +590,8 @@ def _warmup_kernels(
     greedy: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
+        return
+    if _holds_persistent_state(model_runner):
         return
 
     num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens

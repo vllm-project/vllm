@@ -225,6 +225,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     runner.vllm_config = vllm_config
     runner.model = model
     runner.aux_output_connector = None
+    runner.model_state = SimpleNamespace(prepare_execution_memory=lambda: None)
     runner.supports_mm_inputs = False
     runner.is_last_pp_rank = False
     runner.max_num_tokens = 8
@@ -449,8 +450,11 @@ def _make_capture_runner(
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(
-        supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
+        supports_mm_inputs=False,
+        capture_inner_cudagraphs=Mock(),
+        needs_cudagraph_capture=lambda: False,
     )
+    runner.model_config = SimpleNamespace(enforce_eager=False)
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
@@ -795,6 +799,196 @@ def test_state_rows_only_for_the_current_steps_handles():
     with pytest.raises(ValueError, match="Stale state step access"):
         earlier.component_pools  # noqa: B018
     assert bindings.bind_rows("state", ("b",), (second,)).slot_indices_cpu == (2,)
+
+
+# Startup pool access and the pool layout: what a model that captures CUDA
+# graphs over its state pools reads before any request exists. The tests open
+# the startup-access window as the runner does around `capture_cudagraphs`.
+
+
+def test_startup_pool_access_is_refused_outside_a_window():
+    """`startup_pool_access` raises while no startup-access window is open on
+    the bindings: before the first window and after it has closed."""
+    bindings = _state_bindings()
+    with pytest.raises(ValueError):
+        bindings.startup_pool_access("state")
+    with bindings._startup_access_window():
+        bindings.startup_pool_access("state")
+    with pytest.raises(ValueError):
+        bindings.startup_pool_access("state")
+
+
+def test_startup_pool_access_exposes_every_page_of_each_component():
+    """Inside a window, the access gives the layer's spec and one tensor per
+    descriptor that covers every page, the null page and unbound slots
+    included."""
+    bindings = _state_bindings()
+    with bindings._startup_access_window():
+        access = bindings.startup_pool_access("state")
+        assert access.spec == bindings.views["state"].spec
+        pools = access.component_pools
+        assert {name: tuple(pool.shape) for name, pool in pools.items()} == {
+            "hidden": (3, 4),
+            "count": (3, 2),
+        }
+        assert pools["hidden"].dtype == torch.float32
+        assert pools["count"].dtype == torch.int64
+
+
+@pytest.mark.parametrize("accessor", ["startup_pool_access", "pool_layout"])
+def test_state_pool_accessors_reject_an_unknown_layer(accessor):
+    """Both accessors raise for a layer that is not a state layer of the
+    bindings, also inside a window."""
+    bindings = _state_bindings()
+    with bindings._startup_access_window():
+        getattr(bindings, accessor)("state")
+        with pytest.raises(ValueError):
+            getattr(bindings, accessor)("other")
+
+
+@pytest.mark.parametrize("use", ["spec", "component_pools"])
+def test_startup_access_is_stale_once_its_window_has_closed(use):
+    """An access object is refused on every use after its window has closed,
+    also while a later window, which issues its own access, is open."""
+    bindings = _state_bindings()
+    with bindings._startup_access_window():
+        stale = bindings.startup_pool_access("state")
+        getattr(stale, use)
+    with pytest.raises(ValueError):
+        getattr(stale, use)
+    with bindings._startup_access_window():
+        getattr(bindings.startup_pool_access("state"), use)
+        with pytest.raises(ValueError):
+            getattr(stale, use)
+
+
+def test_startup_access_binds_no_slot():
+    """Startup access owns nothing: after a window closes, the first bind of
+    every slot is still a first bind, which accepts a first-generation handle
+    and writes the descriptors' initial values over the zeroed pool."""
+    bindings = _state_bindings()
+    with bindings._startup_access_window():
+        hidden = bindings.startup_pool_access("state").component_pools["hidden"]
+        assert hidden.tolist() == [[0.0] * 4] * 3
+    first, second = _handle(slot=1), _handle(slot=2)
+    _begin_state_step(bindings, 1, {"a": first, "b": second})
+    rows = bindings.bind_rows("state", ("a", "b"), (first, second))
+    assert rows.component_pools["hidden"].tolist() == [[0.0] * 4, [1.0] * 4, [1.0] * 4]
+
+
+def test_pool_layout_describes_the_tensors_the_bindings_expose():
+    """`pool_layout` reports, by descriptor name, the data address, shape,
+    strides and dtype of the tensors that `startup_pool_access` and
+    `bind_rows` expose for the same bindings."""
+    bindings = _state_bindings()
+    layout = bindings.pool_layout("state")
+    with bindings._startup_access_window():
+        startup = dict(bindings.startup_pool_access("state").component_pools)
+    handle = _handle()
+    _begin_state_step(bindings, 1, {"r": handle})
+    rows = bindings.bind_rows("state", ("r",), (handle,)).component_pools
+    assert set(layout) == {"hidden", "count"}
+    for name, entry in layout.items():
+        for tensor in (startup[name], rows[name]):
+            assert (entry.data_ptr, entry.shape, entry.stride, entry.dtype) == (
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                tuple(tensor.stride()),
+                tensor.dtype,
+            )
+
+
+def test_pool_layout_is_a_new_snapshot_at_any_time():
+    """Each call builds a new mapping with the same values, whether no window
+    is open, a window is open, or a step is live."""
+    bindings = _state_bindings()
+    outside = bindings.pool_layout("state")
+    with bindings._startup_access_window():
+        inside = bindings.pool_layout("state")
+    _begin_state_step(bindings, 1, {"r": _handle()})
+    in_step = bindings.pool_layout("state")
+    assert dict(outside) == dict(inside) == dict(in_step)
+    assert outside is not inside and inside is not in_step
+
+
+def test_pool_layout_snapshot_is_immutable_and_keeps_nothing_alive():
+    """The snapshot is read-only, holds plain values only, and references
+    neither the pool nor the bindings: both are freed while it is kept."""
+    import dataclasses
+    import gc
+    import weakref
+
+    from tests.v1.core.utils import create_state_spec, state_layer
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+    from vllm.v1.worker.gpu.state_slots import StateSlotBindings
+
+    spec = create_state_spec()
+    pool = torch.zeros(3 * spec.page_size_bytes, dtype=torch.uint8)
+    bindings = StateSlotBindings(
+        [KVCacheGroup.from_layers({"state": state_layer(spec)})], {"state": pool}
+    )
+    layout = bindings.pool_layout("state")
+    with pytest.raises(TypeError):
+        layout["hidden"] = layout["count"]  # type: ignore[index]
+    for entry in layout.values():
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            entry.data_ptr = 0  # type: ignore[misc]
+        assert type(entry.data_ptr) is int
+        assert all(type(n) is int for n in (*entry.shape, *entry.stride))
+        assert isinstance(entry.dtype, torch.dtype)
+    alive = [weakref.ref(pool), weakref.ref(bindings)]
+    del pool, bindings
+    gc.collect()
+    assert [ref() for ref in alive] == [None, None]
+    assert set(layout) == {"hidden", "count"}
+
+
+# The model-state hooks every `ModelState` has. A state that defines none of
+# them captures nothing and needs no call.
+
+
+@pytest.mark.parametrize(
+    ("hook", "kwargs", "expected"),
+    [
+        ("needs_cudagraph_capture", {}, False),
+        ("prepare_execution_memory", {}, None),
+        (
+            "capture_cudagraphs",
+            {"graph_pool": None, "stream": None, "profile_only": True},
+            None,
+        ),
+        (
+            "capture_cudagraphs",
+            {"graph_pool": None, "stream": None, "profile_only": False},
+            None,
+        ),
+        ("clear_cudagraphs", {}, None),
+        ("post_warmup", {}, None),
+        ("shutdown", {}, None),
+    ],
+)
+def test_model_state_hook_defaults(hook, kwargs, expected):
+    """On a model state that defines none of them, `needs_cudagraph_capture`
+    returns `False` and the other hooks return `None` and leave the state as
+    it was."""
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float32")
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    model = _EmbeddingModel(32, model_config.get_inputs_embeds_size())
+    state = DefaultModelState(vllm_config, model, None, torch.device("cpu"))
+    before = dict(vars(state))
+
+    assert getattr(state, hook)(**kwargs) is expected
+    after = vars(state)
+    assert after.keys() == before.keys()
+    assert all(after[name] is value for name, value in before.items())
 
 
 _NEEDS_CUDA = pytest.mark.skipif(

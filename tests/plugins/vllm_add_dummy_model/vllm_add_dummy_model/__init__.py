@@ -30,6 +30,7 @@ def register():
     for arch in (
         "StubPersistentStateForCausalLM",
         "StubUndeclaredPersistentStateForCausalLM",
+        "StubEncoderPersistentStateForCausalLM",
     ):
         if arch not in ModelRegistry.get_supported_archs():
             ModelRegistry.register_model(

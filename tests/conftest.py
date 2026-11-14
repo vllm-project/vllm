@@ -1590,6 +1590,13 @@ def dummy_state_model_path():
 
 
 @pytest.fixture
+def dummy_encoder_state_model_path():
+    """`StubEncoderPersistentStateForCausalLM`: the persistent-state stub with
+    a vision encoder that supports encoder CUDA graphs."""
+    return _dummy_state_path("StubEncoderPersistentStateForCausalLM")
+
+
+@pytest.fixture
 def dummy_undeclared_state_model_path():
     """`StubUndeclaredPersistentStateForCausalLM`: the same state layer
     without the `supports_persistent_state` declaration."""

@@ -682,6 +682,9 @@ class PersistentStateSpec(KVCacheSpec):
 
     descriptors: tuple[PersistentStateDescriptor, ...]
     _page_size_bytes: int = field(compare=True, repr=False)
+    # Names of the model options that enlarge the model's execution memory or
+    # its graphs. Diagnostic only: not part of the layout or of equality.
+    memory_contributors: tuple[str, ...] = field(default=(), compare=False)
 
     def __init__(
         self,
@@ -689,17 +692,38 @@ class PersistentStateSpec(KVCacheSpec):
         descriptors: Sequence[PersistentStateDescriptor],
         page_size_bytes: int,
         block_size: int = 1,
+        memory_contributors: Sequence[str] = (),
     ) -> None:
         descriptor_tuple = tuple(descriptors)
         if block_size != 1:
             raise ValueError("persistent state requires block_size=1")
         self._validate_layout(descriptor_tuple, page_size_bytes)
+        contributors = self._validate_memory_contributors(memory_contributors)
 
         object.__setattr__(self, "block_size", 1)
         object.__setattr__(self, "dcp_sharded", False)
         object.__setattr__(self, "block_stride_alignment", None)
         object.__setattr__(self, "descriptors", descriptor_tuple)
         object.__setattr__(self, "_page_size_bytes", page_size_bytes)
+        object.__setattr__(self, "memory_contributors", contributors)
+
+    @staticmethod
+    def _validate_memory_contributors(names: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(names, str):
+            raise TypeError(
+                "persistent-state memory contributors must be a sequence of "
+                "names, not a str"
+            )
+        contributors = tuple(names)
+        if not all(isinstance(name, str) for name in contributors):
+            raise TypeError("persistent-state memory contributor names must be str")
+        if not all(contributors):
+            raise ValueError(
+                "persistent-state memory contributor names must be nonempty"
+            )
+        if len(set(contributors)) != len(contributors):
+            raise ValueError("persistent-state memory contributor names must be unique")
+        return contributors
 
     @staticmethod
     def _validate_layout(
@@ -964,6 +988,24 @@ class KVCacheGroup:
             self.block_size,
             token_alignment=self.manager_cls.block_table_token_alignment,
         )
+
+
+def memory_contributors_note(groups: Sequence[KVCacheGroup]) -> str | None:
+    """State which options the persistent-state specs of `groups` declare as
+    using device memory; `None` when they declare none."""
+    names = [
+        name
+        for group in groups
+        for spec in group.distinct_specs
+        if isinstance(spec, PersistentStateSpec)
+        for name in spec.memory_contributors
+    ]
+    if not names:
+        return None
+    return (
+        "The model declares these options as using device memory: "
+        f"{', '.join(dict.fromkeys(names))}."
+    )
 
 
 class PrefixLookupGroup(NamedTuple):
