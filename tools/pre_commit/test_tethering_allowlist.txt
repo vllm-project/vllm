@@ -130,7 +130,6 @@ tests/parser/engine/test_minimax_m3.py  # CI jobs disabled pending locked cmake 
 tests/parser/engine/test_nemotron_v3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_parser_engine.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_plamo3.py  # CI jobs disabled pending locked cmake installation
-tests/parser/engine/test_qwen3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_qwen3_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_replay.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_ripple.py  # CI jobs disabled pending locked cmake installation
