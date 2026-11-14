@@ -24,6 +24,7 @@ from fastapi import FastAPI, Response
 
 import vllm.envs as envs
 from vllm.logger import configure_logging_from_args, init_logger
+from vllm.utils.network_utils import join_host_port
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
@@ -162,7 +163,7 @@ def _child_base_url(args: argparse.Namespace, port: int) -> str:
     elif host == "::":
         host = "::1"
     scheme = "https" if args.ssl_keyfile and args.ssl_certfile else "http"
-    return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{join_host_port(host, port)}"
 
 
 def _join_processes_with_timeout(processes: list[BaseProcess], timeout: float) -> None:
