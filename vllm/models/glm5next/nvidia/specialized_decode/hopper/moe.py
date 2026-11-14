@@ -175,8 +175,8 @@ def unsupported(moe, config) -> list[str]:
     # requantize it without changing its shape.
     backend = getattr(getattr(routed, "quant_method", None), "fp8_backend", None)
     if backend != Fp8MoeBackend.TRITON:
-        name = getattr(backend, "value", backend)
-        reasons.append(f"FP8 MoE backend {name} (expects TRITON)")
+        backend_name = getattr(backend, "value", backend)
+        reasons.append(f"FP8 MoE backend {backend_name} (expects TRITON)")
     fp8 = torch.float8_e4m3fn
     tensors = {
         "w13_weight": (routed.w13_weight, (EXPERTS, 2 * INTER, HIDDEN), fp8),

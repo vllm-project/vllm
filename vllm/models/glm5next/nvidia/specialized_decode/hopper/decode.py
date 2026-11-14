@@ -409,6 +409,8 @@ def boundary_modes(policy: Policy, tokens: list[int]) -> dict[int, Any]:
     modes = {}
     for m in tokens:
         choice = policy("boundary", m)
+        if not choice:
+            continue
         mode = DEFAULT_MODES.get(m) if choice == AUTO else parse_mode(choice)
         if mode is not None:
             modes[m] = mode
@@ -491,8 +493,10 @@ class HopperSpecializedDraft(HopperLayerStages, SpecializedDraft):
         """`norm(x + residual)` and the new residual of a sublayer output; a
         TP-partial `x` at a token count the boundary does not serve (a draft
         prefill's sampled rows) is all-reduced first."""
-        if partial and not self.ar_norm.supports(x.shape[0]):
-            x, partial = tensor_model_parallel_all_reduce(x), False
+        if partial:
+            assert self.ar_norm is not None
+            if not self.ar_norm.supports(x.shape[0]):
+                x, partial = tensor_model_parallel_all_reduce(x), False
         self.calls["draft_boundary", partial] += 1
         out = super().reduced_norm(x, partial, residual, norm)
         return out

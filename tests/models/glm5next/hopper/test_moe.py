@@ -135,7 +135,7 @@ def _reference(x, w, ids, weights, ue8m0=False, shared=True, quantize=True):
     return out
 
 
-_stock = {}
+_stock: dict = {}
 
 
 def _stock_experts(w, x, ids, weights):

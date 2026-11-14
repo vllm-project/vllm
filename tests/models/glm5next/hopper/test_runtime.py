@@ -453,7 +453,8 @@ def _fake_modules(present):
                 return cls(mlp) if mlp.moe == moe else None
 
             def __init__(self, mlp):
-                self.mlp, self.prepared = mlp, None
+                self.mlp = mlp
+                self.prepared: list[int] = []
 
             def supports(self, tokens):
                 return 1 <= tokens <= 32
@@ -515,7 +516,7 @@ def _fake_modules(present):
             calls["logits_gather"] += 1
             return torch.cat([logits] * TP, dim=1)
 
-    contents = {
+    contents: dict[str, dict[str, object]] = {
         "kda": {"HopperKdaLayer": HopperKdaLayer},
         "dsa": {"HopperDsaLayer": HopperDsaLayer},
         "moe": {"HopperMoe": mlp_stage("moe", True)},
@@ -825,7 +826,7 @@ class _Processor:
 
     def __init__(self, vocab):
         self.org_vocab_size = vocab
-        self.calls = Counter()
+        self.calls: Counter = Counter()
 
     def __call__(self, lm_head, hidden_states, skip_gather=False):
         assert skip_gather
