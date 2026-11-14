@@ -8,6 +8,7 @@ to fail.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
@@ -22,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
+from ..models.utils import check_logprobs_close
 
 logger = init_logger("test_context_parallel")
 
@@ -316,3 +318,79 @@ def test_cp_generation(
         method="generate",
         is_multimodal=False,
     )
+
+
+def _check_flashinfer_dcp_output_fusion(model: torch.nn.Module) -> None:
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+        kNvfp4Dynamic,
+    )
+
+    layers = [layer for layer in model.modules() if isinstance(layer, Attention)]
+    assert layers
+    for layer in layers:
+        for quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic):
+            assert not layer.impl.fused_output_quant_supported(quant_key)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer requires CUDA")
+@pytest.mark.usefixtures("enable_pickle")
+@create_new_process_for_each_test()
+def test_flashinfer_dcp_fp8_kv_cache(vllm_runner, num_gpus_available):
+    """DCP with FP8 KV must generate correctly across prefill chunks."""
+    if num_gpus_available < 2:
+        pytest.skip("DCP requires two GPUs")
+
+    prompts = [
+        "def add(a, b):\n    return a + b\n\n" * 16 + "def subtract(a, b):\n    ",
+        "def fibonacci(n):\n    ",
+    ]
+    outputs = {}
+    for name, dcp_size, use_trtllm_attention in (
+        ("tp", 1, None),
+        ("dcp", 2, None),
+        ("dcp_native", 2, False),
+    ):
+        with vllm_runner(
+            "bigcode/tiny_starcoder_py",
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+            kv_cache_dtype="fp8",
+            attention_config={
+                "backend": "FLASHINFER",
+                "use_trtllm_attention": use_trtllm_attention,
+                "disable_flashinfer_q_quantization": dcp_size == 1,
+            },
+            max_model_len=512,
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            kv_cache_memory_bytes=128 * 1024 * 1024,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            disable_custom_all_reduce=True,
+        ) as model:
+            if name == "dcp":
+                model.apply_model(_check_flashinfer_dcp_output_fusion)
+            result = model.generate_greedy_logprobs(
+                prompts, max_tokens=8, num_logprobs=5
+            )
+            for token_ids, _, logprobs in result:
+                assert token_ids
+                assert all(
+                    math.isfinite(logprob.logprob)
+                    for token_logprobs in logprobs
+                    for logprob in token_logprobs.values()
+                )
+            outputs[name] = result
+
+    for name in ("dcp", "dcp_native"):
+        check_logprobs_close(
+            outputs_0_lst=outputs["tp"],
+            outputs_1_lst=outputs[name],
+            name_0="tp",
+            name_1=name,
+        )
