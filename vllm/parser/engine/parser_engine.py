@@ -69,6 +69,7 @@ class ToolCallSlot:
         "_streamed_joined",
         "extend_open_value",
         "open_value_streams",
+        "completed",
     )
 
     def __init__(self) -> None:
@@ -82,6 +83,7 @@ class ToolCallSlot:
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
         self.open_value_streams: bool = False
+        self.completed: bool = False
 
     @property
     def args(self) -> str:
@@ -1034,6 +1036,7 @@ class ParserEngine(Parser):
 
         remaining = self._flush_arg_converter(idx)
         slot = self._tool_slots[idx]
+        slot.completed = True
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
@@ -1199,6 +1202,11 @@ class ParserEngine(Parser):
 
         tool_calls: list[ToolCall] = []
         for slot in self._tool_slots:
+            if not slot.completed:
+                # A synthetic end is suppressed when a call entered
+                # TOOL_ARGS without ever beginning its arguments; such
+                # a slot must not surface as a half call.
+                continue
             if not slot.name and not slot.args:
                 continue
 

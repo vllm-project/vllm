@@ -21,6 +21,10 @@ from tests.parser.engine.streaming_helpers import (
 )
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
+    FUNC_END,
+    FUNC_PREFIX,
+    PARAM_END,
+    PARAM_START,
     TOOL_CALL_END,
     TOOL_CALL_START,
     qwen3_config,
@@ -1534,3 +1538,31 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+class TestFinishFlushPreservesRawArgsCalls:
+    """End-of-stream truncation inside the call-closing tags must keep
+    the call: its argument values already streamed (raw-args shape,
+    no argument buffer), so the never-started judgment must not drop
+    it.  Reverse protection for the emitted-args flag."""
+
+    def test_cut_inside_function_close_keeps_call(self, parser, mock_request):
+        text = (
+            "Let me check the weather.\n"
+            + TOOL_CALL_START
+            + "\n"
+            + FUNC_PREFIX
+            + "get_weather>\n"
+            + PARAM_START
+            + "city>Paris"
+            + PARAM_END
+            + "\n"
+            + FUNC_END[:8]
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        call = result.tool_calls[0]
+        assert call.function.name == "get_weather"
+        assert json.loads(call.function.arguments) == {"city": "Paris"}
