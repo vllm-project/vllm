@@ -272,6 +272,22 @@ def test_extract_tool_calls_list_structure(
     assert extracted_tool_calls.content == expected_content
 
 
+def test_extract_tool_calls_non_object_arguments(xlam_tool_parser):
+    """A call whose arguments are not an object must not drop the other calls."""
+    model_output = (
+        '[{"name": "get_time", "arguments": null}, '
+        '{"name": "get_weather", "arguments": {"city": "Boston"}}]'
+    )
+    extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )
+    assert extracted_tool_calls.tools_called
+    assert [
+        (call.function.name, json.loads(call.function.arguments))
+        for call in extracted_tool_calls.tool_calls
+    ] == [("get_time", {}), ("get_weather", {"city": "Boston"})]
+
+
 # Test for preprocess_model_output method
 def test_preprocess_model_output(xlam_tool_parser):
     # Test with list structure
