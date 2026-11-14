@@ -778,6 +778,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         },
         max_model_len=4096,
     ),
+    "Gliner2ForSchemaExtraction": _HfExamplesInfo(
+        "fastino/GLiNER2.5-Decide",
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
     ),
