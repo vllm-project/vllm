@@ -31,6 +31,7 @@ def _make_gate(
     input_size: int = 2048,
     output_size: int = 64,
     on_gfx950: bool = False,
+    on_gfx1250: bool = False,
     parallel_world_size: int = 1,
 ) -> GateLinear:
     """Build a GateLinear with platform predicates mocked, no GPU needed."""
@@ -56,6 +57,14 @@ def _make_gate(
         import vllm.platforms.rocm as rocm_platform
 
         monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: on_gfx950)
+        monkeypatch.setattr(rocm_platform, "on_gfx1250", lambda: on_gfx1250)
+        # get_cdna_version checks gfx90a/gfx942 first, so patch it too, or the
+        # host's own arch leaks in on MI250/MI300 boxes.
+        monkeypatch.setattr(
+            rocm_platform,
+            "get_cdna_version",
+            lambda: 4 if on_gfx950 else 5 if on_gfx1250 else 0,
+        )
 
     return GateLinear(
         input_size=input_size,
@@ -179,6 +188,52 @@ def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
         on_gfx950=on_gfx950,
     )
     assert not gate.allow_fp32_router_gemm
+
+
+def test_rocm_gfx1250_bf16_weight_routes_to_router_gemm(monkeypatch) -> None:
+    # BF16 router weights (e.g. DeepSeek-V4) reach rocm_fp32_router_gemm
+    # through the tier-6 dispatch, as on gfx950.
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=True,
+        input_size=7168,
+        output_size=384,
+        on_gfx1250=True,
+    )
+    assert gate.cdna_version == 5
+    assert gate.allow_cublas_router_gemm
+
+
+def test_rocm_gfx1250_does_not_take_fp32_weight_tier(monkeypatch) -> None:
+    # The gfx1250 router GEMM needs BF16 weights, so FP32-weight routers skip
+    # the FP32 tier there and keep the F.linear path.
+    gate = _make_gate(
+        monkeypatch,
+        is_rocm=True,
+        params_dtype=torch.float32,
+        input_size=6144,
+        output_size=128,
+        on_gfx1250=True,
+    )
+    assert not gate.allow_fp32_router_gemm
+
+
+def test_rocm_gfx1250_router_gemm_without_aiter_falls_back(monkeypatch) -> None:
+    # Without aiter the gfx1250 path declines and the dispatcher uses torch.mm.
+    import vllm._aiter_ops as aiter_ops
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.model_executor.layers.fused_moe.router import rocm_fp32_router_gemm
+
+    monkeypatch.setattr(rocm_fp32_router_gemm.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm_fp32_router_gemm, "get_cdna_version", lambda: 5)
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: 5)
+    x = torch.zeros(4, 64, dtype=torch.bfloat16)
+    w = torch.zeros(8, 64, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(aiter_ops, "is_aiter_found_and_supported", lambda: False)
+    with pytest.raises(RuntimeError, match="needs aiter"):
+        rocm_fp32_router_gemm._validate_inputs(x, w)
+    assert not rocm_fp32_router_gemm.can_use_rocm_fp32_router_gemm(x, w)
 
 
 # ---------------------------------------------------------------------------
