@@ -153,6 +153,8 @@ class OpenAIServingModels:
         lora_cards = [
             ModelCard(
                 id=lora.lora_name,
+                # Adapters run with the base model's context length.
+                max_model_len=self.model_config.max_model_len,
                 root=lora.path,
                 parent=lora.base_model_name
                 if lora.base_model_name
