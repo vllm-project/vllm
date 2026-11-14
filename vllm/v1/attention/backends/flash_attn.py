@@ -11,7 +11,11 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupChoices
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupChoices,
+    zip_inputs,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
@@ -63,7 +67,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -105,6 +109,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float
         is_single_batch: bool
         num_splits: int
+        is_static_persistent: bool
+        use_batch_lookup: bool
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -124,6 +130,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float,
         is_single_batch: bool = True,
         num_splits: int = 1,
+        is_static_persistent: bool = True,
+        use_batch_lookup: bool = False,
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
@@ -136,6 +144,13 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             softcap=softcap,
             is_single_batch=is_single_batch,
             num_splits=num_splits,
+            # SplitKV is never statically persistent. The longer query of a
+            # non-persistent key still changes FA4's GQA packing, but only
+            # within one Q stage.
+            is_static_persistent=(
+                is_static_persistent or (num_splits > 1 and q_stage > 1)
+            ),
+            use_batch_lookup=use_batch_lookup,
         )
 
     def get_warmup_keys(
@@ -153,6 +168,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             or vllm_config.model_config.rswa_window is not None
             or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
             or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
+            or kv_cache_spec.head_size_v not in (None, kv_cache_spec.head_size)
         ):
             return []
         head_dim = kv_cache_spec.head_size
@@ -163,25 +179,46 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             )
             or 0
         )
-        if major in (10, 11) and head_dim == 256:
-            q_stages = WarmupChoices(1, 2)
-            single_batches = WarmupChoices(True, False)
+        single_batches = WarmupChoices(False)
+        split_counts = WarmupChoices(1)
+        batch_lookups = WarmupChoices(False)
+        if major in (10, 11) and (8 <= head_dim <= 128 or head_dim == 256):
+            from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
+
+            if head_dim == 256:
+                # Two Q stages exceed TMEM at head_dim 256.
+                q_tiles = zip_inputs(
+                    dict(q_stage=1, is_static_persistent=True),
+                    dict(q_stage=1, is_static_persistent=False),
+                )
+            else:
+                q_tiles = zip_inputs(
+                    dict(q_stage=1, is_static_persistent=True),
+                    dict(q_stage=2, is_static_persistent=True),
+                    dict(q_stage=2, is_static_persistent=False),
+                )
             split_counts = WarmupChoices(1, 2)
+            if vllm_config.scheduler_config.max_num_seqs > BIN_BATCH_SEARCH_THRESH:
+                batch_lookups = WarmupChoices(False, True)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
             # SM90 forward has split/non-split variants; its transitive
             # combine specializes at 32/64/128/256 splits.
-            q_stages = WarmupChoices(1)
-            single_batches = WarmupChoices(False)
+            q_tiles = zip_inputs(dict(q_stage=1, is_static_persistent=True))
             split_counts = WarmupChoices(1, 32, 64, 128, 256)
         else:
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            q_stage=q_stages,
+            q_tiles,
             is_single_batch=single_batches,
             num_splits=split_counts,
+            use_batch_lookup=batch_lookups,
+            # SplitKV schedules with a tile semaphore, not the batch lookup.
+            _when=lambda *, num_splits, use_batch_lookup: (
+                num_splits == 1 or not use_batch_lookup
+            ),
             dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
             num_kv_heads=kv_cache_spec.num_kv_heads,
@@ -193,8 +230,20 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
-        max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
-        batch_size = 1 if compile_key.is_single_batch else 2
+        from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
+
+        # One packed row past q_stage - 1 tiles selects the Q stage. A key
+        # without static persistence adds a tile of rows, which crosses the
+        # boundary whether or not FA4 packs the GQA heads.
+        max_seqlen_q = (
+            compile_key.q_stage - 1
+        ) * FA4_DENSE_Q_TILE // compile_key.qhead_per_kvhead + 1
+        if not compile_key.is_static_persistent:
+            max_seqlen_q += FA4_DENSE_Q_TILE
+        if compile_key.use_batch_lookup:
+            batch_size = BIN_BATCH_SEARCH_THRESH + 1
+        else:
+            batch_size = 1 if compile_key.is_single_batch else 2
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
             compile_key.page_size,
@@ -222,7 +271,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             seqused_k_shape=(batch_size,),
             page_table_shape=(
                 batch_size,
-                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+                cdiv(FA4_DENSE_MAX_SEQLEN_K, compile_key.page_size),
             ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
@@ -686,11 +735,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
         self.aot_schedule = fa_version == 3
 
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
-            and fa_version == 4
-        ):
+        if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
             window_sizes = {
                 getattr(layer.impl, "sliding_window", None)
                 for layer in get_layers_from_vllm_config(
