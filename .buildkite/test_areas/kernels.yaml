@@ -724,6 +724,12 @@ steps:
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/quantization/test_per_token_group_quant.py
+  - tests/models/quantization/test_fp8.py
+  - vllm/compilation/passes/fusion/rms_quant_fusion.py
+  - vllm/compilation/passes/fusion/mla_attn_quant_fusion.py
+  - tests/compile/passes/test_mla_attn_quant_fusion.py
+  - tests/compile/passes/test_silu_mul_quant_fusion.py
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
@@ -731,6 +737,10 @@ steps:
   commands:
     - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
+    - pytest -v -s kernels/quantization/test_per_token_group_quant.py
+    - pytest -v -s models/quantization/test_fp8.py::test_ue8m0_rms_fusion_logprobs
+    - pytest -v -s compile/passes/test_mla_attn_quant_fusion.py -k UE8M0
+    - pytest -v -s compile/passes/test_silu_mul_quant_fusion.py -k ue8m0
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py

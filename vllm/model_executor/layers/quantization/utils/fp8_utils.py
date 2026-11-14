@@ -629,6 +629,162 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+@triton.jit
+def _per_token_group_quant_fp8_ue8m0_row(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    s_stride_row,
+    s_stride_col,
+    eps,
+    fp8_min,
+    fp8_max,
+    H: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """One program per row: load the whole row once, compute every group's
+    scale in registers, write the row back in one coalesced store.
+
+    Reproduces torch.ops._C.per_token_group_fp8_quant bit-for-bit: fp32 absmax
+    floored at eps, IEEE round-to-nearest division (plain `/` may compile to an
+    approximate divide), round-to-nearest-satfinite fp8 conversion.
+    """
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+    row = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_H)
+    x = tl.load(x_ptr + row * H + offs, offs < H, other=0).to(tl.float32)
+    g = tl.reshape(x, (BLOCK_H // GROUP, GROUP))
+    magnitudes = tl.where(g == g, tl.abs(g), 0.0)
+    amax = tl.maximum(tl.max(magnitudes, axis=1), eps)
+    scale = tl.math.div_rn(amax, fp8_max)
+    if SCALE_UE8M0:
+        # Match CUDA's integer exponent rounding.
+        scale = tl.maximum(tl.abs(scale), 1.0e-10)
+        bits = scale.to(tl.uint32, bitcast=True)
+        exponent = (bits >> 23) & 255
+        exponent += ((bits & 0x7FFFFF) != 0).to(tl.uint32)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+    y = g * tl.math.div_rn(1.0, scale)[:, None]
+    y = tl.minimum(tl.maximum(y, fp8_min), fp8_max)
+    tl.store(
+        q_ptr + row * H + offs,
+        tl.reshape(y, (BLOCK_H,)).to(q_ptr.dtype.element_ty),
+        offs < H,
+    )
+    gi = tl.arange(0, BLOCK_H // GROUP).to(tl.int64)
+    tl.store(s_ptr + row * s_stride_row + gi * s_stride_col, scale, gi < H // GROUP)
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
+# Keep the lower-launch-cost native kernel for decode and small prefills.
+_UE8M0_ROW_QUANT_MIN_TOKENS = 2048
+_USE_SM90_UE8M0_ROW_QUANT = (
+    current_platform.is_cuda() and current_platform.is_device_capability(90)
+)
+
+
+def _ue8m0_row_quant_eligible(
+    x: torch.Tensor, group_size: int, scale_ue8m0: bool = False
+) -> bool:
+    H = x.shape[-1]
+    if x.dim() != 2 or not x.is_contiguous() or H % group_size or group_size > H:
+        return False
+    return (
+        scale_ue8m0
+        and group_size == 128
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and H <= 32768
+        and _USE_SM90_UE8M0_ROW_QUANT
+    )
+
+
+def _per_token_group_fp8_quant_ue8m0_row(
+    input: torch.Tensor,
+    output_q: torch.Tensor,
+    output_s: torch.Tensor,
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    dummy_is_scale_transposed: bool,
+    dummy_is_tma_aligned: bool = False,
+) -> None:
+    """Drop-in for torch.ops._C.per_token_group_fp8_quant on CUDA.
+
+    Dispatches to the row kernel at large token counts and falls back to the
+    CUDA kernel otherwise. The branch lives inside the opaque op, so
+    torch.compile never traces a data-dependent condition.
+    """
+    if (
+        input.shape[0] < _UE8M0_ROW_QUANT_MIN_TOKENS
+        or not _ue8m0_row_quant_eligible(input, group_size, scale_ue8m0)
+        or not output_q.is_contiguous()
+    ):
+        torch.ops._C.per_token_group_fp8_quant(
+            input,
+            output_q,
+            output_s,
+            group_size,
+            eps,
+            fp8_min,
+            fp8_max,
+            scale_ue8m0,
+            dummy_is_scale_transposed,
+            dummy_is_tma_aligned,
+        )
+        return
+    H = input.shape[-1]
+    _per_token_group_quant_fp8_ue8m0_row[(input.shape[0],)](
+        input,
+        output_q,
+        output_s,
+        output_s.stride(0),
+        output_s.stride(1),
+        eps,
+        fp8_min,
+        fp8_max,
+        H=H,
+        GROUP=group_size,
+        BLOCK_H=triton.next_power_of_2(H),
+        SCALE_UE8M0=scale_ue8m0,
+        num_warps=8,
+        enable_fp_fusion=False,
+        launch_pdl=True,
+    )
+
+
+def _per_token_group_fp8_quant_ue8m0_row_fake(
+    input: torch.Tensor,
+    output_q: torch.Tensor,
+    output_s: torch.Tensor,
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    dummy_is_scale_transposed: bool,
+    dummy_is_tma_aligned: bool = False,
+) -> None:
+    return None
+
+
+if current_platform.is_cuda():
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    direct_register_custom_op(
+        op_name="per_token_group_fp8_quant_ue8m0_row",
+        op_func=_per_token_group_fp8_quant_ue8m0_row,
+        mutates_args=["output_q", "output_s"],
+        fake_impl=_per_token_group_fp8_quant_ue8m0_row_fake,
+    )
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -705,6 +861,22 @@ def per_token_group_quant_fp8(
     if (
         current_platform.is_cuda_alike() or current_platform.is_xpu()
     ) and x.is_contiguous():
+        if _USE_SM90_UE8M0_ROW_QUANT and use_ue8m0 and group_size == 128:
+            # Keep UE8M0 separate from RMS fusion, whose fused kernel emits
+            # ordinary scales without power-of-two rounding.
+            torch.ops.vllm.per_token_group_fp8_quant_ue8m0_row(
+                x,
+                x_q,
+                x_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                use_ue8m0,
+                column_major_scales,
+                tma_aligned_scales,
+            )
+            return x_q, x_s
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,
