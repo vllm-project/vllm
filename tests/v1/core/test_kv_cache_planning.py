@@ -25,7 +25,6 @@ from tests.v1.core.utils import (
     sliding_window_layer,
     uniform_spec,
 )
-from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -1839,7 +1838,6 @@ def test_unify_hybrid_kv_cache_specs():
     kv_cache_spec["draft_layer_2"] = replace(
         before_spec_2,
         spec=replace(before_spec_2.spec, dcp_sharded=False),
-        is_draft=True,
     )
     kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_layer(block_size=64)
@@ -1850,7 +1848,6 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["draft_layer_2"] == replace(
         expected_spec_2, spec=replace(expected_spec_2.spec, dcp_sharded=False)
     )
-    assert kv_cache_spec["draft_layer_2"].is_draft
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_layer()
@@ -2080,104 +2077,6 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     check_enough_kv_cache_memory(
         vllm_config, {"layer1": full_layer(spec)}, spec.page_size_bytes * 33
     )
-
-
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
-    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
-    config.cache_config.kv_cache_layout = "BLHNC"
-    config.speculative_config = fake_speculative_config(
-        method="dflash",
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: use_eagle_block_drop,
-        use_multi_module_mtp=lambda: False,
-        draft_model_config=SimpleNamespace(architectures=[]),
-    )
-    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
-    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
-
-
-def _as_draft(spec):
-    return replace(spec, is_draft=True)
-
-
-def _hybrid_specs(draft=True):
-    """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
-    specs = {}
-    for i in range(8):
-        specs[f"layers.{i}"] = (
-            new_kv_cache_layer()
-            if i % 4 == 3
-            else new_mamba_layer(mamba_cache_mode="align")
-        )
-    if draft:
-        specs["mtp.0"] = _as_draft(new_kv_cache_layer())
-    return specs
-
-
-_DRAFT_SPEC_SHAPES = {
-    "uniform": lambda: {
-        "layers.0": new_kv_cache_layer(),
-        "draft.0": _as_draft(new_kv_cache_layer()),
-    },
-    "hybrid": _hybrid_specs,
-    "draft_spans_groups": lambda: {
-        "layers.0": new_mla_layer(),
-        "layers.1": new_swa_mla_layer(head_size=1024),
-        "mtp.0": _as_draft(new_mla_layer()),
-        "mtp.1": _as_draft(new_swa_mla_layer(head_size=1024)),
-    },
-}
-
-
-@pytest.mark.parametrize(
-    "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
-)
-@pytest.mark.parametrize("pp", [1, 2])
-def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
-    specs = make_specs()
-    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
-    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
-    groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
-
-    worker_specs = [
-        {n: s for n, s in specs.items() if n not in draft_layers},
-        {n: s for n, s in specs.items() if n in draft_layers},
-    ]
-    scheduler_groups = _spec_decode_kv_cache_groups(
-        [specs] if pp == 1 else worker_specs
-    )
-    assert [g.is_eagle_group for g in scheduler_groups] == [
-        bool(draft_layers & set(g.layer_names)) for g in groups
-    ]
-
-
-def test_no_eagle_groups_without_eagle_block_drop():
-    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
-    assert not any(g.is_eagle_group for g in groups)
-
-
-@pytest.mark.parametrize(
-    "make_specs,warns",
-    [
-        (lambda: _hybrid_specs(draft=False), True),
-        (
-            lambda: {
-                "layers.0": new_kv_cache_layer(),
-                "draft.0": new_kv_cache_layer(),
-            },
-            False,
-        ),
-    ],
-    ids=["untagged_hybrid", "untagged_uniform_attention"],
-)
-def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
-    _spec_decode_kv_cache_groups([make_specs()])
-    warned = "could be identified as the draft model's" in caplog_vllm.text
-    assert warned == warns
 
 
 _GQA_SPEC = AttentionSpec(

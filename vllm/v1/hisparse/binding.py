@@ -170,7 +170,7 @@ def fit_mamba_blocks_to_attention(
         if isinstance(lc.spec, MambaSpec):
             new_config = layers[name].get_kv_cache_config(vllm_config)
             assert new_config is not None and isinstance(new_config.spec, MambaSpec)
-            resized[name] = replace(new_config, is_draft=lc.is_draft)
+            resized[name] = new_config
     return resized
 
 

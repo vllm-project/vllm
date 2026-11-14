@@ -202,7 +202,7 @@ class KVConnectorBase_V1(ABC):
         """Whether the connector supports core lookahead hashing.
 
         If False, `num_hash_lookahead_tokens` is 0 and block hashes cover only
-        each block's own tokens.
+        each block's own tokens, so EAGLE/MTP acceptance drops after prefix hits.
         """
         return True
 

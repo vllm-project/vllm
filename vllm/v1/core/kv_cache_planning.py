@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import TYPE_CHECKING, Any
 
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -969,33 +969,6 @@ def _get_packed_kv_cache_groups(
     return groups
 
 
-def _warn_if_unannotated_eagle_mamba(
-    spec_config: SpeculativeConfig,
-    kv_cache_groups: list[KVCacheGroup],
-) -> None:
-    """Warn when no KV cache group could be identified as the draft model's.
-
-    Args:
-        spec_config: Config supplying the speculative method.
-        kv_cache_groups: Groups as they will be handed to consumers.
-
-    """
-    if any(group.is_eagle_group for group in kv_cache_groups):
-        return
-    mamba_groups = [
-        idx
-        for idx, group in enumerate(kv_cache_groups)
-        if issubclass(group.manager_cls, MambaManager)
-    ]
-    if not mamba_groups:
-        return
-    logger.warning(
-        "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's.",
-        spec_config.method,
-    )
-
-
 def _largest_divisor_at_most(value: int, limit: int) -> int:
     for candidate in range(min(value, limit), 0, -1):
         if value % candidate == 0:
@@ -1620,18 +1593,7 @@ def get_global_kv_cache_groups(
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_layer_configs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, vllm_config, merged_layer_configs
-    )
-    spec_config = vllm_config.speculative_config
-    if spec_config is not None and spec_config.use_eagle_block_drop():
-        draft_layer_names = {
-            name for name, config in merged_layer_configs.items() if config.is_draft
-        }
-        for group in global_kv_cache_groups:
-            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
-        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
-    return global_kv_cache_groups
+    return get_kv_cache_groups_from_builder(builder, vllm_config, merged_layer_configs)
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
