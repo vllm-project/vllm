@@ -214,6 +214,14 @@ __device__ void norm_and_quant(
 
 namespace vectorized {
 
+// Matches the unfused rms_norm: the normalized value is rounded to the weight
+// dtype, multiplied by the weight, and the product is rounded to scalar_t.
+template <typename scalar_t, typename weight_t>
+__device__ __forceinline__ scalar_t apply_norm_weight(float normed,
+                                                      weight_t weight) {
+  return static_cast<scalar_t>(static_cast<weight_t>(normed) * weight);
+}
+
 // Compute 1.0/rms(input)
 // hidden_size must be a multiple of 4
 template <typename scalar_t, bool has_residual = false>
@@ -280,10 +288,11 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+          bool is_scale_transposed = false, int32_t group_size = 0,
+          typename weight_t = scalar_t>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
-    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
+    scalar_t const* __restrict__ input, weight_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t const* __restrict__ residual = nullptr,
@@ -295,7 +304,7 @@ __device__ void compute_dynamic_per_token_scales(
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input = nullptr;
-  vec4_t<scalar_t> const* vec_weight = nullptr;
+  vec4_t<weight_t> const* vec_weight = nullptr;
   vec4_t<scalar_t> const* vec_residual = nullptr;
 
   int64_t const input_token_offset =
@@ -315,7 +324,7 @@ __device__ void compute_dynamic_per_token_scales(
                                    static_cast<int64_t>(hidden_size >> 2));
     vec_input =
         reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+    vec_weight = reinterpret_cast<vec4_t<weight_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
           reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
@@ -325,7 +334,7 @@ __device__ void compute_dynamic_per_token_scales(
 #pragma unroll 4
     for (auto i = thread_offset; i < num_vec_elems; i += threads_per_group) {
       vec4_t<scalar_t> in = vec_input[i];
-      vec4_t<scalar_t> const w = vec_weight[i];
+      vec4_t<weight_t> const w = vec_weight[i];
 
       vec4_t<float> x;
 #pragma unroll
@@ -345,7 +354,7 @@ __device__ void compute_dynamic_per_token_scales(
       for (int j = 0; j < VEC_SIZE; ++j) {
         block_absmax_val_maybe =
             fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+                  fabs(apply_norm_weight<scalar_t>(x.val[j] * rms, w.val[j])));
       }
     }
 
@@ -399,7 +408,7 @@ __device__ void compute_dynamic_per_token_scales(
   } else {
     vec_input =
         reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+    vec_weight = reinterpret_cast<vec4_t<weight_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
           reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
@@ -410,7 +419,7 @@ __device__ void compute_dynamic_per_token_scales(
 #pragma unroll 4
     for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
       vec4_t<scalar_t> in = vec_input[i];
-      vec4_t<scalar_t> const w = vec_weight[i];
+      vec4_t<weight_t> const w = vec_weight[i];
 
       vec4_t<float> x;
 #pragma unroll
@@ -430,7 +439,7 @@ __device__ void compute_dynamic_per_token_scales(
       for (int j = 0; j < VEC_SIZE; ++j) {
         block_absmax_val_maybe =
             fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+                  fabs(apply_norm_weight<scalar_t>(x.val[j] * rms, w.val[j])));
       }
     }
 
@@ -462,10 +471,10 @@ __device__ void compute_dynamic_per_token_scales(
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
-          int32_t group_size = 0>
+          int32_t group_size = 0, typename weight_t = scalar_t>
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
-    scalar_t const* __restrict__ weight, float const rms, float* const scale,
+    weight_t const* __restrict__ weight, float const rms, float* const scale,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
   int64_t const input_token_offset =
@@ -475,8 +484,8 @@ __device__ void norm_and_quant(
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
       reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-  vec4_t<scalar_t> const* vec_weight =
-      reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+  vec4_t<weight_t> const* vec_weight =
+      reinterpret_cast<vec4_t<weight_t> const*>(weight);
   q8x4_t<scalar_out_t>* vec_output =
       reinterpret_cast<q8x4_t<scalar_out_t>*>(&output[token_offset]);
   vec4_t<scalar_t>* vec_residual = nullptr;
@@ -492,7 +501,7 @@ __device__ void norm_and_quant(
 #pragma unroll 4
   for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
-    vec4_t<scalar_t> const w = vec_weight[i];
+    vec4_t<weight_t> const w = vec_weight[i];
 
     vec4_t<float> x;
 #pragma unroll
@@ -540,7 +549,7 @@ __device__ void norm_and_quant(
     float y[VEC_SIZE];
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
-      y[j] = static_cast<scalar_t>(x.val[j] * rms) * w.val[j];
+      y[j] = apply_norm_weight<scalar_t>(x.val[j] * rms, w.val[j]);
     }
     ScaledQuant<scalar_out_t, mul_by_recip>::template quant_vec_fn<VEC_SIZE>(
         out.val, y, scale_val);

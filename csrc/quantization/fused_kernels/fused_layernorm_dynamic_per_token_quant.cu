@@ -92,14 +92,15 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+          bool is_scale_transposed = false, int32_t group_size = 0,
+          typename weight_t = scalar_t>
 __global__ void rms_norm_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
     float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
                                      // or
                                      // [hidden_size / group_size, num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
+    weight_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
     int64_t outer_scale_stride = 1) {
@@ -112,9 +113,9 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
-      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, rms, scale_ub, hidden_size, input_stride,
-      residual, outer_scale_stride);
+      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size,
+      weight_t>(nullptr, scales, input, weight, rms, scale_ub, hidden_size,
+                input_stride, residual, outer_scale_stride);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -124,7 +125,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   // overhead.
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
-      has_residual, is_scale_transposed, group_size>(
+      has_residual, is_scale_transposed, group_size, weight_t>(
       out, input, weight, rms, scales, hidden_size, input_stride, residual,
       outer_scale_stride);
 }
@@ -240,33 +241,42 @@ void rms_norm_per_block_quant_dispatch(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
+  bool const fp32_weight =
+      weight.scalar_type() == torch::headeronly::ScalarType::Float;
+
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_per_block_quant_fp_dispatch", [&] {
         using scalar_in_t = scalar_t;
-        VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
-          VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
-            VLLM_STABLE_DISPATCH_BOOL(
-                is_scale_transposed, transpose_scale, [&] {
-                  VLLM_STABLE_DISPATCH_QUANT_TYPES(
-                      out.scalar_type(), "rms_norm_per_block_quant_kernel",
-                      [&] {
-                        vllm::rms_norm_per_block_quant_kernel<
-                            scalar_in_t, scalar_t, has_residual,
-                            transpose_scale, gs><<<grid, block, 0, stream>>>(
-                            out.mutable_data_ptr<scalar_t>(),
-                            scales.mutable_data_ptr<float>(),
-                            input.const_data_ptr<scalar_in_t>(),
-                            weight.const_data_ptr<scalar_in_t>(),
-                            scale_ub.has_value()
-                                ? scale_ub->const_data_ptr<float>()
-                                : nullptr,
-                            var_epsilon, hidden_size, input_stride,
-                            has_residual
-                                ? residual->mutable_data_ptr<scalar_in_t>()
-                                : nullptr,
-                            scales.stride(1));
-                      });
-                });
+        VLLM_STABLE_DISPATCH_BOOL(fp32_weight, use_fp32_weight, [&] {
+          using weight_t =
+              std::conditional_t<use_fp32_weight, float, scalar_in_t>;
+          VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+            VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+              VLLM_STABLE_DISPATCH_BOOL(
+                  is_scale_transposed, transpose_scale, [&] {
+                    VLLM_STABLE_DISPATCH_QUANT_TYPES(
+                        out.scalar_type(), "rms_norm_per_block_quant_kernel",
+                        [&] {
+                          vllm::rms_norm_per_block_quant_kernel<
+                              scalar_in_t, scalar_t, has_residual,
+                              transpose_scale, gs, weight_t>
+                              <<<grid, block, 0, stream>>>(
+                                  out.mutable_data_ptr<scalar_t>(),
+                                  scales.mutable_data_ptr<float>(),
+                                  input.const_data_ptr<scalar_in_t>(),
+                                  weight.const_data_ptr<weight_t>(),
+                                  scale_ub.has_value()
+                                      ? scale_ub->const_data_ptr<float>()
+                                      : nullptr,
+                                  var_epsilon, hidden_size, input_stride,
+                                  has_residual
+                                      ? residual
+                                            ->mutable_data_ptr<scalar_in_t>()
+                                      : nullptr,
+                                  scales.stride(1));
+                        });
+                  });
+            });
           });
         });
       });
@@ -292,7 +302,11 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
   if (scale_ub.has_value()) {
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  // Gemma-style norms keep an fp32 weight next to a 16-bit input.
+  STD_TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type() ||
+          weight.scalar_type() == torch::headeronly::ScalarType::Float,
+      "weight must have the input dtype or float32");
   STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
     STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
