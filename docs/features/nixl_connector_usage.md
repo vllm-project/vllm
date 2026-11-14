@@ -90,6 +90,30 @@ mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
 
 Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
 
+#### LIBFABRIC on AWS EFA: disable the shm provider for same-host prefill and decode
+
+With the LIBFABRIC backend on EFA, libfabric routes transfers between processes on the same host through its shared-memory (shm) provider by default. For GPU memory this path is limited by descriptor rate, about 40K descriptors per second. A KV pull issues one descriptor per KV block per layer, typically thousands of 16-64 KB descriptors per request, so the KV handoff between a prefill instance and a decode instance on the same host becomes the bottleneck.
+
+Set `FI_EFA_ENABLE_SHM_TRANSFER=0` on every vLLM instance (prefill and decode) to keep same-host transfers on EFA:
+
+```bash
+FI_EFA_ENABLE_SHM_TRANSFER=0 vllm serve <MODEL> \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+```
+
+Measured on one p6-b200.48xlarge (NIXL 1.3.2, libfabric 2.6.0amzn1.0), reading a 256 MB GPU buffer from another process on the same host:
+
+| Descriptor size | Count | shm on (default) | `FI_EFA_ENABLE_SHM_TRANSFER=0` |
+| --- | --- | --- | --- |
+| 16 KB | 16,384 | 0.65 GB/s | 7.7 GB/s |
+| 64 KB | 4,096 | 2.5 GB/s | 29.4 GB/s |
+| 1 MB | 256 | 29.4 GB/s | 47.8 GB/s |
+| 256 MB | 1 | 34.2 GB/s | 48.3 GB/s |
+
+The EFA path was faster at every descriptor size, for both READ and WRITE. With Llama-3.1-8B (8192 input / 128 output tokens, 1 prefill GPU and 1 decode GPU on the same host), it reduced the average KV transfer from about 1.5 s to 38 ms and raised throughput from 4.9 to 9.1 requests/s.
+
+This setting does not affect transfers between hosts, which never use shm. NIXL already disables shm on AWS Neuron hosts.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
