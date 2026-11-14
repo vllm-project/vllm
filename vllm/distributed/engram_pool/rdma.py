@@ -85,31 +85,44 @@ def wait_landed(ready, table):
     trap if the requester failed or 60 s pass. Call from every program that
     reads the rows."""
     seq = tl.load(tl.load(ready).to(tl.pointer_type(tl.int64)))
-    done = tl.load(ready + 1).to(tl.pointer_type(tl.int64))
-    used = tl.load(ready + 2).to(tl.pointer_type(tl.int32))
-    flags = tl.load(ready + 3).to(tl.pointer_type(tl.int64))
-    world, qps = tl.load(ready + 4), tl.load(ready + 5)
-    deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 6)
-    q = tl.arange(0, 16)
+    # The first program to see every flag records `seq` here for the others.
+    landed_at = tl.load(ready + 7).to(tl.pointer_type(tl.int64)) + table
     failed = False
     waiting = 0
-    for peer in range(world):
-        group = table * world + peer
-        mask = q < tl.load(used + group)
-        waiting = 1
-        while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
-            landed = tl.load(
-                flags + group * qps + q, mask=mask, other=seq, volatile=True
-            )
-            waiting = tl.sum((landed != seq).to(tl.int32))
-            # Only a fetch with rows still to come can have failed.
-            state = tl.load(done, mask=waiting > 0, other=0, volatile=True)
-            failed = (waiting > 0) & (state == -seq)
+    if tl.load(landed_at, volatile=True) != seq:
+        done = tl.load(ready + 1).to(tl.pointer_type(tl.int64))
+        used = tl.load(ready + 2).to(tl.pointer_type(tl.int32))
+        flags = tl.load(ready + 3).to(tl.pointer_type(tl.int64))
+        world, qps = tl.load(ready + 4), tl.load(ready + 5)
+        deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 6)
+        q = tl.arange(0, 16)
+        for peer in range(world):
+            group = table * world + peer
+            mask = q < tl.load(used + group)
+            waiting = 1
+            while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
+                at = flags + group * qps + q
+                landed = tl.load(at, mask=mask, other=seq, volatile=True)
+                waiting = tl.sum((landed != seq).to(tl.int32))
+                # Only a fetch with rows still to come can have failed.
+                state = tl.load(done, mask=waiting > 0, other=0, volatile=True)
+                failed = (waiting > 0) & (state == -seq)
+        if ~failed & (waiting == 0):
+            tl.atomic_xchg(landed_at, seq, sem="release")
     if failed | (waiting > 0):
         tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
         tl.inline_asm_elementwise(
             "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
+    # Rows are read only after the word that says they landed.
+    tl.inline_asm_elementwise(
+        "fence.acq_rel.gpu; mov.u32 $0, 0;",
+        "=r",
+        [],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
 
 
 @triton.jit(do_not_specialize=["num_items", "num_vg"])
@@ -622,7 +635,8 @@ class RdmaTransport:
         self.world_p2 = triton.next_power_of_2(self.world)
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
         # `wait_landed`'s view of a fetch: seq, done, QPs per group, flags,
-        # world, QPs per peer and timeout.
+        # world, QPs per peer, timeout and each table's last landed seq.
+        self.landed = torch.full((max_tables,), -1, dtype=torch.int64, device=gpu)
         self.ready = torch.tensor(
             [
                 self.seq.data_ptr(),
@@ -632,7 +646,7 @@ class RdmaTransport:
                 self.world,
                 self.qps_per_peer,
                 TIMEOUT_NS,
-                0,
+                self.landed.data_ptr(),
             ],
             dtype=torch.int64,
             device=gpu,
