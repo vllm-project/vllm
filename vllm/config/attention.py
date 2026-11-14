@@ -186,6 +186,18 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    sparse_mla_masked_mha_quantized_kv: bool = False
+    """Let sparse MLA prefill batches without cached context use the masked-MHA
+    path (SM100 with FlashAttention 4) when the KV cache is quantized (fp8 or
+    nvfp4_ds_mla). Like the dense-MHA prefill of prompts up to `index_topk`
+    tokens, that path attends to the new tokens' unquantized K/V rather than the
+    cache; on FLASHMLA_SPARSE it also avoids the cache upconversion and the head
+    padding that make sparse MQA prefill costlier as the tensor-parallel size
+    grows. Batches with cached context, and steps that `sparse_mla_shard_q`
+    shards by token, are unaffected. Only backends and tensor-parallel sizes
+    with a masked-MHA route are affected, and the routing thresholds were
+    measured on unquantized caches."""
+
     sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
     """Sparse MLA prefill workspace size, in multiples of `max_model_len`.
     FlashMLA sparse gathers a prefill step's context KV into this workspace and

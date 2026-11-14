@@ -34,6 +34,10 @@ from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .model import (
     Glm5NextDecoderLayer,
@@ -68,6 +72,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
+        index_group_builder = SparseMLAIndexGroupBuilder(
+            topk_indices_buffer, get_sparse_mla_index_group_max_rows(vllm_config)
+        )
         self.shared_head = SharedHead(
             config=config,
             prefix=prefix,
@@ -83,6 +90,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             layer_idx=layer_idx,
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
             is_mtp_layer=True,
         )
 

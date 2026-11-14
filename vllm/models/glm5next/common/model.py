@@ -103,6 +103,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
@@ -473,6 +477,7 @@ class Glm5NextDecoderLayer(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         is_mtp_layer: bool = False,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -523,6 +528,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 # MTP draft steps reuse each token slot's top-k, which
                 # ShardQ's compact per-rank layout would break.
                 shardq_eligible=not is_mtp_layer,
+                index_group_builder=index_group_builder,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -907,6 +913,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         else:
             # Full-MLA config (no kpool sparse indexer): no topk buffer.
             topk_indices_buffer = None
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -925,6 +939,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 layer_idx=layer_idx,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                index_group_builder=index_group_builder,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
