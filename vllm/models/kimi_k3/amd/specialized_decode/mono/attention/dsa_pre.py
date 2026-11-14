@@ -242,7 +242,7 @@ def scratch_layout(key: DsaPreBuild) -> dict:
         "qcr": s,
         "qn": s * NH * NOPE // 2,
         "ikr": s * IKD // 2,
-        "iqa": s * IQ_TASKS,
+        "iqa": s * IQ_TASKS if key.idx else 0,
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -260,7 +260,7 @@ def scratch_bytes(key: DsaPreBuild) -> int:
 
 def max_build() -> DsaPreBuild:
     """The largest layout a served build takes (``MonoRunner``'s scratch)."""
-    return DsaPreBuild(tokens=16, nblocks=8, delta=True, dump=True)
+    return DsaPreBuild(tokens=16, nblocks=8, delta=True, dump=True, idx=True)
 
 
 # ---------------------------------------------------------------- gemv CTAs
