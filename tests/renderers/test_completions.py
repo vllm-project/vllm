@@ -11,7 +11,7 @@ import pybase64
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
@@ -19,6 +19,7 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.registry import RENDERER_REGISTRY
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -132,6 +133,60 @@ def _preprocess_prompt(
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "renderer_mode",
+    ["deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
+)
+@pytest.mark.parametrize(
+    ("truncation_side", "expected"),
+    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+)
+async def test_native_hf_renderer_truncated_echo(
+    tmp_path, renderer_mode, truncation_side, expected
+):
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import OPTConfig, TokenizersBackend
+
+    from vllm.renderers.inkling_encoding import SPECIAL_TOKEN_SPELLINGS
+    from vllm.tokenizers.hf import get_cached_tokenizer
+
+    tokens = ["<unk>", "<bos>", "Hello", "world"]
+    tokens.extend(s[0] for s in SPECIAL_TOKEN_SPELLINGS.values())
+    vocab = {token: i for i, token in enumerate(tokens)}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = get_cached_tokenizer(
+        TokenizersBackend(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+            bos_token="<bos>",
+            add_bos_token=True,
+        )
+    )
+    OPTConfig(vocab_size=len(vocab)).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), dtype="float32", max_model_len=32)
+    )
+    renderer = RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
+    prompt = "<bos> Hello world"
+    params = TokenizeParams(
+        max_total_tokens=32,
+        truncate_prompt_tokens=3,
+        truncation_side=truncation_side,
+        needs_detokenization=True,
+    )
+    try:
+        (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
+        (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
+        section = slice(-3, None) if truncation_side == "left" else slice(0, 3)
+        for result in (sync, asynchronous):
+            assert result["prompt"] == expected
+            assert result["prompt_token_ids"] == tokenizer.encode(prompt)[section]
+    finally:
+        renderer.shutdown()
+
+
 class TestValidatePrompt:
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
@@ -181,7 +236,8 @@ class TestRenderPrompt:
         assert results[1]["prompt_token_ids"] == [102, 1234, 5678, 9012]
         assert results[2]["prompt_token_ids"] == [103, 4567]
 
-    def test_text_input(self):
+    @pytest.mark.parametrize("needs_detokenization", [False, True])
+    def test_text_input(self, needs_detokenization):
         renderer = _build_renderer(MockModelConfig())
 
         text_input = "x" * 10
@@ -190,11 +246,14 @@ class TestRenderPrompt:
         )
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=100),
+            TokenizeParams(
+                max_total_tokens=100, needs_detokenization=needs_detokenization
+            ),
         )
 
         assert len(results) == 1
         assert len(results[0]["prompt_token_ids"]) == 10
+        assert results[0]["prompt"] == text_input
 
     def test_text_list_input(self):
         renderer = _build_renderer(MockModelConfig())
@@ -382,9 +441,12 @@ class TestRenderPrompt:
 
     @pytest.mark.parametrize(
         ("truncation_side", "expected"),
-        [("left", [106, 107, 108, 109]), ("right", [100, 101, 102, 103])],
+        [("left", [6, 7, 8, 9]), ("right", [0, 1, 2, 3])],
     )
-    def test_detokenization_matches_truncated_tokens(self, truncation_side, expected):
+    @pytest.mark.parametrize("prompt", ["abcdefghij", list(range(10))])
+    def test_detokenization_matches_truncated_tokens(
+        self, prompt, truncation_side, expected
+    ):
         """Echoed prompt text must match the truncated tokens sent to the engine."""
         renderer = _build_renderer(MockModelConfig())
         params = TokenizeParams(
@@ -396,7 +458,7 @@ class TestRenderPrompt:
 
         def render():
             return renderer.render_prompts(
-                _preprocess_prompt(renderer.model_config, list(range(100, 110)))
+                _preprocess_prompt(renderer.model_config, prompt)
             )
 
         results = renderer.tokenize_prompts(render(), params)
