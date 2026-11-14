@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import cast
 
 import torch
 from torch import nn
@@ -81,6 +82,7 @@ from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+from .specialized_decode.hooks import SpecializedDecodeMixin
 
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
@@ -161,24 +163,114 @@ _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
 )
 
 
+# Whole-expert copies held back at most this many at a time: the loader then
+# hands each layout runs of weights, not one weight per call (every call builds
+# the layer's expert mapping).
+_TEE_RUN = 256
+
+
+def _tee_replicated_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Yield every routed-expert weight, the fused shared expert's included,
+    a second time for the whole experts of the dual layout
+    (`mlp.replicated.experts`)."""
+    held: list[tuple[str, torch.Tensor]] = []
+    held_block = None
+    for name, weight in weights:
+        block, sep, rest = name.partition(".mlp.experts.")
+        if held and (not sep or block != held_block or len(held) == _TEE_RUN):
+            yield from held
+            held = []
+        if sep:
+            held_block = block
+            held.append((f"{block}.mlp.replicated.experts.{rest}", weight))
+        yield name, weight
+    yield from held
+
+
+def _replicated_moe(vllm_config: VllmConfig) -> bool:
+    """Whether `--enable-hc-sp-replicated-moe` gives every rank the whole MoE.
+
+    Refuses what the parallel config cannot see: speculative decoding (the MTP
+    draft builds its decoder layers from the same parallel config) and
+    routed-experts capture (its router would see the rank's own rows).
+    """
+    if not vllm_config.parallel_config.enable_hc_sp_replicated_moe:
+        return False
+    flag = "--enable-hc-sp-replicated-moe"
+    if vllm_config.speculative_config is not None:
+        raise ValueError(f"{flag} does not support speculative decoding")
+    if vllm_config.aux_output_config.enable_return_routed_experts:
+        raise ValueError(f"{flag} does not support routed-experts capture")
+    return True
+
+
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
-    """Qwen3Next MoE with Qwen4Exp HC validation."""
+    """Qwen3Next MoE with Qwen4Exp HC validation.
+
+    `replicated` (`--enable-hc-sp-replicated-moe`) keeps every routed expert
+    whole on each rank. With `--monokernel` the block holds both layouts:
+    `experts` stays TP-sharded for the specialized decode, which reads it in
+    place, and `replicated["experts"]` holds the whole experts vLLM's forward
+    runs.
+    """
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        replicated: bool = False,
     ) -> None:
+        dual = replicated and vllm_config.kernel_config.monokernel
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
+            vllm_config=vllm_config,
+            prefix=prefix,
+            reduce_results=reduce_results,
+            experts_tp_size=1 if replicated and not dual else None,
         )
+        if replicated and self.shared_expert is not None:
+            raise ValueError(
+                "--enable-hc-sp-replicated-moe needs the AITER fused shared expert "
+                "(VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1):"
+                " a separate shared expert would stay TP-sharded"
+            )
+        self.replicated: nn.ModuleDict | None = None
+        if dual:
+            # Registered as `{prefix}.replicated.experts`: the expert weight
+            # loader needs a layer name ending in `experts` and
+            # `extract_layer_index` one integer component.
+            self.replicated = nn.ModuleDict(
+                {
+                    "experts": self.make_experts(
+                        vllm_config,
+                        prefix,
+                        f"{prefix}.replicated.experts",
+                        reduce_results,
+                        tp_size=1,
+                    )
+                }
+            )
         if self.replicate_shared_expert and not self.is_sequence_parallel:
             # Reduce routed outputs before adding replicated shared outputs.
             # SP then slices the result to avoid summing shared outputs again via RS.
             self.experts.moe_config.skip_final_all_reduce = False
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        if self.replicated is None:
+            return super().forward(hidden_states, already_sequence_parallel)
+        # The rank's own rows in, their complete outputs out: whole experts
+        # need no collective.
+        return self.replicated["experts"](
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
 
 class Qwen4ExpDecoderLayer(nn.Module):
@@ -197,8 +289,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.layer_idx = extract_layer_index(prefix)
+        replicated_moe = _replicated_moe(vllm_config)
+        # MoE SP and replicated experts consume local tokens and return complete
+        # local outputs: the MoE seam has no collective.
         self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
+            vllm_config.parallel_config.use_sequence_parallel_moe or replicated_moe
         )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
@@ -252,6 +347,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
             reduce_results=not self.use_hc_sequence_parallel,
+            replicated=replicated_moe,
         )
 
         hc_config = HyperConnectionConfig(
@@ -449,6 +545,10 @@ class Qwen4ExpModel(nn.Module):
             Qwen4ExpSparseMoeBlock,
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
+        self.dual_moe_layout = any(
+            isinstance(module, Qwen4ExpSparseMoeBlock) and module.replicated is not None
+            for module in self.modules()
+        )
         intermediate_size = config.hidden_size * config.hc_count
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], intermediate_size
@@ -623,6 +723,9 @@ class Qwen4ExpModel(nn.Module):
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
         )
+        if self.dual_moe_layout:
+            # after the shared expert became expert `num_experts`
+            weights = _tee_replicated_experts(weights)
         # Non-persistent PLE state rebuilt in __init__; skip any ckpt
         # column for them.
         skip_substrs = (
@@ -654,6 +757,7 @@ class Qwen4ExpModel(nn.Module):
 
 class Qwen4ExpForCausalLM(
     nn.Module,
+    SpecializedDecodeMixin,
     HasInnerState,
     SupportsHCSP,
     SupportsLoRA,
@@ -687,6 +791,7 @@ class Qwen4ExpForCausalLM(
         self.quant_config = vllm_config.quant_config
         self.config = config
         self.scheduler_config = vllm_config.scheduler_config
+        self.init_specialized_decode(vllm_config)
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -720,6 +825,11 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        step = self.plan_specialized_decode(input_ids, positions, intermediate_tensors)
+        if step is not None:
+            return self.run_specialized_decode(
+                step, input_ids, positions, inputs_embeds, kwargs
+            )
         return self.model(
             input_ids,
             positions,
@@ -855,6 +965,7 @@ class Qwen4ExpForCausalLM(
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        self.after_specialized_decode_step()
         return self.logits_processor(self.lm_head, hidden_states)
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
@@ -1046,6 +1157,12 @@ class Qwen4ExpForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        lm = cast(Qwen4ExpForCausalLM, self.language_model)
+        step = lm.plan_specialized_decode(input_ids, positions, intermediate_tensors)
+        if step is not None:
+            return lm.run_specialized_decode(
+                step, input_ids, positions, inputs_embeds, kwargs
+            )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
                 inputs_embeds.size(0)

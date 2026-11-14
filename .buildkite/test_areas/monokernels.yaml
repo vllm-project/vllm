@@ -182,3 +182,19 @@ steps:
     tests/models/kimi_k3/amd_specialized_decode/test_numerics.py
     tests/models/kimi_k3/amd_specialized_decode/test_runtime.py
     tests/models/kimi_k3/amd_specialized_decode/test_engine_fault.py
+
+- label: ':amd: (MI355) Qwen3.8-Flash-Next Specialized Decode'
+  key: qwen38-flash-next-specialized-decode-amd
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/amd/
+  - vllm/models/qwen4_exp/common/
+  - tests/models/qwen4_exp/amd_specialized_decode/
+  commands:
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/models/qwen4_exp/amd_specialized_decode/test_stages.py

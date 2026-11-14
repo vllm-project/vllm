@@ -142,6 +142,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        experts_tp_size: int | None = None,
     ):
         super().__init__()
 
@@ -228,7 +229,23 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_expert",
             )
 
-        self.experts = FusedMoEFactory(
+        self.experts = self.make_experts(
+            vllm_config, prefix, f"{prefix}.experts", reduce_results, experts_tp_size
+        )
+
+    def make_experts(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str,
+        experts_prefix: str,
+        reduce_results: bool,
+        tp_size: int | None,
+    ) -> nn.Module:
+        """The routed experts of the block at `prefix`, registered as
+        `experts_prefix`. `tp_size` None is the TP world size; 1 keeps every
+        expert whole on each rank."""
+        config = vllm_config.model_config.hf_text_config
+        return FusedMoEFactory(
             shared_experts=(
                 None if self.replicate_shared_expert else self.shared_expert
             ),
@@ -238,8 +255,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=getattr(config, "norm_topk_prob", True),
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
+            quant_config=vllm_config.quant_config,
+            tp_size=tp_size,
+            prefix=experts_prefix,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
