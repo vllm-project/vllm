@@ -449,6 +449,19 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
+            if sampling_params.aux_session is not None:
+                if self.vllm_config.aux_output_config.object_store is None:
+                    raise VLLMValidationError(
+                        "aux_session requires AuxOutputConfig.object_store.",
+                        parameter="aux_session",
+                    )
+                if sampling_params.routed_experts_prompt_start:
+                    raise VLLMValidationError(
+                        "routed_experts_prompt_start must be 0 with aux_session, "
+                        "whose responses list the keys of every object.",
+                        parameter="routed_experts_prompt_start",
+                        value=sampling_params.routed_experts_prompt_start,
+                    )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(

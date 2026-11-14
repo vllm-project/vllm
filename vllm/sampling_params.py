@@ -447,6 +447,12 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    aux_session: str | None = None
+    """Session of a multi-turn rollout whose routed experts are delivered
+    through `AuxOutputConfig.object_store`. The response lists the keys of
+    the objects that cover rows `[0, B)` in `aux_output_keys` and returns rows
+    `[B, num_tokens - 1)` in `routed_experts`. Prefix-cache hits are limited to
+    objects this session has published."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -489,6 +495,7 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        aux_session: str | None = None,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
@@ -557,6 +564,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            aux_session=aux_session,
             trace_decode_token_ids=trace_decode_token_ids,
         )
 

@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from vllm.distributed.aux_output_connector.store import (
+from vllm.distributed.aux_output_connector.row_cache import (
     BackgroundBlockObjectStore,
     BlockObject,
     BlockObjectStore,
