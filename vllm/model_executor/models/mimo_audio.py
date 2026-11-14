@@ -442,11 +442,12 @@ class ResidualVectorQuantization(nn.Module):
         all_indices = []
         n_q = len(self.layers) if n_q is None else n_q
         st = 0 if st is None else st
-        for layer in self.layers[st:n_q]:
+        layers = self.layers[st:n_q]
+        for i, layer in enumerate(layers):
             indices = layer.encode(residual)
-            quantized = layer.decode(indices)
-            residual = residual - quantized
             all_indices.append(indices)
+            if i + 1 < len(layers):
+                residual = residual - layer.decode(indices)
         out_indices = torch.stack(all_indices)
         return out_indices
 
