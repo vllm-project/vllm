@@ -648,6 +648,30 @@ async def test_joint_schema_reads_every_question_at_once(joint_schema):
 
 
 @pytest.mark.asyncio
+async def test_joint_schema_reads_more_options_than_labels(joint_schema):
+    serving, engine, _ = joint_schema
+    criteria = {f"type_{i:02d}": None for i in range(len(LABELS) + 33)}
+
+    async def encode(prompt, params, request_id, **kwargs):
+        n = sum(params.extra_kwargs["joint_schema"]["option_counts"])
+        data = torch.arange(n, dtype=torch.float32) / (n * (n - 1) / 2)
+        ids = prompt["prompt_token_ids"]
+        yield PoolingRequestOutput(request_id, PoolingOutput(data), ids, 0, True)
+
+    engine.encode.side_effect = encode
+    response = await serving.create_decision(
+        StructuredDecisionRequest(
+            state="x", questions={"doc": {"type": "choice", "criteria": criteria}}
+        )
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+    schema = engine.encode.call_args.args[1].extra_kwargs["joint_schema"]
+    assert schema["option_counts"] == [len(criteria)]
+    assert list(response.answers["doc"]["probabilities"]) == list(criteria)
+    assert response.answers["doc"]["choice"] == "type_58"
+
+
+@pytest.mark.asyncio
 async def test_joint_schema_rejects_instructions(joint_schema):
     serving, engine, _ = joint_schema
     response = await serving.create_decision(
