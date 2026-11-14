@@ -20,6 +20,7 @@ V_HEAD_DIM = 128
 DIFFKV_BACKENDS = (
     AttentionBackendEnum.FLASH_ATTN_DIFFKV,
     AttentionBackendEnum.TRITON_ATTN_DIFFKV,
+    AttentionBackendEnum.TRITON_FLASHINFER_DIFFKV,
 )
 
 
@@ -136,9 +137,13 @@ def test_only_backends_that_can_serve_v_head_size_are_admitted() -> None:
     from vllm.v1.attention.backends.triton_attn_diffkv import (
         TritonAttentionDiffKVBackend,
     )
+    from vllm.v1.attention.backends.triton_flashinfer_diffkv import (
+        TritonFlashInferDiffKVBackend,
+    )
 
     assert FlashAttentionDiffKVBackend.supports_head_size_v(HEAD_DIM, V_HEAD_DIM)
     assert TritonAttentionDiffKVBackend.supports_head_size_v(HEAD_DIM, V_HEAD_DIM)
+    assert TritonFlashInferDiffKVBackend.supports_head_size_v(HEAD_DIM, V_HEAD_DIM)
     # The packed cache is split with `split(head_size)`, so V cannot be wider.
     assert RocmAiterUnifiedAttentionBackend.supports_head_size_v(HEAD_DIM, V_HEAD_DIM)
     assert not RocmAiterUnifiedAttentionBackend.supports_head_size_v(
