@@ -328,6 +328,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Speculative decoding.
         self.speculator = None
+        # (attn_groups, draft layer names, filtered groups); see
+        # _drop_draft_only_attn_groups.
+        self._target_attn_groups: tuple | None = None
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -2058,7 +2061,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert block_tables is not None
             attn_groups = self.attn_groups
             if envs.VLLM_K31_BEAT_DRAFTMETA:
-                attn_groups = self._drop_draft_only_attn_groups(attn_groups)
+                # Both inputs are fixed once the KV cache is set up; filter once.
+                draft = getattr(self.speculator, "draft_attn_layer_names", None)
+                cached = self._target_attn_groups
+                if (
+                    cached is None
+                    or cached[0] is not attn_groups
+                    or cached[1] is not draft
+                ):
+                    cached = (
+                        attn_groups,
+                        draft,
+                        self._drop_draft_only_attn_groups(attn_groups),
+                    )
+                    self._target_attn_groups = cached
+                attn_groups = cached[2]
             if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
                 # attention metadata is still built so those kernels tune.

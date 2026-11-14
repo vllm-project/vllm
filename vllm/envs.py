@@ -1803,7 +1803,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # groups that only hold drafter layers (the drafter builds its own), and a
     # single uniform-qo request's AITER MLA work plan comes from a closed-form
     # kernel (checked against get_mla_metadata_v1 once per shape) instead of
-    # AITER's one-wavefront serial planner.
+    # AITER's one-wavefront serial planner. Both halves are not K3.1-specific:
+    # the first applies to any DFlash-family drafter, the second to any
+    # ROCM_AITER_MLA single-request uniform-qo decode.
     "VLLM_K31_BEAT_DRAFTMETA": lambda: bool(
         int(os.getenv("VLLM_K31_BEAT_DRAFTMETA", "0"))
     ),
