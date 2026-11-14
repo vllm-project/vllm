@@ -197,3 +197,26 @@ def test_streaming_arguments_match_final_arguments(
     streamed = reconstructor.tool_calls[0].function.arguments
     streamed += parser.get_remaining_unstreamed_args()
     assert streamed == '{"location": "Beijing", "days": 3}'
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"value": -2e-3}', '{"value": 5e-1}', '{"values": [1.5e3, -2e-3]}'],
+)
+def test_streaming_scientific_notation(
+    default_tokenizer: TokenizerLike, arguments: str
+) -> None:
+    """An exponent must not corrupt the digits streamed before it."""
+    parser = Internlm2ToolParser(default_tokenizer)
+    deltas = [
+        '<|action_start|><|plugin|>{"name": "calculate", "parameters": ',
+        *f"{arguments}}}",
+        "<|action_end|>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+    assert len(reconstructor.tool_calls) == 1
+    streamed = reconstructor.tool_calls[0].function.arguments
+    streamed += parser.get_remaining_unstreamed_args()
+    assert json.loads(streamed) == json.loads(arguments)
