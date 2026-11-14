@@ -24,7 +24,7 @@ from .store_client import (
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class _StoreSave:
     tensor: torch.Tensor | None
     ready_event: torch.Event | None

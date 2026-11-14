@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     model_path: str
     lora_path: str

@@ -25,7 +25,7 @@ _TRANSFORMERS_LEGACY_MODULES = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class ForbiddenString:
     pattern: str
     tip: str

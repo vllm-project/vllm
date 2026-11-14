@@ -235,7 +235,7 @@ class DequantizeAndGatherKCacheKernel(
 ):
     NUM_WORKERS = 128
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         max_blocks_per_seq: int
         cache_block_size: int
@@ -581,7 +581,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
 ):
     TRITON_BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         global_topk_indices_stride: int
         topk_indices_stride: int
@@ -811,7 +811,7 @@ class CombineTopkSwaIndicesKernel(
 ):
     NUM_WORKERS = 256
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         TOP_K: int
         COMPRESS_RATIO: int
@@ -1241,7 +1241,7 @@ def remap_flashinfer_index(values, block_size, block_span):
 class BuildFlashinferMixedSparseIndicesKernel(
     VllmTritonJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         swa_index_width: int

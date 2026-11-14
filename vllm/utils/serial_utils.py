@@ -14,7 +14,7 @@ import torch
 sys_byteorder = sys.byteorder
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DTypeInfo:
     torch_dtype: torch.dtype
 

@@ -19,7 +19,7 @@ DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class LogicalCPUInfo:
     id: int = -1
     physical_core: int = -1
@@ -49,7 +49,7 @@ class LogicalCPUInfo:
             return obj_dict
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryNodeInfo:
     total_memory: int = -1
     available_memory: int = -1

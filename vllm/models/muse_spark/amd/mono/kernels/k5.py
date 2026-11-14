@@ -154,7 +154,7 @@ REGION_IDS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Build:
     S: int = 32  # rows (32 / 64 / 96 / 128)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)

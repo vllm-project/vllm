@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheLayerConfig, KVCacheSpec
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PipelineBoundary:
     kv_source: int | None = None
     index_source: int | None = None

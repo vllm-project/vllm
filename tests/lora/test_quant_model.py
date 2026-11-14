@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelWithQuantization:
     model_path: str
     quantization: str

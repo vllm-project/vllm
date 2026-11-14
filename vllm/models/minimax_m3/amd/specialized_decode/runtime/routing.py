@@ -14,7 +14,7 @@ from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetada
 from .spec import DecodeConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepDecision:
     use_mono: bool
     reason: str = ""

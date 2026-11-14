@@ -3256,7 +3256,7 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
+        elif current_platform.is_rocm() and KVCacheAccess.REGISTERS in kv_cache_access:
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (

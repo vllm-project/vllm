@@ -304,7 +304,7 @@ def hash_checkpoint(model: str) -> str | None:
     return hasher.hexdigest()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WeightCacheKey:
     """Fingerprint of the cached weights.
 
@@ -411,7 +411,7 @@ class WeightCacheKey:
         ]
 
 
-@dataclass
+@dataclass(slots=True)
 class TensorEntry:
     """A single cached tensor.
 

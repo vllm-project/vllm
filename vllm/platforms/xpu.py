@@ -14,7 +14,10 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    register_backend,
+)
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
@@ -26,6 +29,13 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+# On XPU, FLASH_ATTN_MLA resolves to the XPU-specific subclass everywhere
+# (get_path()/get_class()), not only in the platform's backend selection.
+register_backend(
+    AttentionBackendEnum.FLASH_ATTN_MLA,
+    "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend",
+)
 
 
 def get_mem_info_wrapper(
@@ -208,7 +218,7 @@ class XPUPlatform(Platform):
                 )
                 return AttentionBackendEnum.TRITON_MLA.get_path()
             logger.info_once("Using Flash Attention MLA backend on XPU.")
-            return "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend"
+            return AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()

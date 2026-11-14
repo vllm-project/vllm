@@ -42,7 +42,7 @@ SORT_NETS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MoeBuild:
     tokens: int
     # routed experts and a token's top-k: the target's, or the DSpark draft's
@@ -57,7 +57,7 @@ class MoeBuild:
     tuned: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RouteShape:
     """A build's routing: `experts` routed experts, `topk` a token of
     `tokens`, the task counts and placements that follow, and the route table

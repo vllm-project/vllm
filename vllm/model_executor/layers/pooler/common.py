@@ -15,7 +15,7 @@ ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 ActivationFn = Callable[[_T], _T]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PoolingParamsUpdate:
     requires_token_ids: bool = False
     """Set this flag to enable CPU prompt token IDs for your pooler."""

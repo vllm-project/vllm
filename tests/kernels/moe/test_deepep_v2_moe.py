@@ -48,7 +48,7 @@ requires_flashinfer_sm100 = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestConfig:
     dtype: torch.dtype
     topk: int
@@ -58,7 +58,7 @@ class TestConfig:
     num_experts: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     rank_tokens: torch.Tensor
     rank_token_scales: torch.Tensor | None

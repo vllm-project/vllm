@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
-@dataclass
+@dataclass(slots=True)
 class BaseCacheStats:
     """Stores cache hit statistics."""
 
@@ -117,7 +117,7 @@ class CachingMetrics:
         return self.aggregated_query_hit / self.aggregated_query_total
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixCacheStats(BaseCacheStats):
     """Stores prefix cache hit statistics.
     - `reset`: Whether `reset_prefix_cache` was invoked.
@@ -170,7 +170,7 @@ class PrefixCacheStats(BaseCacheStats):
                 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalCacheStats(BaseCacheStats):
     """Stores multi-modal cache hit statistics.
     - `reset`: Whether `reset_mm_cache` was invoked.
@@ -185,7 +185,7 @@ class MultiModalCacheStats(BaseCacheStats):
         self.hits += num_hits
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
 
@@ -194,7 +194,7 @@ class KVCacheEvictionEvent:
     reuse_gaps_seconds: tuple[float, ...]
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerIterationDetails:
     """Scheduler-side details for one engine iteration."""
 
@@ -219,7 +219,7 @@ KV_FETCH_STAGES = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -255,7 +255,7 @@ class SchedulerStats:
     perf_stats: PerfStats | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -284,7 +284,7 @@ class RequestStateStats:
     is_watermark_skipped: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
@@ -304,7 +304,7 @@ class FinishedRequestStats:
     num_cached_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefillStats:
     """Breakdown of a scheduled prefill computation.
 
@@ -346,7 +346,7 @@ class PrefillStats:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestSpecDecodeMetrics:
     """Per-output-sequence speculative-decoding statistics accumulator.
 

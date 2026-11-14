@@ -1193,7 +1193,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
 class FusedKVCompressNormRopeInsertIndexerTritonKernel(
     VllmTritonJitKernel["FusedKVCompressNormRopeInsertIndexerTritonKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         use_fp4_cache: bool

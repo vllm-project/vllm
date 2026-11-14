@@ -214,7 +214,7 @@ class MockLayer(AttentionLayerBase):
         return FullAttentionManager.layer_config(self._kv_cache_spec)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParameterSweep:
     """Configuration for sweeping a backend parameter."""
 
@@ -230,7 +230,7 @@ class ParameterSweep:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelParameterSweep:
     """Configuration for sweeping model configuration parameter(s).
 
@@ -264,7 +264,7 @@ class ModelParameterSweep:
             raise ValueError("param_name must be set if sweep values are not dicts")
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -309,7 +309,7 @@ class BenchmarkConfig:
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkResult:
     """Results from a single benchmark run."""
 

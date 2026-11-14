@@ -53,7 +53,7 @@ __all__ = ["Box", "LoadPlan", "check_plannable", "load_planned", "plan_loads"]
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entry:
     name: str
     shape: tuple[int, ...]  # from the metadata
@@ -63,7 +63,7 @@ class Entry:
     reason: str | None = None  # why it is a fallback
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoadPlan:
     entries: dict[str, Entry]  # per declared name, in metadata order
     dests: dict[str, Dest]  # live tensors built at plan_loads; not data

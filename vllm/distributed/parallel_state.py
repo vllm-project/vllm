@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
-@dataclass
+@dataclass(slots=True)
 class GraphCaptureContext:
     stream: torch.cuda.Stream
 
