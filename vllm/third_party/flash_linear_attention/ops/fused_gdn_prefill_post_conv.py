@@ -15,6 +15,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .recurrent_common import l2norm_qk, sigmoid_gating
+
 
 @triton.jit
 def _fused_post_conv_kernel(
@@ -45,7 +47,6 @@ def _fused_post_conv_kernel(
     K: tl.constexpr,
     V: tl.constexpr,
     APPLY_L2NORM: tl.constexpr,
-    L2NORM_EPS: tl.constexpr,
     OUTPUT_G_EXP: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     BLOCK_T: tl.constexpr,
@@ -94,13 +95,7 @@ def _fused_post_conv_kernel(
         k_f32 = tl.load(mixed_qkv_ptr + k_offsets, mask=mask_2d, other=0).to(tl.float32)
 
         if APPLY_L2NORM:
-            q_sq_sum = tl.sum(q_f32 * q_f32, axis=1)  # [BLOCK_T]
-            q_inv = 1.0 / tl.sqrt(q_sq_sum + L2NORM_EPS)
-            q_f32 = q_f32 * q_inv[:, None]
-
-            k_sq_sum = tl.sum(k_f32 * k_f32, axis=1)
-            k_inv = 1.0 / tl.sqrt(k_sq_sum + L2NORM_EPS)
-            k_f32 = k_f32 * k_inv[:, None]
+            q_f32, k_f32 = l2norm_qk(q_f32, k_f32, 1)
 
         # Store Q
         q_out = offs_t[:, None] * stride_q_tok + i_h * K + offs_k[None, :]
@@ -145,16 +140,11 @@ def _fused_post_conv_kernel(
         a_vals = tl.load(a_ptr + a_offsets, mask=mask_t, other=0).to(tl.float32)
         b_vals = tl.load(b_ptr + b_offsets, mask=mask_t, other=0).to(tl.float32)
 
-        # g = -exp(A_log) * softplus(a + dt_bias)
-        x = a_vals + dt_bias_val
-        sp = tl.where(x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x)))
-        sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
-        g_vals = -tl.exp(A_log_val) * sp
-
+        g_vals, beta_vals = sigmoid_gating(
+            a_vals, b_vals, A_log_val, dt_bias_val, 1.0, SOFTPLUS_THRESHOLD
+        )
         if OUTPUT_G_EXP:
             g_vals = tl.exp(g_vals)
-
-        beta_vals = tl.sigmoid(b_vals)
 
         gb_offsets = offs_t * HV + i_hv
         tl.store(g_ptr + gb_offsets, g_vals, mask=mask_t)
@@ -247,7 +237,6 @@ def fused_post_conv_prep(
         K=K,
         V=V,
         APPLY_L2NORM=apply_l2norm,
-        L2NORM_EPS=1e-6,
         OUTPUT_G_EXP=output_g_exp,
         SOFTPLUS_THRESHOLD=20.0,
         BLOCK_T=BLOCK_T,

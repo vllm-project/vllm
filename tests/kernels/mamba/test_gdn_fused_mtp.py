@@ -149,6 +149,30 @@ def _build_layer(
 
 
 @pytest.mark.parametrize(
+    "explicit_request,spec_decode,is_cuda,expected",
+    [
+        pytest.param(False, True, True, True, id="cuda-spec-defaults-to-shared"),
+        pytest.param(True, True, True, False, id="explicit-cuda-opts-in"),
+        pytest.param(False, False, True, False, id="no-spec-keeps-cuda"),
+        pytest.param(False, True, False, False, id="non-cuda-unchanged"),
+    ],
+)
+def test_spec_decode_kernel_routing(
+    explicit_request: bool, spec_decode: bool, is_cuda: bool, expected: bool
+) -> None:
+    """Default CUDA spec decode must not take the CUDA-only MTP op."""
+    assert (
+        qwen_gdn_linear_attn.uses_shared_gdn_spec_decode_kernel(
+            "cuda",
+            spec_decode=spec_decode,
+            explicit_request=explicit_request,
+            is_cuda=is_cuda,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     "num_v_heads,expected",
     [
         pytest.param(2, True, id="ratio1"),
