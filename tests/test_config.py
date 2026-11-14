@@ -1244,6 +1244,24 @@ def test_model_runner_supports_custom_logits_processors():
     assert config._get_model_runner_unsupported_features() == []
 
 
+def test_dflash2_draft_rejects_float16():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.float16),
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(
+                architectures=["DFlash2DraftModel"],
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="DFlash2 speculative drafts.*float16"):
+        VllmConfig._verify_dflash2_dtype(config)
+
+    config.model_config.dtype = torch.bfloat16
+    VllmConfig._verify_dflash2_dtype(config)
+
+
 def test_resolve_cudagraph_mode_keeps_spec_decode_sizes():
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
