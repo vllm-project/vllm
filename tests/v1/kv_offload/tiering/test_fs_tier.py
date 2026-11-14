@@ -10,6 +10,7 @@ data integrity throughout the process.
 import errno
 import mmap
 import os
+import signal
 import threading
 import time
 from unittest.mock import MagicMock
@@ -502,6 +503,45 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
             assert torch.allclose(tensor[bid], expected[i])
     finally:
         tier.shutdown()
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
+    """A store that runs out of space partway through a block raises an error
+    that says it was a short write and may mean a full filesystem, instead of
+    EIO, which reads as a device error.
+
+    A soft RLIMIT_FSIZE below the block size makes write(2) return a short
+    count, as a nearly full filesystem does. The hard limit is left alone, so
+    the soft limit can be restored afterwards.
+    """
+    resource = pytest.importorskip("resource")
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    block = 192 * 1024
+    dest = tmp_path / "block.bin"
+    buf = memoryview(bytearray(block))
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, hard))
+    try:
+        with pytest.raises(OSError) as exc_info:
+            io_mod.batch_store_block([str(dest)], buf, [0], block, use_o_direct=False)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+    assert exc_info.value.errno is None
+    assert str(exc_info.value) == (
+        f"Encountered short-write error when writing {dest}. This could be a "
+        "hardware error or the filesystem may be full (ENOSPC)"
+    )
+    # Neither the block nor its temp file is left behind.
+    assert os.listdir(tmp_path) == []
 
 
 def test_wait_idle_blocks_until_tasks_complete():
