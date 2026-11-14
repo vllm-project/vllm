@@ -12,8 +12,15 @@ steps:
     - vllm/distributed/ec_transfer/
     - vllm/entrypoints/scale_out/
     - tests/entrypoints/scale_out/ec_integration/
+    - tests/v1/ec_connector/unit/test_scheduler_nixl_consumer.py
+    - tests/v1/ec_connector/integration/test_nixl_failure.py
   commands:
     - bash entrypoints/scale_out/ec_integration/run_scale_out_ec_e2e_test.sh
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - >-
+      pytest -v -s
+      v1/ec_connector/unit/test_scheduler_nixl_consumer.py
+      v1/ec_connector/integration/test_nixl_failure.py
   mirror:
     amd:
       label: ":amd: (MI300) Scale-out EC Connector E2E"
