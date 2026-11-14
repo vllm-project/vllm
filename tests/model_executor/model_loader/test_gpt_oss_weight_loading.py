@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.model_executor.models.gpt_oss as gpt_oss
 from vllm.model_executor.models.gpt_oss import (
     GptOssForCausalLM,
     GptOssModel,
@@ -150,3 +151,53 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+class _FusedBiasModel(GptOssModel):
+    """One layer holding only the `w2_bias` of a fused GPT-OSS checkpoint."""
+
+    def __init__(self) -> None:
+        torch.nn.Module.__init__(self)
+        self.config = SimpleNamespace(num_local_experts=2, intermediate_size=32)
+        self.parallel_config = SimpleNamespace(enable_expert_parallel=False)
+        block = torch.nn.Module()
+        block.mlp = torch.nn.Module()
+        block.mlp.experts = torch.nn.Module()
+        block.mlp.experts._quant_method = SimpleNamespace(weight_dtype="fp8")
+        bias = torch.nn.Parameter(torch.ones(2, 3), requires_grad=False)
+        bias.weight_loader = lambda param, weight, **kwargs: param.copy_(weight)
+        block.mlp.experts.routed_experts = torch.nn.Module()
+        block.mlp.experts.routed_experts.w2_bias = bias
+        self.layers = torch.nn.ModuleList([block])
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return []
+
+
+@pytest.mark.parametrize(
+    "loader", ["_load_weights_mxfp4", "_load_weights_quark", "_load_weights_other"]
+)
+def test_fused_down_bias_off_tp_rank_zero_keeps_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, loader: str
+) -> None:
+    """Ranks other than 0 load a zero bias. The checkpoint tensor may be a
+    read-only mapping, so it must not be zeroed in place.
+    """
+    single = SimpleNamespace(world_size=1, rank_in_group=0)
+    monkeypatch.setattr(gpt_oss, "get_dp_group", lambda: single)
+    monkeypatch.setattr(gpt_oss, "get_pcp_group", lambda: single)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.config.get_tensor_model_parallel_rank",
+        lambda: 1,
+    )
+    model = _FusedBiasModel()
+    checkpoint = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+    name = "layers.0.mlp.experts.w2_bias"
+
+    loaded = getattr(model, loader)(2, 0, [(name, checkpoint)], [])
+
+    assert loaded == {"layers.0.mlp.experts.routed_experts.w2_bias"}
+    assert torch.count_nonzero(model.layers[0].mlp.experts.routed_experts.w2_bias) == 0
+    assert torch.equal(checkpoint.flatten(), torch.arange(1, 7, dtype=torch.float32))
