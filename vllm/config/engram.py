@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import model_validator
 
@@ -42,6 +42,25 @@ class EngramConfig:
     rows on the host instead of allocating the table. Takes precedence over
     cpu_offload."""
 
+    disk_offload_reader: Literal["auto", "io_uring", "pread", "buffered"] = "auto"
+    """How disk_offload reads each step's rows. "io_uring" and "pread" read the
+    rows' aligned blocks with O_DIRECT, bypassing the page cache, on
+    disk_offload_threads threads; io_uring needs a kernel and a seccomp profile
+    that allow it (Docker's default profile does not). "buffered" reads through
+    the page cache. "auto" picks io_uring, then pread, then buffered when the
+    checkpoint files cannot be opened with O_DIRECT."""
+
+    disk_offload_threads: int = 16
+    """Reader threads for the O_DIRECT disk_offload readers."""
+
+    disk_offload_queue_depth: int = 16
+    """Reads each io_uring reader thread keeps in flight."""
+
+    disk_offload_overlap: bool = True
+    """While the GPU runs a prefill chunk, read the rows of each prefilling
+    request's next chunk on a background thread. Prompt tokens are known ahead,
+    so the next step only reads the rows that were not predicted."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -75,6 +94,10 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if not 1 <= self.disk_offload_threads <= 64:
+            raise ValueError("disk_offload_threads must be in [1, 64]")
+        if not 1 <= self.disk_offload_queue_depth <= 4096:
+            raise ValueError("disk_offload_queue_depth must be in [1, 4096]")
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -170,6 +193,14 @@ class EngramConfig:
 
     def compile_factors(self) -> CompileFactors:
         """Hash settings that affect embedding execution and graph structure."""
-        # The store only matters at startup; a per-launch path must not
-        # invalidate the compile cache.
-        return get_compile_factors(self, {"peer_group_store"})
+        # The reader settings only change how the host reads rows, and the
+        # store only matters at startup; a per-launch path must not invalidate
+        # the compile cache.
+        ignored = {
+            "disk_offload_reader",
+            "disk_offload_threads",
+            "disk_offload_queue_depth",
+            "disk_offload_overlap",
+            "peer_group_store",
+        }
+        return get_compile_factors(self, ignored)

@@ -3,6 +3,8 @@
 
 #include <Python.h>
 
+#include "fs_io_spans.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -360,6 +362,20 @@ static PyMethodDef fs_io_C_methods[] = {
      "\n"
      "Load a batch of blocks from disk into corresponding buffers. "
      "Raises on first error."},
+    {"read_spans_init", read_spans_init, METH_VARARGS,
+     "read_spans_init(threads: int = 16, queue_depth: int = 16,\n"
+     "                use_io_uring: bool = True) -> str\n"
+     "\n"
+     "Set up the process-wide span reader once and return its backend, "
+     "'io_uring' or 'pread' (when io_uring cannot be set up, e.g. under a "
+     "seccomp profile that blocks it). Later calls return the backend."},
+    {"batch_read_spans", batch_read_spans, METH_VARARGS,
+     "batch_read_spans(fds: int64 buffer, offsets: int64 buffer,\n"
+     "                 length: int, out: writable buffer) -> None\n"
+     "\n"
+     "Read span i (`length` bytes at offsets[i] of fds[i]) into "
+     "out[i * length:]. The files must be opened with O_DIRECT. Releases "
+     "the GIL. Raises OSError if any read fails or is short."},
     {nullptr, nullptr, 0, nullptr},
 };
 

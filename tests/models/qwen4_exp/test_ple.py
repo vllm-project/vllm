@@ -3,11 +3,13 @@
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from compressed_tensors.quantization import QuantizationArgs
@@ -51,6 +53,7 @@ from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     PLEVocabParallelEmbedding,
 )
+from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
@@ -1154,6 +1157,8 @@ def _make_ple_from_checkpoint(
     disk_offload: bool,
     device: str = "cpu",
     load: bool = True,
+    reader: str = "auto",
+    overlap: bool = False,
 ) -> Qwen4ExpNGramEmbedding:
     """Build a two-head PLE embedding and load `path` through file-backed views."""
     _mock_etp_group(monkeypatch)
@@ -1164,7 +1169,13 @@ def _make_ple_from_checkpoint(
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
         engram_config=SimpleNamespace(
-            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
+            disk_offload=disk_offload,
+            cpu_offload=False,
+            dp_shared_memory=False,
+            disk_offload_reader=reader,
+            disk_offload_threads=4,
+            disk_offload_queue_depth=8,
+            disk_offload_overlap=overlap,
         ),
     )
     for name, value in (
@@ -1206,15 +1217,21 @@ def _make_ple_from_checkpoint(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="disk offload is CUDA-only")
 @pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
+@pytest.mark.parametrize("reader", ["buffered", "auto"])
 def test_disk_offload_matches_resident_table_under_graph_replay(
-    monkeypatch, tmp_path, fmt
+    monkeypatch, tmp_path, fmt, reader
 ) -> None:
     """Staged rows equal the resident lookup of the same ids in a replayed graph."""
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, fmt)
     gather, resident = (
         _make_ple_from_checkpoint(
-            monkeypatch, path, fmt, disk_offload=disk_offload, device="cuda"
+            monkeypatch,
+            path,
+            fmt,
+            disk_offload=disk_offload,
+            device="cuda",
+            reader=reader,
         )
         for disk_offload in (True, False)
     )
@@ -1250,6 +1267,108 @@ def test_disk_offload_matches_resident_table_under_graph_replay(
         graph.replay()
         expected = forward(resident)
         assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="disk offload is CUDA-only")
+@pytest.mark.parametrize("fmt", ["bf16", "fp8", "nvfp4"])
+@pytest.mark.parametrize("reader", ["buffered", "auto"])
+def test_disk_offload_overlap_stages_the_same_rows(
+    monkeypatch, tmp_path, fmt, reader
+) -> None:
+    """Rows read ahead for a predicted chunk stage exactly like a direct read,
+    whether the prediction is right, partly right, wrong or its read fails."""
+    path = tmp_path / "model.safetensors"
+    _save_ple_checkpoint(path, fmt)
+    gather, resident = (
+        _make_ple_from_checkpoint(
+            monkeypatch,
+            path,
+            fmt,
+            disk_offload=disk_offload,
+            device="cuda",
+            reader=reader,
+            overlap=True,
+        )
+        for disk_offload in (True, False)
+    )
+    embedding = gather.ngram_embedding
+    hidden_states = torch.zeros(8, 64, device="cuda")
+    query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
+    ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
+    torch.manual_seed(0)
+    chunks = [torch.randint(1, 64, (8,), device="cuda") for _ in range(4)]
+    partial = chunks[2].clone()
+    partial[::2] = torch.randint(1, 64, (4,), device="cuda")
+    # Per step: the chunk that runs and the chunk predicted to run next.
+    steps = [(chunks[0], chunks[1]), (chunks[1], partial), (chunks[2], chunks[0])]
+    steps += [(chunks[3], chunks[0]), (chunks[0], None)]
+    original_read = embedding._read_rows
+    failed = [True]  # armed by clearing it
+
+    def fail_once_on_overlap_thread(*args) -> None:
+        if not failed and threading.current_thread() is not threading.main_thread():
+            failed.append(True)
+            raise OSError("injected")
+        original_read(*args)
+
+    monkeypatch.setattr(embedding, "_read_rows", fail_once_on_overlap_thread)
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", True)
+    for step, (input_ids, predicted) in enumerate(steps):
+        if step == 2:
+            failed.clear()  # the read started at step 2 fails
+        next_chunk = (
+            None if predicted is None else (predicted, query_start_loc, ngram_context)
+        )
+        with_gpu_sync_check(stage_checkpoint_rows)(
+            [(gather, embedding)],
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            next_chunk,
+        )
+        output = gather(hidden_states, input_ids, query_start_loc, ngram_context)
+        expected = resident(hidden_states, input_ids, query_start_loc, ngram_context)
+        assert torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+    assert failed
+    assert embedding._next_read is None
+
+
+def test_ple_model_state_predicts_next_prefill_chunk() -> None:
+    """Each prefilling request's next chunk is as long as this one, capped at
+    its prompt, with the preceding tokens as n-gram context."""
+    state = object.__new__(Qwen4ExpModelState)
+    state.ngram_context_len = 2
+    state.ngram_eos_token_id = -1
+    state.device = torch.device("cpu")
+    tokens = torch.arange(400, dtype=torch.int32).reshape(4, 100)
+    req_states = SimpleNamespace(all_token_ids=SimpleNamespace(gpu=tokens))
+    # Batch rows -> request slots 2, 0, 3, 1. Slot 3 decodes; slot 1 finishes
+    # its prompt in this step.
+    input_batch = SimpleNamespace(
+        num_reqs=4,
+        has_prefill=True,
+        num_scheduled_tokens=np.array([4, 1, 1, 3], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([0, 10, 50, 7], dtype=np.int32),
+        prefill_len_np=np.array([30, 12, 50, 10], dtype=np.int32),
+        is_prefilling_np=np.array([True, True, False, True]),
+        idx_mapping_np=np.array([2, 0, 3, 1], dtype=np.intp),
+    )
+    input_ids, query_start_loc, context = state._predict_next_chunk(
+        input_batch, req_states
+    )
+    # Slot 2 continues at 4 for 4 tokens; slot 0 at 11 for its last token.
+    assert input_ids.tolist() == [204, 205, 206, 207, 11]
+    assert query_start_loc.tolist() == [0, 4, 5]
+    assert context.tolist() == [[202, 203], [9, 10]]
+
+    input_batch.num_computed_prefill_tokens_np[0] = 0
+    input_batch.num_scheduled_tokens[0] = 1
+    _, _, context = state._predict_next_chunk(input_batch, req_states)
+    assert context[0].tolist() == [-1, 200]
+
+    input_batch.has_prefill = False
+    assert state._predict_next_chunk(input_batch, req_states) is None
 
 
 @pytest.mark.parametrize(
@@ -1288,12 +1407,15 @@ def test_disk_offload_rejects_shards_it_cannot_serve_from_files(
             embedding.quant_method.process_weights_after_loading(embedding)
 
 
+@pytest.mark.parametrize("reader", ["buffered", "auto"])
 def test_disk_offload_fails_closed_on_truncation_and_reload(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, reader
 ) -> None:
     path = tmp_path / "model.safetensors"
     _save_ple_checkpoint(path, "bf16")
-    module = _make_ple_from_checkpoint(monkeypatch, path, "bf16", disk_offload=True)
+    module = _make_ple_from_checkpoint(
+        monkeypatch, path, "bf16", disk_offload=True, reader=reader
+    )
     embedding = module.ngram_embedding
     assert isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding)
     embedding.copy_ids_to_host(torch.tensor([[0, 23], [5, 6], [12, 17], [23, 23]]))
