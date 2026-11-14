@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import json
-from typing import cast
+import random
+import statistics
+import time
+from typing import Any, cast
 
 import pytest
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -24,7 +32,11 @@ CLOSE = "<|close|>"
 SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
+RESPONSE_OPEN = f"{OPEN}response{SEP}"
 RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
+TOOLS_CLOSE = f"{CLOSE}tools{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
 
 
 class DummyTokenizer:
@@ -714,3 +726,441 @@ def test_chat_params_keeps_template_tool_choice_when_api_auto():
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
     assert chat_params.tool_choice == "auto"
+
+
+# The streaming extraction used to search the whole accumulated text again on
+# every delta. The reference below is that implementation; the incremental one
+# has to reproduce it call for call.
+def _reference_partial_tag_overlap(text: str, tag: str) -> int:
+    max_len = min(len(text), len(tag) - 1)
+    for n in range(max_len, 0, -1):
+        if text.endswith(tag[:n]):
+            return n
+    return 0
+
+
+class _FullRescanToolParser(KimiK3ToolParser):
+    def _extract_response_content(self, current_text):  # type: ignore[override]
+        m_open = self._response_open_re.search(current_text)
+        body_start = m_open.end() if m_open is not None else 0
+        m_tools = self._tools_open_re.search(current_text, body_start)
+        m_rclose = self._response_close_re.search(current_text, body_start)
+        tools_start = m_tools.start() if m_tools else -1
+        response_end = m_rclose.start() if m_rclose else -1
+
+        candidates = [i for i in (tools_start, response_end) if i != -1]
+        if candidates:
+            sendable_idx = min(candidates)
+        else:
+            overlap = max(
+                _reference_partial_tag_overlap(current_text, self.response_open),
+                _reference_partial_tag_overlap(current_text, self.response_close),
+                _reference_partial_tag_overlap(current_text, self.tools_open),
+            )
+            sendable_idx = len(current_text) - overlap
+
+        if sendable_idx <= body_start:
+            return None
+        if self._sent_content_idx < body_start:
+            self._sent_content_idx = body_start
+        if sendable_idx <= self._sent_content_idx:
+            return None
+
+        content = current_text[self._sent_content_idx : sendable_idx]
+        self._sent_content_idx = sendable_idx
+        return content or None
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+    ):
+        content = self._extract_response_content(current_text)
+        m_tools = self._tools_open_re.search(current_text)
+        if m_tools is None:
+            return DeltaMessage(content=content) if content else None
+
+        self._stream_call_parse_idx = max(self._stream_call_parse_idx, m_tools.end())
+        self._stream_call_close_idx = max(self._stream_call_close_idx, m_tools.end())
+        new_calls = []
+        while True:
+            m_close = self._call_close_re.search(
+                current_text, self._stream_call_close_idx, partial=True
+            )
+            if m_close.partial:
+                self._stream_call_close_idx = m_close.start()
+                break
+            self._stream_call_close_idx = m_close.end()
+            for call_match in self._call_re.finditer(
+                current_text, self._stream_call_parse_idx, m_close.end()
+            ):
+                tool_call = self._decode_call(call_match["attrs"], call_match["body"])
+                if tool_call is not None:
+                    new_calls.append(tool_call)
+                self._stream_call_parse_idx = call_match.end()
+
+        if not new_calls:
+            return DeltaMessage(content=content) if content else None
+
+        deltas = [
+            DeltaToolCall(
+                index=self._sent_tool_call_count + i,
+                id=tc.id,
+                type="function",
+                function=DeltaFunctionCall(
+                    name=tc.function.name, arguments=tc.function.arguments
+                ).model_dump(exclude_none=True),
+            )
+            for i, tc in enumerate(new_calls)
+        ]
+        self._sent_tool_call_count += len(new_calls)
+        return DeltaMessage(content=content, tool_calls=deltas)
+
+
+class _ReferenceDelegatingParser(KimiK3Parser):
+    reasoning_parser_cls = KimiK3ReasoningParser
+    tool_parser_cls = _FullRescanToolParser
+
+
+# Channel markers, their fragments, whitespace-tolerant spellings and near misses:
+# the streams below keep splitting, completing and abandoning markers, and put
+# them in orders a model would not produce.
+_STREAM_FRAGMENTS = [
+    "Hi",
+    " there",
+    " ",
+    "\n",
+    "x y",
+    "<",
+    "|",
+    "<|",
+    "|>",
+    "open",
+    "close",
+    "tools",
+    "response",
+    "call",
+    "message",
+    RESPONSE_OPEN,
+    RESPONSE_OPEN,
+    RESPONSE_CLOSE,
+    RESPONSE_CLOSE,
+    TOOLS_OPEN,
+    TOOLS_OPEN,
+    TOOLS_CLOSE,
+    MESSAGE_CLOSE,
+    THINK_CLOSE,
+    f"{OPEN} response {SEP}",
+    f"{CLOSE}\nresponse\n{SEP}",
+    f"{OPEN} tools {SEP}",
+    f'{OPEN}call tool="f" index="1"{SEP}',
+    f"{CLOSE}call{SEP}",
+    _call("lookup", 1, _arg("q", "string", "abc"), _arg("n", "number", "2")),
+    _call("lookup", 1, _arg("q", "string", "abc"), _arg("n", "number", "2")),
+    _arg("k", "string", "v"),
+    "<|clo",
+    "se|>response<|se",
+    "p|>",
+    "<|open|>resp",
+    "<|open|>to",
+    "ols<|sep",
+]
+
+
+def _chop(rnd: random.Random, text: str) -> list[str]:
+    """`text` cut into deltas of 0-34 characters (empty deltas included), so a
+    marker is cut at arbitrary points."""
+    chunks, i = [], 0
+    while i < len(text):
+        size = rnd.choice([0, 1, 1, 2, 3, 5, 8, 13, 34])
+        chunks.append(text[i : i + size])
+        i += size
+    return chunks
+
+
+def _random_chunks(rnd: random.Random) -> list[str]:
+    text = "".join(rnd.choice(_STREAM_FRAGMENTS) for _ in range(rnd.randrange(1, 18)))
+    return _chop(rnd, text)
+
+
+def _structured_chunks(rnd: random.Random) -> list[str]:
+    """A well-formed response and tools channel, with a few stray fragments,
+    cut at arbitrary points: what a model emits, plus what a model might."""
+    parts = []
+    if rnd.random() < 0.8:
+        opening = rnd.choice([RESPONSE_OPEN, RESPONSE_OPEN, ""])
+        parts.append(opening + "answer text " * rnd.randrange(0, 6) + RESPONSE_CLOSE)
+    if rnd.random() < 0.85:
+        calls = [
+            _call(
+                rnd.choice(["lookup", "write"]),
+                1,
+                _arg("q", "string", "abc" * rnd.randrange(4)),
+                _arg("n", "number", "2"),
+            )
+            for _ in range(rnd.randrange(0, 4))
+        ]
+        parts.append(_tools(*calls))
+    parts.append(MESSAGE_CLOSE)
+    for _ in range(rnd.randrange(0, 3)):
+        parts.insert(rnd.randrange(len(parts) + 1), rnd.choice(_STREAM_FRAGMENTS))
+    return _chop(rnd, "".join(parts))
+
+
+def _normalized(message: DeltaMessage | None):
+    """The message without the random ids of its tool calls."""
+    if message is None:
+        return None
+    dumped = message.model_dump()
+    for tool_call in dumped.get("tool_calls") or []:
+        tool_call["id"] = None
+    return dumped
+
+
+def _indices(parser: KimiK3ToolParser) -> tuple[int, int, int, int]:
+    return (
+        parser._sent_content_idx,
+        parser._sent_tool_call_count,
+        parser._stream_call_close_idx,
+        parser._stream_call_parse_idx,
+    )
+
+
+def _stream_in_lockstep(chunks: list[str], *, copy_previous: bool = False) -> None:
+    """Feed one stream to the parser and to the reference, call by call."""
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    reference = _FullRescanToolParser(_dummy_tokenizer())
+    request = _request()
+    previous = ""
+    for chunk in chunks:
+        current = previous + chunk
+        # An equal but distinct string: trusted by content, so it must agree too.
+        given = (previous + "x")[:-1] if copy_previous and previous else previous
+        args: tuple[Any, ...] = (given, current, chunk, [], [], [], request)
+        expected = reference.extract_tool_calls_streaming(*args)
+        assert _normalized(parser.extract_tool_calls_streaming(*args)) == _normalized(
+            expected
+        ), (previous, chunk)
+        assert _indices(parser) == _indices(reference), (previous, chunk)
+        previous = current
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("seed", range(24))
+def test_streaming_matches_full_rescan_over_marker_dense_streams(seed):
+    rnd = random.Random(seed)
+    for _ in range(150):
+        _stream_in_lockstep(_random_chunks(rnd))
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("seed", range(12))
+def test_streaming_matches_full_rescan_over_structured_streams(seed):
+    rnd = random.Random(seed)
+    for _ in range(150):
+        _stream_in_lockstep(_structured_chunks(rnd))
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_for_equal_but_distinct_previous_text(seed):
+    rnd = random.Random(seed)
+    for _ in range(100):
+        _stream_in_lockstep(_random_chunks(rnd), copy_previous=True)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_when_streams_take_turns_on_one_parser(seed):
+    """Two streams alternating on one parser share its sent-content indices, so
+    they are not meaningful as output, but the marker positions each call finds
+    must not leak from one stream's scan into the other's: the reference, fed
+    the same calls, has to answer the same."""
+    rnd = random.Random(seed)
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    reference = _FullRescanToolParser(_dummy_tokenizer())
+    request = _request()
+
+    for _ in range(100):
+        streams = [_random_chunks(rnd), _random_chunks(rnd)]
+        texts = ["", ""]
+        for turn in range(2 * max(len(s) for s in streams)):
+            which = turn % 2
+            if turn // 2 >= len(streams[which]):
+                continue
+            chunk = streams[which][turn // 2]
+            current = texts[which] + chunk
+            args: tuple[Any, ...] = (texts[which], current, chunk, [], [], [], request)
+            assert _normalized(
+                parser.extract_tool_calls_streaming(*args)
+            ) == _normalized(reference.extract_tool_calls_streaming(*args))
+            assert _indices(parser) == _indices(reference)
+            texts[which] = current
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("seed", range(4))
+def test_streaming_matches_full_rescan_for_calls_that_do_not_append(seed):
+    rnd = random.Random(seed)
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    reference = _FullRescanToolParser(_dummy_tokenizer())
+    request = _request()
+
+    def text() -> str:
+        return "".join(rnd.choice(_STREAM_FRAGMENTS) for _ in range(rnd.randrange(8)))
+
+    for _ in range(500):
+        previous, current, delta = text(), text(), text()
+        args: tuple[Any, ...] = (previous, current, delta, [], [], [], request)
+        assert _normalized(parser.extract_tool_calls_streaming(*args)) == _normalized(
+            reference.extract_tool_calls_streaming(*args)
+        ), args
+        assert _indices(parser) == _indices(reference), args
+
+
+_HEAD = f"{RESPONSE_OPEN}Hi there"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("current", "delta"),
+    [
+        # A marker sits before the offset the scan of "abc" would resume at.
+        (_HEAD, "z" * (len(_HEAD) - 3)),  # right length, does not end with the delta
+        (_HEAD, "there"),  # ends with the delta, longer than previous + delta
+        (_HEAD, _HEAD),  # ends with the delta, shorter than previous + delta
+        (_HEAD, "zz"),  # wrong length, does not end with the delta
+        ("abc" + _HEAD, "q" * len(_HEAD)),  # extends previous, no delta suffix
+    ],
+)
+def test_streaming_falls_back_when_a_call_does_not_append_to_the_scanned_text(
+    current, delta
+):
+    """The scan is only valid for the text it was taken on. Handed that text back
+    with a `current_text` that is not `previous_text + delta_text`, the call
+    must be answered from scratch, as before."""
+    parser = KimiK3ToolParser(_dummy_tokenizer())
+    reference = _FullRescanToolParser(_dummy_tokenizer())
+    request = _request()
+    previous = "abc"
+    for p in (parser, reference):
+        # Two appends, so the scan has resumed and its offsets are tight.
+        p.extract_tool_calls_streaming("", "ab", "ab", [], [], [], request)
+        p.extract_tool_calls_streaming("ab", previous, "c", [], [], [], request)
+
+    args: tuple[Any, ...] = (previous, current, delta, [], [], [], request)
+    assert _normalized(parser.extract_tool_calls_streaming(*args)) == _normalized(
+        reference.extract_tool_calls_streaming(*args)
+    )
+    assert _indices(parser) == _indices(reference)
+
+
+@pytest.mark.skip_global_cleanup
+def test_delegating_parser_streaming_matches_full_rescan():
+    """Through `DelegatingParser.parse_delta`, which owns the text it passes
+    back as `previous_text`, with the reasoning parser in front."""
+    request = _request()
+    rnd = random.Random(1234)
+    for _ in range(300):
+        chunks = (_structured_chunks if rnd.random() < 0.6 else _random_chunks)(rnd)
+        # The reasoning parser leaves the think channel on the close marker's
+        # token ids, so the first delta carries them; a few streams never close.
+        closes = rnd.random() < 0.85
+        if closes:
+            chunks = [f"{rnd.choice(['', 'think hard'])}{THINK_CLOSE}", *chunks]
+        parsers = [
+            KimiK3DelegatingParser(_dummy_tokenizer()),
+            _ReferenceDelegatingParser(_dummy_tokenizer()),
+        ]
+        for i, chunk in enumerate(chunks):
+            delta_ids = [ord(ch) % 5 + 1 for ch in chunk]
+            if closes and i == 0:
+                delta_ids = [9, 4, 2, 3]
+            messages = [
+                _normalized(
+                    parser.parse_delta(
+                        chunk,
+                        delta_ids,
+                        request,
+                        prompt_token_ids=[7],
+                        finished=i == len(chunks) - 1,
+                    )
+                )
+                for parser in parsers
+            ]
+            assert messages[0] == messages[1], (chunks, i)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("copy_previous", [False, True])
+def test_streaming_appends_resume_the_scan_instead_of_rescanning(copy_previous):
+    """Deltas that complete no response-open marker are answered from the resumed
+    scan, also when the caller hands back an equal copy of the previous text
+    rather than the very string it was given."""
+    rescans = 0
+
+    class CountingParser(KimiK3ToolParser):
+        def _scan_from_start(self, text):
+            nonlocal rescans
+            rescans += 1
+            return super()._scan_from_start(text)
+
+    parser = CountingParser(_dummy_tokenizer())
+    request = _request()
+    stream = (
+        "answer " * 20
+        + RESPONSE_CLOSE
+        + _tools(_call("calc", 1, _arg("x", "number", "1")))
+        + MESSAGE_CLOSE
+    )
+    previous = ""
+    for i in range(0, len(stream), 3):
+        delta = stream[i : i + 3]
+        current = previous + delta
+        given = (previous + "x")[:-1] if copy_previous and previous else previous
+        parser.extract_tool_calls_streaming(given, current, delta, [], [], [], request)
+        previous = current
+
+    assert rescans == 0
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("prefix", ["", RESPONSE_OPEN], ids=["no-open", "open"])
+def test_streaming_cost_does_not_grow_with_the_accumulated_text(prefix):
+    """Each call used to search the whole accumulated text again, so the cost of
+    one delta grew with the length of the response; the median over the last
+    calls of a long stream must stay close to that of a short one, whether or
+    not the response-open marker was consumed as the generation prefix."""
+
+    def tail_median(num_chars: int) -> float:
+        parser = KimiK3ToolParser(_dummy_tokenizer())
+        request = _request()
+        text = prefix + "response text " * (num_chars // 14)
+        deltas = [text[i : i + 4] for i in range(0, len(text), 4)]
+        previous, samples = "", []
+        for i, delta in enumerate(deltas):
+            current = previous + delta
+            start = time.perf_counter()
+            parser.extract_tool_calls_streaming(
+                previous, current, delta, [], [], [], request
+            )
+            elapsed = time.perf_counter() - start
+            if i >= len(deltas) - 300:
+                samples.append(elapsed)
+            previous = current
+        return statistics.median(samples)
+
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        short, long = tail_median(3_000), tail_median(300_000)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    assert long < 6 * short, (short, long)

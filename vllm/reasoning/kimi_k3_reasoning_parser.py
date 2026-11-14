@@ -23,6 +23,7 @@ delta as normal content; there is simply no think channel to extract.
 """
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -67,6 +68,21 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
     pass that stops at the first hit instead of walking to index 0 twice.
     """
     return -1 if not a or not b else rfind_token_sequences(haystack, (a, b))[1]
+
+
+@dataclass(slots=True)
+class _ReasoningScan:
+    """Where the marker searches of a reasoning stream stand after `text`.
+
+    The serving layer hands over the whole accumulated text on every delta;
+    resuming from these offsets keeps each call proportional to the delta.
+    """
+
+    text: str
+    close_from: int = 0  # no think-close marker starts before this index
+    open_from: int = 0  # the think-open search resumes here while open_end < 0
+    open_end: int = -1  # end of the first think-open marker, -1 until one is seen
+    emitted_end: int = 0  # end of the reasoning prefix already safe to stream
 
 
 class KimiK3ReasoningParser(ReasoningParser):
@@ -131,6 +147,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
+        self._think_holdback = max(len(self._think_open), len(self._think_close)) - 1
+        self._scan: _ReasoningScan | None = None
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -340,16 +358,22 @@ class KimiK3ReasoningParser(ReasoningParser):
           or tools text to the downstream parser.
         """
         m_open = self._think_open_re.search(text)
-        if m_open is not None:
-            text = text[m_open.end() :]
+        start = m_open.end() if m_open is not None else 0
+        return text[start : len(text) - self._think_marker_overlap(text, start)]
+
+    def _think_marker_overlap(self, text: str, start: int) -> int:
+        """Length of the longest suffix of `text[start:]` that is a proper
+        prefix of a think marker, i.e. what a later delta may still complete."""
+        tail = text[max(start, len(text) - self._think_holdback) :]
+        if "<" not in tail:
+            return 0
         overlap = 0
         for marker in (self._think_open, self._think_close):
-            max_check = min(len(marker) - 1, len(text))
-            for n in range(max_check, 0, -1):
-                if text.endswith(marker[:n]):
+            for n in range(min(len(marker) - 1, len(tail)), 0, -1):
+                if tail.endswith(marker[:n]):
                     overlap = max(overlap, n)
                     break
-        return text[:-overlap] if overlap else text
+        return overlap
 
     def _content_ready_to_emit(self, text: str) -> str:
         """Return the content prefix that is safe to stream now.
@@ -418,6 +442,74 @@ class KimiK3ReasoningParser(ReasoningParser):
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
 
+        scan = self._resumable_scan(previous_text, current_text, delta_text)
+        if scan is not None:
+            reasoning_delta = self._advance_scan(scan, current_text)
+            if reasoning_delta is not None:
+                self._scan = scan
+                return (
+                    DeltaMessage(reasoning=reasoning_delta) if reasoning_delta else None
+                )
+        return self._extract_reasoning_from_scratch(
+            previous_text, current_text, delta_text, current_token_ids, delta_token_ids
+        )
+
+    def _resumable_scan(
+        self, previous_text: str, current_text: str, delta_text: str
+    ) -> _ReasoningScan | None:
+        """The scan state of `previous_text` if this call appends `delta_text`
+        to the text it was taken on, else None.
+
+        Streaming calls satisfy `current_text == previous_text + delta_text`;
+        the length and suffix checks reject calls that visibly do not, and the
+        prefix is trusted. `scan.text == previous_text` is a pointer comparison
+        when the serving layer hands back the string it was given.
+        """
+        if len(current_text) != len(previous_text) + len(delta_text):
+            return None
+        if not current_text.endswith(delta_text):
+            return None
+        if not previous_text:
+            return _ReasoningScan("")
+        scan = self._scan
+        return scan if scan is not None and scan.text == previous_text else None
+
+    def _advance_scan(self, scan: _ReasoningScan, current_text: str) -> str | None:
+        """Reasoning to stream for `current_text`, resuming the marker searches
+        where `scan` left them. None when the text needs the full path: a think
+        marker completed, which changes where the reasoning starts or ends."""
+        close = self._think_close_re.search(current_text, scan.close_from, partial=True)
+        if not close.partial:
+            return None
+        open_from = scan.open_from
+        if scan.open_end < 0:
+            opened = self._think_open_re.search(current_text, open_from, partial=True)
+            if not opened.partial:
+                return None
+            open_from = opened.start()
+        start = max(scan.open_end, 0)
+        # A held-back suffix reaching into the previous text was held back there
+        # too, so the emitted prefix never shrinks.
+        emitted_end = len(current_text) - self._think_marker_overlap(
+            current_text, start
+        )
+        reasoning_delta = current_text[scan.emitted_end : emitted_end]
+        scan.text = current_text
+        scan.close_from = close.start()
+        scan.open_from = open_from
+        scan.emitted_end = emitted_end
+        return reasoning_delta
+
+    def _extract_reasoning_from_scratch(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        self._scan = None
+
         # reasoning already ended -> downstream content
         if self._think_close_re.search(previous_text):
             return DeltaMessage(content=delta_text)
@@ -444,12 +536,22 @@ class KimiK3ReasoningParser(ReasoningParser):
                 content=content or None,
             )
 
-        current_reasoning = self._reasoning_text_ready_to_emit(current_text)
+        m_open = self._think_open_re.search(current_text)
+        open_end = m_open.end() if m_open is not None else -1
+        start = max(open_end, 0)
+        emitted_end = len(current_text) - self._think_marker_overlap(
+            current_text, start
+        )
+        current_reasoning = current_text[start:emitted_end]
         previous_reasoning = self._reasoning_text_ready_to_emit(previous_text)
         if current_reasoning.startswith(previous_reasoning):
             reasoning_delta = current_reasoning[len(previous_reasoning) :]
         else:
             reasoning_delta = current_reasoning
+        # Searches resume from the start until a call shows where they stand.
+        self._scan = _ReasoningScan(
+            current_text, open_end=open_end, emitted_end=emitted_end
+        )
         if not reasoning_delta:
             return None
         return DeltaMessage(reasoning=reasoning_delta)
