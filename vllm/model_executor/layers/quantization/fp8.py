@@ -149,7 +149,17 @@ class Fp8Config(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.ignored_layers is not None:
-            self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
+            # Entries can name modules (`model.vision_tower`), which prefix
+            # rules such as `model.vision_tower.` only match with a trailing dot.
+            module_names = hf_to_vllm_mapper.apply_list(
+                [f"{name}." for name in self.ignored_layers]
+            )
+            self.ignored_layers = list(
+                dict.fromkeys(
+                    hf_to_vllm_mapper.apply_list(self.ignored_layers)
+                    + [name.removesuffix(".") for name in module_names]
+                )
+            )
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
@@ -171,25 +181,27 @@ class Fp8Config(QuantizationConfig):
             store_dtype=store_dtype,
         )
 
+    def is_layer_excluded(self, prefix: str) -> bool:
+        # As in transformers' `modules_to_not_convert`, an ignored module keeps
+        # every layer inside it unquantized.
+        return any(
+            prefix.startswith(f"{name}.") for name in self.ignored_layers
+        ) or is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=self.ignored_layers,
+            fused_mapping=self.packed_modules_mapping,
+            match_mode=self.ignored_layers_match_mode,
+        )
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                match_mode=self.ignored_layers_match_mode,
-            ):
+            if self.is_layer_excluded(prefix):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, RoutedExperts):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                match_mode=self.ignored_layers_match_mode,
-            ):
+            if self.is_layer_excluded(prefix):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.store_dtype == "mxfp4":
                 from vllm.model_executor.layers.quantization.mxfp4 import (
