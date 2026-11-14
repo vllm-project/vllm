@@ -155,6 +155,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
     from .w4afp8 import W4AFP8Config
+    from .zaqeris_m3 import ZaqerisM3QuantConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AutoAWQConfig,
@@ -182,6 +183,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "deepseek_v4_fp8": deepseek_config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
+        "zaqeris_m3": ZaqerisM3QuantConfig,
         # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the
         # ModelOpt MXFP8 config (same format). The "mxfp8" online shorthand
         # below only applies to the `--quantization mxfp8` CLI path.

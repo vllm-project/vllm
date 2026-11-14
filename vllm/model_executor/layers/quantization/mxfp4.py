@@ -7,26 +7,26 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEConfig,
-    FusedMoEMethodBase,
-    FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
-    RoutedExperts,
-    SharedExperts,
-)
-from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import (
-    mxfp4_w4a16_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    TRITON_BACKENDS,
-    Mxfp4MoeBackend,
-    backend_to_kernel_cls,
-    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
-    convert_weight_to_mxfp4_moe_kernel_format,
-    make_mxfp4_moe_kernel,
+        from vllm.model_executor.layers.fused_moe import (
+            FusedMoEConfig,
+            FusedMoEMethodBase,
+            FusedMoEParallelConfig,
+            FusedMoEQuantConfig,
+            RoutedExperts,
+            SharedExperts,
+        )
+        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+        from vllm.model_executor.layers.fused_moe.config import (
+            mxfp4_w4a16_moe_quant_config,
+        )
+        from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            TRITON_BACKENDS,
+            Mxfp4MoeBackend,
+            backend_to_kernel_cls,
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+            convert_weight_to_mxfp4_moe_kernel_format,
+            make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_deepseek_v4_mxfp4_moe_backend,
