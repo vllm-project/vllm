@@ -14,6 +14,7 @@ import websockets
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.speech_to_text.realtime.connection import RealtimeConnection
+from vllm.model_executor.models.interfaces import StreamingTranscriptionPostProcessor
 from vllm.multimodal.media.audio import load_audio
 
 MISTRAL_FORMAT_ARGS = [
@@ -55,7 +56,12 @@ def test_realtime_generation_preserves_watermarking(monkeypatch):
     connection = object.__new__(RealtimeConnection)
     connection.connection_id = "test"
     connection.serving = SimpleNamespace(
-        model_cls=SimpleNamespace(realtime_max_tokens=1),
+        model_cls=SimpleNamespace(
+            realtime_max_tokens=1,
+            get_streaming_post_processor_cls=(
+                lambda: StreamingTranscriptionPostProcessor
+            ),
+        ),
         engine_client=EngineClient(),
     )
     connection.audio_queue = asyncio.Queue()
