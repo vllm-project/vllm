@@ -107,6 +107,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _fp8_quant_per_channel,
     _fp8_scale,
     _is_tp_sharded,
+    keep_unquantized_weight,
 )
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
@@ -806,6 +807,47 @@ def test_online_block_fp8_requantization_removes_source_scales(
 
         assert not hasattr(layer, "weight_scale")
         assert layer.weight_scale_inv.numel() > 0
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm())
+    or not is_quant_method_supported("fp8"),
+    reason="Requires FP8 support on CUDA or ROCm.",
+)
+@pytest.mark.parametrize(
+    "linear", ["fp8_per_tensor", "fp8_per_block", "fp8_per_channel"]
+)
+def test_online_fp8_keeps_the_unquantized_weight_on_request(
+    default_vllm_config, dist_init, workspace_init, linear
+) -> None:
+    """A marked linear keeps its loaded bf16 weight beside the FP8 one, even
+    though quantization reuses the loaded weight's storage."""
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear=linear))
+    torch.manual_seed(0)
+    loaded = torch.randn(256, 256, dtype=torch.bfloat16, device=DEVICE)
+
+    def load(keep: bool) -> ColumnParallelLinear:
+        with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+            layer = ColumnParallelLinear(
+                input_size=256,
+                output_size=256,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+                prefix="model.layers.0.self_attn.o_proj",
+                disable_tp=True,
+            )
+        if keep:
+            keep_unquantized_weight(layer)
+        layer.weight.weight_loader(layer.weight, loaded)
+        return layer
+
+    kept = load(keep=True)
+    assert kept.weight.dtype == current_platform.fp8_dtype()
+    assert kept.unquantized_weight.dtype == torch.bfloat16
+    assert torch.equal(kept.unquantized_weight, loaded)
+    assert not hasattr(load(keep=False), "unquantized_weight")
 
 
 def test_online_ignore_keeps_checkpoint_quantization_linear(
