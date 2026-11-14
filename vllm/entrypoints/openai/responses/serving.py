@@ -24,6 +24,7 @@ from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MIN,
     DeltaMessage,
     RequestResponseMetadata,
 )
@@ -747,8 +748,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     ),
                 )
 
-            # OPTIMIZATION
-            priority = orig_priority - 1
+            # Boost continuations without exceeding the engine's signed wire range.
+            priority = max(PRIORITY_MIN, orig_priority - 1)
             sub_request += 1
 
     async def _initialize_tool_sessions(

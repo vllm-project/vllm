@@ -157,6 +157,11 @@ class BaseFrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
     """If set to True, include per-request timing metrics in API responses."""
+    allow_header_priority: bool | None = None
+    """Accept X-Priority and RFC 9218 Priority request headers when body priority
+    is omitted. Defaults to enabled only with --scheduling-policy priority.
+    Use --no-allow-header-priority to disable. Does not affect the legacy
+    X-Vllm-Priority override. Only enable for trusted clients or gateways."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False

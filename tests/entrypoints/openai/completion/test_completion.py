@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
+from typing import Any
 
 import openai  # use the official client for correctness check
 import pytest
@@ -43,6 +44,46 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.fixture(scope="module")
+def header_priority_server(default_server_args):
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        [*default_server_args, "--scheduling-policy", "priority"],
+        env_dict={"VLLM_BATCH_INVARIANT": "1"},
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize("headers", [{"X-Priority": "-5"}, {"Priority": "u=1, i"}])
+async def test_header_priority_real_server(header_priority_server, endpoint, headers):
+    """Header injection preserves real-model greedy output on both public APIs."""
+    async with header_priority_server.get_async_client() as client:
+        kwargs: dict[str, Any]
+        if endpoint == "chat":
+            create = client.chat.completions.create
+            kwargs = {"messages": [{"role": "user", "content": "Say hello."}]}
+        else:
+            create = client.completions.create
+            kwargs = {"prompt": "Say hello."}
+        reference = await create(
+            model=MODEL_NAME, max_tokens=5, temperature=0.0, **kwargs
+        )
+        response = await create(
+            model=MODEL_NAME,
+            max_tokens=5,
+            temperature=0.0,
+            extra_headers=headers,
+            **kwargs,
+        )
+    assert response.usage == reference.usage
+    if endpoint == "chat":
+        assert response.choices[0].message == reference.choices[0].message
+    else:
+        assert response.choices[0].text == reference.choices[0].text
 
 
 @pytest.mark.asyncio
