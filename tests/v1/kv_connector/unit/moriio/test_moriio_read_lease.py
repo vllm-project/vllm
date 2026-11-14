@@ -254,6 +254,24 @@ def test_paused_decode_goes_idle_and_computes_lapsed_requests_locally(clock):
     assert not any(meta.reqs_to_recv[request.request_id].local_block_ids)
 
 
+def test_renewal_after_a_pause_does_not_revive_a_lapsed_lease(clock):
+    """A request not examined in the first step after a long pause must not be
+    renewed back to life: prefill ignores the late renewal and frees it."""
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
+    connector = scheduler.connector.connector_scheduler
+    connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    clock.now += LEASE
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    meta = MoRIIOConnectorMetadata()
+    connector._package_read_lease_renewals(meta)
+    assert meta.read_lease_renewals == {}
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 def test_decode_reads_a_request_whose_lease_was_renewed(clock):
     scheduler = _decode_scheduler()
     request = _waiting_request(scheduler, 1, lease=LEASE)

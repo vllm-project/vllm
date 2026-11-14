@@ -922,7 +922,7 @@ class MoRIIOConnectorScheduler:
 
         if (
             self._read_leases or self._read_lease_lapsed
-        ) and self._read_lease_has_lapsed(request):
+        ) and self._read_lease_has_lapsed(request.request_id):
             # The prefill may have freed and reused the blocks: compute locally.
             return 0, False
 
@@ -1002,7 +1002,7 @@ class MoRIIOConnectorScheduler:
         self._read_lease_renewed_at[request.request_id] = now
         self._unrenewed_read_leases.add(request.request_id)
 
-    def _read_lease_has_lapsed(self, request: "Request") -> bool:
+    def _read_lease_has_lapsed(self, request_id: ReqId) -> bool:
         """Whether the prefill may have freed this request's blocks.
 
         Renewals only go out while the engine steps (not while paused). A renewal
@@ -1011,7 +1011,6 @@ class MoRIIOConnectorScheduler:
         covers the read. The renewal cap ends the lease regardless, so a request
         is not read within a lease (at most half the cap) of it.
         """
-        request_id = request.request_id
         if request_id in self._read_lease_lapsed:
             return True
         lease = self._read_leases.get(request_id)
@@ -1707,6 +1706,10 @@ class MoRIIOConnectorScheduler:
             renew = [r for r in self._unrenewed_read_leases if r in self._read_leases]
         self._unrenewed_read_leases.clear()
         for req_id in renew:
+            # A renewal cannot revive a lease that may have lapsed (e.g. during
+            # a pause): prefill ignores it, so the request must recompute.
+            if self._read_lease_has_lapsed(req_id):
+                continue
             target, transfer_id = self._read_leases[req_id]
             meta.read_lease_renewals.setdefault(target, []).append(transfer_id)
             self._read_lease_renewed_at[req_id] = now
@@ -1796,8 +1799,9 @@ class MoRIIOConnectorScheduler:
         if not self.is_producer:
             transfer_id = params.get("transfer_id") if params else None
             self.unmap_request_id(request_id, transfer_id=transfer_id)
-            self._forget_read_lease(request_id)
-            self._read_lease_lapsed.discard(request_id)
+            if self.mode == MoRIIOMode.READ:
+                self._forget_read_lease(request_id)
+                self._read_lease_lapsed.discard(request_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s",
