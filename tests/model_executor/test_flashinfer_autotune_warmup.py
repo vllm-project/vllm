@@ -58,7 +58,9 @@ def _make_runner(modules, *, max_tokens: int = 8192):
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
         ),
-        _dummy_run=Mock(),
+        _dummy_run=Mock(return_value=(None, None)),
+        _dummy_sampler_run=Mock(),
+        pooling_runner=None,
         speculator=None,
     )
 
@@ -98,9 +100,12 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
     runner = _make_runner([])
     dummy_run_signature = signature(GPUModelRunner._dummy_run)
-    runner._dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
-        None, **kwargs
-    )
+
+    def _bind_dummy_run(**kwargs):
+        dummy_run_signature.bind(None, **kwargs)
+        return None, None
+
+    runner._dummy_run.side_effect = _bind_dummy_run
     max_buckets = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 8192)
     deferred_buckets = (1, 2, 4, 8, 16, 32, 64, 128)
 
@@ -419,6 +424,63 @@ def test_flashinfer_autotune_buckets_cover_drafter_tokens():
         8192,
         128,
     ]
+
+
+@pytest.mark.parametrize(
+    ("is_last_pp_rank", "is_pooling", "expect_sampler_call"),
+    [
+        (True, False, True),
+        (True, True, False),
+        (False, False, False),
+    ],
+)
+def test_flashinfer_autotune_runs_dummy_sampler_for_lm_head(
+    is_last_pp_rank: bool,
+    is_pooling: bool,
+    expect_sampler_call: bool,
+):
+    """Ensure compute_logits (via _dummy_sampler_run) runs inside autotune."""
+    runner = _make_runner([])
+    hidden = torch.zeros((4, 8)) if is_last_pp_rank else None
+    sample_hidden = torch.zeros((2, 8)) if is_last_pp_rank else None
+    runner._dummy_run.return_value = (hidden, sample_hidden)
+    runner.pooling_runner = object() if is_pooling else None
+
+    in_autotune = False
+    observed_in_autotune: list[bool] = []
+
+    @contextmanager
+    def fake_autotune(**kwargs):
+        nonlocal in_autotune
+        in_autotune = True
+        try:
+            yield
+        finally:
+            in_autotune = False
+
+    runner._dummy_sampler_run.side_effect = lambda hs: observed_in_autotune.append(
+        in_autotune
+    )
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(128,),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            return_value=(1, 2, 4, 8, 16, 32, 64, 128),
+        ),
+        patch("vllm.utils.flashinfer.autotune", side_effect=fake_autotune),
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    if expect_sampler_call:
+        runner._dummy_sampler_run.assert_called_once_with(sample_hidden)
+        assert observed_in_autotune == [True]
+    else:
+        runner._dummy_sampler_run.assert_not_called()
 
 
 class _AutotuneGroup:
