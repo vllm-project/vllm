@@ -147,6 +147,8 @@ def _maybe_promote_torch_symbols_for_rocm():
 _maybe_set_cuda_compatibility_path()
 _maybe_promote_torch_symbols_for_rocm()
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.logger import init_logger
@@ -773,6 +775,58 @@ def _apply_cpp_indirect_assert_patch():
     CppVecKernel._vllm_indirect_assert_patched = True  # type: ignore[attr-defined]
 
 
+def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> None:
+    """Run `callback` right after `module_name` has been imported.
+
+    If the module is already in `sys.modules` the callback runs now.
+    Otherwise a `MetaPathFinder` wraps the module loader's `exec_module`
+    so the callback runs right after the module body has finished executing,
+    before the import machinery hands the module back to the importer. This
+    lets `vllm.env_override` patch Inductor internals without importing the
+    Inductor stack eagerly during `import vllm` (~0.5-0.75 s, >1400
+    modules), which only processes that actually compile should pay.
+
+    The finder stays on `sys.meta_path` until the callback has run: a bare
+    `importlib.util.find_spec(module_name)` probe also consults it without
+    importing anything, and must not use it up before the real import.
+    """
+    import sys
+
+    if module_name in sys.modules:
+        callback()
+        return
+
+    import importlib.abc
+
+    class _AfterImportFinder(importlib.abc.MetaPathFinder):
+        _resolving = False
+
+        def find_spec(self, fullname, path, target=None):
+            # _resolving skips this finder while it asks the rest of
+            # sys.meta_path for the real spec below.
+            if fullname != module_name or self._resolving:
+                return None
+            self._resolving = True
+            try:
+                spec = importlib.util.find_spec(fullname)
+            finally:
+                self._resolving = False
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                callback()
+                if self in sys.meta_path:
+                    sys.meta_path.remove(self)
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _AfterImportFinder())
+
+
 def _patch_cpp_indirect_assert_if_needed():
     """Apply cpp codegen indirect_assert backport when on torch 2.11.x.
 
@@ -787,33 +841,9 @@ def _patch_cpp_indirect_assert_if_needed():
     if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.codegen.cpp"
-    if target_name in sys.modules:
-        _apply_cpp_indirect_assert_patch()
-        return
-
-    import importlib.abc
-
-    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_cpp_indirect_assert_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+    _run_after_module_import(
+        "torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch
+    )
 
 
 _patch_cpp_indirect_assert_if_needed()
@@ -856,33 +886,7 @@ def _patch_inductor_operator_str_if_needed():
     if is_torch_equal_or_newer("2.13.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.exc"
-    if target_name in sys.modules:
-        _apply_inductor_operator_str_patch()
-        return
-
-    import importlib.abc
-
-    class _OperatorStrPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_operator_str_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _OperatorStrPatchFinder())
+    _run_after_module_import("torch._inductor.exc", _apply_inductor_operator_str_patch)
 
 
 _patch_inductor_operator_str_if_needed()
@@ -905,33 +909,9 @@ def _apply_inductor_pattern_matcher_patch() -> None:
 
 def _patch_inductor_pattern_matcher() -> None:
     """Apply the backport when Inductor imports its pattern matcher."""
-    import sys
-
-    target_name = "torch._inductor.pattern_matcher"
-    if target_name in sys.modules:
-        _apply_inductor_pattern_matcher_patch()
-        return
-
-    import importlib.abc
-
-    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_pattern_matcher_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
+    _run_after_module_import(
+        "torch._inductor.pattern_matcher", _apply_inductor_pattern_matcher_patch
+    )
 
 
 # Remove once the minimum supported torch includes
