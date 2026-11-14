@@ -1196,7 +1196,9 @@ class MoRIIOWrapper:
             logger.warning("Ignoring READ lease renewal without transfer_ids")
             return
         with self.lock:
-            self.renewed_lease_transfer_ids.update(transfer_ids)
+            self.renewed_lease_transfer_ids.update(
+                t for t in transfer_ids if isinstance(t, str)
+            )
 
     def fail_unallocated_write(self, transfer_id: TransferId) -> bool:
         """Mark a WRITE transfer terminal and release its source blocks if
@@ -1288,7 +1290,7 @@ class MoRIIOWrapper:
                 flags=zmq.NOBLOCK,
             )
         except zmq.ZMQError as e:
-            logger.warning("Dropped a READ lease renewal to %s: %s", path, e)
+            logger.warning_once("Dropped a READ lease renewal to %s: %s", path, str(e))
 
     def pop_renewed_lease_transfer_ids(self) -> set[TransferId]:
         with self.lock:

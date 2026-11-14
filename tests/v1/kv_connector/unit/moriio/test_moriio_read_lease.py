@@ -4,6 +4,7 @@
 expires, and decode renews that lease while the request waits."""
 
 import threading
+import time
 from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     MoRIIOConnectorMetadata,
+    MoRIIOConstants,
     MoRIIOMode,
     ReadLeaseTarget,
     get_port_offset,
@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
 from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.request import RequestStatus
 
 from ..utils import create_request, create_scheduler
 from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_config
@@ -38,17 +41,28 @@ LEASE = 60.0
 
 
 class _Clock:
+    """The connector's `time`: perf_counter and monotonic read `now`."""
+
     def __init__(self, now: float = 1000.0):
         self.now = now
 
     def __call__(self) -> float:
         return self.now
 
+    def perf_counter(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
 
 @pytest.fixture
 def clock():
     clock = _Clock()
-    with patch.object(moriio_connector.time, "perf_counter", clock):
+    with patch.object(moriio_connector, "time", clock):
         yield clock
 
 
@@ -152,10 +166,10 @@ def test_prefill_advertises_its_lease_and_caps_renewals(clock):
 
     # The scheduler leaves expiry to the lease and only caps renewals.
     output = SimpleNamespace(finished_sending=set())
+    clock.now += 2 * LEASE
     MoRIIOConnectorScheduler.update_connector_output(scheduler, output)
     assert not output.finished_sending
-    deadline, transfer_id = scheduler._deferred_send_deadlines["r1"]
-    scheduler._deferred_send_deadlines["r1"] = (deadline - 2 * 3600, transfer_id)
+    clock.now += MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
     MoRIIOConnectorScheduler.update_connector_output(scheduler, output)
     assert output.finished_sending == {"r1"}
 
@@ -175,7 +189,9 @@ def _waiting_request(scheduler, request_id: int, lease: float | None):
         do_remote_prefill=True,
     )
     request = _setup_kv_transfer_request(request, fake_transfer_id=f"tx-{request_id}")
-    request.kv_transfer_params.update(remote_dp_rank=1, tp_size=2)
+    request.kv_transfer_params.update(
+        remote_dp_rank=1, tp_size=2, remote_block_ids=[[7, 8]]
+    )
     if lease is not None:
         request.kv_transfer_params["remote_lease_duration"] = lease
     return request
@@ -211,12 +227,82 @@ def test_decode_renews_waiting_requests_until_it_reads_them(clock):
     assert scheduler.schedule().kv_connector_metadata.read_lease_renewals == {}
 
 
-def test_paused_decode_keeps_stepping_to_renew_its_leases():
+@pytest.mark.parametrize("pause", [PauseState.PAUSED_NEW, PauseState.PAUSED_ALL])
+def test_paused_decode_goes_idle_and_computes_lapsed_requests_locally(clock, pause):
+    """A pause completes only once the engine has no work; queued requests are
+    never allocated while paused, so their leases must not keep it busy."""
     scheduler = _decode_scheduler()
-    scheduler.add_request(_waiting_request(scheduler, 1, lease=LEASE))
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    assert scheduler.get_num_unfinished_requests() == 0
-    assert scheduler.has_requests()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
+    scheduler.set_pause_state(pause)
+    assert not scheduler.has_requests()
+
+    # Not renewed while paused, the prefill's lease lapses: after the pause the
+    # request is computed locally, reads nothing and only releases the blocks.
+    clock.now += LEASE
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
+    meta = out.kv_connector_metadata
+    assert meta.read_lease_renewals == {}
+    assert not any(meta.reqs_to_recv[request.request_id].local_block_ids)
+
+
+def test_decode_reads_a_request_whose_lease_was_renewed(clock):
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
+    connector = scheduler.connector.connector_scheduler
+    for _ in range(12):
+        clock.now += LEASE / 6
+        connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
+
+    out = scheduler.schedule()
+    # READ recomputes only the last token.
+    assert out.num_scheduled_tokens[request.request_id] == 1
+    meta = out.kv_connector_metadata
+    assert any(meta.reqs_to_recv[request.request_id].local_block_ids)
+
+
+def test_decode_stops_relying_on_a_lease_near_the_renewal_cap(clock):
+    """The prefill frees a request at its renewal cap however often it is
+    renewed, so a request held that long is computed locally."""
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
+    connector = scheduler.connector.connector_scheduler
+    clock.now += MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT - LEASE
+    connector._package_read_lease_renewals(MoRIIOConnectorMetadata())
+
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
+
+
+def test_decode_abort_while_queued_stops_renewing(clock):
+    scheduler = _decode_scheduler()
+    request = _waiting_request(scheduler, 1, lease=LEASE)
+    scheduler.add_request(request)
+    connector = scheduler.connector.connector_scheduler
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    assert connector._read_leases == {}
+    clock.now += LEASE
+    meta = MoRIIOConnectorMetadata()
+    connector._package_read_lease_renewals(meta)
+    assert meta.read_lease_renewals == {}
+
+
+@pytest.mark.parametrize("lease", [float("inf"), 0.0, -1.0])
+def test_decode_does_not_track_an_invalid_lease(lease):
+    scheduler = _decode_scheduler()
+    scheduler.add_request(_waiting_request(scheduler, 1, lease=lease))
+    assert scheduler.connector.connector_scheduler._read_leases == {}
+
+
+def test_malformed_renewal_does_not_stop_the_notify_listener():
+    wrapper = _prefill_worker().moriio_wrapper
+    _send(wrapper, {"type": "renew_lease", "transfer_ids": [["tx-1"], "tx-2"]})
+    assert wrapper.pop_renewed_lease_transfer_ids() == {"tx-2"}
 
 
 def test_decode_tp_rank_0_renews_on_every_prefill_tp_rank():
