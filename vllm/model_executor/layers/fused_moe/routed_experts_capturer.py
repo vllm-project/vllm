@@ -57,6 +57,18 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
     return num_layers, num_experts, num_experts_per_tok
 
 
+def _routed_experts_dtype_name(num_experts: int) -> str:
+    return "uint8" if num_experts <= 256 else "uint16"
+
+
+def get_routed_experts_bytes_per_token(vllm_config: VllmConfig) -> int:
+    num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
+        vllm_config
+    )
+    itemsize = getattr(torch, _routed_experts_dtype_name(num_experts)).itemsize
+    return num_layers * num_experts_per_tok * itemsize
+
+
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
@@ -81,7 +93,7 @@ class RoutedExpertsCapturer:
             vllm_config
         )
         self.shape_per_token = (num_layers, num_experts_per_tok)
-        self.output_dtype_name = "uint8" if num_experts <= 256 else "uint16"
+        self.output_dtype_name = _routed_experts_dtype_name(num_experts)
         self.output_dtype = getattr(torch, self.output_dtype_name)
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
