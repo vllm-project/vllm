@@ -432,3 +432,68 @@ def test_recipient_less_content_keeps_glimmer_behavior(chunk):
             reasoning.append(delta.reasoning or "")
     assert "".join(content) == "Hello."
     assert "".join(reasoning) == ""
+
+
+# ------------------------------------------------------- partial ATEM markers
+#
+# An ATEM tag split across chunks is protocol data, not content: it must be
+# held until its closing ">" arrives, and dropped when the turn truncates
+# (#55395). The coverage lives one level down, on the marker machinery every
+# Muse-family parser shares, plus one end-to-end streaming pass.
+
+
+def test_trailing_partial_marker_len_covers_atem():
+    from vllm.tool_parsers.muse_tool_parser import _trailing_partial_marker_len
+
+    # a fragment that can still grow into a tag is held...
+    assert _trailing_partial_marker_len("answer <atem:func") == len("<atem:func")
+    assert _trailing_partial_marker_len('answer <atem:invoke name="ge') == len(
+        '<atem:invoke name="ge'
+    )
+    # ...a closer cut mid-word is held too...
+    assert _trailing_partial_marker_len("answer </atem:inv") > 0
+    # ...but once text continues past a tag nothing is held...
+    assert _trailing_partial_marker_len("</atem:invoke> done") == 0
+    # ...and prose that merely mentions "<atem:" with a space (which no tag
+    # allows after the colon) is not
+    assert _trailing_partial_marker_len("see <atem: invoke") == 0
+
+
+def _stream_tool_parser_only(chunks: list[str]) -> list[str]:
+    """Feed successive prefixes through the tool parser; collect content per call."""
+    out: list[str] = []
+    prev = ""
+    for cur in chunks:
+        delta = cur[len(prev) :]
+        dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+            T, prev, cur, delta, [], [], [], _fake_req()
+        )
+        if dm is not None and getattr(dm, "content", None):
+            out.append(dm.content)
+        prev = cur
+    return out
+
+
+def test_open_body_holds_partial_atem_until_tag_completes():
+    first = " to=user<|message|>The answer is <atem:func"
+    second = "tion_calls> as literal text"
+    # the partial tag must not leave with the first chunk...
+    assert _stream_tool_parser_only([first]) == ["The answer is "]
+    # ...and once the closing ">" arrives the withheld text releases intact
+    assert "".join(_stream_tool_parser_only([first, first + second])) == (
+        "The answer is <atem:function_calls> as literal text"
+    )
+
+
+def test_open_body_holds_partial_atem_with_attributes():
+    first = ' to=user<|message|>answer <atem:invoke name="rea'
+    second = 'd.read"> now'
+    assert "".join(_stream_tool_parser_only([first, first + second])) == (
+        'answer <atem:invoke name="rea' + 'd.read"> now'
+    )
+
+
+def test_truncated_turn_drops_the_partial_atem_fragment():
+    # a turn cut off mid-marker ends without showing protocol bytes
+    first = ' to=user<|message|>The answer is <atem:invoke name="weather.'
+    assert _stream_tool_parser_only([first]) == ["The answer is "]
