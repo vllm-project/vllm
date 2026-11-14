@@ -201,6 +201,23 @@ do_build() {
         fi
     fi
 
+    # Low-latency dispatch asserts that IBGDA created RC QPs even when every peer
+    # is reached over NVLink and no QP is used. Without an RDMA NIC, IBGDA init
+    # fails; NVSHMEM 3.4.5 still reported a nonzero QP count, but 3.7.2 (torch
+    # nightly) reports zero, so single-node runs abort. Only require QPs when
+    # some peer is not NVLink-reachable.
+    if [[ "$name" == "DeepEP" ]]; then
+        if [[ "$deepep_head" != a56d6156febcd9976e55adc85b5155bfac9f28f8 ]]; then
+            echo "WARNING: Skipping DeepEP low-latency NVLink-without-RDMA patch: HEAD is $deepep_head, expected a56d6156febcd9976e55adc85b5155bfac9f28f8." >&2
+        elif patch --batch --force --reverse --dry-run -p1 \
+            < "${PATCHES_DIR}/deepep-low-latency-nvlink-without-rdma.patch" > /dev/null 2>&1; then
+            echo "DeepEP low-latency NVLink-without-RDMA patch is already applied."
+        elif ! patch --batch -p1 < "${PATCHES_DIR}/deepep-low-latency-nvlink-without-rdma.patch"; then
+            echo "ERROR: Failed to apply DeepEP low-latency NVLink-without-RDMA patch; aborting build." >&2
+            exit 1
+        fi
+    fi
+
     # DeepEP CUDA 13 patch
     if [[ "$name" == "DeepEP" && "${CUDA_VERSION_MAJOR}" -ge 13 ]]; then
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
