@@ -1745,8 +1745,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
-    # fuse this into routing; the existing backend opt-in is still required.
+    # treats topk_id == -1 as a skip sentinel. Grouped routers apply it too;
+    # on ROCm AITER only with the model's opt-in under DeepEP v2.
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
