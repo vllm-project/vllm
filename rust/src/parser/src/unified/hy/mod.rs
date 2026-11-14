@@ -29,7 +29,7 @@ fn detect_hy_token_suffix(tokenizer: &dyn vllm_tokenizer::Tokenizer) -> String {
 
 /// Extract the suffix from one opening or closing HY structural token.
 fn hy_marker_suffix(token: &str) -> Option<&str> {
-    let body = token.strip_prefix('<')?.strip_suffix('>')?;
+    let body = token.strip_circumfix('<', '>')?;
     let body = body.strip_prefix('/').unwrap_or(body);
 
     HY_MARKER_STEMS.iter().find_map(|stem| {
