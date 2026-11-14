@@ -55,7 +55,7 @@ def unpack_tensor(
     ]
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedChunk:
     """Result of packing tensors into a single contiguous uint8 buffer."""
 
@@ -299,7 +299,7 @@ def packed_nccl_broadcast_consumer(
 # ── IPC packed transfer ────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedIpcChunk:
     """Metadata and IPC handle for a single packed chunk."""
 

@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from .all_reduce import BoundaryAllReduce
 
 
-@dataclass
+@dataclass(slots=True)
 class BoundaryState:
     """The hc residual streams and the mixes carried to the next boundary."""
 

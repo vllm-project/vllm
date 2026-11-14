@@ -53,7 +53,7 @@ def make_cpu_manager(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class ExpectedPrepareStoreOutput:
     keys_to_store: list[int]
     store_chunk_ids: list[int]

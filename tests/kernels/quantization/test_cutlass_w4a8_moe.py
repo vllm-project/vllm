@@ -93,7 +93,7 @@ TEST_SHAPES = [
 ALIGNMENT = 16  # torch._scaled_mm alignment for M, needed for reference check
 
 
-@dataclass
+@dataclass(slots=True)
 class MoETestSetup:
     num_experts: int
     K: int

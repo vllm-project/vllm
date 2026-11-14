@@ -15,7 +15,7 @@ PromMetricT = TypeVar("PromMetricT", bound=PromMetric)
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ECConnectorStats:
     """Base class for EC Connector Stats, a container for transfer performance
     metrics or otherwise important telemetry from the connector.

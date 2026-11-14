@@ -349,7 +349,7 @@ class DeepseekSparseSWAMetadata:
 class ComputePrefillMetadataKernel(
     VllmTritonJitKernel["ComputePrefillMetadataKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
 
@@ -1142,7 +1142,7 @@ def _compute_swa_indices_and_lens_kernel(
 class ComputeSWAIndicesAndLensKernel(
     VllmTritonJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int
@@ -1241,7 +1241,7 @@ class ComputeSWAIndicesAndLensKernel(
 class ComputeDSparkNoncausalSWAIndicesKernel(
     VllmTritonJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int

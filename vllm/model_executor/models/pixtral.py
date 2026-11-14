@@ -960,7 +960,7 @@ class PixtralForConditionalGeneration(
 
 
 # Vision encoder
-@dataclass
+@dataclass(slots=True)
 class VisionEncoderArgs:
     hidden_size: int
     num_channels: int

@@ -122,7 +122,7 @@ _TORCH_COMPILE_OPTIONS: dict[str, bool] = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class Row:
     case: str
     baseline_ms: float
@@ -360,7 +360,7 @@ def check_correctness(
         raise AssertionError(f"Numerics check failed for case {case}:\n{e}") from e
 
 
-@dataclass
+@dataclass(slots=True)
 class CorrectnessResult:
     """Outcome of the numerics check for a single shape case."""
 

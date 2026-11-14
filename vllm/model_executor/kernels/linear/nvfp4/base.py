@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class NvFp4LinearLayerConfig:
     """Configuration for an NVFP4 linear layer.
 

@@ -161,7 +161,7 @@ class Molmo2MultiModalInputs(TypedDict, total=False):
     videos: Molmo2VideoInputs | None
 
 
-@dataclass
+@dataclass(slots=True)
 class VitConfig:
     """Config for a vision transformer."""
 
@@ -186,7 +186,7 @@ class VitConfig:
         return h // self.image_patch_size, w // self.image_patch_size
 
 
-@dataclass
+@dataclass(slots=True)
 class AdapterConfig:
     """Config for a vit-llm adapter."""
 
@@ -201,7 +201,7 @@ class AdapterConfig:
     text_hidden_size: int = 3584
 
 
-@dataclass
+@dataclass(slots=True)
 class TextConfig:
     """Configuration for a text model transformer."""
 

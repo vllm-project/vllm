@@ -48,7 +48,7 @@ _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 _CUMULATIVE_BUFFER_KEYS = frozenset({"cu_seqlens", "cu_window_seqlens"})
 
 
-@dataclass
+@dataclass(slots=True)
 class BudgetGraphMetadata:
     """Metadata for a single budget graph.
 

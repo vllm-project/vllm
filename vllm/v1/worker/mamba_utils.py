@@ -730,7 +730,7 @@ def _get_mamba_gpu_state_copy_funcs(
     return state_copy_funcs
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MambaSpecDecodeGPUContext:
     """Context for GPU-side Mamba state copy operations during the
     fused postprocess path.

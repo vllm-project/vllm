@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class Mxfp8LinearLayerConfig:
     """Configuration for an MXFP8 linear layer.
 

@@ -38,7 +38,7 @@ def _token_match_ratio(a: tuple[int, ...], b: tuple[int, ...]) -> float:
     return sum(x == y for x, y in zip(a, b)) / n if n else 0.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InlineConfig:
     id: str
     tp_size: int = 1

@@ -26,7 +26,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ZmqListener:
     """A supervisor-bound listener that a ZMQ socket can adopt."""
 

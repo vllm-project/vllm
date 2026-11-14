@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from ..base import MMLinearLayerConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
@@ -33,7 +33,7 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_fused_module: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey

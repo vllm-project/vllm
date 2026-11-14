@@ -154,14 +154,14 @@ def stage_spec_decode_metadata(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
     num_computed_tokens: torch.Tensor
     block_size: int
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
