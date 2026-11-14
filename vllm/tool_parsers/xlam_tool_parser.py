@@ -139,15 +139,16 @@ class xLAMToolParser(ToolParser):
             # Parse the potential tool calls as JSON
             tool_calls_data = json.loads(potential_tool_calls)
 
-            # Ensure it's an array
-            if not isinstance(tool_calls_data, list):
-                logger.debug("Tool calls data is not an array")
+            # Normalize a single tool call dict to a list of calls
+            if isinstance(tool_calls_data, dict):
+                tool_calls_data = [tool_calls_data]
+            elif not isinstance(tool_calls_data, list):
+                logger.debug("Tool calls data is not an array or object")
                 return ExtractedToolCallInformation(
                     tools_called=False,
                     tool_calls=[],
                     content=content or model_output,
                 )
-
             tool_calls: list[ToolCall] = []
 
             for idx, call in enumerate(tool_calls_data):
