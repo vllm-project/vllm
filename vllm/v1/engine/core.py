@@ -21,6 +21,7 @@ import msgspec
 import pydantic
 import zmq
 
+import vllm.distributed.parallel_state as parallel_state
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
@@ -129,6 +130,11 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    # Whether this engine is the only one in its process. In-process engines
+    # (InprocClient) are not: a newer one can start while an old one waits
+    # for garbage collection.
+    _owns_process: bool = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -162,6 +168,9 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        # The world group this engine set up in this process (None when the
+        # workers run in other processes). See shutdown().
+        self._world_group = parallel_state._WORLD
         self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -894,8 +903,18 @@ class EngineCore:
         # the engine in-process (e.g. unit tests) leaks GPU memory.
         gc.unfreeze()
         # Tear down distributed state initialized in this EngineCore process
-        # before it exits and release cached memory.
-        cleanup_dist_env_and_memory()
+        # before it exits and release cached memory. An in-process engine can
+        # be garbage-collected while a newer engine in the same process starts
+        # up; the groups are then the newer engine's, so leave them alone.
+        if self._owns_process or parallel_state._WORLD is getattr(
+            self, "_world_group", None
+        ):
+            cleanup_dist_env_and_memory()
+        else:
+            logger.debug(
+                "[shutdown] EngineCore: distributed state belongs to another "
+                "engine; skipping its teardown"
+            )
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(
@@ -1328,6 +1347,7 @@ _INPUT_SPIN_DURATION_S = 1.0
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
+    _owns_process = True
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
     addresses: EngineZmqAddresses
 
