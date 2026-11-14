@@ -309,3 +309,45 @@ class TestMissingFunctionCallsWrapper:
         assert collect_function_name(results) == "fn"
         assert json.loads(collect_tool_arguments(results)) == {"k": "v"}
         assert "DSML" not in collect_content(results)
+
+
+class TestInvokeLessToolBlock:
+    """A tool block with no invoke is not a tool call: the block falls back
+    to content verbatim instead of being dropped silently (#62051)."""
+
+    def test_falls_back_to_content(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        text = (
+            f"Before tools.{DSML_FUNC_START}\n<url>https://x.com</url>\n{DSML_FUNC_END}"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_content(results) == text
+
+
+class TestNameTruncatedCall:
+    """A call cut off inside its tool name never became a call: it must not
+    reach the client as a ghost call with empty arguments (#62051)."""
+
+    def test_non_streaming_yields_no_call(self, mock_tokenizer, mock_request):
+        text = f"{DSML_FUNC_START}\n{DSML_INVOKE_PREFIX}WebF"
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+
+    def test_streaming_yields_no_call(self, mock_tokenizer, mock_request):
+        text = f"Sure.\n{DSML_FUNC_START}\n{DSML_INVOKE_PREFIX}WebF"
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert not collect_function_name(results)
+        assert not collect_tool_arguments(results)
+        assert collect_content(results).strip() == "Sure."

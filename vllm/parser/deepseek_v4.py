@@ -282,6 +282,12 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # An invoke-less block is not a tool call: close it and fall the
+            # buffered preamble text back to content (#62051).
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
+            ),
             # A tool call ends the turn: stay in TOOL_BETWEEN so any text
             # after the block is dropped.
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
@@ -302,6 +308,8 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
         arg_value_extender=_dsml_arg_value_extender,
+        preamble_fallback_to_content=True,
+        drop_name_truncated_calls=True,
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )
