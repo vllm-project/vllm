@@ -409,3 +409,18 @@ shown below:
     ```
 
 See also: [full example](../../examples/features/structured_outputs/structured_outputs_offline.py)
+
+### Beam search
+
+`LLM.beam_search` accepts `structured_outputs` in `BeamSearchParams`.
+Configure an explicit backend, such as `structured_outputs_config={"backend": "xgrammar"}`,
+when constructing `LLM`.
+
+With the default `raw_logprobs` mode, beam search ranks grammar-valid candidates
+using their original model probabilities, without renormalizing over the allowed
+set. The candidate mask restricts top-k selection without changing the logits
+used to compute scores. Existing allowed-token processing is retained where
+supported, preserving the scoring behavior of `processed_*` modes. Candidate
+selection uses the same model forward pass, including for wide grammars.
+`Logprob.rank` is `None` for grammar-filtered candidates because their order
+within the allowed set does not represent their rank in the full vocabulary.

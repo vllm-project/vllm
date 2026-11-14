@@ -6,11 +6,13 @@ Run `pytest tests/samplers/test_beam_search.py`.
 """
 
 import json
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import jsonschema
 import pytest
+import regex as re
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm import CompletionOutput, RequestOutput
@@ -19,7 +21,12 @@ from vllm.entrypoints.llm import LLM
 from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
-from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    BeamSearchParams,
+    SamplingParams,
+    StructuredOutputsParams,
+)
+from vllm.v1.metrics.reader import Counter
 
 # Extra engine kwargs needed for numerically deterministic beam search.
 # On ROCm, floating-point reductions in attention and GEMM kernels are
@@ -402,3 +409,189 @@ def test_beam_search_structured_output(
             print(f"Generated JSON: {generated!r}")
             parsed = json.loads(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param(("raw_logprobs", None), id="raw"),
+        pytest.param(("processed_logprobs", None), id="processed"),
+        pytest.param(("raw_logprobs", "ngram"), id="raw-ngram"),
+        pytest.param(("processed_logprobs", "ngram"), id="processed-ngram"),
+    ],
+)
+def structured_beam_llm(vllm_runner, request):
+    logprobs_mode, speculative_method = request.param
+    with vllm_runner(
+        "bigcode/tiny_starcoder_py",
+        dtype="bfloat16",
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        enforce_eager=True,
+        async_scheduling=False,
+        enable_prefix_caching=False,
+        max_logprobs=-1,
+        logprobs_mode=logprobs_mode,
+        disable_log_stats=False,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config=(
+            {"method": "ngram", "num_speculative_tokens": 3}
+            if speculative_method == "ngram"
+            else None
+        ),
+    ) as model:
+        yield model.llm
+
+
+def test_structured_beam_search_keeps_better_complete_sequence(
+    structured_beam_llm,
+) -> None:
+    """A width-two search must explore both legal single-token answers."""
+    llm = structured_beam_llm
+    tokenizer = llm.get_tokenizer()
+    prompt_ids = tokenizer.encode("# Choose one answer.\n# Answer:")
+    choice_ids = [tokenizer.encode(s, add_special_tokens=False) for s in ("b", "t")]
+    assert all(len(ids) == 1 for ids in choice_ids)
+    tokens = [ids[0] for ids in choice_ids]
+    first = (
+        llm.generate(
+            [{"prompt_token_ids": prompt_ids}],
+            SamplingParams(
+                temperature=0,
+                max_tokens=1,
+                allowed_token_ids=tokens,
+                logprob_token_ids=tokens,
+            ),
+            use_tqdm=False,
+        )[0]
+        .outputs[0]
+        .logprobs[0]
+    )
+    expected = []
+    for token in tokens:
+        tail = (
+            llm.generate(
+                [{"prompt_token_ids": prompt_ids + [token]}],
+                SamplingParams(
+                    temperature=0,
+                    max_tokens=1,
+                    allowed_token_ids=[tokenizer.eos_token_id],
+                    logprob_token_ids=[tokenizer.eos_token_id],
+                ),
+                use_tqdm=False,
+            )[0]
+            .outputs[0]
+            .logprobs[0]
+        )
+        expected.append(
+            (
+                [token, tokenizer.eos_token_id],
+                first[token].logprob + tail[tokenizer.eos_token_id].logprob,
+            )
+        )
+    expected.sort(key=lambda item: item[1], reverse=True)
+    output = llm.beam_search(
+        [{"prompt_token_ids": prompt_ids}],
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=2,
+            length_penalty=0,
+            structured_outputs=StructuredOutputsParams(choice=["b", "t"]),
+        ),
+    )[0]
+    assert [beam.tokens[len(prompt_ids) :] for beam in output.sequences] == [
+        tokens for tokens, _ in expected
+    ]
+    assert [beam.cum_logprob for beam in output.sequences] == pytest.approx(
+        [score for _, score in expected], abs=1e-5, rel=1e-5
+    )
+    for beam in output.sequences:
+        assert set(beam.logprobs[0]) == set(tokens)
+        assert all(score.rank is None for score in beam.logprobs[0].values())
+
+
+def test_structured_beam_search_scores_large_allowed_set(structured_beam_llm) -> None:
+    """A wide grammar must return the highest-scoring legal candidates."""
+    llm = structured_beam_llm
+    tokenizer = llm.get_tokenizer()
+    prompt = {"prompt_token_ids": tokenizer.encode("# Choose one answer.\n# Answer:")}
+    pattern = r"[a-z]{1,4}"
+    reference = (
+        llm.generate(
+            [prompt],
+            SamplingParams(temperature=0, max_tokens=1, logprobs=-1),
+            use_tqdm=False,
+        )[0]
+        .outputs[0]
+        .logprobs[0]
+    )
+    candidates = sorted(
+        (
+            (token, score.logprob)
+            for token, score in reference.items()
+            if re.fullmatch(pattern, tokenizer.decode([token]))
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    assert len(candidates) > 1024
+    output = llm.beam_search(
+        [prompt],
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=1,
+            structured_outputs=StructuredOutputsParams(regex=pattern),
+        ),
+    )[0]
+    assert [beam.tokens[-1] for beam in output.sequences] == [
+        token for token, _ in candidates[:2]
+    ]
+    assert [beam.cum_logprob for beam in output.sequences] == pytest.approx(
+        [score for _, score in candidates[:2]], abs=1e-5, rel=1e-5
+    )
+
+
+def test_logprob_token_mask_preserves_sampling(structured_beam_llm) -> None:
+    """Candidate filtering must not change sampling, including accepted drafts."""
+    llm = structured_beam_llm
+    prompt = {"prompt_token_ids": [225] * 16}
+    params = dict(
+        temperature=0,
+        max_tokens=12,
+        ignore_eos=True,
+        allowed_token_ids=[225],
+        logprobs=4,
+    )
+    original = llm.generate([prompt], SamplingParams(**params), use_tqdm=False)[
+        0
+    ].outputs[0]
+    num_words = (llm.model_config.get_vocab_size() + 31) // 32
+    mask = [-(1 << 31), 1, 1] + [0] * (num_words - 3)
+    accepted_before = {
+        metric.name: metric.value
+        for metric in llm.get_metrics()
+        if isinstance(metric, Counter)
+        and metric.name == "vllm:spec_decode_num_accepted_tokens"
+    }
+    filtered = llm.generate(
+        [prompt], SamplingParams(**params, _logprob_token_mask=mask), use_tqdm=False
+    )[0].outputs[0]
+    if llm.llm_engine.vllm_config.speculative_config is not None:
+        assert accepted_before
+        for metric in llm.get_metrics():
+            if isinstance(metric, Counter) and metric.name in accepted_before:
+                assert metric.value > accepted_before[metric.name]
+    assert filtered.token_ids == original.token_ids == [225] * 12
+    expected_tokens = (
+        {225}
+        if llm.model_config.logprobs_mode.startswith("processed")
+        else {225, 31, 32, 64}
+    )
+    for before, after in zip(original.logprobs, filtered.logprobs):
+        assert after[225].logprob == pytest.approx(
+            before[225].logprob, abs=1e-5, rel=1e-5
+        )
+        assert {
+            token for token, score in after.items() if math.isfinite(score.logprob)
+        } == expected_tokens

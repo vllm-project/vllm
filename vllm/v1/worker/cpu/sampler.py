@@ -29,7 +29,11 @@ from vllm.v1.worker.cpu.logits_processors import (
     LogitsProcessor,
     LogitsProcRequestState,
 )
-from vllm.v1.worker.cpu.logprob import LogprobTokenIdsState, compute_topk_scores
+from vllm.v1.worker.cpu.logprob import (
+    LogprobTokenIdsState,
+    LogprobTokenMaskState,
+    compute_topk_scores,
+)
 from vllm.v1.worker.cpu.states import CPURequestState
 
 if TYPE_CHECKING:
@@ -574,6 +578,9 @@ class CPUSampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.logprob_token_mask_state = LogprobTokenMaskState(
+            max_num_reqs, vocab_size, device
+        )
         self.thinking_budget_state = CPUThinkingBudgetState(
             req_states, vllm_config.reasoning_config
         )
@@ -593,6 +600,7 @@ class CPUSampler:
         self.needs_logits_processing[req_idx] = needs_processing
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.logprob_token_mask_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
 
@@ -658,6 +666,9 @@ class CPUSampler:
                 per_req_token_ids=self.logprob_token_ids_state.token_ids,
                 expanded_idx_mapping=input_batch.expanded_idx_mapping,
                 max_per_req_token_ids=max_per_req_token_ids,
+                logits_for_topk=self.logprob_token_mask_state.apply(
+                    logits, input_batch.expanded_idx_mapping, idx_mapping_np
+                ),
                 logits_mode=self.logprobs_mode in ("raw_logits", "processed_logits"),
             )
         else:
