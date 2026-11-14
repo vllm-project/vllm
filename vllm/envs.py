@@ -229,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
     VLLM_K3_INDEXER_SAMPLED_TOPK: bool = False
+    VLLM_K31_BEAT_MARKOV: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1798,6 +1799,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_K3_INDEXER_SAMPLED_TOPK": lambda: bool(
         int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0"))
     ),
+    # Kimi-K3.1 DSpark drafting on ROCm, one request: each sequential Markov
+    # draft step (bias GEMV, bf16 add, Gumbel sample, token copy) as one fused
+    # launch over the vocabulary instead of ~9 launches.
+    "VLLM_K31_BEAT_MARKOV": lambda: bool(int(os.getenv("VLLM_K31_BEAT_MARKOV", "0"))),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
