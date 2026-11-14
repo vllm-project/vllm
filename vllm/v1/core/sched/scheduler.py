@@ -55,7 +55,6 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import (
     EngineCoreEventType,
     EngineCoreOutput,
@@ -64,6 +63,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -321,10 +321,10 @@ class Scheduler(SchedulerInterface):
         self.prefix_replay_group_ids = tuple(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.prefix_replay_tokens > 0
+            if group.kv_cache_spec.prefix_replay_tokens > 0
         )
         replay_windows = {
-            kv_cache_config.kv_cache_groups[group_id].prefix_replay_tokens
+            kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
             for group_id in self.prefix_replay_group_ids
         }
         assert len(replay_windows) <= 1, (
@@ -394,7 +394,7 @@ class Scheduler(SchedulerInterface):
         self._spec_decode_step_blocks = sum(
             cdiv(num_spec_decode_tokens, manager.block_size)
             for manager in self.kv_cache_manager.coordinator.single_type_managers
-            if not isinstance(manager, MambaManager)
+            if not isinstance(manager.kv_cache_spec, MambaSpec)
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -433,15 +433,15 @@ class Scheduler(SchedulerInterface):
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
             (
-                group.manager_config.params.prefill_checkpoint_alignment
+                group.kv_cache_spec.prefill_checkpoint_alignment
                 for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.manager_config.params, MambaManager.Params)
+                if isinstance(group.kv_cache_spec, MambaSpec)
             ),
             None,
         )
         self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.manager_config.params, MambaManager.Params)
-            or group.manager_config.params.num_prefill_checkpoint_blocks > 0
+            not isinstance(group.kv_cache_spec, MambaSpec)
+            or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
@@ -1618,6 +1618,15 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
+                # Local experiment log: the work the engine will actually
+                # compute, before the first step runs.
+                if request.num_preemptions == 0:
+                    logger.info(
+                        "engine_admit request_id=%s prompt=%d cached=%d",
+                        request.request_id,
+                        request.num_prompt_tokens,
+                        num_computed_tokens,
+                    )
                 drafts_needed = drafts_needed or not self._drafts_unused(
                     request, num_computed_tokens, num_new_tokens
                 )
@@ -2270,15 +2279,11 @@ class Scheduler(SchedulerInterface):
         remaining = max(0, request.num_tokens - computed)
         state = self._prefill_progress.get(request.request_id)
         if remaining <= 0:
-            if state is None:
-                pending.setdefault(request.client_index, []).append(
-                    PrefillProgress(
-                        request_id=request.request_id, remaining_prefill_tokens=0
-                    )
-                )
-                return
-            del self._prefill_progress[request.request_id]
-            pending.setdefault(state.client_index, []).append(
+            client_index = request.client_index
+            if state is not None:
+                del self._prefill_progress[request.request_id]
+                client_index = state.client_index
+            pending.setdefault(client_index, []).append(
                 PrefillProgress(
                     request_id=request.request_id, remaining_prefill_tokens=0
                 )

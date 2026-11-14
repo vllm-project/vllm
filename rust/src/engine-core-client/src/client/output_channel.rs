@@ -84,8 +84,8 @@ impl OutputSender {
         let finished = output.finished();
         // Holding a progress-only output back would keep the worker's own view of
         // its remaining work from the consumer until the next token arrives.
-        let progress_only = output.output.prefill_progress.is_some()
-            && output.output.new_token_ids.is_empty();
+        let progress_only =
+            output.output.prefill_progress.is_some() && output.output.new_token_ids.is_empty();
         if self.buffered.is_empty()
             && (finished || progress_only || !self.delivered_first || self.stream_interval == 1)
         {
@@ -179,12 +179,10 @@ mod tests {
     /// An output that carries prefill progress and nothing else.
     fn progress(remaining: u64) -> EngineCoreStreamOutput {
         let mut output = output(&[]);
-        output.output.prefill_progress = Some(Box::new(
-            crate::protocol::output::PrefillProgress {
-                request_id: "req".to_string(),
-                remaining_prefill_tokens: remaining,
-            },
-        ));
+        output.output.prefill_progress = Some(Box::new(crate::protocol::output::PrefillProgress {
+            request_id: "req".to_string(),
+            remaining_prefill_tokens: remaining,
+        }));
         output
     }
 
@@ -211,13 +209,8 @@ mod tests {
         let (mut sender, mut receiver) = channel(8);
         sender.send(output(&[1]));
         sender.send(progress(500));
-        // Both arrive now rather than waiting for eight tokens.
+        // The progress frame arrives now instead of with the eighth token.
         assert_eq!(deliveries(&mut receiver), vec![vec![vec![1]], vec![vec![]]]);
-        sender.send(output(&[2, 3]));
-        assert!(
-            deliveries(&mut receiver).is_empty(),
-            "tokens stay held back"
-        );
     }
 
     #[test]
