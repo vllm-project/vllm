@@ -549,6 +549,7 @@ class SupportsMultiModalPruning(Protocol):
         multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
+        multimodal_offsets: Sequence[int] | None = None,
     ) -> tuple[Sequence[torch.Tensor], Tensor, int]:
         """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -565,6 +566,8 @@ class SupportsMultiModalPruning(Protocol):
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
+            multimodal_offsets: Placeholder offset of the media item that
+                each of multimodal_embeddings belongs to.
 
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
