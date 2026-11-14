@@ -273,7 +273,7 @@ def test_eligible_calls_reach_triton(fp8, kernel, name):
     assert kernel[0].q.dtype == kernel[0].k.dtype == kernel[0].v.dtype
     assert kernel[0].q.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
     assert kernel[0].causal is bool(args["causal"])
-    assert kernel[0].config == fp8._TUNED_CONFIG
+    assert kernel[0].config is None
     assert kernel[0].max_seqlen_q % 16 == 0 and kernel[0].max_seqlen_k % 16 == 0
 
 

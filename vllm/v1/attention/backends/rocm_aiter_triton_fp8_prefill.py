@@ -23,19 +23,6 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
-# aiter has no gfx942 FP8 head-dim-256 config yet; its default is slower than CK.
-_TUNED_CONFIG = {
-    "BLOCK_M": 128,
-    "BLOCK_N": 64,
-    "PRELOAD_V": True,
-    "waves_per_eu": 2,
-    "num_warps": 8,
-    "num_ctas": 1,
-    "num_stages": 2,
-    "matrix_instr_nonkdim": 16,
-    "kpack": 1,
-}
-
 _HEAD_DIM = 256
 _KERNEL_KWARGS = frozenset(
     {
@@ -307,7 +294,7 @@ def _triton_or_orig(
         descale_k=dk,
         descale_v=dv,
         sink=None,
-        config=dict(_TUNED_CONFIG),
+        config=None,
     )[:2]
 
     logger.info_once(
