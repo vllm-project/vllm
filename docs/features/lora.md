@@ -470,7 +470,7 @@ vllm serve model --enable-lora --max-lora-rank 256
 
 ### Configuring `max_loras`
 
-`--max-loras` is the number of different adapters that can run in one batch. When requests need more adapters than that, the extra ones wait for a slot. While one waits, the adapter that has held its slot the longest admits no new requests, so that its slot frees once its running requests finish. Set `--max-loras` to the number of adapters you expect to be in use at the same time to avoid the wait.
+`--max-loras` is the number of different adapters that can run in one batch. When requests need more adapters than that, the extra ones wait for a slot. While one waits, the adapter that has held its slot the longest admits no new requests, so that its slot frees once its running requests finish. The wait therefore lasts at most as long as the longest of those requests. Set `--max-loras` to the number of adapters you expect to be in use at the same time to avoid the wait.
 
 ### Restricting LoRA to Specific Modules
 

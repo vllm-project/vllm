@@ -365,3 +365,78 @@ async def test_beam_search_with_lora_adapters(
         )
 
     await asyncio.gather(*lora_tasks)
+
+
+@pytest.mark.asyncio
+async def test_request_waiting_for_lora_slot_is_not_starved(qwen3_lora_files):
+    """With more adapters in demand than `--max-loras`, a request waiting for
+    a slot is served while traffic for the adapters holding the slots goes on."""
+    busy_adapters, num_tokens = ("busy-1", "busy-2"), 64
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "64",
+        "--max-loras",
+        "2",
+        "--max-cpu-loras",
+        "3",
+        "--gpu-memory-utilization",
+        "0.3",
+        "--lora-modules",
+        *(f"{name}={qwen3_lora_files}" for name in (*busy_adapters, "waiting")),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        async with remote_server.get_async_client() as client:
+            stop = asyncio.Event()
+
+            async def stream(model: str, halfway: asyncio.Event) -> None:
+                try:
+                    chunks = await client.completions.create(
+                        model=model,
+                        prompt="Write a long story: ",
+                        max_tokens=num_tokens,
+                        stream=True,
+                        extra_body={"ignore_eos": True},
+                    )
+                    num_chunks = 0
+                    async for _ in chunks:
+                        num_chunks += 1
+                        if num_chunks == num_tokens // 2:
+                            halfway.set()
+                finally:
+                    halfway.set()
+
+            async def keep_busy(model: str, running: asyncio.Event) -> None:
+                # The next request is sent while the current one is halfway
+                # through, so the adapter always has a request in flight.
+                streams = []
+                while not stop.is_set():
+                    halfway = asyncio.Event()
+                    streams.append(asyncio.create_task(stream(model, halfway)))
+                    await halfway.wait()
+                    running.set()
+                await asyncio.gather(*streams)
+
+            running = [asyncio.Event() for _ in busy_adapters]
+            traffic = [
+                asyncio.create_task(keep_busy(model, event))
+                for model, event in zip(busy_adapters, running)
+            ]
+            try:
+                await asyncio.gather(*(event.wait() for event in running))
+                completion = await asyncio.wait_for(
+                    client.completions.create(
+                        model="waiting", prompt="Hello there", max_tokens=1
+                    ),
+                    timeout=60,
+                )
+            finally:
+                stop.set()
+                await asyncio.gather(*traffic)
+            assert completion.usage.completion_tokens == 1
