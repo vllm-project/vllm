@@ -42,6 +42,7 @@ from .geometry import (
     byte_runs,
     merge_writes,
 )
+from .utils import stages_online_quant
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta
@@ -184,6 +185,11 @@ def check_plannable(model: torch.nn.Module) -> None:
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
+        if stages_online_quant(module):
+            # staged by `begin`: its loaders buffer the traced tensors
+            raise RuntimeError(
+                f"load plan: online quantization is not supported ({name})"
+            )
 
 
 def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:
