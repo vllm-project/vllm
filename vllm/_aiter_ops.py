@@ -4248,6 +4248,7 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        v_norm: bool = False,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
@@ -4279,6 +4280,7 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
+            v_norm,
         )
 
     @staticmethod
@@ -4303,6 +4305,7 @@ class rocm_aiter_ops:
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
         return_kv: bool,
+        v_norm: bool = False,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4354,6 +4357,7 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            v_norm=v_norm,
         )
         if dequant_k_out:
             ops.convert_fp8(k_out, kernel_k_out, float(k_scale), kv_cache_dtype)
