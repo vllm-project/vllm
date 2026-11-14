@@ -164,8 +164,10 @@ def fused_recurrent_kda(
     g_bias: torch.Tensor | None = None,
     compute_gate: bool = False,
     lower_bound: float | None = -5.0,
+    defer_spec_state: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert not defer_spec_state, "Deferred spec states are ROCm-only"
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
