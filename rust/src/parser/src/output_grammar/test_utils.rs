@@ -6,7 +6,9 @@
 use std::fmt::Write;
 
 use serde_json::{Map, Value};
-use xgrammar_structural_tag::format::{EndBoundary, Format, TagBoundary, TagFormat, TokenValue};
+use xgrammar_structural_tag::format::{
+    EndBoundary, Format, GrammarSyntax, TagBoundary, TagFormat, TokenValue,
+};
 
 /// Render `format` as an indented outline, one node per line.
 ///
@@ -126,7 +128,11 @@ fn format_node(format: &Format) -> Node<'_> {
             Node::leaf(header)
         }
         Format::Grammar(format) => {
-            Node::branch("grammar", format.grammar.lines().map(Child::Text).collect())
+            let header = match format.syntax {
+                GrammarSyntax::Ebnf => "grammar",
+                GrammarSyntax::Lark => "grammar lark",
+            };
+            Node::branch(header, format.grammar.lines().map(Child::Text).collect())
         }
         Format::Token(format) => Node::leaf(format!("token {}", token(&format.token))),
         Format::ExcludeToken(format) => {
@@ -551,8 +557,8 @@ mod tests {
     use expect_test::expect;
     use serde_json::json;
     use xgrammar_structural_tag::format::{
-        AnyTokensFormat, DispatchFormat, ExcludeTokenFormat, GrammarFormat, JsonSchemaFormat,
-        JsonSchemaStyle, TokenBoundary, TokenDispatchFormat, TokenFormat, TokenTriggeredTagsFormat,
+        AnyTokensFormat, DispatchFormat, ExcludeTokenFormat, JsonSchemaFormat, JsonSchemaStyle,
+        TokenBoundary, TokenDispatchFormat, TokenFormat, TokenTriggeredTagsFormat,
     };
 
     use super::*;
@@ -570,9 +576,8 @@ mod tests {
                 exclude_tokens: vec![TokenValue::Id(2)],
                 max_tokens: Some(16),
             }),
-            Format::Grammar(GrammarFormat {
-                grammar: "root ::= a\na ::= \"x\"".to_string(),
-            }),
+            Format::grammar("root ::= a\na ::= \"x\"", GrammarSyntax::Ebnf),
+            Format::grammar("start: \"x\"+", GrammarSyntax::Lark),
             Format::repeat(Format::regex("[0-9]"), 1, -1),
             Format::JsonSchema(
                 JsonSchemaFormat::new(json!({ "type": "string" }))
@@ -618,6 +623,8 @@ mod tests {
               grammar
                 root ::= a
                 a ::= "x"
+              grammar lark
+                start: "x"+
               repeat 1.. /[0-9]/
               kimi_k3_xml(string) any_order max_whitespace=2 excluding [`</arg>`]
               token_triggered_tags [9] stop_after_first
