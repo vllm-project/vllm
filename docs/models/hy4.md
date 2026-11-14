@@ -11,6 +11,9 @@ and fewer than 32 query heads per TP rank. The existing ShardQ token threshold,
 graph-mode and context-parallelism checks apply. The target backbone can enable
 ShardQ with MTP configured.
 
+With DP1/PP1, eligible backbones also keep iHC residuals and normalization
+token-sharded across TP ranks.
+
 The `nvfp4_ds_mla` KV cache format requires Blackwell (SM100-family) GPUs.
 
 Use `--attention-config '{"sparse_mla_shard_q": false}'` to disable ShardQ.
