@@ -62,7 +62,7 @@ from vllm.utils.import_utils import has_deep_gemm
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Geometry:
     name: str
     hidden_size: int

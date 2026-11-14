@@ -23,6 +23,7 @@ from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig, CacheDType
+from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
@@ -144,7 +145,7 @@ AITER_PTPC_KERNELS = (
 DEVICE_TYPE = current_platform.device_type
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QTensorConfig:
     name: str
     weight: QuarkQTensorHint
@@ -1997,7 +1998,7 @@ def test_quark_fp8_parity(dist_init, workspace_init):
         assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
 
 
-@dataclass
+@dataclass(slots=True)
 class AccuracyTestConfig:
     model_name: str
     excepted_value: float
@@ -3060,3 +3061,13 @@ def test_quark_override_delegates_to_quark_config(
         assert result == "deepseek_v4_fp8", (
             f"Native FP8 should be claimed by DeepseekV4FP8Config, got {result!r}"
         )
+
+
+def test_quark_dict_algo_config_engine_config():
+    """Older Quark exports store a single `algo_config` dict, not a list."""
+    vllm_config = EngineArgs(
+        model="amd-quark/llama-small-int4-per-group-sym-awq"
+    ).create_engine_config()
+    assert isinstance(vllm_config.quant_config, QuarkConfig)
+    assert vllm_config.quant_config.quant_config["algo_config"]["name"] == "awq"
+    assert vllm_config.quant_config.input_rotation_sizes == {}

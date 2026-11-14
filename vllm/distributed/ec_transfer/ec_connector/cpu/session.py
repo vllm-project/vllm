@@ -80,7 +80,7 @@ class XferState(enum.Enum):
 # ── ProducerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ProducerXfer:
     """One pinned read grant on the producer side.
 
@@ -99,7 +99,7 @@ class ProducerXfer:
 # ── ConsumerXfer ──────────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerXfer:
     """State machine for one NIXL READ on the consumer side.
 
@@ -388,7 +388,7 @@ class ProducerSession:
 # ── ConsumerSession ───────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerSessionResults:
     """Results from ConsumerSession.take_results()."""
 

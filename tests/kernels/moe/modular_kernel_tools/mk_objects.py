@@ -48,7 +48,7 @@ from vllm.utils.import_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class TestMoEQuantConfig:
     quant_dtype: torch.dtype | str | None
     per_out_ch_quant: bool
@@ -61,7 +61,7 @@ class TestMoEQuantConfig:
     weight_dtype: torch.dtype | str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PrepareFinalizeInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[torch.dtype | str]
@@ -70,7 +70,7 @@ class PrepareFinalizeInfo:
     supports_apply_weight_on_input: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class ExpertInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[torch.dtype | str]
