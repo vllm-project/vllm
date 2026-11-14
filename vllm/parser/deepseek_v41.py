@@ -68,6 +68,7 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
             param_start=DSML_PARAM_START,
             param_close=DSML_PARAM_CLOSE,
         ),
+        arg_structural_chars=None,
     )
 
 
