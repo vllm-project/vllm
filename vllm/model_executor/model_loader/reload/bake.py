@@ -36,7 +36,7 @@ _META = torch.device("meta")
 # ---- targets
 
 
-@dataclass
+@dataclass(slots=True)
 class Target:
     """A checkpoint tensor, as a write destination."""
 
@@ -86,7 +86,7 @@ class _SinkClosed(RuntimeError):
 _VALUE_READ = "its loader reads tensor values (.item(), bool(), ...)"
 
 
-@dataclass
+@dataclass(slots=True)
 class Copy:
     """One `dest.copy_(src)` from a trace."""
 
@@ -98,7 +98,7 @@ class Copy:
     dtype: torch.dtype
 
 
-@dataclass
+@dataclass(slots=True)
 class _PlanSink:
     """One bake's record. Traces call `accept_copy` for a `copy_` from
     them, `unsupported` for any other op outside `VIEW_OPS` and
@@ -327,7 +327,7 @@ def _bake(
     return sink
 
 
-@dataclass
+@dataclass(slots=True)
 class Traced:
     copies: dict[str, list[Copy]]  # per name
     reasons: dict[str, str]  # fallback names and why

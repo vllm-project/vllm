@@ -52,6 +52,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
+    nvfp4_backend_supports_csf_scales,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -892,15 +893,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
+        scale_encoding: str | None = None,
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        if scale_encoding is None:
+            scale_encoding = quant_config.weight_scale_encoding
         # Whether the selected backend reads the activation input scales.
         self.uses_input_scales = True
         activation_key = None if self.use_a16 else kNvfp4Dynamic
@@ -924,9 +929,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_key=kNvfp4Static,
             activation_key=activation_key,
         )
-        if (
-            self.per_token_activation
-            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        # NONE: requantization source, which has no compute backend.
+        if self.per_token_activation and self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.NONE,
         ):
             raise ValueError(
                 "Per-token NVFP4 activation for pre-quantized weights "
@@ -936,6 +942,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+        # Backends that read `csf` scales keep them compressed; the others get
+        # the scales decoded at load.
+        self.csf_scales = (scale_encoding or "").lower() == "csf" and (
+            nvfp4_backend_supports_csf_scales(
+                self.nvfp4_backend, self.moe, self.use_a16
+            )
+        )
+        if self.csf_scales:
+            logger.info_once("Keeping CSF-compressed NVFP4 MoE scales on the GPU.")
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
@@ -1139,6 +1154,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 per_token_activation=self.per_token_activation,
                 is_act_and_mul=self.moe.is_act_and_mul,
             ),
+            csf_scales=self.csf_scales,
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1170,6 +1186,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
+            csf_scales=self.csf_scales,
         )
         self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
@@ -1210,6 +1227,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1227,6 +1245,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(
@@ -2270,11 +2289,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8FusedMoE(
@@ -2322,7 +2347,7 @@ WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
@@ -2330,7 +2355,7 @@ class CkptCtx:
     scale_block_size: tuple[int, int] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeDtypes:
     """Runtime/model dtypes kernels need — format-agnostic."""
 
@@ -2338,7 +2363,7 @@ class RuntimeDtypes:
     out_dtype: torch.dtype
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shapes:
     """Layer geometry from create_weights args."""
 
@@ -2892,6 +2917,7 @@ def select_linear_kernel(
         return init_mxfp8_linear_kernel(
             weight_shape=weight_shape or layer.weight.shape,
             bmm_batch_size=getattr(layer, "bmm_batch_size", None),
+            activation_quant_key=spec.activation,
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -3107,6 +3133,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
                 bmm_batch_size=layer.bmm_batch_size,
+                activation_quant_key=self.spec.activation,
             )
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
