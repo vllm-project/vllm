@@ -675,6 +675,11 @@ def has_humming() -> bool:
     return _has_module("humming")
 
 
+def has_nf12() -> bool:
+    """Whether the optional `nf12` package is available."""
+    return _has_module("nf12")
+
+
 def has_quark():
     """Whether the optional `quark` package is available."""
     return _has_module("quark")

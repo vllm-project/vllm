@@ -18,6 +18,7 @@ The following are the supported quantization formats for vLLM:
     - [INT8 W8A8](llm_compressor/int8_w8a8.md)
 - [NVIDIA Model Optimizer](modelopt.md)
 - [Online Quantization](online.md)
+    - [NF12 lossless BF16 weight encoding](online.md#nf12)
 - [AMD Quark](quark.md)
 - [Quantized KV Cache](quantized_kvcache.md)
 - [TorchAO](torchao.md)
