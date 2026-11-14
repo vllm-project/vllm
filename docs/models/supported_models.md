@@ -717,13 +717,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
-    `GraniteDoclingForConditionalGeneration` tiles each page image with the Hugging Face processor's grid
-    (512×512 tiles plus a thumbnail). Checkpoints with a fine connector path (`vision_config.use_fine_route`,
-    e.g. the 500M variant) accept `fine_route=True` in `--mm-processor-kwargs` or per request, which yields
-    four times as many image tokens per tile; the default is `False`. The model supports EAGLE-3 speculative
-    decoding; a checkpoint that ships its draft in an `eagle3/` subfolder needs only
-    `--speculative-config '{"method": "eagle3", "num_speculative_tokens": 5}'`
-    (see [EAGLE draft models](../features/speculative_decoding/eagle.md)).
+    `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
+    accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
