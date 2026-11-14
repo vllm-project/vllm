@@ -2006,11 +2006,14 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
 )
 def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
     supported = current_platform.is_cuda() and (
-        current_platform.is_device_capability(90)
+        current_platform.is_device_capability_family(80)
+        or current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(120)
     )
     if not supported:
-        pytest.skip("Native FlashInfer prefill with sinks requires SM90 or SM12x.")
+        pytest.skip(
+            "Native FlashInfer prefill with sinks requires SM8x, SM90 or SM12x."
+        )
 
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
@@ -2149,14 +2152,15 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
     or not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
     reason="FlashInfer decodes an NVFP4 cache with XQA on SM12x and fa2 on SM8x.",
 )
+@pytest.mark.parametrize("use_sinks", [False, True])
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("q_len", [1, 4])
 def test_flashinfer_nvfp4_decode_correctness(
-    default_vllm_config, q_len, use_cuda_graph
+    default_vllm_config, q_len, use_cuda_graph, use_sinks
 ):
-    """Single-token and spec-decode queries over an NVFP4 cache decode with
-    XQA on SM12x and fa2 on SM8x, eager and replayed, and match the fa2
-    prefill that wrote the cache."""
+    """Single-token and spec-decode queries over an NVFP4 cache, with and
+    without sinks, decode with XQA on SM12x and fa2 on SM8x, eager and
+    replayed, and match the fa2 prefill that wrote the cache."""
     import unittest.mock
 
     from vllm.v1.attention.backends import flashinfer as fi
@@ -2202,6 +2206,7 @@ def test_flashinfer_nvfp4_decode_correctness(
     q, k, v = (
         torch.randn(sum(seq_lens), h, d).bfloat16().to(device) for h in (24, 4, 4)
     )
+    sinks = torch.linspace(0.0, 4.0, 24, device=device) if use_sinks else None
 
     def run(query_lens, use_cuda_graph=False):
         req = torch.repeat_interleave(torch.arange(3), torch.tensor(query_lens))
@@ -2225,6 +2230,7 @@ def test_flashinfer_nvfp4_decode_correctness(
                 v[rows],
                 kv_cache,
                 kv_cache_dtype="nvfp4",
+                sinks=sinks,
                 use_cuda_graph=use_cuda_graph,
                 layer_k_scale=0.02,
                 layer_v_scale=0.03,
