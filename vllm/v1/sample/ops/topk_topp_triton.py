@@ -255,6 +255,7 @@ def _topk_topp_kernel(
 
                 # First pass: compute max and min logits and gather outliers
                 num_finite_total = tl.zeros((), dtype=tl.uint32)
+                num_min_logit = tl.zeros((), dtype=tl.uint32)
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < VOCAB_SIZE
@@ -267,7 +268,17 @@ def _topk_topp_kernel(
                     # finite (avoids NaN pivots).
                     finite_blk_mask = logits_blk > -float("inf")
                     finite_blk = tl.where(finite_blk_mask, logits_blk, float("inf"))
-                    min_logit = tl.minimum(min_logit, tl.min(finite_blk))
+                    tile_min = tl.min(finite_blk)
+                    # Bit-exact tie group at the row minimum, merged across
+                    # tiles the same way _update_min_larger_stats merges a
+                    # pivot's group.
+                    tile_min_count = tl.sum((finite_blk == tile_min) & mask_n)
+                    num_min_logit = tl.where(
+                        tile_min < min_logit,
+                        tile_min_count,
+                        num_min_logit + tile_min_count * (tile_min == min_logit),
+                    )
+                    min_logit = tl.minimum(min_logit, tile_min)
                     num_finite_total += tl.sum(finite_blk_mask & mask_n)
 
                     outlier_mask = (logits_blk > outlier_pivot) & mask_n
@@ -461,6 +472,15 @@ def _topk_topp_kernel(
                             num_min_larger = num_min_larger_0
                             found_pivot = 1
 
+                # Top-k keeps the whole tie group at the k-th logit, matching
+                # the reference's strict `<` mask. The pivot search only
+                # considers values strictly above a pivot, so when the k-th
+                # logit is the row minimum no pivot can satisfy its stop
+                # condition: the search converges on that minimum and would
+                # mask every copy of it. Fewer than k logits above the row
+                # minimum means top-k selects the entire finite row.
+                topk_covers_row = num_finite_total - num_min_logit < k
+
                 duplicate_logit = min_larger
                 num_duplicate_logit = num_min_larger
                 num_keep = num_duplicate_logit - (k_pivots_num - k)
@@ -468,9 +488,13 @@ def _topk_topp_kernel(
 
                 # Top-k only path.  If there are fewer finite values
                 # than k (e.g. grammar mask), keep everything.
-                final_pivot = k_pivot if num_finite_total > k else -float("inf")
+                final_pivot = (
+                    k_pivot
+                    if num_finite_total > k and not topk_covers_row
+                    else -float("inf")
+                )
 
-                if TOPP_ENABLED and num_finite_total > k:
+                if TOPP_ENABLED and num_finite_total > k and not topk_covers_row:
                     #### TOP-P SAMPLING AFTER TOP-K ####
                     p = tl.load(P + row_id)
                     if p < 1.0:

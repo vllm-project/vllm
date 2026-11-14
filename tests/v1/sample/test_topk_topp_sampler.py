@@ -413,6 +413,88 @@ class TestTritonTopkTopp:
 
         assert torch.equal(out != float("-inf"), ref != float("-inf"))
 
+    @pytest.mark.parametrize("num_above", [0, 1, 5, 19])
+    @pytest.mark.parametrize("tie_size", [2, 30, 500])
+    def test_topk_keeps_tie_group_at_row_minimum(self, num_above: int, tie_size: int):
+        """Regression: when the k-th logit is the row minimum, the pivot
+        search has no pivot with k values strictly above it, converges on
+        that minimum and masks every copy of it. A grammar-masked row with
+        24 finite logits and k=20 kept 2 tokens instead of 24.
+
+        The batch exceeds the split pipeline's limit so the monolithic
+        kernel handles these rows on CUDA too.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 32768
+        logits = torch.full((128, vocab), -float("inf"), dtype=torch.float32)
+        logits[:, :num_above] = 2.0
+        logits[:, num_above : num_above + tie_size] = 1.0
+        k = torch.full((128,), 20, dtype=torch.int32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=k, p=None)
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=None)
+
+        assert torch.equal(out != float("-inf"), ref != float("-inf"))
+
+    @pytest.mark.parametrize("num_above", [0, 1, 5, 19])
+    @pytest.mark.parametrize("tie_size", [2, 30])
+    def test_topk_topp_keeps_reachable_mass_at_row_minimum(
+        self, num_above: int, tie_size: int
+    ):
+        """Same rows with top-p on: top-k must hand the whole tie group to
+        top-p instead of the two tokens the collapsed pivot left.
+
+        Which members of an exact tie survive the final trim is positional
+        and differs between the sort-based reference and the kernel, so this
+        compares the kept count and the kept mass, not the mask.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 32768
+        logits = torch.full((128, vocab), -float("inf"), dtype=torch.float32)
+        logits[:, :num_above] = 2.0
+        logits[:, num_above : num_above + tie_size] = 1.0
+        k = torch.full((128,), 20, dtype=torch.int32)
+        p = torch.full((128,), 0.8, dtype=torch.float32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=k, p=p)
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=p)
+
+        ref_keep = ref != float("-inf")
+        out_keep = out != float("-inf")
+        assert torch.equal(out_keep.sum(dim=-1), ref_keep.sum(dim=-1))
+
+        ref_mass = ref.softmax(dim=-1).sum(dim=-1)
+        out_mass = out.softmax(dim=-1).sum(dim=-1)
+        assert torch.allclose(out_mass, ref_mass, atol=1e-5)
+
+    def test_topk_keeps_whole_row_tied_at_minimum(self):
+        """Regression: most of the vocab tied at its minimum is the same
+        failure with a full row, where top-k should not mask anything."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((128, 32768), 1.0, dtype=torch.float32)
+        logits[:, :2] = 2.0
+        k = torch.full((128,), 20, dtype=torch.int32)
+
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=None)
+
+        assert torch.isfinite(out).all()
+
+    def test_topk_still_trims_when_kth_logit_is_above_minimum(self):
+        """The tie-at-minimum shortcut must not disable top-k for rows whose
+        k-th logit is strictly above the row minimum."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((128, 4096), -5.0, dtype=torch.float32)
+        logits[:, :60] = 2.0
+        k = torch.full((128,), 20, dtype=torch.int32)
+
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=None)
+
+        assert (torch.isfinite(out).sum(dim=-1) == 20).all()
+
     @staticmethod
     def _exact_topp(row: np.ndarray, p: float) -> tuple[int, np.ndarray]:
         """fp64 reference: exact top-p count and per-token probabilities."""
