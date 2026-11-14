@@ -976,12 +976,12 @@ class TestBuildRenderConfig:
 # regressions in either path are caught uniformly.
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockModelConfig:
     runner_type = "generate"
     model: str = "cohere-test"
@@ -1001,12 +1001,12 @@ class _MockModelConfig:
     renderer_num_workers: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockVllmConfig:
     model_config: _MockModelConfig
     parallel_config: _MockParallelConfig

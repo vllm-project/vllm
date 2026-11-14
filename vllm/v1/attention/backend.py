@@ -46,7 +46,7 @@ class AttentionType(StrEnum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultipleOf:
     base: int
 
@@ -406,7 +406,7 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class CommonAttentionMetadata:
     """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.

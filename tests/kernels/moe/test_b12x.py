@@ -1041,7 +1041,7 @@ def test_b12x_moe_workspace_uses_prepared_router_weight_contract(
     ]
 
 
-@dataclass
+@dataclass(slots=True)
 class _B12xMoeCase:
     hidden_states: torch.Tensor
     score: torch.Tensor

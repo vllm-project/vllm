@@ -32,12 +32,12 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"

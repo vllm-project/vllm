@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 # ======================================================================
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadSpec:
     """Specification for a single remote block read operation."""
 
@@ -32,7 +32,7 @@ class ReadSpec:
     block_ids_by_region: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TPMapping:
     """Complete local-to-remote TP mapping for one remote engine.
 

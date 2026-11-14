@@ -465,7 +465,7 @@ class TestExampleConnector(ExampleConnector):
         return attr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False

@@ -78,7 +78,7 @@ class ShardError(ValueError):
     """A width the TP size does not divide, or a TP size the model refuses."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shard:
     tp: int
 
