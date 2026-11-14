@@ -114,24 +114,20 @@ pub fn lower_text_request(
 /// Convert [`SamplingParams`] into [`EngineCoreSamplingParams`], enriching
 /// omitted user values with tokenizer/model-derived hints when available.
 pub fn lower_sampling_params(
-    sampling_params: SamplingParams,
-    SamplingHints {
-        primary_eos_token_id,
-        extra_eos_token_ids,
-        default_temperature,
-        default_top_p,
-        default_top_k,
-        default_min_p,
-        default_repetition_penalty,
-        default_presence_penalty,
-        default_frequency_penalty,
-        default_max_tokens,
-    }: SamplingHints,
+    mut sampling_params: SamplingParams,
+    sampling_hints: SamplingHints,
     sampling_limits: SamplingLimits,
     structured_outputs_backend: StructuredOutputBackend,
     prompt_len: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Result<EngineCoreSamplingParams> {
+    sampling_hints.apply_defaults(&mut sampling_params);
+    let SamplingHints {
+        primary_eos_token_id,
+        extra_eos_token_ids,
+        default_max_tokens,
+        ..
+    } = sampling_hints;
     let SamplingParams {
         temperature,
         watermarking,
@@ -195,13 +191,13 @@ pub fn lower_sampling_params(
     // If neither the caller nor the model provides a value, fall back to 1.0 — the
     // default used by the Python vLLM OpenAI-compatible API (via
     // `_DEFAULT_SAMPLING_PARAMS`).
-    let temperature = temperature.or(default_temperature).unwrap_or(1.0);
-    let top_p = top_p.or(default_top_p).unwrap_or(1.0);
-    let top_k = top_k.or(default_top_k).unwrap_or(0);
-    let min_p = min_p.or(default_min_p).unwrap_or(0.0);
-    let repetition_penalty = repetition_penalty.or(default_repetition_penalty).unwrap_or(1.0);
-    let presence_penalty = presence_penalty.or(default_presence_penalty).unwrap_or(0.0);
-    let frequency_penalty = frequency_penalty.or(default_frequency_penalty).unwrap_or(0.0);
+    let temperature = temperature.unwrap_or(1.0);
+    let top_p = top_p.unwrap_or(1.0);
+    let top_k = top_k.unwrap_or(0);
+    let min_p = min_p.unwrap_or(0.0);
+    let repetition_penalty = repetition_penalty.unwrap_or(1.0);
+    let presence_penalty = presence_penalty.unwrap_or(0.0);
+    let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let max_tokens = resolve_max_tokens(
         max_tokens,
         default_max_tokens,

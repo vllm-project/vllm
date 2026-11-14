@@ -14,8 +14,9 @@ use tonic_health::server::health_reporter;
 use tracing::info;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
-    ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
-    ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
+    ChatRequestProcessor, ChatTemplateContentFormatOption, GenerationConfigMode,
+    LoadModelBackendsOptions, ParserSelection, RendererSelection, ToolStrictLevel,
+    load_model_backends,
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
@@ -42,6 +43,8 @@ pub struct RenderConfig {
     /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
     pub skip_tokenizer_init: bool,
     pub hf_overrides: HfOverrides,
+    /// Source of the sampling defaults resolved into rendered requests.
+    pub generation_config: GenerationConfigMode,
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
@@ -148,7 +151,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
-            generation_config: Default::default(),
+            generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
@@ -364,6 +367,7 @@ mod tests {
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
+                generation_config: Default::default(),
                 skip_tokenizer_init: false,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),

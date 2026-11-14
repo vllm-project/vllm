@@ -148,6 +148,11 @@ pub struct RenderArgs {
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
     hf_overrides: HfOverrides,
+    /// The source of the sampling defaults resolved into rendered requests.
+    /// `"auto"` loads the model's defaults, while `"vllm"` uses vLLM's neutral
+    /// defaults. Must match the engine's.
+    #[arg(long, default_value_t)]
+    generation_config: GenerationConfigMode,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -274,6 +279,7 @@ impl RenderArgs {
             hf_config,
             skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),

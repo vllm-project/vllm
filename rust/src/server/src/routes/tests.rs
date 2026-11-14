@@ -2068,6 +2068,53 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Python's generate endpoint does not apply the model's sampling defaults, so
+/// a rendered request must carry them for the fields the request left unset.
+#[tokio::test]
+async fn render_resolves_model_sampling_defaults() {
+    let backend = Arc::new(FakeChatBackend {
+        sampling_hints: vllm_text::SamplingHints {
+            default_temperature: Some(0.6),
+            default_top_p: Some(0.95),
+            default_top_k: Some(20),
+            default_repetition_penalty: Some(1.05),
+            ..Default::default()
+        },
+        ..FakeChatBackend::new()
+    });
+    let mut app = build_render_router(Arc::new(RenderState {
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
+    }));
+
+    let (status, chat) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_p": 0.5,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let (status, completion) = post_json(
+        &mut app,
+        "/v1/completions/render",
+        json!({"model": "render-model", "prompt": "hello", "temperature": 0.0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completion}");
+
+    expect_test::expect![[r#"
+        {"temperature":0.6,"top_p":0.5,"top_k":20,"repetition_penalty":1.05,"ignore_eos":false}
+        {"temperature":0.0,"top_p":0.95,"top_k":20,"max_tokens":16,"repetition_penalty":1.05,"ignore_eos":false}"#]].assert_eq(&format!(
+        "{}\n{}",
+        chat["sampling_params"], completion[0]["sampling_params"]
+    ));
+}
+
 /// Python renders an empty user turn, so the render route must accept empty
 /// message content instead of rejecting it.
 #[tokio::test]

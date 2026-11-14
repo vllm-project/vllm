@@ -113,6 +113,11 @@ fn lower_render_request(
         .map(|features| MultiModalFeatures::from_prepared(features, mm_payload))
         .transpose()?;
     let mut text_request = prepared.text_request;
+    // Like Python's render, resolve the model's sampling defaults here:
+    // Python's generate only defaults an absent `max_tokens`.
+    (state.text.sampling_hints())
+        .map_err(|error| text_submit_error("failed to prepare render request", error))?
+        .apply_defaults(&mut text_request.sampling_params);
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");

@@ -107,6 +107,11 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    /// Return the model-derived sampling defaults that lowering applies.
+    pub fn sampling_hints(&self) -> Result<SamplingHints> {
+        self.backend.sampling_hints()
+    }
+
     fn prepare_prompt_tokens(
         &self,
         prompt: Prompt,

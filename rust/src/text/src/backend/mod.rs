@@ -12,6 +12,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
+use crate::request::SamplingParams;
 
 /// Select which sampling defaults to inherit from generation config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
@@ -68,6 +69,21 @@ pub struct SamplingHints {
     pub default_presence_penalty: Option<f32>,
     pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
+}
+
+impl SamplingHints {
+    /// Fill the sampling parameters `params` leaves unset with the model's
+    /// defaults. `max_tokens` is left to lowering, which resolves it against
+    /// the prompt length.
+    pub fn apply_defaults(&self, params: &mut SamplingParams) {
+        params.temperature = params.temperature.or(self.default_temperature);
+        params.top_p = params.top_p.or(self.default_top_p);
+        params.top_k = params.top_k.or(self.default_top_k);
+        params.min_p = params.min_p.or(self.default_min_p);
+        params.repetition_penalty = params.repetition_penalty.or(self.default_repetition_penalty);
+        params.presence_penalty = params.presence_penalty.or(self.default_presence_penalty);
+        params.frequency_penalty = params.frequency_penalty.or(self.default_frequency_penalty);
+    }
 }
 
 /// Effective bounds used to validate and lower sampling requests.
