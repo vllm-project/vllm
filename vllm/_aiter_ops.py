@@ -2961,6 +2961,34 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def pa_gluon_splits_support_kv_row_size(cls) -> bool:
+        """Probe whether AITER's gluon `get_recommended_splits` accepts
+        `head_size` and `kv_cache_dtype`.
+
+        Added in https://github.com/ROCm/aiter/pull/6434 (unreleased). With them
+        the split count follows the kernel's occupancy for the KV row size.
+        """
+        import inspect
+
+        from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+
+        params = inspect.signature(get_recommended_splits).parameters
+        return "head_size" in params and "kv_cache_dtype" in params
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def pa_decode_gluon_supports_output_gate(cls) -> bool:
+        """Probe whether the installed aiter pa_decode_gluon accepts `output_gate`."""
+        import inspect
+
+        from aiter.ops.triton.gluon.pa_decode_gluon import pa_decode_gluon
+
+        return "output_gate" in inspect.signature(pa_decode_gluon).parameters
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""

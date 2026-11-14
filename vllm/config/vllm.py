@@ -271,6 +271,27 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     return rocm_aiter_ops.is_enabled()
 
 
+def enable_attn_output_gate_fusion(cfg: "VllmConfig") -> bool:
+    """Enable for gated attention (attn_output_gate) with AITER when the attention
+    op is not a splitting op (use_inductor_graph_partition or no splitting ops).
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    cc = cfg.compilation_config
+    return (
+        rocm_aiter_ops.is_enabled()
+        and cfg.model_config is not None
+        and bool(getattr(cfg.model_config.hf_text_config, "attn_output_gate", False))
+        and (
+            cc.use_inductor_graph_partition
+            or (
+                cc.splitting_ops is not None
+                and not cc.splitting_ops_contain_attention()
+            )
+        )
+    )
+
+
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
@@ -287,6 +308,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_quant": False,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
+            "fuse_attn_output_gate": False,
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
@@ -308,6 +330,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
+            "fuse_attn_output_gate": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
@@ -329,6 +352,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
+            "fuse_attn_output_gate": enable_attn_output_gate_fusion,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -350,6 +374,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
+            "fuse_attn_output_gate": enable_attn_output_gate_fusion,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -2830,6 +2855,13 @@ class VllmConfig:
                         "num_tokens <= %d.",
                         compile_range_end,
                     )
+
+        if compilation_config.pass_config.fuse_attn_output_gate:
+            max_token_num = (
+                compilation_config.pass_config.attn_output_gate_fusion_max_token_num
+            )
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
 
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
