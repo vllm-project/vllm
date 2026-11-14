@@ -451,10 +451,10 @@ def test_glm5_next_mtp_read_pairs_every_group(external_tokens):
         assert local == [[], [300], [200]]
 
     output = SchedulerOutput.make_empty()
-    output.new_block_ids_to_zero = [100, 101, 102, 300]
+    output.new_block_ids_to_zero = [[], [100, 101, 102], [300]]
     consumer.build_connector_meta(output)
     expected_zero = [102] if external_tokens else [100, 101, 102]
-    assert output.new_block_ids_to_zero == expected_zero
+    assert output.new_block_ids_to_zero == [[], expected_zero, []]
 
 
 def test_read_blocks_routes_each_hybrid_layer_to_its_group():
@@ -1126,19 +1126,19 @@ def test_update_state_drops_decode_recompute_tail_block(
     assert sched._req_kv_params["req"]["remote_block_ids"] == remote_blocks
 
     output = SchedulerOutput.make_empty()
-    output.new_block_ids_to_zero = None if zero_ids is None else list(zero_ids)
+    output.new_block_ids_to_zero = None if zero_ids is None else [list(zero_ids)]
     before = asdict(output)
     meta = sched.build_connector_meta(output)
     assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
     if zero_ids and has_mamba and external_tokens:
-        before["new_block_ids_to_zero"] = zero_ids[1:]
+        before["new_block_ids_to_zero"] = [zero_ids[1:]]
     assert asdict(output) == before
 
     # A later local allocation of the same pages must still be zeroed.
-    output.new_block_ids_to_zero = [100, 101, 102]
+    output.new_block_ids_to_zero = [[100, 101, 102]]
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
-    assert output.new_block_ids_to_zero == [100, 101, 102]
+    assert output.new_block_ids_to_zero == [[100, 101, 102]]
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():

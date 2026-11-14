@@ -359,8 +359,9 @@ def test_kv_load_zeroing_respects_loaded_groups(is_async, loads_window):
         not b.is_null and b.block_id not in hit_ids
         for b in swa_blocks[: local // BLOCK_SIZE]
     )
-    zeroed = set(out.new_block_ids_to_zero or ())
+    zeroed_by_group = out.new_block_ids_to_zero or []
     for group_id, blocks in enumerate(manager.get_blocks(request.request_id).blocks):
+        zeroed = set(zeroed_by_group[group_id]) if zeroed_by_group else set()
         new_ids = {
             b.block_id for b in blocks if not b.is_null and b.block_id not in hit_ids
         }
