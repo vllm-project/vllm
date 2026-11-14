@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import atexit
 import contextlib
+import hashlib
 import logging
+import os
+import stat
 import tempfile
 from typing import Any
 
@@ -66,19 +69,122 @@ def set_graph_pool_id(graph_pool_id: Any) -> None:
     _graph_pool_id = graph_pool_id
 
 
+def _current_uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    return getuid() if getuid is not None else -1
+
+
+def _verify_private_entry(info: os.stat_result, path: str, *, expect_dir: bool) -> None:
+    """Check a file entry is safe to trust before it is used or loaded.
+
+    Follows the weight cache protocol
+    (vllm/model_executor/model_loader/weight_cache/protocol.py): reject
+    symlinks and entries owned by a different user, and require the
+    directory to be inaccessible to group and world. Permission bits are
+    only meaningful on POSIX; on Windows isolation comes from the
+    per-profile directory.
+    """
+    if stat.S_ISLNK(info.st_mode):
+        raise RuntimeError(f"Refusing to use symlinked path {path}")
+    if expect_dir:
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(f"{path} is not a directory")
+        if os.name == "posix" and info.st_mode & 0o077:
+            raise RuntimeError(f"{path} is group/world accessible")
+    elif not stat.S_ISREG(info.st_mode):
+        raise RuntimeError(f"{path} is not a regular file")
+    uid = _current_uid()
+    if uid != -1 and info.st_uid != uid:
+        raise RuntimeError(f"{path} is not owned by the current user")
+
+
+def _verify_private_dir(directory: str) -> None:
+    """Verify a dir is a real dir owned by us, not group/world accessible."""
+    _verify_private_entry(os.lstat(directory), directory, expect_dir=True)
+
+
+def _verify_owned_file(path: str) -> None:
+    """Verify a file is ours and lives in a private dir before dlopen.
+
+    Called on the compiled allocator library so this process never loads
+    a library a different local user could have planted.
+    """
+    _verify_private_dir(os.path.dirname(path) or os.curdir)
+    _verify_private_entry(os.lstat(path), path, expect_dir=False)
+
+
+def _cache_key(
+    libname: str,
+    ldflags: list[str],
+    include_paths: list[str] | None,
+) -> str:
+    """Hash everything that can change the compiled library.
+
+    Mirrors torch's extension versioner (sources plus build flags), so a
+    cached artifact is never reused under a key that no longer matches.
+    """
+    material = "\0".join(
+        (
+            nccl_allocator_source,
+            libname,
+            repr(ldflags),
+            repr(include_paths),
+            torch.__version__,
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def _prepare_build_dir(
+    libname: str,
+    ldflags: list[str],
+    include_paths: list[str] | None,
+) -> str:
+    """Return a private build directory for the JIT-compiled allocator.
+
+    The build artifacts include the .so that is dlopen'ed into this
+    process, so they must never live in a shared sticky directory under
+    a predictable name: a local user could pre-plant a malicious library
+    that ninja then skips rebuilding. Prefer a per-user cache directory
+    keyed by the build inputs (so the library is compiled once and
+    reused across processes), locked down and verified following
+    ensure_private_socket_dir. Fall back to a fresh private temp
+    directory when the cache root is unusable.
+    """
+    try:
+        out_dir = os.path.join(
+            envs.VLLM_CACHE_ROOT, libname, _cache_key(libname, ldflags, include_paths)
+        )
+        os.makedirs(out_dir, mode=0o700, exist_ok=True)
+        os.chmod(out_dir, 0o700)
+        _verify_private_dir(out_dir)
+        return out_dir
+    except (OSError, RuntimeError, AttributeError) as e:
+        logger.warning(
+            "Could not use a build directory under VLLM_CACHE_ROOT (%s) "
+            "for the NCCL allocator, falling back to a private temp "
+            "directory. Error: %s",
+            envs.VLLM_CACHE_ROOT,
+            str(e),
+        )
+        return tempfile.mkdtemp(prefix=f"vllm-{libname}-")
+
+
 def compile_nccl_allocator():
     global _allocator, _allocator_wrapper, _nccl_allocator_failed_to_compile
     if not current_platform.is_cuda():
         _nccl_allocator_failed_to_compile = True
         return
     try:
-        out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         nccl_include_paths = find_nccl_include_paths()
         ldflags = ["-l:libnccl.so.2"]
         nccl_lib_paths = find_nccl_library_paths()
         if nccl_lib_paths:
             ldflags = [f"-L{p}" for p in nccl_lib_paths] + ldflags
+        out_dir = _prepare_build_dir(
+            nccl_allocator_libname, ldflags, nccl_include_paths
+        )
         load_inline(
             name=nccl_allocator_libname,
             cpp_sources=nccl_allocator_source,
@@ -89,8 +195,12 @@ def compile_nccl_allocator():
             build_directory=out_dir,
             extra_include_paths=nccl_include_paths,
         )
+        nccl_allocator_lib_path = os.path.join(out_dir, f"{nccl_allocator_libname}.so")
+        # The library is dlopen'ed into this process; refuse anything a
+        # different local user could have planted.
+        _verify_owned_file(nccl_allocator_lib_path)
         _allocator_wrapper = CUDAPluggableAllocator(
-            f"{out_dir}/{nccl_allocator_libname}.so",
+            nccl_allocator_lib_path,
             "nccl_alloc_plug",
             "nccl_free_plug",
         )
