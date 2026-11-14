@@ -327,7 +327,7 @@ class SchedulerOffloadConfig(NamedTuple):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestGroupState:
     offload_keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
