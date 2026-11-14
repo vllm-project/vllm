@@ -2386,3 +2386,82 @@ def test_moe_layer_tp_expert_bias(tp_size: int, tmp_path):
     )
     output, expected = torch.load(result_path)
     torch.testing.assert_close(output, expected, atol=3.5e-2, rtol=3.5e-2)
+
+
+@pytest.mark.parametrize(
+    ("is_fnuz", "weight_dtype", "converts"),
+    [
+        (False, torch.float8_e4m3fn, False),
+        (True, torch.float8_e4m3fn, True),
+        (True, torch.bfloat16, False),
+    ],
+)
+def test_modelopt_fp8_moe_expert_weight_fnuz_conversion(
+    monkeypatch, is_fnuz, weight_dtype, converts
+):
+    """ModelOpt FP8 MoE expert weights convert to e4m3fnuz only on fnuz + e4m3fn."""
+    from vllm.model_executor.layers.quantization import modelopt
+
+    num_experts, shard_size, hidden = 2, 4, 8
+    layer = torch.nn.Module()
+    for name, shape in (
+        ("w13_weight", (num_experts, 2 * shard_size, hidden)),
+        ("w2_weight", (num_experts, hidden, shard_size)),
+    ):
+        if weight_dtype == torch.float8_e4m3fn:
+            # 0x80 is -0.0 in e4m3fn but NaN in e4m3fnuz, so conversion zeroes it.
+            data = torch.full(shape, -128, dtype=torch.int8).view(weight_dtype)
+        else:
+            data = torch.zeros(shape, dtype=weight_dtype)
+        layer.register_parameter(name, torch.nn.Parameter(data, requires_grad=False))
+    for name, data in (
+        ("w13_weight_scale", torch.full((num_experts, 2), 0.5)),
+        ("w2_weight_scale", torch.full((num_experts,), 0.25)),
+        ("w13_input_scale", torch.full((num_experts,), 0.125)),
+        ("w2_input_scale", torch.full((num_experts,), 0.0625)),
+    ):
+        layer.register_parameter(name, torch.nn.Parameter(data, requires_grad=False))
+    layer.intermediate_size_per_partition = shard_size
+    layer.moe_config = types.SimpleNamespace(
+        moe_parallel_config=types.SimpleNamespace(enable_eplb=False)
+    )
+
+    kernel_args = {}
+
+    def capture(layer, w13, w2, w13_scale, w2_scale, w13_input, w2_input):
+        kernel_args.update(
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_input=w13_input,
+            w2_input=w2_input,
+        )
+
+    requant_dtypes = []
+
+    def requant(weight, scales, *a, **kw):
+        requant_dtypes.append(weight.dtype)
+        return weight, scales.max(dim=1).values
+
+    monkeypatch.setattr(modelopt.current_platform, "is_fp8_fnuz", lambda: is_fnuz)
+    monkeypatch.setattr(modelopt, "process_fp8_weight_tensor_strategy_moe", requant)
+    method = object.__new__(modelopt.ModelOptFp8MoEMethod)
+    method.moe = types.SimpleNamespace(is_act_and_mul=True)
+    method._setup_kernel = capture
+
+    method.process_weights_after_loading(layer)
+
+    factor = 2.0 if converts else 1.0
+    expected_dtype = torch.float8_e4m3fnuz if converts else weight_dtype
+    assert requant_dtypes == [expected_dtype]
+    assert kernel_args["w13"].dtype == expected_dtype
+    assert kernel_args["w2"].dtype == expected_dtype
+    assert kernel_args["w13_scale"].max().item() == pytest.approx(0.5 * factor)
+    assert kernel_args["w2_scale"].max().item() == pytest.approx(0.25 * factor)
+    assert kernel_args["w13_input"].item() == pytest.approx(0.125 * factor)
+    assert kernel_args["w2_input"].item() == pytest.approx(0.0625 * factor)
+
+    if weight_dtype == torch.float8_e4m3fn:
+        nan_bits = bool(kernel_args["w13"].view(torch.int8).eq(-128).any())
+        assert nan_bits is not converts
