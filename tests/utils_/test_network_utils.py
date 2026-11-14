@@ -237,6 +237,37 @@ def test_get_open_port_handles_unprivileged_or_symlink_lock_fallback(
         assert os.path.islink(link)
 
 
+def test_get_open_port_survives_reservation_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """A failed reservation write (e.g. disk full) must not discard the port
+    that was already selected."""
+    import errno
+
+    def disk_full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_RPC_BASE_PATH", str(tmp_path))
+        m.setenv("VLLM_PORT", "43300")
+        m.setattr(network_utils.os, "ftruncate", disk_full)
+        port = _call_with_timeout(get_open_port)
+        assert port >= 43300
+
+
+def test_port_reservation_state_propagates_body_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Errors raised while choosing a port surface as-is, not as
+    'generator didn't stop'."""
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", str(tmp_path))
+    with (
+        pytest.raises(OSError, match="bind failed"),
+        network_utils._port_reservation_state(),
+    ):
+        raise OSError("bind failed")
+
+
 @pytest.mark.parametrize(
     "path,expected",
     [

@@ -243,6 +243,50 @@ _PORT_RESERVATION_TTL_S = 15.0
 _PORT_MIN_EPHEMERAL_WRAP = 1024
 
 
+def _open_port_reservation_file() -> int:
+    """Open and exclusively lock the shared reservation file.
+
+    Returns -1 when the file cannot be used, so callers fall back to an
+    uncoordinated port scan.
+    """
+    assert fcntl is not None
+    rpc_dir = envs.VLLM_RPC_BASE_PATH
+    lock_path = os.path.join(rpc_dir, "vllm_port_reservations.lock")
+    fd = -1
+    try:
+        os.makedirs(rpc_dir, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(lock_path, flags, 0o600)
+        if hasattr(os, "getuid") and os.fstat(fd).st_uid != os.getuid():
+            raise PermissionError(
+                f"Refusing port lock file {lock_path!r} not owned by current user"
+            )
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    except OSError as exc:
+        logger.debug("Falling back to uncoordinated port scan (%s): %s", lock_path, exc)
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        return -1
+
+
+def _read_port_reservations(fd: int, wall_now: float) -> dict[str, float]:
+    """Return unexpired reservations as {port: wall-clock expiry}."""
+    try:
+        raw = os.pread(fd, 1 << 16, 0)
+        loaded = json.loads(raw.decode("utf-8")) if raw else {}
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        str(k): float(v)
+        for k, v in loaded.items()
+        if isinstance(v, (int, float)) and float(v) > wall_now
+    }
+
+
 @contextlib.contextmanager
 def _port_reservation_state() -> Generator[set[int], None, None]:
     """Coordinate short-lived port reservations across threads and processes.
@@ -252,42 +296,14 @@ def _port_reservation_state() -> Generator[set[int], None, None]:
     [Errno 98] Address already in use races (#43206).
     """
     with _PORT_ALLOC_LOCK:
-        if fcntl is None:
+        fd = _open_port_reservation_file() if fcntl is not None else -1
+        if fd < 0:
             yield set()
             return
-
-        rpc_dir = envs.VLLM_RPC_BASE_PATH
-        lock_path = os.path.join(rpc_dir, "vllm_port_reservations.lock")
-        fd = -1
-        locked = False
         try:
-            os.makedirs(rpc_dir, exist_ok=True)
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(lock_path, flags, 0o600)
-            if hasattr(os, "getuid") and os.fstat(fd).st_uid != os.getuid():
-                raise PermissionError(
-                    f"Refusing port lock file {lock_path!r} not owned by current user"
-                )
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            locked = True
-
-            now = time.monotonic()
-            # Keep wall-clock timestamp so expired entries clear across processes.
+            # Wall-clock expiry so stale entries clear across processes.
             wall_now = time.time()
-            raw = os.pread(fd, 1 << 16, 0)
-            data: dict[str, float] = {}
-            if raw:
-                try:
-                    loaded = json.loads(raw.decode("utf-8"))
-                    if isinstance(loaded, dict):
-                        data = {
-                            str(k): float(v)
-                            for k, v in loaded.items()
-                            if isinstance(v, (int, float)) and float(v) > wall_now
-                        }
-                except (ValueError, UnicodeDecodeError):
-                    data = {}
-
+            data = _read_port_reservations(fd, wall_now)
             reserved = {int(k) for k in data if k.isdigit()}
             before = set(reserved)
             yield reserved
@@ -297,23 +313,18 @@ def _port_reservation_state() -> Generator[set[int], None, None]:
                 expiry = wall_now + _PORT_RESERVATION_TTL_S
                 for p in added:
                     data[str(p)] = expiry
-                encoded = json.dumps(data).encode("utf-8")
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.ftruncate(fd, 0)
-                os.write(fd, encoded)
-            _ = now
-        except OSError as exc:
-            logger.debug(
-                "Falling back to uncoordinated port scan (%s): %s", lock_path, exc
-            )
-            yield set()
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.ftruncate(fd, 0)
+                    os.write(fd, json.dumps(data).encode("utf-8"))
+                except OSError as exc:
+                    # The port is already selected; only coordination is lost.
+                    logger.debug("Could not save port reservations: %s", exc)
         finally:
-            if fd >= 0:
-                if locked:
-                    with contextlib.suppress(OSError):
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                with contextlib.suppress(OSError):
-                    os.close(fd)
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _get_open_port(
