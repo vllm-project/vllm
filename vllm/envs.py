@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
+    VLLM_PREFIX_CACHE_DIAGNOSTICS: bool = False
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = None
@@ -940,6 +941,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+    # Opt-in DEBUG logs for prefix-cache lookup outcomes. Disabled by default.
+    # Supported only for a single full-attention group with equal physical/hash
+    # block sizes, without context parallelism or speculative/lookahead hashing.
+    # Retains at most one pool's block count of recently evicted keys.
+    "VLLM_PREFIX_CACHE_DIAGNOSTICS": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", "0"))
+    ),
     # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
     # by default when the hardware supports it — set to 0 to opt out
     # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.

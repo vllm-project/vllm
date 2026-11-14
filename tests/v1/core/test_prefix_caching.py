@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import logging
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
@@ -82,6 +83,124 @@ from vllm.v1.request import RequestStatus
 from .utils import mamba_layer, new_kv_cache_group, sliding_window_layer
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _diagnostic_store(manager, request):
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+    request.num_computed_tokens = request.num_tokens
+    manager.cache_blocks(request, request.num_tokens)
+    manager.free(request)
+
+
+def test_prefix_cache_diagnostic_unhashed_request(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", "1")
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.v1.core.kv_cache_manager")
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 8), max_model_len=256, hash_block_size=16
+    )
+    request = Request(
+        request_id="unhashed",
+        prompt_token_ids=list(range(33)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert "prefix_cache_diagnostic " not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("length,cached", [(16, 0), (17, 16), (32, 16), (33, 32)])
+def test_prefix_cache_diagnostic_lookup_limit(monkeypatch, caplog_vllm, length, cached):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", "1")
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.v1.core.kv_cache_manager")
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 8), max_model_len=256, hash_block_size=16
+    )
+    _diagnostic_store(manager, make_request("seed", list(range(33)), 16, sha256))
+    caplog_vllm.clear()
+    replay = make_request("boundary", list(range(length)), 16, sha256)
+    assert manager.get_computed_blocks(replay)[1] == cached
+    assert "reason=lookup_limit" in caplog_vllm.text
+    assert f"cached_tokens={cached}" in caplog_vllm.text
+
+
+def test_prefix_cache_diagnostic_eviction_reset_and_key_types(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", "1")
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.v1.core.kv_cache_manager")
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 8), max_model_len=256, hash_block_size=16
+    )
+    tokens = list(range(33))
+    salt = "private-salt-must-not-appear"
+    _diagnostic_store(
+        manager, make_request("seed", tokens, 16, sha256, cache_salt=salt)
+    )
+    _diagnostic_store(
+        manager, make_request("pressure", list(range(1000, 1112)), 16, sha256)
+    )
+    caplog_vllm.clear()
+    replay = make_request("replay", tokens, 16, sha256, cache_salt=salt)
+    assert manager.get_computed_blocks(replay)[1] == 0
+    assert "reason=evicted" in caplog_vllm.text
+    assert "cache_salt" in caplog_vllm.text
+    assert salt not in caplog_vllm.text
+    caplog_vllm.clear()
+    different_salt = make_request("salt", tokens, 16, sha256, cache_salt="other-secret")
+    assert manager.get_computed_blocks(different_salt)[1] == 0
+    assert "reason=no_match" in caplog_vllm.text
+    assert "other-secret" not in caplog_vllm.text
+    running = make_request("running", [5000], 16, sha256)
+    assert manager.allocate_slots(running, 1) is not None
+    assert not manager.reset_prefix_cache()
+    caplog_vllm.clear()
+    assert manager.get_computed_blocks(replay)[1] == 0
+    assert "reason=evicted" in caplog_vllm.text
+    manager.free(running)
+    assert manager.reset_prefix_cache()
+    caplog_vllm.clear()
+    assert manager.get_computed_blocks(replay)[1] == 0
+    assert "reason=no_match" in caplog_vllm.text
+
+
+def test_prefix_cache_diagnostic_history_is_bounded(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", "1")
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.v1.core.kv_cache_manager")
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 4), max_model_len=256, hash_block_size=16
+    )
+    original = make_request("original", list(range(17)), 16, sha256)
+    _diagnostic_store(manager, original)
+    for i in range(5):
+        _diagnostic_store(
+            manager,
+            make_request(
+                f"fill-{i}", list(range(1000 + i * 100, 1048 + i * 100)), 16, sha256
+            ),
+        )
+    caplog_vllm.clear()
+    assert manager.get_computed_blocks(original)[1] == 0
+    assert "reason=no_match" in caplog_vllm.text
+
+
+@pytest.mark.parametrize("enabled,eagle", [(False, False), (True, True)])
+def test_prefix_cache_diagnostic_disabled_or_unsupported(
+    monkeypatch, caplog_vllm, enabled, eagle
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_DIAGNOSTICS", str(int(enabled)))
+    caplog_vllm.set_level(logging.DEBUG, logger="vllm.v1.core.kv_cache_manager")
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 8),
+        max_model_len=256,
+        hash_block_size=16,
+        use_eagle=eagle,
+    )
+    caplog_vllm.clear()
+    assert (
+        manager.get_computed_blocks(make_request("cold", list(range(33)), 16, sha256))[
+            1
+        ]
+        == 0
+    )
+    assert "prefix_cache_diagnostic " not in caplog_vllm.text
 
 
 def _swa_layer(sliding_window: int, **spec_kwargs) -> KVCacheLayerConfig:
