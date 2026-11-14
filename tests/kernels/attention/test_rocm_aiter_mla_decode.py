@@ -211,6 +211,38 @@ def test_mla_decode_determinism() -> None:
 
 
 @torch.inference_mode()
+def test_mla_decode_graph_replay_after_meta_param_eviction() -> None:
+    """A captured decode stays exact after AITER's split metadata cache evicts."""
+    _require_aiter()
+    import aiter.mla as aiter_mla
+
+    set_random_seed(0)
+    inputs = _make_inputs(batch_size=4, nhead=16, kv_seq_len=256)
+    expected = _run_kernel(inputs).clone()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run_kernel(inputs)
+
+    cache = aiter_mla.get_meta_param
+    while cache is not None and not hasattr(cache, "cache_clear"):
+        cache = getattr(cache, "__wrapped__", None)
+    if cache is not None:  # Newer AITER does not cache the tensor.
+        cache.cache_clear()
+    # Reuse the freed memory with garbage, as a long-running server does.
+    scratch = [
+        torch.full((n,), 0x0FFFFFFF, dtype=torch.int32, device="cuda")
+        for n in range(1, 2049)
+    ]
+
+    inputs["o"].zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    del scratch
+    torch.testing.assert_close(inputs["o"], expected, atol=0, rtol=0)
+
+
+@torch.inference_mode()
 def test_mla_decode_smoke() -> None:
     """Basic sanity: correct shape, dtype, finite, non-zero."""
     _require_aiter()
