@@ -1301,6 +1301,15 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # Restore OpenTelemetry to vLLM's versions. KV connectors (e.g. LMCache) may \
+        # downgrade OpenTelemetry below vLLM's security floors; keep vLLM's versions \
+        # instead (see requirements/kv_connectors_cuda.overrides and the ALLOWED_UNMET \
+        # entries in tools/kv_connector_lock.py). --no-deps avoids re-resolving \
+        # LMCache's intentionally-unmet OpenTelemetry requirements. \
+        grep -E '^opentelemetry==' /tmp/kv-installed.txt > /tmp/kv-otel-versions.txt 2>/dev/null || true; \
+        if [ -s /tmp/kv-otel-versions.txt ]; then \
+            uv pip install --system --no-deps -r /tmp/kv-otel-versions.txt; \
+        fi; \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # The CI image does the same via requirements/test/kv_connectors_cuda.in.
@@ -1309,7 +1318,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
             uv pip install --system -c /tmp/kv-constraints.txt "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
-        rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
+        rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt /tmp/kv-otel-versions.txt; \
     fi
 
 # Install the AWS EFA userspace with the KV connectors: NIXL's LIBFABRIC plugin
