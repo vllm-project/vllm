@@ -29,6 +29,8 @@ import random
 import shutil
 import ssl
 import time
+import urllib.parse
+import urllib.request
 import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Iterator
@@ -817,6 +819,19 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
+def env_proxy_applies(api_url: str) -> bool:
+    """Whether a proxy from the environment applies to `api_url`.
+
+    The benchmark session trusts the environment only in that case. With
+    `trust_env=True`, aiohttp also looks up `~/.netrc` in a worker thread for
+    every request, which delays each request by tens of milliseconds at a few
+    hundred concurrent requests and inflates the measured TTFT.
+    """
+    url = urllib.parse.urlsplit(api_url)
+    proxies = urllib.request.getproxies()
+    return url.scheme in proxies and not urllib.request.proxy_bypass(url.hostname or "")
+
+
 async def benchmark(
     task_type: TaskType,
     endpoint_type: str,
@@ -871,7 +886,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
-            trust_env=True,
+            trust_env=env_proxy_applies(api_url),
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
 
