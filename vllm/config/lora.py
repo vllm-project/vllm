@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, ParallelConfig, VllmConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
@@ -33,7 +33,8 @@ class LoRAConfig:
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
-    """Max number of LoRAs in a single batch."""
+    """Max number of LoRAs in a single batch. With DP+EP this limits the
+    global resident adapter set shared by all ranks."""
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -127,6 +128,43 @@ class LoRAConfig:
             )
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
+
+    def is_dp_ep(
+        self, model_config: ModelConfig | None, parallel_config: "ParallelConfig"
+    ) -> bool:
+        """Whether LoRA residency must be coordinated across DP/EP ranks."""
+        return (
+            model_config is not None
+            and model_config.is_moe
+            and parallel_config.data_parallel_size > 1
+            and parallel_config.enable_expert_parallel
+        )
+
+    def verify_with_vllm_config(self, vllm_config: "VllmConfig") -> None:
+        """Validate DEP combinations and resolve synchronous scheduling."""
+        if not self.is_dp_ep(vllm_config.model_config, vllm_config.parallel_config):
+            return
+        parallel = vllm_config.parallel_config
+        if (
+            parallel.pipeline_parallel_size != 1
+            or parallel.data_parallel_external_lb
+            or parallel.data_parallel_hybrid_lb
+            or parallel.enable_fault_tolerance
+            or parallel.enable_elastic_ep
+            or parallel.enable_dbo
+            or vllm_config.speculative_config is not None
+            or vllm_config.kv_transfer_config is not None
+        ):
+            raise ValueError(
+                "DP LoRA sync requires a MoE model with internal DP+EP, PP=1, "
+                "without hybrid LB, fault tolerance, elastic EP, DBO, "
+                "speculative decoding or KV transfer"
+            )
+        if parallel._api_process_count != 1:
+            raise ValueError("DP LoRA sync requires --api-server-count=1")
+        if vllm_config.scheduler_config.async_scheduling:
+            raise ValueError("DP LoRA sync requires synchronous scheduling")
+        vllm_config.scheduler_config.async_scheduling = False
 
     def verify_with_kernel_config(self, kernel_config: KernelConfig) -> None:
         """Reject MegaMoE backends, which do not support LoRA."""

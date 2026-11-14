@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+    from vllm.lora.dp_manager import LoRAUsage
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -36,6 +37,16 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    def get_lora_usage(self) -> list["LoRAUsage"]:
+        raise NotImplementedError(
+            "This scheduler does not support DP LoRA synchronization"
+        )
+
+    def set_allowed_loras(self, adapter_ids: set[int]) -> None:
+        raise NotImplementedError(
+            "This scheduler does not support DP LoRA synchronization"
+        )
+
     @abstractmethod
     def __init__(
         self,
