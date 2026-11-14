@@ -254,6 +254,9 @@ pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
             ctx.tool_strict_level >= ToolStrictLevel::Function
                 || ctx.tools.iter().any(|tool| tool.strict == Some(true))
                 || ctx.answer.is_some()
+                // `parallel_tool_calls = false` caps the model at one call,
+                // which needs the call envelope in the grammar, like Python.
+                || !ctx.parallel_tool_calls
         }
         ToolChoice::Value(ToolChoiceValue::Required)
         | ToolChoice::NamedFunction(_)
@@ -328,6 +331,35 @@ mod tests {
 
     fn tag_string(format: &Format) -> String {
         serde_json::to_string(format).unwrap()
+    }
+
+    #[test]
+    fn parallel_tool_calls_false_constrains_auto_to_one_call() {
+        // Limiting the call count needs the call envelope in the grammar, so a
+        // single-call request constrains `auto` even without strict tools.
+        let tools = [tool("search", None)];
+        let build = |parallel_tool_calls| {
+            visible_format_from_builder(
+                Some(&Qwen3Builder),
+                &OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice: &ToolChoice::auto(),
+                    tool_strict_level: ToolStrictLevel::Auto,
+                    parallel_tool_calls,
+                    answer: None,
+                },
+            )
+            .unwrap()
+        };
+
+        assert!(build(true).is_none());
+        let single = build(false).expect("auto grammar limited to one call");
+        let unlimited = build_at_level(
+            ToolChoice::auto(),
+            tools.to_vec(),
+            ToolStrictLevel::Function,
+        );
+        assert_ne!(tag_string(&single), tag_string(&unlimited));
     }
 
     #[test]
