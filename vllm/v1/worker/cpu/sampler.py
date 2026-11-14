@@ -74,6 +74,9 @@ class CPUThinkingBudgetState:
             if reasoning_config is None
             else reasoning_config.natural_reasoning_end_token_ids or []
         )
+        turn_end_ids = (
+            [] if reasoning_config is None else reasoning_config.turn_end_token_ids
+        )
         self.enabled = bool(start_ids and end_ids and natural_end_ids)
         if not self.enabled:
             return
@@ -86,6 +89,7 @@ class CPUThinkingBudgetState:
         self.reasoning_start_token_ids = tuple(start_ids)
         self.natural_reasoning_end_token_ids = tuple(natural_end_ids)
         self.reasoning_end_token_ids = tuple(end_ids)
+        self.turn_end_token_ids = frozenset(turn_end_ids)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
@@ -116,6 +120,20 @@ class CPUThinkingBudgetState:
                 current = offset + pos
         return current
 
+    def _last_prompt_turn_end(
+        self, req_idx: int, tokens: list[int], offset: int
+    ) -> int:
+        """Position of the last end-of-turn token among the prompt `tokens`.
+
+        It closes reasoning that an earlier message opened by quoting the start
+        marker. Generated end-of-turn tokens (e.g. with ignore_eos) don't count.
+        """
+        prompt_end = int(self.req_states.prompt_len_np[req_idx]) - offset
+        for pos in range(min(prompt_end, len(tokens)) - 1, -1, -1):
+            if tokens[pos] in self.turn_end_token_ids:
+                return offset + pos
+        return -1
+
     def _update_committed_cache(self, req_idx: int) -> int:
         total_len = int(self.req_states.total_len[req_idx])
         scan_pos = int(self.cached_scan_pos[req_idx])
@@ -137,6 +155,11 @@ class CPUThinkingBudgetState:
             scan_pos,
             int(self.cached_last_end[req_idx]),
         )
+        if self.turn_end_token_ids:
+            self.cached_last_end[req_idx] = max(
+                int(self.cached_last_end[req_idx]),
+                self._last_prompt_turn_end(req_idx, tokens, scan_pos),
+            )
         overlap = (
             max(
                 len(self.reasoning_start_token_ids),

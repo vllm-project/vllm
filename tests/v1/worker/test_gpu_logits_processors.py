@@ -35,6 +35,7 @@ class MockReasoningConfig:
     reasoning_start_token_ids = [90]
     reasoning_end_token_ids = [91]
     natural_reasoning_end_token_ids = [91]
+    turn_end_token_ids: list[int] = []
 
 
 class RecordingProcessor(LogitsProcessor):
