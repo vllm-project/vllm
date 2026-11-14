@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any, cast
+
 import pytest
 
 from vllm.entrypoints.openai.responses.protocol import (
@@ -246,3 +248,54 @@ def test_responses_request_parallel_tool_calls_null_accepted():
         {"input": "Hello", "model": "test-model", "parallel_tool_calls": None}
     )
     assert req.parallel_tool_calls is None
+
+
+@pytest.mark.parametrize("detail", [None, "low", "auto", "high"])
+def test_function_output_image_detail_defaults_or_preserves(detail):
+    image = {"type": "input_image", "image_url": "https://example.com/image.png"}
+    if detail is not None:
+        image["detail"] = detail
+    text = {"type": "input_text", "text": "Tool image"}
+    item = {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": [text, image],
+    }
+    request = ResponsesRequest.model_validate({"input": [item]})
+    parsed = cast(list[dict[str, Any]], request.input)
+    output = parsed[0]["output"]
+    assert output[0] == text
+    actual = output[1]
+    assert actual["detail"] == ("auto" if detail is None else detail)
+    assert ("detail" in image) == (detail is not None)
+
+
+def test_function_output_string_preserved():
+    item = {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+    request = ResponsesRequest.model_validate({"input": [item]})
+    parsed = cast(list[dict[str, Any]], request.input)
+    assert parsed[0]["output"] == "result"
+
+
+def test_message_and_multiple_function_output_images_default_together():
+    image = {"type": "input_image", "image_url": "https://example.com/image.png"}
+    items = [
+        {"role": "user", "content": [image]},
+        {"type": "function_call_output", "call_id": "call_1", "output": [image, image]},
+    ]
+    request = ResponsesRequest.model_validate({"input": items})
+    parsed = cast(list[dict[str, Any]], request.input)
+    assert parsed[0]["content"][0]["detail"] == "auto"
+    assert [part["detail"] for part in parsed[1]["output"]] == ["auto", "auto"]
+    assert "detail" not in image
+
+
+def test_function_output_invalid_explicit_image_detail_rejected():
+    image = {
+        "type": "input_image",
+        "image_url": "https://example.com/image.png",
+        "detail": "invalid",
+    }
+    item = {"type": "function_call_output", "call_id": "call_1", "output": [image]}
+    with pytest.raises(ValueError, match="detail"):
+        ResponsesRequest.model_validate({"input": [item]})
