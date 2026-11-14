@@ -451,6 +451,7 @@ class ResponsesRequest(OpenAIBaseModel):
     stop: StopParam = []
     stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
+    min_tokens: int = 0
     thinking_token_budget: ThinkingTokenBudget = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -636,6 +637,7 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k=top_k,
             min_p=min_p,
             max_tokens=max_tokens,
+            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
             stop_token_ids=self.stop_token_ids,
