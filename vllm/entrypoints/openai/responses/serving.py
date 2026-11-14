@@ -45,6 +45,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseFailedEvent,
     ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
@@ -99,6 +100,10 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+_TERMINAL_STREAM_EVENT_TYPES: Final = frozenset(
+    {"response.completed", "response.incomplete", "response.failed"}
+)
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -1096,9 +1101,34 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.event_store[request.request_id] = (event_deque, new_event_signal)
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
-            async for event in generator:
-                event_deque.append(event)
-                new_event_signal.set()  # Signal new event available
+            try:
+                async for event in generator:
+                    event_deque.append(event)
+                    new_event_signal.set()  # Signal new event available
+            except Exception:
+                # Nobody awaits this task, so log the error here.
+                logger.exception("Background response %s failed", request.request_id)
+
+            # Cancellation never gets here; cancel_responses sets the status.
+            if (
+                not event_deque
+                or event_deque[-1].type not in _TERMINAL_STREAM_EVENT_TYPES
+            ):
+                async with self.response_store_lock:
+                    stored_response = self.response_store.get(request.request_id)
+                    if stored_response is not None and stored_response.status in (
+                        "queued",
+                        "in_progress",
+                    ):
+                        stored_response.status = "failed"
+                        event_deque.append(
+                            ResponseFailedEvent(
+                                type="response.failed",
+                                # Events are numbered by their deque position.
+                                sequence_number=len(event_deque),
+                                response=stored_response.model_copy(),
+                            )
+                        )
         finally:
             new_event_signal.set()
 
@@ -1142,10 +1172,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             while current_index < len(event_deque):
                 event = event_deque[current_index]
                 yield event
-                if getattr(event, "type", "unknown") in (
-                    "response.completed",
-                    "response.incomplete",
-                ):
+                if getattr(event, "type", "unknown") in _TERMINAL_STREAM_EVENT_TYPES:
                     return
                 current_index += 1
 
