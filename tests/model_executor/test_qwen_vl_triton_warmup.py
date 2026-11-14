@@ -65,6 +65,7 @@ def test_vision_warmup_matches_runtime_rotary_layout(
         expected.append((qk.shape, qk.stride()))
 
     with (
+        torch.device("cpu"),
         attention.apply_rotary_emb.register_forward_pre_hook(record_layout),
         visual.register_forward_pre_hook(reject_tower_forward),
         visual.blocks[0].register_forward_pre_hook(reject_tower_forward),
