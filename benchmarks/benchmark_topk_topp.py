@@ -4,8 +4,9 @@
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
 All implementations return masked logits. Timings include a fresh-input copy.
-FlashInfer timings include softmax and mask reconstruction when its APIs require them.
-L2 is flushed before each measured iteration, outside the timed region.
+The FlashInfer entry is the sampler's own path, so a case it is not eligible for
+is reported as skipped rather than timed. L2 is flushed before each measured
+iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -20,11 +21,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
 from flashinfer.testing import bench_gpu_time_with_cupti
 
+from vllm.v1.sample.ops.topk_topp_flashinfer import (
+    apply_top_k_top_p_flashinfer,
+    can_apply_top_k_top_p_flashinfer,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -75,6 +79,7 @@ def create_logits(
     vocab_size: int,
     device: str = "cuda",
     num_finite_logits: int | None = None,
+    distribution: str = "zipf",
 ) -> torch.Tensor:
     """Create random logits mimicking a realistic LLM distribution.
 
@@ -84,6 +89,17 @@ def create_logits(
     real model outputs. When num_finite_logits is set, retain that many ranks
     before permuting their positions independently in each row.
     """
+    if distribution != "zipf":
+        logits = torch.randn(batch_size, vocab_size, device=device)
+        if distribution == "bf16-rounded":
+            logits = logits.bfloat16().float()
+        if num_finite_logits is None:
+            return logits
+        logits[:, num_finite_logits:] = -float("inf")
+        for i in range(batch_size):
+            logits[i] = logits[i, torch.randperm(vocab_size, device=device)]
+        return logits
+
     # Create Zipf-like probabilities: p(rank) ~ rank^(-alpha)
     ranks = torch.arange(1, vocab_size + 1, dtype=torch.float32, device=device)
     probs = ranks.pow(-1.1)
@@ -102,22 +118,25 @@ def create_logits(
     return logits
 
 
-def apply_top_k_top_p_flashinfer_mask(logits, k, p):
-    """Keep top-k in logits; adapt probability-based top-p back to logits."""
-    if k is not None:
-        logits = fi_sampling.top_k_mask_logits(logits, k)
-    if p is not None:
-        # Top-p renormalization requires softmax, even after logits-based top-k.
-        probs = logits.softmax(dim=-1)
-        probs = fi_sampling.top_p_renorm_probs(probs, p, is_deterministic=True)
-        # Return the selected original logits, not normalized probabilities.
-        logits = logits.masked_fill(probs == 0, -float("inf"))
-    return logits
+def apply_flashinfer_fastpath(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    *,
+    top_k_min: int,
+    top_k_max: int,
+) -> torch.Tensor:
+    """Run the sampler's FlashInfer path, or reject configurations it skips."""
+    top_k_bounds = (top_k_min, top_k_max)
+    if not can_apply_top_k_top_p_flashinfer(logits, k, top_k_bounds):
+        raise NotImplementedError(str(top_k_bounds))
+    assert k is not None
+    return apply_top_k_top_p_flashinfer(logits, k, p, top_k_bounds)
 
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
-    "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
+    "flashinfer-fastpath": apply_flashinfer_fastpath,
     "pytorch": apply_top_k_top_p_pytorch,
 }
 
@@ -143,14 +162,20 @@ def create_benchmark_configs(
     batch_sizes: list[int],
     vocab_sizes: list[int],
     device: str = "cuda",
+    top_k: int | None = None,
+    top_p: float | None = None,
 ) -> list[BenchmarkConfig]:
     """Create all benchmark configurations."""
     configs = []
+    k_only = 50 if top_k is None else top_k
+    k_both = 100 if top_k is None else top_k
+    p_value = 0.9 if top_p is None else top_p
+    p_mixed_value = 0.5 if top_p is None else top_p
 
     for vocab_size in vocab_sizes:
         for batch_size in batch_sizes:
             # 1. Top-k only - whole batch (all rows have k < vocab_size)
-            k_all = torch.full((batch_size,), 50, dtype=torch.int32, device=device)
+            k_all = torch.full((batch_size,), k_only, dtype=torch.int32, device=device)
             configs.append(
                 BenchmarkConfig(
                     name=f"topk_whole_b{batch_size}_v{vocab_size // 1000}k",
@@ -158,14 +183,16 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_all,
                     p_values=None,
-                    description=f"Top-k only (whole batch, k=50), "
+                    description=f"Top-k only (whole batch, k={k_only}), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(k_all, None, vocab_size, batch_size),
                 )
             )
 
             # 2. Top-k only - partial batch (half have k=50, half have k=vocab_size)
-            k_partial = torch.full((batch_size,), 50, dtype=torch.int32, device=device)
+            k_partial = torch.full(
+                (batch_size,), k_only, dtype=torch.int32, device=device
+            )
             k_partial[batch_size // 2 :] = vocab_size  # No filtering for second half
             configs.append(
                 BenchmarkConfig(
@@ -174,14 +201,17 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_partial,
                     p_values=None,
-                    description=f"Top-k only (partial batch, 50% k=50, 50% k=vocab), "
+                    description=f"Top-k only (partial batch, 50% k={k_only}, "
+                    f"50% k=vocab), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(k_partial, None, vocab_size, batch_size),
                 )
             )
 
             # 3. Top-p only - whole batch (all rows have p < 1.0)
-            p_all = torch.full((batch_size,), 0.9, dtype=torch.float32, device=device)
+            p_all = torch.full(
+                (batch_size,), p_value, dtype=torch.float32, device=device
+            )
             configs.append(
                 BenchmarkConfig(
                     name=f"topp_whole_b{batch_size}_v{vocab_size // 1000}k",
@@ -189,7 +219,7 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=None,
                     p_values=p_all,
-                    description=f"Top-p only (whole batch, p=0.9), "
+                    description=f"Top-p only (whole batch, p={p_value}), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(None, p_all, vocab_size, batch_size),
                 )
@@ -197,7 +227,7 @@ def create_benchmark_configs(
 
             # 4. Top-p only - partial batch (half have p=0.9, half have p=1.0)
             p_partial = torch.full(
-                (batch_size,), 0.9, dtype=torch.float32, device=device
+                (batch_size,), p_value, dtype=torch.float32, device=device
             )
             p_partial[batch_size // 2 :] = 1.0  # No filtering for second half
             configs.append(
@@ -207,15 +237,18 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=None,
                     p_values=p_partial,
-                    description=f"Top-p only (partial batch, 50% p=0.9, 50% p=1.0), "
+                    description=f"Top-p only (partial batch, 50% p={p_value}, "
+                    f"50% p=1.0), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(None, p_partial, vocab_size, batch_size),
                 )
             )
 
             # 5. Mix of top-k and top-p (both applied to whole batch)
-            k_mix = torch.full((batch_size,), 100, dtype=torch.int32, device=device)
-            p_mix = torch.full((batch_size,), 0.9, dtype=torch.float32, device=device)
+            k_mix = torch.full((batch_size,), k_both, dtype=torch.int32, device=device)
+            p_mix = torch.full(
+                (batch_size,), p_value, dtype=torch.float32, device=device
+            )
             configs.append(
                 BenchmarkConfig(
                     name=f"topk_topp_whole_b{batch_size}_v{vocab_size // 1000}k",
@@ -223,7 +256,8 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_mix,
                     p_values=p_mix,
-                    description=f"Top-k + Top-p (whole batch, k=100, p=0.9), "
+                    description=f"Top-k + Top-p (whole batch, k={k_both}, "
+                    f"p={p_value}), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(k_mix, p_mix, vocab_size, batch_size),
                 )
@@ -236,12 +270,12 @@ def create_benchmark_configs(
             p_mixed = torch.full((batch_size,), 1.0, dtype=torch.float32, device=device)
             # First third: k only
             third = batch_size // 3
-            k_mixed[:third] = 50
+            k_mixed[:third] = k_only
             # Second third: p only
-            p_mixed[third : 2 * third] = 0.5
+            p_mixed[third : 2 * third] = p_mixed_value
             # Last third: both k and p
-            k_mixed[2 * third :] = 100
-            p_mixed[2 * third :] = 0.9
+            k_mixed[2 * third :] = k_both
+            p_mixed[2 * third :] = p_value
             configs.append(
                 BenchmarkConfig(
                     name=f"mixed_partial_b{batch_size}_v{vocab_size // 1000}k",
@@ -249,7 +283,8 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_mixed,
                     p_values=p_mixed,
-                    description=f"Mixed partial (1/3 k=50, 1/3 p=0.9, 1/3 both), "
+                    description=f"Mixed partial (1/3 k={k_only}, "
+                    f"1/3 p={p_mixed_value}, 1/3 k={k_both}/p={p_value}), "
                     f"batch={batch_size}, vocab={vocab_size}",
                     ops_pct=calculate_ops_pct(k_mixed, p_mixed, vocab_size, batch_size),
                 )
@@ -278,6 +313,7 @@ def run_benchmark(
     num_finite_logits: int | None = None,
     check: bool = False,
     output: Path | None = None,
+    distribution: str = "zipf",
 ):
     """Run selected implementations with identical inputs and masked-logit outputs."""
     results = []
@@ -287,6 +323,7 @@ def run_benchmark(
             config.batch_size,
             config.vocab_size,
             num_finite_logits=num_finite_logits,
+            distribution=distribution,
         )
         checks = {}
         if check:
@@ -295,15 +332,22 @@ def run_benchmark(
         timings = {}
         for name in implementations:
             func = IMPLEMENTATIONS[name]
+            kwargs = prepare_kwargs(name, k, p, config.vocab_size)
             reset_memory_stats()
-            times = bench_gpu_time_with_cupti(
-                # note: measured runtime includes logits.clone()
-                lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
-                dry_run_iters=warmup_iters,
-                repeat_iters=benchmark_iters,
-                use_cuda_graph=False,  # sampling is outside cuda graph
-                cold_l2_cache=True,
-            )
+            try:
+                times = bench_gpu_time_with_cupti(
+                    # note: measured runtime includes logits.clone()
+                    lambda func=func, logits=logits, k=k, p=p, kwargs=kwargs: func(
+                        logits.clone(), k, p, **kwargs
+                    ),
+                    dry_run_iters=warmup_iters,
+                    repeat_iters=benchmark_iters,
+                    use_cuda_graph=False,  # sampling is outside cuda graph
+                    cold_l2_cache=True,
+                )
+            except NotImplementedError as error:
+                print(f"Skipped {name} on {config.name}: {error}", flush=True)
+                continue
             elapsed = sum(times) / len(times)
             _, memory = measure_memory()
             timings[name] = dict(time_ms=elapsed, peak_memory=memory)
@@ -320,6 +364,28 @@ def run_benchmark(
     return results
 
 
+def prepare_kwargs(
+    name: str, k: torch.Tensor | None, p: torch.Tensor | None, vocab_size: int
+) -> dict[str, bool | int]:
+    """Resolve host dispatch hints outside timing, preserving device k/p inputs."""
+    if name == "flashinfer-fastpath":
+        if k is None:
+            return {"top_k_min": 0, "top_k_max": 0}
+        values = k.tolist()
+        if not values or any(value <= 0 for value in values):
+            return {"top_k_min": 0, "top_k_max": 0}
+        return {"top_k_min": min(values), "top_k_max": max(values)}
+    if name != "triton":
+        return {}
+    has_topp_only_rows = False
+    if p is not None:
+        topp_only = p < 1
+        if k is not None:
+            topp_only &= k >= vocab_size
+        has_topp_only_rows = bool(topp_only.any().item())
+    return {"has_topp_only_rows": has_topp_only_rows}
+
+
 def check_implementations(
     logits: torch.Tensor,
     config: BenchmarkConfig,
@@ -330,7 +396,13 @@ def check_implementations(
     reference = apply_top_k_top_p_pytorch(logits.clone(), k, p).softmax(dim=-1)
     checks = {}
     for name in implementations:
-        actual = IMPLEMENTATIONS[name](logits.clone(), k, p).softmax(dim=-1)
+        kwargs = prepare_kwargs(name, k, p, config.vocab_size)
+        try:
+            actual = IMPLEMENTATIONS[name](logits.clone(), k, p, **kwargs)
+        except NotImplementedError as error:
+            checks[name] = {"skipped": str(error)}
+            continue
+        actual = actual.softmax(dim=-1)
         total_variation = (actual - reference).abs().sum(-1).max().item() / 2
         checks[name] = {
             "close": torch.allclose(actual, reference, rtol=1e-5, atol=1e-6),
@@ -360,8 +432,8 @@ def create_result_row(config, timings, checks) -> dict:
     for name, data in timings.items():
         row[f"{name} mem"] = format_memory(data["peak_memory"])
     for name, data in checks.items():
-        row[f"{name} check"] = data["close"]
-        row[f"{name} max TV"] = data["max_total_variation"]
+        row[f"{name} check"] = data.get("close", "skipped")
+        row[f"{name} max TV"] = data.get("max_total_variation")
     return row
 
 
@@ -406,12 +478,20 @@ def main():
         type=int,
         help="Finite logits per row; remaining entries are -inf (default: dense)",
     )
+    parser.add_argument("--top-k", type=int, help="Override active top-k values")
+    parser.add_argument("--top-p", type=float, help="Override active top-p values")
+    parser.add_argument(
+        "--distribution",
+        choices=["zipf", "normal", "bf16-rounded"],
+        default="zipf",
+        help="FP32 logit distribution (default: zipf)",
+    )
 
     parser.add_argument(
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
+        default=["triton", "flashinfer-fastpath"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 
@@ -437,6 +517,10 @@ def main():
     parser.add_argument("--output", type=Path, help="Save incremental JSONL results")
 
     args = parser.parse_args()
+    if args.top_k is not None and not 0 < args.top_k <= min(args.vocab_sizes):
+        parser.error("--top-k must be between 1 and each vocabulary size")
+    if args.top_p is not None and not 0 < args.top_p <= 1:
+        parser.error("--top-p must be in (0, 1]")
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.open("x").close()
@@ -452,7 +536,9 @@ def main():
         return
 
     # Create configs
-    configs = create_benchmark_configs(args.batch_sizes, args.vocab_sizes)
+    configs = create_benchmark_configs(
+        args.batch_sizes, args.vocab_sizes, top_k=args.top_k, top_p=args.top_p
+    )
     if args.scenarios is not None:
         configs = [c for c in configs if c.name.split("_b")[0] in args.scenarios]
 
@@ -466,6 +552,7 @@ def main():
         implementations=args.implementations,
         check=args.check,
         output=args.output,
+        distribution=args.distribution,
     )
 
     # Print summary

@@ -137,6 +137,21 @@ def test_has_topp_only_rows():
     assert has_topp_only_rows([0], vocab_size=10)
 
 
+def test_top_k_bounds():
+    """Host bounds cover every row, including rows with top-k disabled."""
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(top_k=10, top_p=0.9))
+    sampler.add_request(1, SamplingParams(top_k=50))
+    sampler.add_request(2, SamplingParams(top_p=0.9))
+    states = sampler.sampling_states
+    states.apply_staged_writes()
+
+    assert states.top_k_bounds(np.array([0, 1], dtype=np.int32)) == (10, 50)
+    # A disabled top-k is stored as the vocabulary size.
+    assert states.top_k_bounds(np.array([0, 2], dtype=np.int32)) == (10, VOCAB_SIZE)
+    assert states.top_k_bounds(np.array([], dtype=np.int32)) is None
+
+
 def test_logits_processing_cache_only_checks_active_requests():
     sampler = _make_sampler()
     sampler.add_request(0, SamplingParams(temperature=0.0))
