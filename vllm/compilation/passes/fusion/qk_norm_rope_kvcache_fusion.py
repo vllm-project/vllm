@@ -59,6 +59,8 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -76,11 +78,15 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             is_neox,
             kv_cache,
             layer_slot_mapping,
+            q_out_fp8=q_out_fp8,
+            q_scale=q_scale,
         )
     else:
-        # Profiling/dummy run: define q_out/k_out (consumed by attention).
+        # Profiling/dummy run: define q_out/k_out/q_out_fp8 (consumed by attention).
         q_out.zero_()
         k_out.zero_()
+        if q_out_fp8 is not None:
+            q_out_fp8.zero_()
 
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -96,6 +102,8 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -103,7 +111,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
 direct_register_custom_op(
     op_name="fused_qk_norm_rope_and_unified_kv_cache_update",
     op_func=fused_qk_norm_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["q_out", "k_out"],
+    mutates_args=["q_out", "k_out", "q_out_fp8"],
     fake_impl=fused_qk_norm_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -230,6 +238,11 @@ class QkNormRopeKvCachePattern:
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
+        # The kernel takes one scalar Q scale; per-head scales quantize separately.
+        self.fold_query_quant = quant_query and (
+            self.query_quant_group_shape.is_per_tensor()
+            or self.query_quant_group_shape == GroupShape(-1, self.q_size)
+        )
 
         self.rope_matcher: MatcherRotaryEmbedding | MatcherMRotaryEmbedding = (
             MatcherRotaryEmbedding(
@@ -324,6 +337,8 @@ class QkNormRopeKvCachePattern:
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=None,
+            q_scale=None,
         )
         return results[0], results[1], results[2], v
 
@@ -332,8 +347,14 @@ class QkNormRopeKvCachePattern:
         query: torch.Tensor,
         q_scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # torch.empty also matches the AITER op's empty_like allocation (which
+        # only adds layout=strided); empty_like would miss the static op's.
+        q_out = torch.empty(
+            query.shape,
+            device=query.device,
+            dtype=current_platform.fp8_dtype(),
+        )
         if self.query_quant_group_shape.is_per_tensor():
-            q_out = torch.empty_like(query, dtype=current_platform.fp8_dtype())
             q_quant = auto_functionalized(
                 torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
                 out=q_out,
@@ -349,11 +370,6 @@ class QkNormRopeKvCachePattern:
         # historical per-head shape (-1, block_size). This also covers the
         # degenerate one-local-KV-head case where a scalar scale is represented
         # as (-1, q_size), rather than changing Attention's classification.
-        q_out = torch.empty(
-            query.shape,
-            device=query.device,
-            dtype=current_platform.fp8_dtype(),
-        )
         q_quant = auto_functionalized(
             torch.ops._C.static_scaled_fp8_quant.default,
             result=q_out,
@@ -423,6 +439,16 @@ class QkNormRopeKvCachePattern:
         )
         _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        q_out_fp8 = (
+            torch.empty(
+                qkv.shape[0],
+                self.q_size,
+                device=qkv.device,
+                dtype=current_platform.fp8_dtype(),
+            )
+            if self.fold_query_quant
+            else None
+        )
         results = auto_functionalized(
             self.FUSED_OP,
             q_out=q_out,
@@ -435,9 +461,20 @@ class QkNormRopeKvCachePattern:
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=q_out_fp8,
+            q_scale=q_scale if self.fold_query_quant else None,
         )
+        if self.fold_query_quant:
+            # results = (op return, q_out, k_out, q_out_fp8); outputs mirror the
+            # pattern: dummy, fp8 q, k, v[, scale].
+            # Static quant leaves the scale unchanged; return it in place of
+            # the per-tensor quant op's functionalized scale output.
+            if self.query_quant_group_shape.is_per_tensor():
+                return results[0], results[3], results[2], v, q_scale
+            return results[0], results[3], results[2], v
+
         # Re-apply the same quant form on the kernel's bf16 q_out; the fused
-        # operation does not quantize Q.
+        # operation does not quantize Q with per-head scales.
         q_fp8_flat = results[1].view(-1, self.q_size)
         q_fp8, q_scale_out = self._quantize_query(q_fp8_flat, q_scale)
         if q_scale_out is None:
@@ -644,6 +681,8 @@ class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
         self.rotary_dim = rotary_dim
         self.mrope_section = mrope_section
         self.is_interleaved = is_interleaved
+        # The MRoPE kernel has no fp8 Q output; Q stays separately quantized.
+        self.fold_query_quant = False
         self.rope_matcher = MatcherMRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
