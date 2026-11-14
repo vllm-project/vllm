@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling2 vision encoder against an eager per-image torch reference."""
 
+import sys
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -9,18 +10,23 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.models.inkling2.nvidia.ops.vision import gather_patches
-from vllm.models.inkling2.nvidia.vision import (
-    _CLIP_MEAN,
-    _CLIP_STD,
-    _PROCESSOR_CLIP_STD,
-    Inkling2VisionEncoder,
-)
+from vllm.models.inkling2 import Inkling2VisionEncoder, gather_patches
+from vllm.platforms import current_platform
+
+# The normalization constants of the platform's encoder.
+_vision = sys.modules[Inkling2VisionEncoder.__module__]
+_CLIP_MEAN = _vision._CLIP_MEAN
+_CLIP_STD = _vision._CLIP_STD
+_PROCESSOR_CLIP_STD = _vision._PROCESSOR_CLIP_STD
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available()
-    or torch.cuda.get_device_capability()[0] not in (9, 10, 12),
-    reason="needs a Hopper or Blackwell GPU",
+    not (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(120)
+        or (current_platform.is_rocm() and current_platform.is_device_capability(95))
+    ),
+    reason="needs a Hopper or Blackwell GPU, or gfx950",
 )
 
 CONFIG = {
@@ -150,7 +156,7 @@ def test_gather_patches_matches_cpu_normalization():
 def test_cuda_graph_replay_matches_eager():
     """A graph captured on padded budget buffers (as EncoderCudaGraphManager
     pads them) replays smaller batches bitwise like the eager encoder."""
-    from vllm.models.inkling2.nvidia.model import Inkling2ForConditionalGeneration as M
+    from vllm.models.inkling2 import Inkling2ForConditionalGeneration as M
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
     torch.manual_seed(0)

@@ -15,9 +15,18 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import bucket_max_seqlen_q
 from vllm.platforms import current_platform
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
+_sm90 = _cap is not None and _cap.major in (9, 10, 11, 12)
 requires_sm90 = pytest.mark.skipif(
-    _cap is None or _cap.major not in (9, 10, 11, 12),
-    reason="Inkling2 attention requires Hopper or Blackwell",
+    not _sm90, reason="Inkling2 attention requires Hopper or Blackwell"
+)
+_is_rocm = current_platform.is_rocm()
+_gfx950 = _is_rocm and current_platform.is_device_capability(95)
+requires_rocm = pytest.mark.skipif(
+    not _gfx950, reason="ROCm Triton attention requires gfx950"
+)
+requires_rel_attention = pytest.mark.skipif(
+    not (_sm90 or _gfx950),
+    reason="Inkling2 attention requires Hopper, Blackwell or gfx950",
 )
 
 HEAD_DIM = 128
@@ -26,6 +35,8 @@ SCENARIOS = {
     "prefill": [(1500, 1500), (37, 37), (300, 300)],
     "chunked_prefill": [(200, 1700), (64, 64), (513, 2100)],
     "decode": [(1, 1), (1, 900), (1, 3000), (1, 1025)],
+    # Requests without queries or keys between others.
+    "empty_requests": [(1, 900), (0, 0), (1, 3000), (0, 0)],
 }
 
 
@@ -172,7 +183,7 @@ def test_portable_attention_dequantizes_kv_before_mma(
         torch.testing.assert_close(observed, reference, atol=0, rtol=0)
 
 
-@requires_sm90
+@requires_rel_attention
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,block_size,window_left,scenario",
     [
@@ -186,10 +197,14 @@ def test_portable_attention_dequantizes_kv_before_mma(
         (48, 8, 128, None, "chunked_prefill"),
         (12, 2, 16, None, "decode"),
         (48, 8, 128, REL_EXTENT - 1, "decode"),
+        pytest.param(48, 8, 16, None, "empty_requests", marks=requires_rocm),
+        pytest.param(48, 8, 16, REL_EXTENT - 1, "empty_requests", marks=requires_rocm),
     ],
 )
+# FA4's KV splits and split scheduler: ROCm's Triton kernel takes neither.
 @pytest.mark.parametrize(
-    "num_splits,use_scheduler", [(1, True), (8, True), (8, False), (32, False)]
+    "num_splits,use_scheduler",
+    [(1, False)] if _is_rocm else [(1, True), (8, True), (8, False), (32, False)],
 )
 @torch.inference_mode()
 def test_inkling2_rel_attention(
@@ -202,16 +217,9 @@ def test_inkling2_rel_attention(
     use_scheduler,
 ):
     from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
-    from vllm.models.inkling2.nvidia.ops.attention import (
-        _INKLING2_FA4_REL_ATTENTION_KERNEL,
-    )
-    from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
-        MODE_OUT_LSE,
-        rel_attention,
-    )
 
     sm100 = use_sm100_kernels()
-    if not sm100 and (num_splits, use_scheduler) != (1, True):
+    if not (_is_rocm or sm100) and (num_splits, use_scheduler) != (1, True):
         pytest.skip("the Hopper kernel does not split prefill")
     torch.manual_seed(0)
     device = "cuda"
@@ -248,7 +256,30 @@ def test_inkling2_rel_attention(
     out = torch.empty(q.shape, device=device)
     lse = torch.empty(q.shape[1::-1], device=device)
 
-    if sm100:
+    if _is_rocm:
+        from vllm.models.inkling2.amd.ops.attention import (
+            rel_attention as amd_rel_attention,
+        )
+
+        amd_rel_attention(
+            q,
+            key_cache,
+            value_cache,
+            block_table=block_table,
+            cache_seqlens=seqused_k,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max(q_lens),
+            softmax_scale=scale,
+            window=-1 if window_left is None else window_left,
+            sheared_bias=rel_in,
+            out=out,
+            lse=lse,
+        )
+    elif sm100:
+        from vllm.models.inkling2.nvidia.ops.attention import (
+            _INKLING2_FA4_REL_ATTENTION_KERNEL,
+        )
+
         _INKLING2_FA4_REL_ATTENTION_KERNEL(
             q,
             key_cache,
@@ -266,6 +297,11 @@ def test_inkling2_rel_attention(
             lse=lse,
         )
     else:
+        from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
+            MODE_OUT_LSE,
+            rel_attention,
+        )
+
         rel_attention(
             q,
             key_cache,
@@ -292,7 +328,7 @@ def test_inkling2_rel_attention(
     torch.testing.assert_close(lse, ref_lse, atol=1e-4, rtol=1e-5)
 
 
-@requires_sm90
+@requires_rel_attention
 @pytest.mark.parametrize(
     "num_heads,num_kv_heads,window_left",
     [
@@ -319,9 +355,9 @@ def test_inkling2_rel_attention(
 def test_inkling2_rel_decode_attention(
     num_heads, num_kv_heads, window_left, query_lens, kv_lens, block_size, num_splits
 ):
-    """Decode and verify on the Gluon kernel match the reference, gate and
-    sink included, with and without split-KV."""
-    from vllm.models.inkling2.nvidia.ops.attention import rel_decode_attention
+    """Decode and verify on the Gluon kernel (ROCm: the Triton kernel) match
+    the reference, gate and sink included, with and without split-KV."""
+    from vllm.models.inkling2 import rel_decode_attention
 
     torch.manual_seed(0)
     device = "cuda"
@@ -386,16 +422,20 @@ def test_inkling2_rel_decode_attention(
     assert (out[num_tokens:] == 0).all()
 
 
-@requires_sm90
+@requires_rel_attention
 @pytest.mark.parametrize("is_local", [False, True])
 @pytest.mark.parametrize("num_splits", [1, 9])
 @torch.inference_mode()
 def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
     """Back to back under PDL (CUDA graph replay), the decode kernel loads
     cached keys while the prologue still writes the new ones: it must match a
-    run with the two launches serialized."""
-    from vllm.models.inkling2.nvidia.ops.attention import rel_decode_attention
-    from vllm.models.inkling2.nvidia.ops.sconv import attention_prologue, shift_rel_proj
+    run with the two launches serialized. (ROCm has no PDL: this checks the
+    graph replay.)"""
+    from vllm.models.inkling2 import (
+        attention_prologue,
+        rel_decode_attention,
+        shift_rel_proj,
+    )
 
     torch.manual_seed(0)
     device = "cuda"
@@ -503,10 +543,96 @@ def test_inkling2_decode_attention_after_prologue(is_local, num_splits):
         torch.testing.assert_close(out, expected, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not _gfx950,
+    reason="ROCm's split merge reads the token count at replay (CUDA zeroes "
+    "padding rows by the captured count)",
+)
+@pytest.mark.parametrize("is_local", [False, True])
+@pytest.mark.parametrize("num_splits", [1, 9])
+@torch.inference_mode()
+def test_inkling2_decode_graph_replays_smaller_batch(is_local, num_splits):
+    """A full CUDA graph captured on a decode batch replays a smaller one as
+    the runner pads it: the requests after the last real one have no queries,
+    and the tokens after the last real one (NaN here) come out zero."""
+    from vllm.models.inkling2 import rel_decode_attention
+
+    torch.manual_seed(0)
+    device = "cuda"
+    heads, kv_heads, page, max_reqs, max_tokens = 12, 2, 16, 4, 8
+    max_blocks = -(-3000 // page)
+    kv = torch.randn(max_reqs * max_blocks + 1, page, kv_heads, 2 * HEAD_DIM)
+    key_cache, value_cache = kv.to(device, torch.bfloat16).split(HEAD_DIM, dim=-1)
+    block_table = (torch.randperm(kv.shape[0] - 1, device=device) + 1).int()
+    block_table = block_table.view(max_reqs, max_blocks)
+    width = heads * HEAD_DIM
+    q = torch.empty(max_tokens, heads, HEAD_DIM, device=device, dtype=torch.bfloat16)
+    rel = q.new_empty(max_tokens + 128, heads, REL_EXTENT + 256)
+    proj = q.new_empty(max_tokens, width + heads)
+    gate, sinks = proj[:, :width], proj[:, width:]
+    out = q.new_empty(max_tokens, width)
+    cu_seqlens_q = torch.empty(max_reqs + 1, dtype=torch.int32, device=device)
+    seq_lens = torch.empty(max_reqs, dtype=torch.int32, device=device)
+
+    def run():
+        rel_decode_attention(
+            q,
+            key_cache,
+            value_cache,
+            rel,
+            gate,
+            sinks,
+            out,
+            block_table=block_table,
+            cache_seqlens=seq_lens,
+            cu_seqlens_q=cu_seqlens_q,
+            max_query_len=2,
+            num_actual_tokens=max_tokens,
+            softmax_scale=HEAD_DIM**-0.5,
+            is_local=is_local,
+            num_splits=num_splits,
+        )
+
+    def load(seqs, stale_seq_len):
+        """Fill the buffers with a batch, padded as the runner pads it."""
+        num_tokens = sum(q_len for q_len, _ in seqs)
+        q.fill_(float("nan"))
+        proj.fill_(float("nan"))
+        rel.fill_(float("nan"))
+        q[:num_tokens] = torch.randn(num_tokens, heads, HEAD_DIM)
+        proj[:num_tokens] = torch.randn(num_tokens, width + heads)
+        rel_logits = torch.randn(num_tokens, heads, REL_EXTENT).to(rel)
+        rel[: num_tokens + 128] = shear_rel_logits(rel_logits, seqs, 128, is_local)
+        starts = torch.tensor([0, *[q_len for q_len, _ in seqs]]).cumsum(0)
+        cu_seqlens_q.fill_(num_tokens)
+        cu_seqlens_q[: len(starts)] = starts
+        seq_lens.fill_(stale_seq_len)
+        seq_lens[: len(seqs)] = torch.tensor([kv_len for _, kv_len in seqs])
+        out.fill_(float("nan"))
+        return num_tokens
+
+    load([(2, 3000), (2, 900), (2, 1025), (2, 2)], 0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    # Padding requests keep the previous batch's KV lengths.
+    for seqs, stale in (([(2, 2100), (1, 300)], 1025), ([(1, 1)], 2100)):
+        num_tokens = load(seqs, stale)
+        run()
+        expected = out.clone()
+        out.fill_(float("nan"))
+        graph.replay()
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
+        assert not out[:num_tokens].isnan().any()
+        assert (out[num_tokens:] == 0).all()
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or _gfx950), reason="requires CUDA or gfx950"
+)
 @pytest.mark.parametrize("num_tokens", [1, 300])
 def test_gate_sink(num_tokens):
-    from vllm.models.inkling2.nvidia.ops.attention import gate_sink
+    from vllm.models.inkling2 import gate_sink
 
     torch.manual_seed(0)
     num_heads, head_dim = 12, 128
