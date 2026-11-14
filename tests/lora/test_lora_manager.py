@@ -908,6 +908,51 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_inplace_reload_preserves_cached_adapter_when_slots_are_pinned(
+    dist_init, dummy_model, device, tmp_path, pinned
+):
+    paths = [tmp_path / name for name in ("original", "replacement")]
+    for path in paths:
+        path.mkdir()
+        create_peft_lora(
+            dummy_model,
+            save_dir=str(path),
+            target_modules=["dense2"],
+            lora_dtype=DEFAULT_DTYPE,
+        )
+    config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16),
+        lora_config=LoRAConfig(
+            max_loras=1, max_cpu_loras=2, max_lora_rank=8, lora_dtype=DEFAULT_DTYPE
+        ),
+    )
+    worker = LRUCacheWorkerLoRAManager(config, device, EMBEDDING_MODULES)
+    worker.create_lora_manager(dummy_model, config)
+    original = LoRARequest("original", 1, str(paths[0]))
+    assert worker.add_adapter(original)
+    assert worker.add_adapter(LoRARequest("blocker", 2, str(paths[0])))
+    replacement = LoRARequest("original", 1, str(paths[1]), load_inplace=True)
+    if pinned:
+        assert worker.pin_adapter(2)
+        with pytest.raises(RuntimeError, match="All items are pinned"):
+            worker.add_adapter(replacement)
+        assert worker.remove_adapter(2)
+    else:
+        assert worker.add_adapter(replacement)
+    assert worker.add_adapter(original)
+    expected = load_file(str(paths[0 if pinned else 1] / "adapter_model.safetensors"))
+    cached = worker._adapter_manager.get_adapter(1)
+    assert cached is not None
+    torch.testing.assert_close(
+        cached.loras["dense2"].lora_a.cpu(),
+        expected["base_model.model.dense2.lora_A.weight"],
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE

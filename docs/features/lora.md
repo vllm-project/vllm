@@ -219,6 +219,10 @@ When dynamically loading LoRA adapters, you may need to replace an existing adap
 
 When `load_inplace=True`, vLLM will replace the existing adapter with the new one.
 
+If all execution slots are pinned through the engine API, reloading a cached,
+inactive adapter raises an error and preserves its previous weights. Remove a
+pinned adapter to free a slot before retrying the reload.
+
 Example request to load or replace a LoRA adapter with the same name:
 
 ```bash

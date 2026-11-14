@@ -1447,6 +1447,16 @@ class LoRAModelManager:
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
 
+    def check_adapter_activation(self, lora_id: int) -> None:
+        """Check slot availability without changing either adapter cache."""
+        if (
+            lora_id not in self._active_adapters
+            and len(self._active_adapters.pinned_items) >= self.lora_slots
+        ):
+            raise RuntimeError(
+                "All items are pinned, cannot remove oldest from the cache."
+            )
+
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug("Adding lora. Model id: %d, int id: %d", lora.id, lora.id)
@@ -1463,6 +1473,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self,
         lora_id: int,
     ) -> bool:
+        self.check_adapter_activation(lora_id)
         if (
             lora_id not in self._active_adapters
             and len(self._active_adapters) >= self.lora_slots
