@@ -25,7 +25,6 @@ from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma4 import (
-    Gemma4AudioFeatureExtractor,
     Gemma4Config,
     Gemma4Processor,
     Gemma4VisionConfig,
@@ -307,6 +306,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
+    def get_dummy_size_for_soft_tokens(self, max_soft_tokens: int) -> tuple[int, int]:
+        vision_cfg = self.get_hf_config().vision_config
+        unit = vision_cfg.patch_size * vision_cfg.pooling_kernel_size
+        rows = math.isqrt(max_soft_tokens)
+        while max_soft_tokens % rows:
+            rows -= 1
+        return max_soft_tokens // rows * unit, rows * unit
+
     def get_data_parser(self) -> MultiModalDataParser:
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
         if self.has_audio():
@@ -485,23 +492,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
 
 def _dummy_audio_num_samples(processor: Any) -> int:
-    """Length in samples of a worst-case dummy audio item.
-
-    `fft_length` is set in `Gemma4AudioFeatureExtractor.__init__` and is not
-    defined by `Gemma4UnifiedAudioFeatureExtractor`, which the encoder-free
-    Gemma 4 variant uses. Reading it unconditionally therefore raises
-    `AttributeError` during memory profiling on that variant, which is reached
-    whenever audio is the modality with the largest per-item token count.
-
-    For any other extractor, fall back to the audio budget the processor itself
-    declares -- the same pair of values used to warn about over-long audio
-    elsewhere in this file.
-    """
-    feature_extractor = processor.feature_extractor
-    if isinstance(feature_extractor, Gemma4AudioFeatureExtractor):
-        return feature_extractor.fft_length
-
-    sampling_rate = feature_extractor.sampling_rate
+    sampling_rate = processor.feature_extractor.sampling_rate
     max_duration_s = processor.audio_seq_length * processor.audio_ms_per_token / 1000.0
     return int(max_duration_s * sampling_rate)
 
@@ -532,14 +523,11 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
-        image_processor = processor.image_processor
-        # Use processor's configured image size for dummies.
-        # Gemma4ImageProcessor sets size=None (it uses patch_size /
-        # max_soft_tokens instead of the standard size dict), so we
-        # guard against None with `or {}`.
-        size = getattr(image_processor, "size", None) or {}
-        img_width = size.get("width", 224)
-        img_height = size.get("height", 224)
+        max_image_tokens = self.info.get_mm_max_tokens_per_item(seq_len, mm_counts)
+        assert max_image_tokens is not None
+        img_width, img_height = self.info.get_dummy_size_for_soft_tokens(
+            max_image_tokens["image"]
+        )
 
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
@@ -559,9 +547,12 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             )
 
         if num_videos > 0:
+            frame_width, frame_height = self.info.get_dummy_size_for_soft_tokens(
+                _VIDEO_MAX_SOFT_TOKENS
+            )
             data["video"] = self._get_dummy_videos(
-                width=img_width,
-                height=img_height,
+                width=frame_width,
+                height=frame_height,
                 num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
                 overrides=mm_options.get("video") if mm_options else None,
