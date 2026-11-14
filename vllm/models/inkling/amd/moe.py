@@ -605,16 +605,18 @@ class InklingMoE(nn.Module):
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
-        gids = sorted(slots)
-        lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
         tp_size = experts.moe_config.moe_parallel_config.tp_size
 
         if key.endswith("_scale_2"):
-            # Per-expert scalars, vectorized over the local experts. The
-            # fused w13 param carries one slot per gate/up half.
-            vals = weight[gids].float().to(param.device)
-            param.data[lids] = vals[:, None] if param.data.ndim == 2 else vals
+            # Per-expert scalars, one copy_ per local expert. The fused w13
+            # param carries one slot per gate/up half; the checkpoint value is
+            # copied into each half.
+            for gid, lid in slots.items():
+                val = weight[gid].reshape(-1)
+                dst = param.data[lid].view(-1)
+                for half in range(dst.numel()):
+                    dst.narrow(0, half, 1).copy_(val)
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
