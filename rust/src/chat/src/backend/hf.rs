@@ -6,8 +6,8 @@ use std::sync::Arc;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 use vllm_text::backend::hf::{
-    HfTextBackend, ModelFileSources, ModelSource, ResolvedModelFiles, load_model_config,
-    load_tokenizer_config,
+    HfTextBackend, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,
+    load_model_config, load_tokenizer_config,
 };
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -80,11 +80,17 @@ impl HfChatBackend {
         }
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
-            RendererSelection::Hf => Arc::new(HfChatRenderer::load(
-                &files,
-                options,
-                multimodal_render_info,
-            )?),
+            RendererSelection::Hf => {
+                let renderer = HfChatRenderer::load(&files, options, multimodal_render_info)?;
+                // Tekken keeps control tokens as text when encoding, so the
+                // renderer maps the ones its template spells out.
+                Arc::new(match files.tokenizer {
+                    Some(TokenizerSource::Tekken(_)) => {
+                        renderer.with_control_tokens(tokenizer.clone())
+                    }
+                    _ => renderer,
+                })
+            }
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new(
                 options.default_chat_template_kwargs,
             )),
@@ -252,7 +258,7 @@ mod tests {
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::HfChatBackend;
+    use super::{HfChatBackend, TokenizerSource};
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
     use crate::{ChatTool, EffortValue, ParserSelection, RendererSelection};
@@ -386,6 +392,34 @@ mod tests {
         );
 
         assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn hf_renderer_maps_tekken_control_tokens_to_ids() {
+        let mut files = resolved_files(
+            r#"{"model_type":"mistral"}"#,
+            r#"{"bos_token":"<s>","chat_template":"{{ bos_token }}{% for message in messages %}[INST]{{ message.content }}[/INST]{% endfor %}"}"#,
+        );
+        let tekken_path = files.config_path.as_ref().unwrap().with_file_name("tekken.json");
+        files.tokenizer = Some(TokenizerSource::Tekken(tekken_path));
+        // Control tokens take the IDs from 0 and each byte follows them.
+        let tokenizer = Arc::new(vllm_tokenizer::TekkenTokenizer::for_test(&[
+            "<unk>", "<s>", "</s>", "[INST]", "[/INST]",
+        ]));
+        let backend = HfChatBackend::from_resolved_model_files(
+            files,
+            "test-model".to_string(),
+            LoadModelBackendsOptions::default(),
+            tokenizer,
+        )
+        .unwrap();
+
+        let rendered = backend.chat_renderer().render(&request_with_user_text("hi")).unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::TokenIds(vec![1, 3, 5 + u32::from(b'h'), 5 + u32::from(b'i'), 4])
+        );
     }
 
     #[test]
