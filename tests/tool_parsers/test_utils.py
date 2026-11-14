@@ -12,6 +12,7 @@ from vllm.tool_parsers.utils import (
     contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
+    extract_intermediate_diff,
     extract_types_from_schema,
     get_parameter_value,
     handle_single_tool,
@@ -773,3 +774,33 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class TestExtractIntermediateDiff:
+    # Streaming: when the previously streamed argument text is a prefix of the
+    # new full argument text, the delta is exactly the new tail. The suffix and
+    # prefix rewrite must not mis-handle such prefixes, or streamed argument
+    # content is corrupted or dropped
+    def test_prefix_returns_new_tail(self):
+        assert extract_intermediate_diff('"ab"', '"') == 'ab"'
+
+    def test_prefix_returns_new_tail_array(self):
+        assert (
+            extract_intermediate_diff('[[[null], [true, "x"]]]', "[[[null")
+            == '], [true, "x"]]]'
+        )
+
+    def test_prefix_after_closing_bracket(self):
+        assert extract_intermediate_diff('[{"k0": [2]}]', '[{"k0": [2') == "]}]"
+
+    def test_empty_old_returns_curr(self):
+        assert extract_intermediate_diff('{"a": 1}', "") == '{"a": 1}'
+
+    def test_equal_strings_return_empty(self):
+        assert extract_intermediate_diff('{"a": 1}', '{"a": 1}') == ""
+
+    def test_middle_diff_unchanged(self):
+        # old is not a prefix of curr; the middle-difference rewrite applies
+        result = extract_intermediate_diff('{"fruit": "apple"}', '{"fruit": "ap"}')
+        expected = "ple"
+        assert result == expected

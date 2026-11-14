@@ -55,6 +55,9 @@ class Hermes2ProToolParser(ToolParser):
 
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0
+        # Index in current_text up to which trailing content (text after the
+        # last complete tool call) has been emitted.
+        self._trailing_emitted_up_to: int = 0
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -106,11 +109,15 @@ class Hermes2ProToolParser(ToolParser):
                     for function_call in raw_function_calls
                 ]
 
-                content = model_output[: model_output.find(self.tool_call_start_token)]
+                # Every part of the response outside tool-call tags is content:
+                # leading text, text between consecutive calls, and text after
+                # the last call. Dropping it silently loses legitimate output.
+                content = self.tool_call_regex.sub("", model_output)
+                content = content.strip() if content else None
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if content else None,
+                    content=content,
                 )
 
             except Exception:
@@ -138,9 +145,13 @@ class Hermes2ProToolParser(ToolParser):
             return content
         return None
 
-    def _extract_tool_call_jsons(self, text: str) -> list[tuple[str, bool]]:
-        """Extract (json_text, is_complete) for each <tool_call> region."""
-        results: list[tuple[str, bool]] = []
+    def _extract_tool_call_jsons(self, text: str) -> list[tuple[str, bool, int | None]]:
+        """Extract (json_text, is_complete, end_pos) for each <tool_call> region.
+
+        ``end_pos`` is the index in *text* just past the closing </tool_call>
+        for a complete call, or None when the call is still open.
+        """
+        results: list[tuple[str, bool, int | None]] = []
         pos = 0
         while True:
             start = text.find(self.tool_call_start_token, pos)
@@ -149,8 +160,9 @@ class Hermes2ProToolParser(ToolParser):
             json_start = start + len(self.tool_call_start_token)
             json_end = text.find(self.tool_call_end_token, json_start)
             if json_end != -1:
-                results.append((text[json_start:json_end].strip(), True))
-                pos = json_end + len(self.tool_call_end_token)
+                end_pos = json_end + len(self.tool_call_end_token)
+                results.append((text[json_start:json_end].strip(), True, end_pos))
+                pos = end_pos
             else:
                 raw = text[json_start:]
                 # Strip partial </tool_call> suffix if present.
@@ -161,7 +173,7 @@ class Hermes2ProToolParser(ToolParser):
                 # Valid JSON without closing tag = complete body,
                 # tag tokens just haven't arrived yet.
                 is_complete = is_complete_json(tc_json) if tc_json else False
-                results.append((tc_json, is_complete))
+                results.append((tc_json, is_complete, None))
                 break
         return results
 
@@ -225,8 +237,9 @@ class Hermes2ProToolParser(ToolParser):
             content = self._extract_content(current_text)
             tool_call_jsons = self._extract_tool_call_jsons(current_text)
             tool_call_deltas: list[DeltaToolCall] = []
+            last_complete_end: int | None = None
 
-            for i, (tc_json, is_complete) in enumerate(tool_call_jsons):
+            for i, (tc_json, is_complete, end_pos) in enumerate(tool_call_jsons):
                 if i >= len(self.prev_tool_call_arr):
                     self.prev_tool_call_arr.append({})
                     self.streamed_args_for_tool.append("")
@@ -260,6 +273,18 @@ class Hermes2ProToolParser(ToolParser):
                             ),
                         )
                     )
+                if is_complete and end_pos is not None:
+                    last_complete_end = end_pos
+
+            # Emit any trailing content after the last complete tool call, so
+            # streaming matches non-streaming (which keeps leading, between-
+            # call, and trailing text as content).
+            if last_complete_end is not None:
+                emit_from = max(last_complete_end, self._trailing_emitted_up_to)
+                if len(current_text) > emit_from:
+                    trailing = current_text[emit_from:]
+                    self._trailing_emitted_up_to = len(current_text)
+                    content = content + trailing if content else trailing
 
             if content or tool_call_deltas:
                 return DeltaMessage(

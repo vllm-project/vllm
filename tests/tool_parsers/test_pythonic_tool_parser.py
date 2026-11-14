@@ -58,6 +58,17 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+RESERVED_KEYWORD_FUNCTION_OUTPUT = (
+    'send_message(from="alice@example.com", in="inbox", class="urgent", '
+    'import=True, return=False, count=42)'
+)
+RESERVED_KEYWORD_FUNCTION_CALL = FunctionCall(
+    name="send_message",
+    arguments=(
+        '{"from": "alice@example.com", "in": "inbox", "class": "urgent", '
+        '"import": true, "return": false, "count": 42}'
+    ),
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -159,6 +170,18 @@ TEST_CASES = [
         f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{RESERVED_KEYWORD_FUNCTION_OUTPUT}]",
+        [RESERVED_KEYWORD_FUNCTION_CALL],
+        id="reserved_keywords_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{RESERVED_KEYWORD_FUNCTION_OUTPUT}]",
+        [RESERVED_KEYWORD_FUNCTION_CALL],
+        id="reserved_keywords_nonstreaming",
     ),
 ]
 
