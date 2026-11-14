@@ -331,7 +331,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and is_breakable_cudagraph_enabled(self.compilation_config)
             and current_platform.is_cuda()
             and self.gdn_prefill_backend == "triton"
-            and kv_cache_spec.num_prefill_checkpoint_blocks == 0
+            and self.checkpoint_alignment is None
             and type(self) is GDNAttentionMetadataBuilder
         )
 

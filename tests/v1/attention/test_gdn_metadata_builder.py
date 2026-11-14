@@ -153,7 +153,6 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
-    num_speculative_blocks: int = 0,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -175,7 +174,6 @@ def _create_gdn_builder(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        num_speculative_blocks=num_speculative_blocks,
     )
     return GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,
@@ -791,8 +789,7 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool, mamba_cache_mo
 
     align = mamba_cache_mode == "align"
     builder, group_builder, reference_builder = (
-        _create_gdn_builder(num_speculative_tokens=2, num_speculative_blocks=2)
-        for _ in range(3)
+        _create_gdn_builder(num_speculative_tokens=2) for _ in range(3)
     )
     for each_builder in (builder, group_builder, reference_builder):
         each_builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
@@ -818,6 +815,7 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool, mamba_cache_mo
                         torch.tensor(seq_lens),
                         group_builder.kv_cache_spec,
                         "align",
+                        group_builder.num_speculative_blocks,
                     )
                 )
             # The first group was built with another block table.
@@ -879,8 +877,7 @@ def test_capture_buffers_skipped_for_full(cudagraph_mode, staged):
     )
 
     builder, group_builder, reference_builder = (
-        _create_gdn_builder(num_speculative_tokens=2, num_speculative_blocks=2)
-        for _ in range(3)
+        _create_gdn_builder(num_speculative_tokens=2) for _ in range(3)
     )
     for each_builder in (builder, group_builder, reference_builder):
         each_builder.vllm_config.cache_config.mamba_cache_mode = "none"
@@ -915,11 +912,11 @@ def test_capture_buffers_skipped_for_full(cudagraph_mode, staged):
 
 
 @pytest.mark.parametrize(
-    "mamba_cache_mode,num_prefill_checkpoint_blocks,expected",
-    [("none", 0, True), ("align", 0, True), ("align", 1, False)],
+    "mamba_cache_mode,checkpoint_alignment,expected",
+    [("none", None, True), ("align", None, True), ("align", 16, False)],
 )
 def test_captures_mixed_batches_unless_checkpoints_are_exported(
-    mamba_cache_mode: str, num_prefill_checkpoint_blocks: int, expected: bool
+    mamba_cache_mode: str, checkpoint_alignment: int | None, expected: bool
 ):
     """The GDN core is captured with prefix caching ("align" mode) too, unless
     the layer exports prefill checkpoints, which the captured core cannot."""
@@ -937,8 +934,8 @@ def test_captures_mixed_batches_unless_checkpoints_are_exported(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
     )
+    register_mamba_layers(vllm_config, ["layer.0"], checkpoint_alignment)
     with patch.object(gdn_attn.current_platform, "is_cuda", return_value=True):
         builder = GDNAttentionMetadataBuilder(
             kv_cache_spec=mamba_spec,
