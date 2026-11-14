@@ -124,14 +124,14 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
 
 
 def test_allreduce_fusion_pass_does_not_own_global_workspace():
-        # Regression test for #67629: the FlashInfer all-reduce workspace is
-        # process-global, shared by compiled callables, CUDA graphs, and
-        # communicators. Its lifetime is owned by the communicator / process
-        # shutdown (`destroy_fi_ar_workspace` is atexit-registered and called
-        # on communicator shutdown), so an individual pass instance must not
-        # destroy it from `__del__` when the pass is garbage-collected.
-        assert "__del__" not in AllReduceFusionPass.__dict__
-    
+    # Regression test for #67629: the FlashInfer all-reduce workspace is
+    # process-global, shared by compiled callables, CUDA graphs, and
+    # communicators. Its lifetime is owned by the communicator / process
+    # shutdown (`destroy_fi_ar_workspace` is atexit-registered and called
+    # on communicator shutdown), so an individual pass instance must not
+    # destroy it from `__del__` when the pass is garbage-collected.
+    assert "__del__" not in AllReduceFusionPass.__dict__
+
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(
