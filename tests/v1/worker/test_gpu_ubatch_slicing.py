@@ -11,7 +11,7 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -25,6 +25,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import create_forward_context
+from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
@@ -32,6 +33,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
+from vllm.v1.worker.gpu import ubatch_utils as gpu_ubatch_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -363,6 +365,91 @@ def test_all_padding_microbatch_has_no_work_to_do():
     torch.testing.assert_close(
         last.seq_lens_cpu_upper_bound, torch.tensor([64], dtype=torch.int32)
     )
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_all_padding_microbatch_skips_attention(monkeypatch, cg_mode):
+    """An eager microbatch wholly in the DP padding is run like a dummy run that
+    skips attention: no attention metadata and no slot mappings, so no backend
+    sees a batch with a request but no tokens. A FULL CUDA graph replay still
+    needs metadata for every microbatch it captured."""
+    input_batch = _make_input_batch(
+        [1] * 6, [64] * 6, _make_buffers(), num_tokens_padded=16
+    )
+    built: list[int] = []
+    runner = UBatchRunner.__new__(UBatchRunner)
+    runner.num_ubatches = 2
+    runner.ubatch_query_start_loc, runner.ubatch_seq_lens = (
+        list(b) for b in zip(*_make_ubatch_buffers())
+    )
+    runner.ubatch_dcp_local_seq_lens = [None, None]
+    runner.dcp_size, runner.dcp_rank, runner.cp_interleave = 1, 0, 1
+    runner.attn_groups, runner.kv_cache_config = [], None
+    runner.model_state = cast(
+        ModelState,
+        SimpleNamespace(
+            prepare_attn=lambda ubatch, *args, **kwargs: (
+                built.append(ubatch.num_tokens) or {"attn": ubatch.num_tokens}
+            )
+        ),
+    )
+    runner._make_forward_contexts = lambda slices, attn, slots, padding: list(
+        zip(attn, slots)
+    )
+    monkeypatch.setattr(
+        gpu_ubatch_utils,
+        "build_slot_mappings_by_layer",
+        lambda slot_mappings, kv_cache_config: {"attn": slot_mappings},
+    )
+
+    contexts = runner.prepare(
+        input_batch,
+        (torch.zeros(6, 4, dtype=torch.int32),),
+        torch.zeros(1, 16, dtype=torch.int64),
+        SimpleNamespace(cg_mode=cg_mode, uniform_token_count=None),
+    ).forward_contexts
+
+    if cg_mode == CUDAGraphMode.FULL:
+        assert built == [6, 0]
+        assert all(attn is not None and slots is not None for attn, slots in contexts)
+    else:
+        assert built == [6]
+        assert contexts[0][0] == {"attn": 6} and contexts[0][1] is not None
+        assert contexts[1] == (None, None)
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_mla_without_metadata_reserves_only_before_the_workspace_locks(
+    monkeypatch, locked
+):
+    """MLA takes missing attention metadata for the profile run and reserves
+    its worst-case workspace. Once the workspace is locked it is a microbatch
+    wholly in the DP padding instead, whose workspace must not be asked to
+    grow."""
+    manager = SimpleNamespace(is_locked=lambda: locked)
+    monkeypatch.setattr(mla_attention, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(mla_attention, "current_workspace_manager", lambda: manager)
+    impl = Mock()
+    layer = SimpleNamespace(
+        num_heads=2,
+        v_head_dim=4,
+        qk_nope_head_dim=4,
+        chunked_prefill_workspace_size=8,
+        impl=impl,
+    )
+
+    output = mla_attention.MLAAttention.forward_impl(
+        layer,
+        torch.zeros(3, 2, 8),
+        torch.zeros(3, 4),
+        torch.zeros(3, 1, 4),
+        torch.empty(0),
+        None,
+        output=torch.ones(3, 8),
+    )
+
+    assert impl.reserve_workspace.called is not locked
+    assert torch.equal(output, torch.zeros(3, 8))
 
 
 def test_microbatching_off_when_a_rank_does_not_allow_it():
