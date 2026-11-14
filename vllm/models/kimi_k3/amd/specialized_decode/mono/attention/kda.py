@@ -36,6 +36,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
@@ -139,6 +140,14 @@ class KdaPreBuild:
     # non-temporal + device scope: they stream out instead of sitting dirty in
     # L2 and draining at kernel end (~1.3 us a launch). Bit-exact.
     stream_states: bool = False
+    # in_proj (s <= XT): group 1's first ``inproj`` K chunks (of 7) issued before
+    # the XRDY poll (they land about as x does), the rest to 4 after x lands,
+    # then after group 0. 1 GPU, 68 layers cold: 0 -> 3 is -1.5 us a layer
+    inproj: int = 3
+    # in_proj weights loaded as whole 128 B lines (8 rows x 128 B an instruction,
+    # not 16 x 64 B), traded into the MFMA layout by DPP: same operands. A CU
+    # streams 90 MB / 197 CTAs in 14.9 us so, 21.4 us in half lines (1 GPU)
+    lines: bool = True
 
 
 ABI = KernelAbi(
@@ -509,29 +518,68 @@ def stage_gates(c, bid):
 def gemv_loads(c, rg, chunks):
     """This wave's weight operands of rows 16 rg .. for its K chunks ``chunks``
     (indices into wave, wave + 8, ..): a lane 64 contiguous bytes of its row a
-    chunk (4 dwordx4). ``rg`` past the last group loads the last group."""
+    chunk (4 dwordx4). ``rg`` past the last group loads the last group.
+    ``c["lines"]``: the same bytes as whole lines (``line_ops`` trades them)."""
     lane, wave = c["lane"], c["wave"]
     r_w = rsrc(c["args"]["w_in"])
-    row = fx.min(rg, GEMV_TASKS - 1) * ROWS + lane % ROWS
-    g = lane // ROWS
+    rg = fx.min(rg, GEMV_TASKS - 1)
+    lines = c.get("lines", False)
+    if lines:
+        # load (h, a): rows 8 a + lane % 8, K 64 h + 32 (lane % 16 / 8) + 8 g
+        row = rg * ROWS + lane % 8
+        ko = (lane % ROWS) // 8 * 32 + (lane // ROWS) * 8
+    else:
+        row = rg * ROWS + lane % ROWS
+        ko = (lane // ROWS) * 8
     out = []
     for i in chunks:
-        k = (wave + WAVES * i) * KCH + g * 8
-        base = (row * HIDDEN + k) // 2  # dwords
+        k = (wave + WAVES * i) * KCH + ko
+        if const_expr(lines):
+            offs = [
+                ((row + 8 * a) * HIDDEN + k + 64 * h) // 2
+                for h in range(2)
+                for a in range(2)
+            ]
+        else:
+            base = (row * HIDDEN + k) // 2  # dwords
+            offs = [base + 16 * q for q in range(4)]
         out.append(
             [
                 fx.Vector(
                     bo.buffer_load(
                         r_w,
-                        base + 16 * q,
+                        o,
                         vec_width=4,
                         dtype=T.i32,
                         cache_modifier=CM_NT,
                     )
                 )
-                for q in range(4)
+                for o in offs
             ]
         )
+    return out
+
+
+def line_ops(ld):
+    """A chunk's whole-line loads [(h, a) = (0, 0), (0, 1), (1, 0), (1, 1)] ->
+    the 4 MFMA operands: q = 2 h takes row r < 8 from (h, 0) and r >= 8 from
+    (h, 1) lane r - 8 (row_shr:8 into banks 2, 3); q = 2 h + 1 row r < 8 from
+    (h, 0) lane r + 8 (row_shl:8 into banks 0, 1), r >= 8 from (h, 1)."""
+    out = []
+    for h in range(2):
+        lo, hi = ld[2 * h], ld[2 * h + 1]
+        q0 = [
+            fx.Int32(update_dpp_i32(lo[e], hi[e], 0x118, 0xF, 0xC, False))
+            for e in range(4)
+        ]
+        q1 = [
+            fx.Int32(update_dpp_i32(hi[e], lo[e], 0x108, 0xF, 0x3, False))
+            for e in range(4)
+        ]
+        out += [
+            fx.Vector.from_elements(q0, fx.Int32),
+            fx.Vector.from_elements(q1, fx.Int32),
+        ]
     return out
 
 
@@ -578,6 +626,7 @@ def stage_gemv(c, rg, ops, t0, n):
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
     for i in range_constexpr(PER_WAVE):
         k = (wave + WAVES * i) * KCH + g * 8
+        opi = line_ops(ops[i]) if const_expr(c.get("lines", False)) else ops[i]
         for q in range_constexpr(4):
             xb = fx.Vector(
                 fx.ptr_load(
@@ -585,9 +634,7 @@ def stage_gemv(c, rg, ops, t0, n):
                     result_type=fx.Vector.make_type(4, fx.Int32),
                 )
             )
-            acc = mfma_bf16(
-                ops[i][q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc
-            )
+            acc = mfma_bf16(opi[q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     if (tid < ROWS * n) & (rg < GEMV_TASKS):
@@ -889,7 +936,10 @@ def build(key: KdaPreBuild):
     keyed = key_tuple(key, _SOURCES)
     name = (
         f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
-        f"_t{int(key.timeline)}" + ("_ns" if key.stream_states else "")
+        f"_t{int(key.timeline)}"
+        + ("_ns" if key.stream_states else "")
+        + f"_ip{key.inproj}"
+        + ("_ln" if key.lines else "")
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -952,6 +1002,7 @@ def build(key: KdaPreBuild):
             "write_idx": key.write_idx,
             "st_cm": (CM_NT | CM_DEV) if key.stream_states else 0,
             "vals_all": vals_all(s, ns),
+            "lines": key.lines,
             "put": mb.put,
             "poll": mb.poll,
             "red": lds.red.ptr,
@@ -1008,15 +1059,18 @@ def build(key: KdaPreBuild):
             rg0 = 2 * gi
             rg1 = 2 * gi + 1
             ops0 = gemv_loads(c, rg0, range(PER_WAVE))
+            # group 1's first ``pre`` chunks in flight before the XRDY poll
+            pre = key.inproj if s <= XT else 0
+            ops1 = gemv_loads(c, rg1, range(pre))
             wait_x(c)
             if const_expr(s <= XT):
                 load_x(c, 0, s)
                 stamp(on, tls, tid, 4)
                 # the second group's first half in flight under the first's MFMAs
-                ops1 = gemv_loads(c, rg1, range(4))
+                ops1 = ops1 + gemv_loads(c, rg1, range(pre, max(pre, 4)))
                 stage_gemv(c, rg0, ops0, 0, s)
                 stamp(on, tls, tid, 5)
-                ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
+                ops1 = ops1 + gemv_loads(c, rg1, range(max(pre, 4), PER_WAVE))
                 stage_gemv(c, rg1, ops1, 0, s)
                 stamp(on, tls, tid, 6)
             else:
