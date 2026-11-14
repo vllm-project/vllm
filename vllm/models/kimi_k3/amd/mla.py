@@ -8,6 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import in_piecewise_cudagraph
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import split_kv_b_proj
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -374,11 +375,14 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
                 self.mla_attn.layer_name
             )
+            # PIECEWISE graphs replay any batch shape; this check only sees the
+            # decode-only capture batch.
             fuse = (
                 attn_metadata is not None
                 and slot_mapping is not None
                 and kv_cache.numel() > 0
                 and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
+                and not in_piecewise_cudagraph()
             )
 
         if fuse and self._fold_qb_uk and llama_4_scaling is None:
