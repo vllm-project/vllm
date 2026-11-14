@@ -48,7 +48,7 @@ def make_read_question(
         type=LabelQuestion(),
         instructions=question.instructions,
         options=tuple(options),
-        labels=LABELS[: len(options)],
+        labels=LabelQuestion().labels([o.name.strip('"') for o in options]),
     )
 
 

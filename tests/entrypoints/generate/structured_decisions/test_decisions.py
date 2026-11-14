@@ -105,6 +105,14 @@ def test_empty_input_is_valid_under_the_openai_schema(evidence):
     assert input_text(request(input=evidence).input) == ""
 
 
+def test_choices_named_with_distinct_letters_keep_them():
+    choices = [{"value": v} for v in "CADB"]
+    question = request(
+        questions=[{"type": "choice", "instructions": "Which?", "choices": choices}]
+    ).questions[0]
+    assert make_read_question(0, question).labels == ("C", "A", "D", "B")
+
+
 def test_score_levels_with_the_same_label_keep_their_positions():
     question = request(
         questions=[
