@@ -35,7 +35,7 @@ def _heads_per_program(heads_per_group: int) -> int:
 class FusedInvRopeFP8QuantKernel(
     VllmTritonJitKernel["FusedInvRopeFP8QuantKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         heads_per_group: int
         fp8_max: float
@@ -220,7 +220,7 @@ class FusedInvRopeFP8QuantKernel(
             )
             tl.store(scale_addrs, scales)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         heads_per_group: int,

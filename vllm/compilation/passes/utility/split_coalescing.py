@@ -31,7 +31,7 @@ from ..vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _SliceInfo:
     node: fx.Node
     dim: int

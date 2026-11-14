@@ -18,6 +18,7 @@ only to reduce them; fusing the add into the reduction never writes them.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -85,14 +86,17 @@ def _xpress_latent_kernel(
     R: tl.constexpr,
     H: tl.constexpr,
     BP: tl.constexpr,
+    KC: tl.constexpr,
+    RC: tl.constexpr,
     HT: tl.constexpr,
     DO_MLP: tl.constexpr,
 ):
     """The latent stage of one Jacobi pass for one block, fused end to end.
 
-    Grid: (N,), one program per block. For every slot b it gathers the previous
-    slot's token embedding (slot 0 reads the anchor's predecessor `am1`),
-    adds the pass-invariant hidden cache, applies the folded causal mixer
+    Grid: (N, R // RC), one program per block and RC latent channels. For every
+    slot b it gathers the previous slot's token embedding (slot 0 reads the
+    anchor's predecessor `am1`), adds the pass-invariant hidden cache, applies
+    the folded causal mixer
     `u[b] = sum_{j <= b} L[b, j, :] * x[j]`, then a SwiGLU MLP with a
     residual, and writes the latent for slots 1..B-1 (slot 0 is the anchor and
     is never read out).
@@ -114,52 +118,72 @@ def _xpress_latent_kernel(
         R: latent rank.
         H: MLP hidden size.
         BP: B rounded up to a power of two (tile size).
+        KC: rank chunk of the embedding projection; R holds all of W_lat at once.
+        RC: latent channels per program. Below R the MLP cannot run here, and the
+            mixer becomes one [BP, BP, RC] product, which only fits registers when
+            RC is small.
         HT: MLP hidden tile size.
         DO_MLP: whether to run the SwiGLU MLP here. False stops after the mixer
-            and hands its output back, so the caller can run the SwiGLU as
-            cuBLAS GEMMs instead -- see the comment at the MLP loop for why
-            that is faster.
+            and hands its output back, so `xpress_latent_pass` can run the
+            SwiGLU as GEMMs instead -- see the comment at the MLP loop for why
+            that can be faster.
 
     """
     n = tl.program_id(0).to(tl.int64)
     offs_b = tl.arange(0, BP)
-    offs_r = tl.arange(0, R)
+    offs_r = tl.arange(0, RC)
+    if RC < R:
+        offs_r += tl.program_id(1) * RC
     mask_b = offs_b < B
 
-    xh = tl.load(
+    x = tl.load(
         xh_ptr + n * B * R + offs_b[:, None] * R + offs_r[None, :],
         mask=mask_b[:, None],
         other=0.0,
     ).to(tl.float32)
-    wlat = tl.load(wlat_ptr + offs_r[:, None] * R + offs_r[None, :])
 
-    prev = tl.load(blk_ptr + n * B + offs_b - 1, mask=mask_b & (offs_b >= 1), other=0)
-    am1 = tl.load(am1_ptr + n)
-    prev = tl.where(offs_b == 0, am1, prev)
-
-    lat = tl.load(
-        w1_ptr + prev[:, None] * R + offs_r[None, :],
-        mask=mask_b[:, None],
-        other=0.0,
-    )
-    x = xh + tl.dot(lat, wlat, out_dtype=tl.float32)
-
-    u = tl.zeros([BP, R], dtype=tl.float32)
-    for j in tl.static_range(B):
-        lj = tl.load(
-            mixl_ptr + offs_b[:, None] * B * R + j * R + offs_r[None, :],
+    for k0 in tl.static_range(0, R, KC):
+        offs_k = k0 + tl.arange(0, KC)
+        wlat = tl.load(wlat_ptr + offs_k[:, None] * R + offs_r[None, :])
+        prev = tl.load(
+            blk_ptr + n * B + offs_b - 1, mask=mask_b & (offs_b >= 1), other=0
+        )
+        am1 = tl.load(am1_ptr + n)
+        prev = tl.where(offs_b == 0, am1, prev)
+        lat = tl.load(
+            w1_ptr + prev[:, None] * R + offs_k[None, :],
             mask=mask_b[:, None],
             other=0.0,
+        )
+        x += tl.dot(lat, wlat, out_dtype=tl.float32)
+
+    if RC < R:
+        mix = tl.load(
+            mixl_ptr
+            + offs_b[:, None, None] * B * R
+            + offs_b[None, :, None] * R
+            + offs_r[None, None, :],
+            mask=mask_b[:, None, None] & mask_b[None, :, None],
+            other=0.0,
         ).to(tl.float32)
-        xj = tl.sum(tl.where(offs_b[:, None] == j, x, 0.0), axis=0)
-        u += lj * xj[None, :]
+        u = tl.sum(mix * x[None, :, :], axis=1)
+    else:
+        u = tl.zeros([BP, R], dtype=tl.float32)
+        for j in tl.static_range(B):
+            lj = tl.load(
+                mixl_ptr + offs_b[:, None] * B * R + j * R + offs_r[None, :],
+                mask=mask_b[:, None],
+                other=0.0,
+            ).to(tl.float32)
+            xj = tl.sum(tl.where(offs_b[:, None] == j, x, 0.0), axis=0)
+            u += lj * xj[None, :]
 
     ub = u.to(wg_ptr.dtype.element_ty)
     x = u
     # DO_MLP=False stops after the mixer and hands u back, so the caller can run the
-    # SwiGLU as cuBLAS GEMMs. The MLP's wg/wu/wd are ~768KB of the ~940KB this program
-    # reads, and with grid (N,) one SM pulls all of it; cuBLAS spreads the same reads
-    # over many SMs, and under a CUDA graph the extra launches cost nothing.
+    # SwiGLU as GEMMs. The MLP's wg/wu/wd are ~768KB of the ~940KB this program
+    # reads, and with grid (N,) one SM pulls all of it; GEMMs spread the same reads
+    # over many SMs, at the cost of extra launches, which still take time in a graph.
     for h0 in range(0, H if DO_MLP else 0, HT):
         offs_ht = h0 + tl.arange(0, HT)
         g = tl.dot(
@@ -197,17 +221,46 @@ def xpress_latent_pass(
     wg_t,
     wu_t,
     wd_t,
-    do_mlp: bool = True,
+    wgu_t: torch.Tensor | None = None,
+    do_mlp: bool | None = None,
+    kc: int | None = None,
+    rc: int | None = None,
+    ht: int = 64,
+    num_stages: int | None = None,
 ) -> None:
     """Run `_xpress_latent_kernel` over N blocks; see its docstring for shapes.
 
     The caller follows this with the readout matmul `lat_out @ W2` and one of
-    the fused argmax entry points below.
+    the fused argmax entry points below. `do_mlp` runs the SwiGLU MLP in the
+    kernel, else as GEMMs after it on `wgu_t` ([R, 2 * H], `wg_t` and `wu_t`
+    side by side). `kc`, `rc`, `ht` and `num_stages` set the kernel's
+    `KC`, `RC`, `HT` and pipelining depth; None picks the platform default.
     """
     N, B = blk.shape
     R = xh.shape[-1]
     H = wg_t.shape[-1]
-    _xpress_latent_kernel[(N,)](
+    rocm = current_platform.is_rocm()
+    if do_mlp is None:
+        # On MI355 the in-kernel MLP cannot pipeline within gfx950's LDS at HT=64,
+        # and running it as GEMMs after the kernel is faster than any fused config.
+        do_mlp = not rocm
+    if kc is None:
+        # As fast as R on MI355, and at R=256 the W_lat tile then fits gfx942's 64KB.
+        kc = R // 2 if rocm else R
+    if kc <= 0 or kc & (kc - 1) or R % kc:
+        raise ValueError(f"kc must be a positive power of two dividing R={R}, got {kc}")
+    if rc is None:
+        # MI355, the kernel alone at N = 1/64/256: 11.7/12.0/12.3us with one
+        # 8-warp program per block, 3.1/3.7/6.8us with one warp per 32 channels.
+        rc = R if do_mlp else min(R, 32)
+    if rc != R and (do_mlp or rc < 16 or rc & (rc - 1) or R % rc):
+        raise ValueError(
+            f"rc must be R={R}, or without the MLP a power of two >= 16 dividing R"
+            f", got {rc}"
+        )
+    if not do_mlp and wgu_t is None:
+        raise ValueError("the GEMM MLP needs wgu_t, [R, 2 * H]")
+    _xpress_latent_kernel[(N, R // rc)](
         blk,
         tok_am1,
         xh,
@@ -222,15 +275,23 @@ def xpress_latent_pass(
         R=R,
         H=H,
         BP=triton.next_power_of_2(B),
-        HT=64,
+        KC=kc,
+        RC=rc,
+        HT=ht,
         DO_MLP=do_mlp,
-        num_warps=8,
+        num_warps=8 if rc == R else 1,
         # 3 stages, measured: one pass at bs=1 drops 76.7us -> 61.0us, because the
         # weight loads (wlat, wg, wu, wd: ~940KB per program) then overlap with the
         # dots instead of each one exposing its full latency. 4+ stages do not
-        # compile -- the tiles already use most of the shared memory.
-        num_stages=3,
+        # compile -- the tiles already use most of the shared memory. gfx950's 160KB
+        # LDS fits only one stage at HT=64.
+        num_stages=num_stages or (1 if rocm else 3),
     )
+    if not do_mlp:
+        u = lat_out.view(-1, R)
+        m = u.new_empty(u.shape[0], H)
+        torch.ops._C.silu_and_mul(m, u @ wgu_t)
+        u.addmm_(m, wd_t)
 
 
 @triton.jit
