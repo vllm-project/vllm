@@ -18,7 +18,7 @@ pub(crate) fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
         Endianness::Big => '>',
         Endianness::Little | Endianness::Native => '<',
     };
-    let code = &array.dtype.to_string()[1..];
+    let code = array.dtype.code();
     let dims: Vec<_> = array.shape.iter().map(ToString::to_string).collect();
     let shape = match dims.as_slice() {
         [dim] => format!("({dim},)"),

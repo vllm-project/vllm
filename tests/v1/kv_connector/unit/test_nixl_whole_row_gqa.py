@@ -26,17 +26,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.v1.core.single_type_kv_cache_manager import SinkFullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     create_kv_cache_views,
 )
 
 from .test_nixl_desc_geometry import _RecordingNixl
-from .utils import create_vllm_config, expand_strided_descs
+from .utils import create_vllm_config, expand_strided_descs, make_kv_cache_group
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 4
@@ -58,9 +58,10 @@ def _make_gqa_worker(
     head_size: int = 64,
     worker_cls=NixlPullConnectorWorker,
     engine_id: str = "local",
+    manager_config=None,
 ):
     """Register real views of one GQA KV tensor on a real worker."""
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
@@ -88,7 +89,11 @@ def _make_gqa_worker(
     )
     config.cache_config.kv_cache_layout = layout.name
     kv_cache_config = KVCacheConfig(
-        NUM_BLOCKS, [tensor], [KVCacheGroupSpec(names, spec)]
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[
+            make_kv_cache_group(names, spec, manager_config=manager_config)
+        ],
     )
     with set_current_vllm_config(config):
         worker = worker_cls(config, engine_id, kv_cache_config)
@@ -154,6 +159,18 @@ def test_whole_row_gqa_needs_opt_in_and_a_block_outermost_layout(
 
 
 @record_nixl
+def test_whole_row_gqa_needs_plain_full_attention(dist_init):
+    # A full-attention subclass (here attention sinks) keeps per-layer regions.
+    worker, _, caches, _ = _make_gqa_worker(
+        KVCacheLayout.BLHNC,
+        whole_row=True,
+        manager_config=SinkFullAttentionManager.config(sink_len=BLOCK_SIZE),
+    )
+    assert worker.num_regions == len(caches)
+    assert _metadata(worker).packed_member_layouts == {}
+
+
+@record_nixl
 def test_per_layer_peer_addresses_pages_inside_whole_gqa_rows(dist_init):
     # In pull mode, a BLHNC decoder without the opt-in (one region per layer)
     # views the prefiller's rows as per-layer pages.
@@ -191,7 +208,8 @@ def test_per_layer_decoder_reads_layer_pages_from_a_whole_row_prefiller(dist_ini
     }
     consumer.add_remote_agent(meta)
     assert consumer.num_regions == num_layers
-    handle = consumer.dst_xfer_side_handles["remote"][0]
+    stage = consumer._single_remote_stage("remote")
+    handle = stage.xfer_side_handles[0]
     remote_descs = consumer.nixl_wrapper.dlists[handle]
     assert sorted(map(tuple, remote_descs.tolist())) == sorted(
         (p_raw.data_ptr() + b * row + i * page, page, 0)
@@ -199,13 +217,13 @@ def test_per_layer_decoder_reads_layer_pages_from_a_whole_row_prefiller(dist_ini
         for i in range(num_layers)
     )
     # Block 1 locally is read from block 2 remotely, layer by layer.
-    pairs = consumer._dst_pairs["remote"]
+    pairs = stage.pairs
     local_ids = consumer._compute_desc_ids(
         [[1]],
         consumer.num_blocks,
         None,
         1,
-        region_num_blocks=consumer.dst_region_num_blocks[consumer.engine_id],
+        region_num_blocks=consumer.region_num_blocks,
         pairs=(pairs.local, pairs.group),
     )
     remote_ids = consumer._compute_desc_ids(
@@ -213,7 +231,7 @@ def test_per_layer_decoder_reads_layer_pages_from_a_whole_row_prefiller(dist_ini
         meta.num_blocks,
         None,
         1,
-        region_num_blocks=consumer.dst_region_num_blocks["remote"],
+        region_num_blocks=stage.region_num_blocks,
         pairs=(pairs.remote, pairs.group),
     )
     local_descs = expand_strided_descs(consumer.src_blocks_data)

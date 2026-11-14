@@ -182,6 +182,8 @@ class SeedTransport:
         listen = self._seed_config.listen
         if listen is None:
             return None
+        if self._server is not None:
+            return self._server.getsockname()[:2]
         family = socket.AF_INET6 if ":" in listen[0] else socket.AF_INET
         self._server = socket.create_server(listen, family=family)
         threading.Thread(
