@@ -1632,3 +1632,29 @@ def test_combo_kernel_defaults_without_inductor_deterministic_setting():
 
     assert config.inductor_compile_config["combo_kernels"] is True
     assert config.inductor_compile_config["benchmark_combo_kernel"] is True
+
+
+@pytest.mark.parametrize("backend", ["not_a_backend", "__main__", "a..b", "1x.y"])
+def test_stock_compile_rejects_malformed_backend(backend):
+    with pytest.raises(ValueError, match="Invalid compilation_config.backend"):
+        CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE, backend=backend)
+
+
+def test_stock_compile_accepts_registered_and_qualified_backends():
+    config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE, backend="eager"
+    )
+    assert config.backend == "eager"
+
+    config = CompilationConfig(
+        mode=CompilationMode.DYNAMO_TRACE_ONCE, backend="my_pkg.mod.my_backend"
+    )
+    assert config.backend == "my_pkg.mod.my_backend"
+
+
+def test_stock_compile_unimportable_backend_raises_named_value_error():
+    config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE, backend="nonexistent_pkg_xyz.fn"
+    )
+    with pytest.raises(ValueError, match="compilation_config.backend"):
+        config.init_backend(MagicMock())
