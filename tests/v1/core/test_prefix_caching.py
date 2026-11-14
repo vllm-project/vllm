@@ -7249,14 +7249,13 @@ def _check_session_invariants(manager: KVCacheManager) -> None:
     }
 
     expected: Counter[int] = Counter()
-    if manager.sessions is not None:
-        for session in manager.sessions._sessions.values():
-            expected.update(
-                b.block_id
-                for blocks, keys in zip(session.blocks, session.keys)
-                for b, key in zip(blocks, keys)
-                if b.block_hash is key
-            )
+    for session in manager.sessions._sessions.values():
+        expected.update(
+            b.block_id
+            for blocks, keys in zip(session.blocks, session.keys)
+            for b, key in zip(blocks, keys)
+            if b.block_hash is key
+        )
     assert [b.session_ref for b in pool.blocks] == [
         expected[b.block_id] for b in pool.blocks
     ]
@@ -7278,8 +7277,7 @@ def test_session_retention_random_ops_keep_invariants(
     else:
         config = make_kv_cache_config(16, 40)
     manager = _session_manager(config, session_ttl)
-    if manager.sessions is not None:
-        manager.sessions.max_sessions = 3
+    manager.sessions.max_sessions = 3
     last_prompt: dict[str, list[int]] = {}
     running: list[Request] = []
     num_session_lookups = 0
@@ -7307,7 +7305,7 @@ def test_session_retention_random_ops_keep_invariants(
             request = make_request(
                 f"r{step}", token_ids, 16, sha256, session_id=session_id
             )
-            if session_id is not None and manager.sessions is not None:
+            if session_id is not None:
                 found = manager.sessions.get_blocks(session_id, request.block_hashes)
                 num_session_lookups += found is not None
             assert _lookup(manager, request) == _lookup(

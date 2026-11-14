@@ -206,21 +206,20 @@ class KVCacheManager:
         )
         self.kv_cache_config = kv_cache_config
 
-        self.sessions: KVCacheSessions | None = None
-        if enable_caching and session_ttl > 0:
-            self.sessions = KVCacheSessions(
-                ttl=session_ttl,
-                hash_block_size=hash_block_size,
-                lookup_block_sizes={
-                    manager.kv_cache_group_id: manager.block_size
-                    for manager, group in zip(
-                        self.coordinator.single_type_managers,
-                        kv_cache_config.kv_cache_groups,
-                    )
-                    if isinstance(manager, FullAttentionManager)
-                    and group.prefix_cacheable
-                },
-            )
+        # A TTL of 0 keeps the session table empty.
+        self.sessions = KVCacheSessions(
+            ttl=session_ttl if enable_caching else 0,
+            hash_block_size=hash_block_size,
+            # Only the full-attention lookup scans from the first block.
+            lookup_block_sizes={
+                manager.kv_cache_group_id: manager.block_size
+                for manager, group in zip(
+                    self.coordinator.single_type_managers,
+                    kv_cache_config.kv_cache_groups,
+                )
+                if isinstance(manager, FullAttentionManager) and group.prefix_cacheable
+            },
+        )
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -273,12 +272,12 @@ class KVCacheManager:
     def _session_blocks(
         self, request: Request
     ) -> Mapping[int, Sequence[KVCacheBlock]] | None:
-        if self.sessions is None or request.session_id is None:
+        if request.session_id is None:
             return None
         return self.sessions.get_blocks(request.session_id, request.block_hashes)
 
     def _register_session(self, request: Request) -> None:
-        if self.sessions is None or request.session_id is None:
+        if request.session_id is None or not self.sessions.ttl:
             return
         self.sessions.register(
             request.session_id,
@@ -288,8 +287,7 @@ class KVCacheManager:
 
     def close_session(self, session_id: str) -> None:
         """Stop preferring a session's blocks for retention."""
-        if self.sessions is not None:
-            self.sessions.close(session_id)
+        self.sessions.close(session_id)
 
     def get_num_cached_tokens(self, request: Request) -> int:
         """How many of a request's tokens are already in the prefix cache.
@@ -760,8 +758,7 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        if self.sessions is not None:
-            self.sessions.clear()
+        self.sessions.clear()
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
@@ -990,6 +987,5 @@ class KVCacheManager:
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
-        if self.sessions is not None:
-            self.sessions.expire()
+        self.sessions.expire()
         self.coordinator.new_step_starts()
