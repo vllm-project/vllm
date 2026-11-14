@@ -173,6 +173,33 @@ For backward compatibility, passing an integer works as before and is interprete
 
 ## Multi-modal processor arguments
 
+### GLM-5.3-Flash video budget
+
+When neither startup options nor request options specify a video token budget,
+GLM-5.3-Flash defaults to 30,000 vision tokens (or the checkpoint budget if
+smaller). This preserves KV cache capacity in aggregated deployments; it is not
+a hard per-request limit. To configure the startup budget without changing the
+image budget:
+
+```bash
+--mm-processor-kwargs '{"videos_kwargs": {"max_image_tokens": 60000}}'
+```
+
+The startup budget is used for token-budget estimation and encoder memory
+profiling, and is the preprocessing default for requests without an override.
+Use `240000` to select the checkpoint's full video budget. Larger budgets can
+retain more video detail but increase encoder peak memory and reduce the memory
+available for KV cache; validate them on your GPUs.
+
+The scoped `videos_kwargs.max_image_tokens` takes precedence over a flat
+`max_image_tokens` setting and leaves the image budget unchanged. A flat setting
+can affect both modalities. Configure the largest intended video budget at
+startup: request-time overrides remain supported, but do not rerun profiling or
+resize the encoder cache. Exceeding the startup budget can cause capacity errors
+or OOM; this option does not enforce a per-request upper bound.
+
+### Other models
+
 For certain models, you can adjust the multi-modal processor arguments to
 reduce the size of the processed multi-modal inputs, which in turn saves memory.
 

@@ -656,7 +656,24 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
-        return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
+
+        video_processor = self.get_hf_processor().video_processor
+
+        # Video size profiling from optional --mm-processor-kwargs.
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        mm_processor_kwargs = mm_config.mm_processor_kwargs or {}
+        max_image_tokens = mm_processor_kwargs.get("max_image_tokens")
+        video_kwargs = mm_processor_kwargs.get("videos_kwargs")
+        if isinstance(video_kwargs, Mapping):
+            max_image_tokens = video_kwargs.get("max_image_tokens", max_image_tokens)
+        if max_image_tokens is not None:
+            if not isinstance(max_image_tokens, int) or max_image_tokens <= 0:
+                raise ValueError("Video max_image_tokens must be a positive integer.")
+            return max_image_tokens * self._pixels_per_token(video_processor)
+
+        # If no override is set, use the processor's own budget.
+        # See get_hf_processor().
+        return self._processor_pixel_budget(video_processor)[1]
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # The inherited square probe strands budget whenever the token
