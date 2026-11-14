@@ -607,13 +607,14 @@ endmacro()
 # LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 # USE_SABI <version>         - Use python stable api <version>
+# NO_TORCH                  - Do not link Torch for a pure CPython extension.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
 function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     ARG
-    "WITH_SOABI"
+    "WITH_SOABI;NO_TORCH"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
@@ -661,6 +662,14 @@ function (define_extension_target MOD_NAME)
 
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
+
+  if(ARG_NO_TORCH)
+    if(ARG_LIBRARIES)
+      target_link_libraries(${MOD_NAME} PRIVATE ${ARG_LIBRARIES})
+    endif()
+    install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
+    return()
+  endif()
 
   target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
 

@@ -63,6 +63,24 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("VLLM_SHM_WAIT_BACKEND", "stock"),
+        ("VLLM_SHM_READER_STRIDE", "16"),
+        ("VLLM_SHM_SPIN_NS", "1000"),
+    ],
+)
+def test_shm_wait_settings_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+):
+    # The queue wait policy only changes how processes wait for messages, so
+    # switching it must reuse the same compile cache.
+    monkeypatch.setenv(name, value)
+
+    assert name not in envs.compile_factors()
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)

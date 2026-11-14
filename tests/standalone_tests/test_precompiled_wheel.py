@@ -6,15 +6,20 @@
 import ast
 import logging
 import os
+import shutil
 import subprocess
+import sysconfig
 import tempfile
 import unittest
+import zipfile
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+
+import regex as re
 
 # setup.py executes setup() on import; load only the wheel utility class.
 setup_path = Path(__file__).resolve().parents[2] / "setup.py"
@@ -23,14 +28,26 @@ node = next(
     for node in ast.parse(setup_path.read_text()).body
     if isinstance(node, ast.ClassDef) and node.name == "precompiled_wheel_utils"
 )
+freethreaded_node = next(
+    node
+    for node in ast.parse(setup_path.read_text()).body
+    if isinstance(node, ast.FunctionDef) and node.name == "is_freethreaded"
+)
 namespace: dict[str, Any] = {
     "subprocess": subprocess,
     "os": os,
+    "re": re,
+    "shutil": shutil,
+    "sysconfig": sysconfig,
     "logger": logging.getLogger("setup"),
     "envs": SimpleNamespace(VLLM_DOCKER_BUILD_CONTEXT=False, VLLM_USE_PRECOMPILED=True),
 }
 exec(
-    compile(ast.Module(body=[node], type_ignores=[]), str(setup_path), "exec"),
+    compile(
+        ast.Module(body=[freethreaded_node, node], type_ignores=[]),
+        str(setup_path),
+        "exec",
+    ),
     namespace,
 )
 wheel_utils = namespace["precompiled_wheel_utils"]
@@ -189,6 +206,55 @@ class TestDetermineWheelUrl(unittest.TestCase):
                 self.assertEqual(url, (location, None))
                 fetch.assert_not_called()
                 search.assert_not_called()
+
+
+class TestQueueExtensionExtraction(unittest.TestCase):
+    def extract(self, members, *, enabled=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wheel = root / "test.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                for member in members:
+                    archive.writestr(member, b"fixture-extension")
+            before = os.getcwd()
+            try:
+                os.chdir(root)
+                result = wheel_utils.extract_precompiled_and_patch_package(
+                    str(wheel),
+                    None,
+                    extract_extensions=enabled,
+                    extract_rust_frontend=False,
+                )
+                files = sorted(str(p.relative_to(root)) for p in root.rglob("*.so"))
+                return result, files
+            finally:
+                os.chdir(before)
+
+    def member(self):
+        suffix = (
+            sysconfig.get_config_var("EXT_SUFFIX")
+            if namespace["is_freethreaded"]()
+            else ".abi3.so"
+        )
+        return "vllm/_shm_wait" + suffix
+
+    def test_packaged_queue_extension_uses_actual_interpreter_ABI(self):
+        member = self.member()
+        result, files = self.extract([member])
+        self.assertEqual(files, [member])
+        self.assertEqual(result, {"vllm": [Path(member).name]})
+
+    def test_queue_extension_rejects_foreign_namespace_and_ABI(self):
+        self.assertEqual(self.extract([self.member()])[1], [self.member()])
+        for member in (
+            "_shm_wait.abi3.so",
+            "vllm/_shm_wait.cpython-310-aarch64-linux-gnu.so",
+        ):
+            with self.subTest(member=member):
+                self.assertEqual(self.extract([member]), ({}, []))
+
+    def test_rust_only_extraction_does_not_install_queue_code(self):
+        self.assertEqual(self.extract([self.member()], enabled=False), ({}, []))
 
 
 if __name__ == "__main__":
