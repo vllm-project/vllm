@@ -116,9 +116,42 @@ def _qwen3_parse_params(
     return params, open_param
 
 
+def _qwen3_json_body_args(raw_args: str, partial: bool) -> str | None:
+    """Extract the arguments JSON from a hermes-style JSON tool body.
+
+    Qwen3 base models emit ``{"name": ..., "arguments": ...}`` inside
+    ``<tool_call>`` instead of the Qwen3-Coder XML parameter format.
+    Returns None when the body is not JSON, so the caller falls back to
+    XML parameter parsing. An incomplete JSON body during streaming
+    yields "", so no partial arguments are emitted; the complete body
+    is converted when the tool call closes.
+    """
+    stripped = raw_args.strip()
+    if not stripped.startswith("{"):
+        return None
+    if partial and not stripped.endswith("}"):
+        # Incomplete JSON: defer without reparsing the growing body per chunk.
+        return ""
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return "" if partial else None
+    if not isinstance(parsed, dict):
+        return "" if partial else None
+    args = parsed.get("arguments", parsed.get("parameters"))
+    if args is None:
+        args = {k: v for k, v in parsed.items() if k != "name"}
+    if isinstance(args, str):
+        return args
+    return json.dumps(args, ensure_ascii=False)
+
+
 def _qwen3_arg_converter(
     raw_args: str, partial: bool, closed: _ClosedParams | None = None
 ) -> str:
+    json_args = _qwen3_json_body_args(raw_args, partial)
+    if json_args is not None:
+        return json_args
     params, open_param = _qwen3_parse_params(raw_args, partial, closed)
     if open_param is not None and open_param.group(1):
         params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
@@ -322,6 +355,16 @@ def qwen3_config(
                 (EventType.TOOL_CALL_START,),
             ),
         },
+        content_events={
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.TOOL_NAME: EventType.TOOL_NAME,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            # Qwen3 base models put a hermes-style JSON body directly in
+            # <tool_call>; capture it as raw args so the name/arguments
+            # can be recovered from the JSON.
+            ParserState.TOOL_PREAMBLE: EventType.ARG_VALUE_CHUNK,
+        },
         arg_converter=_qwen3_arg_converter,
         arg_value_extender=_qwen3_arg_value_extender,
         stream_arg_deltas=True,
@@ -381,6 +424,31 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+
+    def _try_extract_name(self, idx: int) -> str | None:
+        raw = self._tool_slots[idx].args
+        if not raw.lstrip().startswith("{"):
+            return super()._try_extract_name(idx)
+        # JSON body: the regex could match a "name" field nested inside a
+        # leading "arguments"/"parameters" object, so only trust it ahead
+        # of those keys; the complete body parses exactly.
+        try:
+            parsed = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            name = parsed.get("name")
+            return name if isinstance(name, str) and name else None
+        match = self._NAME_RE.search(raw)
+        if not match:
+            return None
+        key_positions = [
+            p for key in ('"arguments"', '"parameters"') if (p := raw.find(key)) != -1
+        ]
+        envelope_end = min(key_positions, default=len(raw))
+        if match.start() < envelope_end and match.group(1):
+            return match.group(1)
+        return None
 
     def extract_reasoning(
         self,
