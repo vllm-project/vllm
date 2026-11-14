@@ -89,7 +89,7 @@ class EncoderRunner:
                 mm_feature = mm_features[mm_input_id]
                 if mm_feature.data is None:
                     continue
-                if mm_feature.identifier in self.encoder_cache.encoder_outputs:
+                if self._has_cached_encoder_output(mm_feature.identifier):
                     continue
                 if mm_feature.modality == "prompt_embeds":
                     # Passthrough modality: the tensor is already in the
@@ -98,8 +98,9 @@ class EncoderRunner:
                     # standard is_mm_embed path.
                     embeds = mm_feature.data["embedding"].data
                     assert isinstance(embeds, torch.Tensor)
-                    self.encoder_cache.encoder_outputs[mm_feature.identifier] = (
-                        async_tensor_h2d(embeds, device=self.device)
+                    self._cache_encoder_output(
+                        mm_feature.identifier,
+                        async_tensor_h2d(embeds, device=self.device),
                     )
                     continue
                 mm_hashes.append(mm_feature.identifier)
@@ -204,6 +205,26 @@ class EncoderRunner:
             self.encoder_timing_registry.clear()
             return stats
 
+    def cache_encoder_outputs(
+        self,
+        mm_hashes: list[str],
+        outputs: list[torch.Tensor],
+    ) -> None:
+        self.encoder_cache.encoder_outputs.update(zip(mm_hashes, outputs))
+
+    def _cache_encoder_output(
+        self,
+        mm_hash: str,
+        output: torch.Tensor,
+    ) -> None:
+        self.encoder_cache.encoder_outputs[mm_hash] = output
+
+    def _has_cached_encoder_output(self, mm_hash: str) -> bool:
+        return mm_hash in self.encoder_cache.encoder_outputs
+
+    def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
+        return self.encoder_cache.encoder_outputs.get(mm_hash, None)
+
     def gather_mm_embeddings(
         self,
         req_ids: list[str],
@@ -267,7 +288,7 @@ class EncoderRunner:
                     continue
 
                 mm_hash = mm_feature.identifier
-                encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash, None)
+                encoder_output = self._get_encoder_output_from_cache(mm_hash)
                 if encoder_output is None:
                     # A feature starting at/after the processed boundary is only
                     # reached via the drafter's +1 look-ahead and might not be
