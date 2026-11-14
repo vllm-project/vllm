@@ -484,13 +484,18 @@ def _run_flashinfer_autotune_dummy_runs(
         # Round M up to match serving-time bucket selection for non-bucket M.
         # See https://github.com/flashinfer-ai/flashinfer/issues/5450
         with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
-            runner._dummy_run(
+            _, sample_hidden_states = runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            if (
+                sample_hidden_states is not None
+                and getattr(runner, "pooling_runner", None) is None
+            ):
+                runner._dummy_sampler_run(sample_hidden_states)
             autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
