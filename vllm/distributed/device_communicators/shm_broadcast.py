@@ -722,7 +722,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     def shutdown(self):
-        """If this is an idle reader, wakes it up so it can clean up and shut
+        """Wake up any reader or writer waiting on this queue so it can clean up and shut
         down"""
         self.shutting_down = True
         if self._spin_condition is not None:
@@ -751,6 +751,9 @@ class MessageQueue:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
+                    if self.shutting_down:
+                        raise RuntimeError("cancelled")
+
                     # Release the processor to other threads
                     sched_yield()
 
@@ -758,6 +761,7 @@ class MessageQueue:
                     elapsed = time.monotonic() - start_time
                     if timeout is not None and elapsed > timeout:
                         raise TimeoutError
+
 
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
