@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+import time
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -24,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.stats import (
+    MoRIIOKVConnectorStats,
 )
 
 
@@ -343,7 +347,9 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
         "req": ("127.0.0.1", ("7000",), "tx-release")
     }
     # Transfer-timeout reaping state consulted by _pop_done_transfers.
-    worker._recving_transfers_start = {}
+    worker._recving_transfers_start = {"req": 0.0}
+    worker._recving_transfers_size = defaultdict(lambda: [0, 0])
+    worker.xfer_stats = MoRIIOKVConnectorStats()
     # Load-error bookkeeping cleared alongside a completed transfer.
     worker._recving_local_blocks = {}
     worker._invalid_block_ids = set()
@@ -446,6 +452,8 @@ def test_read_completion_waits_for_every_posted_read():
         "req": ("127.0.0.1", ("7000",), "tx-pending")
     }
     worker._recving_transfers_start = {"req": float("inf")}
+    worker._recving_transfers_size = defaultdict(lambda: [0, 0])
+    worker.xfer_stats = MoRIIOKVConnectorStats()
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
 
@@ -608,7 +616,9 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
         "a": ("127.0.0.1", "7000", "tx-a"),
         "b": ("127.0.0.1", "7000", "tx-b"),
     }
-    worker._recving_transfers_start = {}
+    worker._recving_transfers_start = dict.fromkeys(("a", "b"), time.monotonic())
+    worker._recving_transfers_size = defaultdict(lambda: [0, 0])
+    worker.xfer_stats = MoRIIOKVConnectorStats()
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
     return worker

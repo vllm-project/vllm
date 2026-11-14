@@ -45,6 +45,7 @@ from .test_moriio_hetero_tp_write import (
     NUM_BLOCKS,
     PREFILL_BLOCKS,
     Rank,
+    _assert_one_transfer_recorded,
     _build_rank,
     _expected,
     _global_state,
@@ -143,6 +144,7 @@ def _make_reader(
 
     def read_remote_data(sizes, local_offsets, remote_offsets, session):
         read_from.append(session.tp_rank)
+        consumer.posted.append((sum(sizes), len(sizes)))
         for size, local, remote in zip(sizes, local_offsets, remote_offsets):
             session.local[local : local + size] = session.remote[remote : remote + size]
         return _Status(not fail)
@@ -173,6 +175,7 @@ def _make_reader(
     )
     worker._recving_transfers = defaultdict(dict)
     worker._recving_transfers_start = {}
+    worker._recving_transfers_size = defaultdict(lambda: [0, 0])
     worker._recving_transfers_callback_addr = {}
     worker._recving_local_blocks = {}
     worker._reads_issued_this_step = []
@@ -256,6 +259,7 @@ def _read_all(
         released = _make_reader(consumer, producers, backend)
         consumer.worker._read_blocks_for_req("req", _meta(groups, advertised_tp))
         assert consumer.worker._pop_done_transfers() == {"t"}
+        _assert_one_transfer_recorded(consumer)
         for p, message_type, fields in released:
             releases[p].append((message_type, fields))
         for layer in layers:
@@ -424,6 +428,10 @@ def test_failed_read_releases_every_holder():
     assert consumer.worker._pop_done_transfers() == set()
     assert sorted(p for p, _, _ in released) == [0, 1]
     assert consumer.worker._invalid_block_ids == set(DECODE_BLOCKS["full"])
+    stats = consumer.worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.num_successful_transfers == 0
+    assert stats.data["num_failed_transfers"] == [1]
 
 
 def _mixed_layout_pair():
