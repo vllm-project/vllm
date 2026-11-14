@@ -27,10 +27,12 @@ class ScatterSplitReplacementModel(nn.Module):
         num_kv_heads: int,
         head_size: int,
         dtype: torch.dtype,
+        output_indices: tuple[int, ...] = (0, 1, 2),
     ):
         super().__init__()
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
+        self.output_indices = output_indices
 
         self.rotary_emb = RotaryEmbedding(
             head_size,
@@ -49,7 +51,8 @@ class ScatterSplitReplacementModel(nn.Module):
         q = q + 1
         k = k + 2
         v = v + 3
-        return q, k, v
+        outputs = (q, k, v)
+        return tuple(outputs[i] for i in self.output_indices)
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
         return [
@@ -63,7 +66,8 @@ class ScatterSplitReplacementModel(nn.Module):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_scatter_split_replace(dtype):
+@pytest.mark.parametrize("output_indices", [(0, 1, 2), (0,), (1,), (0, 1)])
+def test_scatter_split_replace(dtype, output_indices):
     torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
@@ -85,7 +89,9 @@ def test_scatter_split_replace(dtype):
         passes = [coalesce_pass, replace_pass]
         backend = TestBackend(*passes)
 
-        model = ScatterSplitReplacementModel(num_heads, num_kv_heads, head_size, dtype)
+        model = ScatterSplitReplacementModel(
+            num_heads, num_kv_heads, head_size, dtype, output_indices
+        )
 
         T = 5
         qkv = torch.randn(

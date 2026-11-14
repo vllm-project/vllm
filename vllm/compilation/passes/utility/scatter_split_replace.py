@@ -119,13 +119,18 @@ class ScatterSplitReplacementPass(VllmInductorPass):
                             split_getitem_users[user.args[1]] = user
 
                     # Replace query node
-                    split_getitem_users[0].replace_all_uses_with(getitem_nodes[1])
-                    graph.erase_node(split_getitem_users[0])
+                    if 0 in split_getitem_users:
+                        split_getitem_users[0].replace_all_uses_with(getitem_nodes[1])
+                        graph.erase_node(split_getitem_users[0])
                     # Replace key node
-                    split_getitem_users[1].replace_all_uses_with(getitem_nodes[2])
-                    graph.erase_node(split_getitem_users[1])
+                    if 1 in split_getitem_users:
+                        split_getitem_users[1].replace_all_uses_with(getitem_nodes[2])
+                        graph.erase_node(split_getitem_users[1])
                     # Redirect value node to original qkv tensor
-                    split_getitem_users[2].replace_input_with(split_node, query.args[0])
+                    if 2 in split_getitem_users:
+                        split_getitem_users[2].replace_input_with(
+                            split_node, query.args[0]
+                        )
 
                     # Erase unused nodes
                     graph.erase_node(split_node)
