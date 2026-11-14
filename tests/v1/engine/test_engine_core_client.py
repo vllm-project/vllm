@@ -410,6 +410,26 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+def test_dplb_failed_add_releases_inflight():
+    """If the send to the engine core fails, the engine never reports the request
+    finished, so its routing entry must be released at once."""
+    client = _make_dplb_client(num_engines=2)
+    client.current_wave = 0
+    client.client_index = 0
+    client._ensure_stats_update_task = lambda: None
+
+    def send_input(*_args):
+        raise RuntimeError("send to the engine core failed")
+
+    client._send_input = send_input
+    req = make_request(SamplingParams(max_tokens=1))
+    with pytest.raises(RuntimeError, match="send to the engine core failed"):
+        asyncio.run(client.add_request_async(req))
+
+    assert req.request_id not in client.reqs_in_flight
+    assert sum(client.engine_inflight.values()) == 0
+
+
 @pytest.mark.parametrize("final_sent", [False, True])
 def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
     """A streaming-input chunk in flight when its session finished may
