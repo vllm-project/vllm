@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PP transport on CUDA copy engines, synchronized on the GPU (one node).
+"""PP transport on CUDA copy engines, synchronized on the GPU (one NVLink
+domain).
 
-Each rank shares one CUDA IPC buffer holding its flags and a receive region
+Each rank shares one buffer holding its flags and a receive region
 laid out like its persistent intermediate tensors. Per stage boundary, step N:
 
 - sender: once the previous peer copy is done, pack the outputs into a local
@@ -18,10 +19,23 @@ the CPU group.
 The waits omit CU_STREAM_WAIT_VALUE_FLUSH, which x86 hosts do not support. As
 in NCCL's zero-SM copy-engine path, this relies on NVLink delivering the peer
 copy before the flag write that follows it, so all PP GPUs must be NVLink peers.
+
+With TP or PCP > 1, each (PCP, TP) position's PP chain is its own transport,
+sending to the same position in the next stage: a stage's TP ranks hold the
+same outputs and each sends all of them, and each PCP rank sends its own
+tokens.
+
+A chain on one node shares its receive buffers through CUDA IPC. A chain that
+spans nodes (multi-node NVLink, e.g. GB200/GB300 NVL72) shares them through
+FABRIC handles, which need an IMEX channel; mapping a peer's FABRIC memory only
+succeeds within its NVLink domain. Stream memory ops cannot write another
+node's memory, so there a flag is written to local staging and peer-copied,
+after the data on the same stream.
 """
 
 import contextlib
 from collections import deque
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -34,7 +48,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.parallel_state import GroupCoordinator
 
-# Flags at bytes 0 (full) and 8 (empty) of each shared buffer, data from here.
+# Flags at bytes 0 (full) and 8 (empty) of each shared buffer, and staging for
+# the flags this rank writes to its peers at bytes 16 (their full) and 24 (their
+# empty); data from here.
 _DATA_OFFSET = 256
 
 
@@ -117,14 +133,119 @@ def _write_flag(stream: torch.cuda.Stream, addr: int, value: int) -> None:
     )
 
 
+def _signal(
+    stream: torch.cuda.Stream, addr: int, value: int, staging: int | None
+) -> None:
+    """Write a peer's flag after the stream's earlier work; through `staging`
+    (local) and a peer copy when `addr` is on another node."""
+    if staging is None:
+        _write_flag(stream, addr, value)
+        return
+    from cuda.bindings import runtime as cudart
+
+    _write_flag(stream, staging, value)
+    kind = cudart.cudaMemcpyKind.cudaMemcpyDefault
+    _check(cudart.cudaMemcpyAsync(addr, staging, 8, kind, stream.cuda_stream))
+
+
 class CopyEngineUnavailable(RuntimeError):
     """Copy engines are not usable. Raised on every rank alike."""
 
 
-def _close_peer(ptr: int) -> None:
+def _ipc_share(nbytes: int) -> tuple[int, Any, Callable[[], None]]:
+    """A zeroed buffer on this GPU: its pointer, the handle a peer opens it
+    with, and its release."""
+    from vllm import _custom_ops as ops
+
+    ptr, handle = ops.allocate_shared_buffer_and_handle(nbytes)
+    return ptr, handle, lambda: ops.free_shared_buffer(ptr)
+
+
+def _ipc_open(handle: Any, nbytes: int) -> tuple[int, Callable[[], None]]:
     from cuda.bindings import runtime as cudart
 
-    _check(cudart.cudaIpcCloseMemHandle(ptr))
+    from vllm import _custom_ops as ops
+
+    ptr = ops.open_mem_handle(handle)
+    return ptr, lambda: _check(cudart.cudaIpcCloseMemHandle(ptr))
+
+
+def _fabric_map(handle: Any, size: int) -> int:
+    """Map a cuMem allocation for this GPU to a new address."""
+    from cuda.bindings import driver as cu
+
+    ptr = int(_check(cu.cuMemAddressReserve(size, 0, 0, 0)))
+    try:
+        _check(cu.cuMemMap(ptr, size, 0, handle, 0))
+        access = cu.CUmemAccessDesc()
+        access.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+        access.location.id = torch.accelerator.current_device_index()
+        access.flags = cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+        _check(cu.cuMemSetAccess(ptr, size, [access], 1))
+    except Exception:
+        _fabric_unmap(ptr, size)
+        raise
+    return ptr
+
+
+def _fabric_unmap(ptr: int, size: int) -> None:
+    from cuda.bindings import driver as cu
+
+    # Not checked: also undoes a partial `_fabric_map`.
+    cu.cuMemUnmap(ptr, size)
+    cu.cuMemAddressFree(ptr, size)
+
+
+def _fabric_share(nbytes: int) -> tuple[int, Any, Callable[[], None]]:
+    """As `_ipc_share`, through a FABRIC handle."""
+    from cuda.bindings import driver as cu
+
+    from vllm.utils.vmm_driver import imex_channel_available
+
+    if not imex_channel_available():
+        raise RuntimeError("no IMEX channel for FABRIC handles")
+    fabric = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+    prop = cu.CUmemAllocationProp()
+    prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    prop.location.id = torch.accelerator.current_device_index()
+    prop.requestedHandleTypes = fabric
+    granularity = _check(cu.cuMemGetAllocationGranularity(prop, 0))
+    size = -(-nbytes // granularity) * granularity
+    handle = _check(cu.cuMemCreate(size, prop, 0))
+    try:
+        ptr = _fabric_map(handle, size)
+    except Exception:
+        cu.cuMemRelease(handle)
+        raise
+
+    def release() -> None:
+        _fabric_unmap(ptr, size)
+        _check(cu.cuMemRelease(handle))
+
+    try:
+        exported = _check(cu.cuMemExportToShareableHandle(handle, fabric, 0))
+        _check(cu.cuMemsetD8(ptr, 0, size))
+        torch.accelerator.synchronize()
+    except Exception:
+        release()
+        raise
+    return ptr, (bytes(exported.data), size), release
+
+
+def _fabric_open(handle: Any, nbytes: int) -> tuple[int, Callable[[], None]]:
+    """As `_ipc_open`, for a buffer from `_fabric_share`."""
+    from cuda.bindings import driver as cu
+
+    exported, size = handle
+    fabric = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+    imported = _check(cu.cuMemImportFromShareableHandle(exported, fabric))
+    try:
+        ptr = _fabric_map(imported, size)
+    finally:
+        # The mapping keeps the memory alive.
+        cu.cuMemRelease(imported)
+    return ptr, lambda: _fabric_unmap(ptr, size)
 
 
 class CopyEngineTransport(PPTransport):
@@ -134,30 +255,35 @@ class CopyEngineTransport(PPTransport):
         pp_group: "GroupCoordinator",
         persistent: dict[str, torch.Tensor] | None,
     ) -> None:
-        """Collective over the PP group. Raises `CopyEngineUnavailable` on every
-        rank alike, with nothing left allocated, if copy engines are not usable
-        on some rank."""
-        from vllm import _custom_ops as ops
-        from vllm.distributed.parallel_state import in_the_same_node_as
+        """Collective over the PP, TP and PCP groups. Raises `CopyEngineUnavailable`
+        on every rank alike, with nothing left allocated, if copy engines are
+        not usable on some rank."""
+        from vllm.distributed.parallel_state import (
+            get_pcp_group,
+            get_tp_group,
+            in_the_same_node_as,
+        )
         from vllm.platforms import current_platform
 
-        # The same on every rank, so these raise before any collective.
-        parallel_config = vllm_config.parallel_config
+        # The same on every rank, so this raises before any collective.
         if not current_platform.is_cuda():
             raise CopyEngineUnavailable("PP copy engines need CUDA")
-        if (
-            parallel_config.tensor_parallel_size != 1
-            or parallel_config.prefill_context_parallel_size != 1
-        ):
-            raise CopyEngineUnavailable("PP copy engines need TP=1 and PCP=1")
-        if not all(in_the_same_node_as(pp_group.cpu_group, source_rank=0)):
-            raise CopyEngineUnavailable("PP copy engines need one node")
 
         # Anything that can differ between ranks runs inside `step`, and the
-        # ranks share its outcome before going on, so they all agree.
+        # ranks share its outcome before going on, so they all agree. That
+        # includes the other chains over TP (a stage's TP ranks must all use
+        # copy engines or none, since NCCL's receive all-gathers over TP) and
+        # PCP, so every rank makes the same choice.
         rank, world = pp_group.rank_in_group, pp_group.world_size
-        owned: list[int] = []  # Buffers this rank allocated.
-        opened: list[int] = []  # Peer buffers this rank mapped.
+        other_chains = [
+            g for g in (get_tp_group(), get_pcp_group()) if g.world_size > 1
+        ]
+        one_node = all(in_the_same_node_as(pp_group.cpu_group, source_rank=0))
+        share, open_peer = _ipc_share, _ipc_open
+        if not one_node:
+            share, open_peer = _fabric_share, _fabric_open
+        # Releases this rank's buffers and peer mappings, in setup order.
+        releases: list[Callable[[], None]] = []
 
         def step(fn) -> list[Any]:
             out = error = None
@@ -170,13 +296,18 @@ class CopyEngineTransport(PPTransport):
                 gathered, (out, error), group=pp_group.cpu_group
             )
             errors = [e for _, e in gathered if e]
+            # In turn over TP then PCP, so each rank sees every chain's errors.
+            for group in other_chains:
+                group_errors: list[Any] = [None] * group.world_size
+                torch.distributed.all_gather_object(
+                    group_errors, errors[0] if errors else None, group=group.cpu_group
+                )
+                errors = errors or [e for e in group_errors if e]
             if errors:
                 # Best effort: every rank must still raise the same error.
-                with contextlib.suppress(Exception):
-                    for p in opened:
-                        _close_peer(p)
-                    for p in owned:
-                        ops.free_shared_buffer(p)
+                for release in reversed(releases):
+                    with contextlib.suppress(Exception):
+                        release()
                 raise CopyEngineUnavailable(
                     f"PP copy engines are not usable: {errors[0]}"
                 )
@@ -193,35 +324,43 @@ class CopyEngineTransport(PPTransport):
             if not _check(cu.cuDeviceGetAttribute(memops, dev)):
                 raise RuntimeError(f"GPU {device} lacks 64-bit stream memory ops")
             # Zeroed before the handle is shared.
-            ptr, handle = ops.allocate_shared_buffer_and_handle(
-                _DATA_OFFSET + _nbytes(layout)
-            )
-            owned.append(ptr)
+            ptr, handle, release = share(_DATA_OFFSET + _nbytes(layout))
+            releases.append(release)
             phys = current_platform.visible_device_id_to_physical_device_id(device)
             return ptr, handle, layout, phys
 
         ranks = step(allocate_recv)
         ptr, _, layout, _ = ranks[rank]
 
+        def open_rank(r: int) -> int:
+            peer_ptr, release = open_peer(
+                ranks[r][1], _DATA_OFFSET + _nbytes(ranks[r][2])
+            )
+            releases.append(release)
+            return peer_ptr
+
         def connect() -> tuple[int | None, int | None, int | None]:
-            if not current_platform.is_fully_connected([r[3] for r in ranks]):
+            # Across nodes, only GPUs in one NVLink domain map each other's
+            # FABRIC memory, so mapping it checks the same.
+            if one_node and not current_platform.is_fully_connected(
+                [r[3] for r in ranks]
+            ):
                 raise RuntimeError("PP GPUs are not all NVLink-connected")
             prev_ptr = next_ptr = send_ptr = None
             if not pp_group.is_first_rank:
-                prev_ptr = ops.open_mem_handle(ranks[rank - 1][1])
-                opened.append(prev_ptr)
+                prev_ptr = open_rank(rank - 1)
             if not pp_group.is_last_rank:
-                next_ptr = ops.open_mem_handle(ranks[rank + 1][1])
-                opened.append(next_ptr)
+                next_ptr = open_rank(rank + 1)
                 # Outside the torch allocator, so memory profiling counts it.
-                send_ptr, _ = ops.allocate_shared_buffer_and_handle(
-                    _nbytes(ranks[rank + 1][2])
-                )
-                owned.append(send_ptr)
+                send_ptr, _, release = _ipc_share(_nbytes(ranks[rank + 1][2]))
+                releases.append(release)
             return prev_ptr, next_ptr, send_ptr
 
         prev_ptr, next_ptr, send_ptr = step(connect)[rank]
 
+        # Local staging for flags written to another node; see `_signal`.
+        self.stage_full = None if one_node else ptr + 16
+        self.stage_empty = None if one_node else ptr + 24
         if not pp_group.is_first_rank:
             assert persistent is not None and prev_ptr is not None
             self.src = rank - 1
@@ -264,7 +403,7 @@ class CopyEngineTransport(PPTransport):
             _wait_flag(stream, self.full, meta["seq"])
             for key, view in src.items():
                 out[key].copy_(view)
-            _write_flag(stream, self.peer_empty, meta["seq"])
+            _signal(stream, self.peer_empty, meta["seq"], self.stage_empty)
 
         return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
@@ -302,7 +441,7 @@ class CopyEngineTransport(PPTransport):
                 )
         self.peer_done = torch.cuda.Event()
         self.peer_done.record(self.stream)
-        _write_flag(self.stream, self.peer_full, self.seq)
+        _signal(self.stream, self.peer_full, self.seq, self.stage_full)
 
         # gloo sends complete only in wait(), which blocks until the peer
         # receives. Step k+1's copy waited for empty >= k, so k was received.
