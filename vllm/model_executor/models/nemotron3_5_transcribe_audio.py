@@ -272,7 +272,7 @@ class FeatureStacking(nn.Module):
         return (lengths + self.factor - 1) // self.factor
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedFrames:
     """The valid frames of a padded `(B, T)` batch, packed row after row.
 
@@ -526,7 +526,7 @@ def align_frames(preds: torch.Tensor, target_len: int) -> torch.Tensor:
     return preds[:, :target_len]
 
 
-@dataclass
+@dataclass(slots=True)
 class SpeakerCacheState:
     """Synchronous streaming state of the Sortformer speaker encoder."""
 

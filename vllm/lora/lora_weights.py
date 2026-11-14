@@ -303,7 +303,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         return True
 
 
-@dataclass
+@dataclass(slots=True)
 class LoRAFullModuleWeights:
     """LoRA weights for classification layers."""
 

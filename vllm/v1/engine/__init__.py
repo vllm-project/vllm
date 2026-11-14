@@ -90,7 +90,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +106,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
