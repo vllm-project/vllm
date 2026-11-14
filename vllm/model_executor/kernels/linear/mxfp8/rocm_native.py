@@ -18,6 +18,7 @@ import torch
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -44,6 +45,8 @@ from .rocm_block32_gemm import (
     rocm_mxfp8_block32_gemm,
     rocm_mxfp8_block32_gemm_quant,
 )
+
+logger = init_logger(__name__)
 
 _FP8_MAX = float(torch.finfo(MXFP8_VALUE_DTYPE).max)
 _TINY = float(torch.finfo(torch.float32).tiny)
@@ -474,16 +477,19 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             and torch.get_default_dtype() == torch.bfloat16
         )
 
-    def _use_flydsl(self, layer: torch.nn.Module) -> bool:
-        """Whether a 32x32 block-scaled layer runs AITER's tuned FlyDSL GEMMs,
-        which need K % 64 == 0 (batched wo_a as [G, N / G, K])."""
+    @staticmethod
+    def _flydsl_fallback(layer: torch.nn.Module) -> str | None:
+        """Why a 32x32 block-scaled layer cannot run AITER's tuned FlyDSL GEMMs
+        (batched wo_a as [G, N / G, K]), or None if it can."""
         n, k = layer.weight.shape
         batch = getattr(layer, "bmm_batch_size", None)
-        if not self.flydsl_enabled or k % 64 or n % (batch or 1):
-            return False
-        return rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(
+        if k % 64 or n % (batch or 1):
+            return "K % 64 != 0"
+        if not rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(
             n // (batch or 1), k, batch
-        )
+        ):
+            return "no AITER tuned rows for this shape and CU count"
+        return None
 
     @classmethod
     def is_supported(
@@ -521,7 +527,16 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
         layer.weight_preshuffled = None
-        if block_scale is not None and self._use_flydsl(layer):
+        if block_scale is None or not self.flydsl_enabled:
+            return
+        why = self._flydsl_fallback(layer)
+        logger.info_once(
+            "MXFP8 32x32 block-scaled linear [%d, %d]: %s",
+            N,
+            K,
+            "AITER FlyDSL GEMM" if why is None else f"Triton GEMM ({why})",
+        )
+        if why is None:
             # In place, unless other code reads the row-major weight (mono decode).
             shuffled = rocm_aiter_ops.shuffle_weight(layer.weight.data, (16, 16))
             if not getattr(layer, "keep_row_major_weight", False):

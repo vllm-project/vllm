@@ -926,6 +926,15 @@ def flydsl(monkeypatch: pytest.MonkeyPatch):
         rocm_aiter_ops.refresh_env_variables()
 
 
+def _require_tuned(n: int, k: int, batch: int | None = None) -> None:
+    """Skips unless AITER has tuned 32x32 rows here (they are keyed by CU count,
+    so e.g. a partitioned MI355X has none and its layers keep Triton)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(n, k, batch):
+        pytest.skip(f"AITER has no tuned 32x32 rows for N={n}, K={k} on this GPU")
+
+
 def _load(layer: torch.nn.Module, flydsl: bool) -> RocmDotScaledMxfp8LinearKernel:
     kernel = RocmDotScaledMxfp8LinearKernel(
         Mxfp8LinearLayerConfig(weight_shape=tuple(layer.weight.shape))
@@ -943,6 +952,7 @@ def _load(layer: torch.nn.Module, flydsl: bool) -> RocmDotScaledMxfp8LinearKerne
 def test_rocm_mxfp8_linear_flydsl_matches_triton(flydsl, n, k, m):
     """DeepSeek V4.1 linears AITER has tuned rows for are preshuffled in place
     and run its FlyDSL GEMMs, which agree with the Triton GEMM."""
+    _require_tuned(n, k)
     torch.manual_seed(m)
     layer = _make_block32_layer(n, k, "cuda")
     ref_layer = copy.deepcopy(layer)
@@ -962,6 +972,7 @@ def test_rocm_mxfp8_wo_a_flydsl_matches_triton(flydsl, m):
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
 
     n_groups, rank, group_dim = 8, 1024, 4096
+    _require_tuned(rank, group_dim, n_groups)
     torch.manual_seed(m)
     wo_a = _make_block32_layer(n_groups * rank, group_dim, "cuda")
     wo_a.bmm_batch_size = n_groups
