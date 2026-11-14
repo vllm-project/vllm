@@ -11,8 +11,8 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
-    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+    is_unquantized_method,
 )
 
 logger = init_logger(__name__)
@@ -47,14 +47,16 @@ def _get_untied_lm_head(model: nn.Module) -> _UntiedLMHead | None:
     another name, and online quantization creates them after loading, so
     neither their contents nor whether they were loaded can be established here.
     Note that this is a property of the layer, not of the model: most quantized
-    models leave the `lm_head` and the input embeddings unquantized.
+    models leave the `lm_head` and the input embeddings unquantized — and an
+    lm_head *excluded* from quantization carries `UnquantizedLinearMethod`,
+    which counts as unquantized here.
     """
     heads = list[tuple[str, ParallelLMHead]]()
     embeddings = list[VocabParallelEmbedding]()
     for name, module in model.named_modules():
         if not isinstance(module, VocabParallelEmbedding):
             continue
-        if not isinstance(module.quant_method, UnquantizedEmbeddingMethod):
+        if not is_unquantized_method(module.quant_method):
             continue
         if isinstance(module, ParallelLMHead):
             heads.append((name, module))
