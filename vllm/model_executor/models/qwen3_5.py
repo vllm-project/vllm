@@ -151,6 +151,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                fuse_in_proj_qkvzba=True,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -229,6 +230,14 @@ class Qwen3_5Model(Qwen3NextModel):
             ".in_proj_a": (".in_proj_ba", 1),
         }
     )
+    hf_to_vllm_mapper_fused_in_proj = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_stacked={
+            ".in_proj_qkv": (".in_proj_qkvzba", (0, 1, 2)),
+            ".in_proj_z": (".in_proj_qkvzba", 3),
+            ".in_proj_b": (".in_proj_qkvzba", 4),
+            ".in_proj_a": (".in_proj_qkvzba", 5),
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3NextModel, self).__init__()
@@ -289,8 +298,17 @@ class Qwen3_5Model(Qwen3NextModel):
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",
             )
+        fused_in_proj = any(
+            getattr(getattr(layer, "linear_attn", None), "fuse_in_proj_qkvzba", False)
+            for layer in self.layers
+        )
+        mapper = (
+            self.hf_to_vllm_mapper_fused_in_proj
+            if fused_in_proj
+            else self.hf_to_vllm_mapper
+        )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class Qwen3_5ForCausalLMBase(
