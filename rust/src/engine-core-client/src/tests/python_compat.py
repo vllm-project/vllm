@@ -84,7 +84,7 @@ class EngineCoreRequest(
     omit_defaults=True,
 ):
     request_id: str
-    prompt_token_ids: list[int] | None
+    prompt_token_ids: object | None
     mm_features: object | None
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
@@ -105,6 +105,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+    block_hashes: list[bytes] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    watermarking: bool | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -163,9 +165,15 @@ class EngineCoreOutputs(
     weight_version: str | None = None
 
 
+def token_ids(ids: list[int]) -> list:
+    # Prompt token ids as the Python frontend sends them, an int32 ndarray.
+    array = np.array(ids, dtype=np.int32)
+    return [array.dtype.str, list(array.shape), msgspec.msgpack.Ext(3, array.tobytes())]
+
+
 request = EngineCoreRequest(
     request_id="req-1",
-    prompt_token_ids=[11, 22],
+    prompt_token_ids=token_ids([11, 22]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
@@ -202,12 +210,13 @@ request = EngineCoreRequest(
             )
         ],
     ),
+    block_hashes=[b"\x01" * 32, b"\x02" * 32],
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
 defaults_request = EngineCoreRequest(
     request_id="req-defaults",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -217,7 +226,7 @@ defaults_request = EngineCoreRequest(
 # Embedded in a full request so the fixture also pins the `lora_request` slot.
 lora_request = EngineCoreRequest(
     request_id="req-lora",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -270,7 +279,11 @@ multimodal_features = [
 ]
 multimodal_request_wire = [
     "req-mm",
-    [101, 102, 103, 104],
+    [
+        "<i4",
+        [4],
+        msgpack.ExtType(3, np.array([101, 102, 103, 104], dtype=np.int32).tobytes()),
+    ],
     multimodal_features,
     None,
     None,
@@ -284,6 +297,7 @@ outputs = EngineCoreOutputs(
             new_token_ids=[7, 8],
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
+            watermarking=True,
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],
@@ -499,6 +513,14 @@ class KVEventsConfig:
 
 
 @dataclass
+class PrefixHashConfig:
+    hash_algo: str
+    hash_block_size: int
+    none_hash: bytes
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -524,6 +546,11 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
+    prefix_hash_config: PrefixHashConfig | None = None
+    cache_config_info: dict[str, str] | None = None
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -548,6 +575,12 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
+    prefix_hash_config=PrefixHashConfig(
+        hash_algo="sha256",
+        hash_block_size=16,
+        none_hash=bytes(range(32)),
+        num_lookahead_tokens=1,
+    ),
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -558,6 +591,15 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
+    cache_config_info={"block_size": "16", "mamba_block_size": "None"},
+    config_hash="0123456789",
+    enable_expert_parallel=True,
 )
 
 nixl_stats = {
@@ -566,8 +608,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [
@@ -588,10 +632,46 @@ mooncake_transfer_stats = {
     "num_failed_recvs": [],
     "num_kv_expired_reqs": [1],
 }
+# `UMBPStoreConnectorStats.data`: interval counters keyed by operation.
+umbp_stats = {
+    "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+    "store": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 4096},
+}
+# `SimpleCPUOffloadStats.data` as `SimpleCPUOffloadScheduler.get_stats` fills
+# it: metric types, and samples keyed by metric name and label-value tuple. The
+# last metric stands for one Python adds later, which Rust must ignore.
+simple_cpu_offload_stats = {
+    "types": {
+        "vllm:simple_kv_offload_save_outcomes_total": "counter",
+        "vllm:simple_kv_offload_load_blocks_total": "counter",
+        "vllm:simple_kv_offload_used_blocks": "gauge",
+        "vllm:simple_kv_offload_pending_store_blocks": "gauge",
+        "vllm:simple_kv_offload_info": "gauge",
+        "vllm:simple_kv_offload_future_blocks": "gauge",
+    },
+    "data": {
+        "vllm:simple_kv_offload_save_outcomes_total": {
+            ("stored",): 3,
+            ("skipped_in_flight",): 1,
+        },
+        "vllm:simple_kv_offload_load_blocks_total": {(): 4},
+        "vllm:simple_kv_offload_used_blocks": {(): 9},
+        "vllm:simple_kv_offload_pending_store_blocks": {(): 2},
+        "vllm:simple_kv_offload_info": {("cpu", "false", "true", "64"): 1},
+        "vllm:simple_kv_offload_future_blocks": {(): 7},
+    },
+}
+# `OffloadingConnector` stats share the `types`/`data` envelope.
+kv_offload_stats = {
+    "types": {"vllm:kv_offload_load_bytes": "counter"},
+    "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
+    "UMBPStoreConnector": umbp_stats,
+    "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 
@@ -617,8 +697,11 @@ print(
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
+print(msgspec.msgpack.encode(umbp_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
 print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
+print(msgspec.msgpack.encode(simple_cpu_offload_stats).hex())
+print(msgspec.msgpack.encode(kv_offload_stats).hex())

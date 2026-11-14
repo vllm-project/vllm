@@ -43,9 +43,7 @@ class FakeConnectorStats(ECConnectorStats):
 
 
 def _worker_output(ec_output: ECConnectorOutput | None) -> ModelRunnerOutput:
-    return ModelRunnerOutput(
-        req_ids=[], req_id_to_index={}, ec_connector_output=ec_output
-    )
+    return ModelRunnerOutput(req_ids=[], ec_connector_output=ec_output)
 
 
 def test_aggregate_folds_every_rank_onto_output_rank():

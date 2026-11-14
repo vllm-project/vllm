@@ -138,7 +138,13 @@ class Olmo3PythonicToolParser(ToolParser):
     ) -> DeltaMessage | None:
         # All function calls start with the <function_calls> tag.
         # But since this is streaming, we may have seen only part of the tag.
-        if not current_text.startswith("<"):
+        start_tag = "<function_calls>"
+        if start_tag.startswith(current_text):
+            return None
+        if not current_text.startswith(start_tag):
+            # Release text withheld while it could still have been the tag.
+            if start_tag.startswith(previous_text):
+                return DeltaMessage(content=current_text)
             return DeltaMessage(content=delta_text)
 
         try:

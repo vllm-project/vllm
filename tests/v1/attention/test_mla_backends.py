@@ -10,7 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -22,7 +22,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.config.vllm import set_current_vllm_config
+from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -57,8 +57,9 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    get_block_table_width,
+    is_quantized_kv_cache,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -70,7 +71,10 @@ BACKENDS_TO_TEST = [
 ]
 
 if current_platform.is_rocm():
-    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+    BACKENDS_TO_TEST += [
+        AttentionBackendEnum.ROCM_AITER_MLA,
+        AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    ]
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -219,16 +223,41 @@ def test_masked_mha_routing_is_dimension_specific():
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
     ],
 )
+@pytest.mark.parametrize(
+    ("sm120", "kv_lora_rank", "rope_dim", "row_bytes"),
+    [
+        (False, 512, 64, 656),
+        (False, 512, 0, 656),
+        (True, 512, 64, 656),
+        (True, 512, 0, 528),
+        (True, 256, 0, 656),
+    ],
+)
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
-    cache_dtype: str, expected_quant_mode: KVQuantMode
+    cache_dtype: str,
+    expected_quant_mode: KVQuantMode,
+    sm120: bool,
+    kv_lora_rank: int,
+    rope_dim: int,
+    row_bytes: int,
 ):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+        FlashInferMLASparseSM120Impl,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+
+    impl: Any = object.__new__(
+        FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl
+    )
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
         attn_backend=flashmla_module.FlashMLABackend,
+        impl=impl,
         kv_cache_dtype=cache_dtype,
-        head_size=576,
+        head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         sliding_window=None,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
@@ -236,13 +265,14 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
 
-    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+    spec = MLAAttention.get_kv_cache_config(layer, vllm_config).spec
 
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
-        assert spec.page_size_bytes == 64 * 656
+        assert spec.state_content_bytes == row_bytes
+        assert spec.page_size_bytes == 64 * row_bytes
 
 
 @pytest.mark.cpu_test
@@ -326,8 +356,10 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
@@ -335,7 +367,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -344,12 +376,75 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [1, 64, 300])
+@pytest.mark.parametrize("q_scale", [1.0, 0.37])
+def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
+    """The fused AITER decode query (Kimi-K2 at TP8: 8 heads, L=512, P=128) is
+    the padded fp8 query MLAAttention builds otherwise: torch.bmm into a
+    token-major buffer, _DecodeConcatQuantFP8, then get_mla_padded_q."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+        num_heads, kv_lora_rank, qk_nope_head_dim
+    ):
+        pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
+
+    set_random_seed(0)
+    q = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    q_nope, q_pe = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    q_nope = q_nope.transpose(0, 1)
+    # W_UK^T as split_kv_b_proj + process_weights_after_loading lay it out.
+    kv_b_weight = 0.05 * torch.randn(
+        num_heads * 2 * qk_nope_head_dim,
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
+        [qk_nope_head_dim, qk_nope_head_dim], dim=-1
+    )
+    w_uk_t = w_uk.permute(1, 2, 0)
+    scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+
+    ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
+    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
+    with set_current_vllm_config(VllmConfig()):
+        concat_quant = _DecodeConcatQuantFP8(
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
+        )
+    ref = AiterMLAHelper.get_mla_padded_q(
+        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
+    )
+    out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+        q_nope, w_uk_t, q_pe, scale, padded_heads
+    )
+
+    assert out.shape == ref.shape and out.dtype == ref.dtype
+    # A different accumulation order can flip a bf16 rounding of the BMM
+    # result, which moves the fp8 value by at most one step.
+    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
+    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
+    assert mismatch.item() < 0.01
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
@@ -364,7 +459,12 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8,
+        ]
+    )
 elif current_platform.is_xpu():
     PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.FLASH_ATTN)
 
@@ -445,6 +545,13 @@ for backend in BACKENDS_TO_TEST:
 torch.manual_seed(42)
 
 
+@pytest.fixture(autouse=True)
+def _reseed_each_test():
+    # Inputs must not depend on which tests ran earlier in the process: CI
+    # shards this file, so the preceding tests differ per shard.
+    set_random_seed(42)
+
+
 def _convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
     if isinstance(dtype, str):
@@ -492,6 +599,11 @@ BATCH_SPECS = {
     "chunked_context_prefill": BatchSpec(
         seq_lens=[1568, 520, 8, 80, 96, 8],
         query_lens=[32, 8, 8, 16, 16, 8],
+    ),
+    # No request has context, so ROCM_AITER_MLA would take its ASM FP8 prefill
+    # unless the FlyDSL FP8 prefill backend is selected.
+    "context_free_prefill": BatchSpec(
+        seq_lens=[128, 300, 17], query_lens=[128, 300, 17]
     ),
 }
 
@@ -715,7 +827,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
-        fp8_attention = kv_cache_dtype.startswith("fp8")
+        fp8_attention = is_quantized_kv_cache(kv_cache_dtype)
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -732,7 +844,7 @@ class MockSparseMLAAttentionLayer:
                 scale=self._k_scale,
             )
 
-        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
@@ -815,6 +927,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
+        self.sliding_window = None
 
         # Compute weight matrices from kv_b_proj (like MLAAttention does)
         # This replicates MLAAttention.process_weights_after_loading logic
@@ -848,7 +961,7 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         raise NotImplementedError
 
     # test replica takes only the arguments the test passes
@@ -1683,6 +1796,7 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    set_random_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -1737,7 +1851,10 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
-    if hf_config_override and current_platform.is_xpu():
+    # model_arch_config is resolved before the override reaches it, so the
+    # backends would otherwise see the full model's heads at every TP size.
+    # Not yet on CUDA, whose backends have head-count limits of their own.
+    if hf_config_override and (current_platform.is_xpu() or current_platform.is_rocm()):
         vllm_config.model_config.model_arch_config.total_num_attention_heads = (
             hf_config_override["num_attention_heads"]
         )
@@ -1810,7 +1927,7 @@ def _run_backend_correctness(
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(backends_to_test):
+    for _ in backends_to_test:
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -1857,7 +1974,7 @@ def _run_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend in backends_to_test:
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -1962,7 +2079,7 @@ def _run_backend_correctness(
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend_idx in range(len(backends_to_test)):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -2058,12 +2175,16 @@ def _run_backend_correctness(
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        "auto": 2e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
+    if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8:
+        # Per-tensor e4m3 Q/K/V (3 mantissa bits): a row attending to a few
+        # tokens is off by up to ~2**-4 of max|V| (~4 here).
+        rtol, atol = 2**-4, 3e-1
     failures = []
-    for backend_idx, backend_name in enumerate(backends_to_test):
+    for backend_name in backends_to_test:
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
@@ -2081,7 +2202,6 @@ def _run_backend_correctness(
             ),
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
-            sliding_window=vllm_config.model_config.get_sliding_window(),
             cache_dtype_str=kv_cache_dtype,
         )
 
@@ -2217,6 +2337,9 @@ def test_backend_correctness(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm-gen", "cute-dsl"])
 @pytest.mark.parametrize("use_prefill_query_quantization", [False, True])
+@pytest.mark.parametrize(
+    "batch_spec_name", ["chunked_context_prefill", "context_free_prefill"]
+)
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -2227,6 +2350,7 @@ def test_chunked_context_backend_correctness(
     kv_cache_dtype: str,
     trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"],
     use_prefill_query_quantization: bool,
+    batch_spec_name: str,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
     if prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED and (
@@ -2245,11 +2369,19 @@ def test_chunked_context_backend_correctness(
             qk_nope_head_dim + 64, v_head_dim, query_dtype
         ):
             pytest.skip("Unsupported CuTe DSL prefill dimensions or query dtype")
+    if (
+        batch_spec_name == "context_free_prefill"
+        and prefill_backend != MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8
+    ):
+        pytest.skip(
+            "Covers ROCM_AITER_FLYDSL_FP8 taking over ROCM_AITER_MLA's "
+            "context-free FP8 prefill"
+        )
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,
-        batch_spec_name="chunked_context_prefill",
+        batch_spec_name=batch_spec_name,
         model="deepseek-ai/DeepSeek-R1",
         tensor_parallel_size=16,
         kv_cache_dtype=kv_cache_dtype,

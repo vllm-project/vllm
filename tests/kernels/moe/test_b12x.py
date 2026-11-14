@@ -444,6 +444,22 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
     assert experts_cls is B12xExperts
 
 
+def test_explicit_b12x_mxfp4_force_a16_is_rejected_under_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing A16 drops a requested activation quantization, which
+    VLLM_STRICT_QUANT_SCHEME forbids like any other BF16 fallback."""
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(mxfp4_oracle.envs, "VLLM_B12X_MOE_FP4_FORCE_A16", True)
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "1")
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "b12x"
+
+    with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+        select_mxfp4_moe_backend(config, activation_key=kMxfp8Dynamic)
+
+
 @pytest.mark.parametrize(
     "force_a16,expected_backend",
     [
@@ -526,7 +542,8 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
-        process_weights_after_loading=processed_layers.append
+        process_weights_after_loading=processed_layers.append,
+        keep_constants=lambda layer: None,
     )
     kernel = SimpleNamespace(fused_experts=fake_experts)
     monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
@@ -586,7 +603,9 @@ def test_explicit_b12x_nvfp4_selection(
     selected_activation_keys = []
 
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        selected_activation_keys.append(activation_key)
+        selected_activation_keys.append(
+            cls.executed_activation_key(weight_key, activation_key)
+        )
         return True, None
 
     monkeypatch.setattr(B12xExperts, "is_supported_config", is_supported_config)
@@ -607,6 +626,39 @@ def test_explicit_b12x_nvfp4_selection(
     assert backend == NvFp4MoeBackend.B12X
     assert experts_cls is B12xExperts
     assert selected_activation_keys == [expected_activation_key]
+
+
+@pytest.mark.parametrize("force_a16", [False, True])
+def test_b12x_nvfp4_uninterleave_support_follows_executed_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    force_a16: bool,
+) -> None:
+    """Force-A16 runs W4A4 layers unquantized, so the W4A8-only uninterleave
+    rejection must not apply to them."""
+    monkeypatch.setattr(
+        nvfp4_oracle.envs,
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        force_a16,
+    )
+    monkeypatch.setattr(
+        B12xExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(
+        hidden_dim=128,
+        intermediate_size=64,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+
+    supported, reason = B12xExperts.is_supported_config(
+        B12xExperts,
+        config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert force_a16 == (reason is None or "swigluoai" not in reason)
+    assert not force_a16 or supported
 
 
 @pytest.mark.parametrize(

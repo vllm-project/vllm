@@ -65,6 +65,25 @@ parse_args() {
     done
 }
 
+# TP_SIZE is the TP degree of each TP-mode server, or of each DP rank in EP mode.
+# In EP mode DP_SIZE is the DP ranks per node and EP_SIZE = DP_SIZE x TP_SIZE the EP
+# ranks per node; give either, or neither for a full node. A role's server spans
+# its nodes, so its --data-parallel-size is DP_SIZE x that role's node count.
+resolve_parallel_sizes() {
+    if [[ "${PARALLEL_MODE}" == "tp" ]]; then
+        TP_SIZE="${TP_SIZE:-${GPUS_PER_NODE}}"
+        DP_SIZE=1
+        return
+    fi
+    TP_SIZE="${TP_SIZE:-1}"
+    DP_SIZE="${DP_SIZE:-$(( ${EP_SIZE:-${GPUS_PER_NODE}} / TP_SIZE ))}"
+    EP_SIZE="${EP_SIZE:-$(( DP_SIZE * TP_SIZE ))}"
+    (( EP_SIZE == DP_SIZE * TP_SIZE )) \
+        || die "EP_SIZE=${EP_SIZE} must equal DP_SIZE=${DP_SIZE} x TP_SIZE=${TP_SIZE}"
+    (( EP_SIZE <= GPUS_PER_NODE )) \
+        || die "EP_SIZE=${EP_SIZE} exceeds GPUS_PER_NODE=${GPUS_PER_NODE}"
+}
+
 # ----------------------------------------------------------------- load config
 # Sources cluster.sh and resolves WIDE_EP_MODE -> PARALLEL_MODE (tp|ep).
 load_config() {
@@ -84,6 +103,7 @@ load_config() {
         1) PARALLEL_MODE="ep" ;;
         *) die "WIDE_EP_MODE must be 0 (tp) or 1 (ep); got '${WIDE_EP_MODE}'" ;;
     esac
+    resolve_parallel_sizes
 
     # node-mode orchestration knobs
     RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"     # bench | accuracy | none
@@ -100,6 +120,18 @@ moriio_read_mode_kv() {
         1|true|True|TRUE|yes|on) printf ',\n    "read_mode": true' ;;
         *) : ;;
     esac
+}
+
+# NIXL KV config. UCX backend.
+nixl_kv_cfg() {
+    cat <<EOF
+{
+  "kv_connector": "${KV_CONNECTOR}",
+  "kv_role": "${KV_ROLE}",
+  "kv_load_failure_policy": "recompute",
+  "kv_connector_extra_config": {"backends": ["UCX"], "kv_lease_duration": 180}
+}
+EOF
 }
 
 # ----------------------------------------------------------------- topology
@@ -180,7 +212,15 @@ run_accuracy() {
         log "lm_eval not found — installing ${ACCURACY_PIP_SPEC:-lm_eval[api]}"
         python3 -m pip install --no-cache-dir "${ACCURACY_PIP_SPEC:-lm_eval[api]}"
     fi
-    local base_url="http://127.0.0.1:${GATEWAY_PORT:-${PROXY_PORT}}/v1/completions"
+    # ACCURACY_CHAT=1 scores through the chat template, with the few-shot examples
+    # as prior turns, for models that answer only in that form; the reasoning they
+    # may emit first needs a larger generation budget.
+    local api="completions" lm_model="local-completions" chat=()
+    if [[ "${ACCURACY_CHAT:-0}" == 1 ]]; then
+        api="chat/completions" lm_model="local-chat-completions"
+        chat=(--apply_chat_template --fewshot_as_multiturn --gen_kwargs max_gen_toks=8192)
+    fi
+    local base_url="http://127.0.0.1:${GATEWAY_PORT:-${PROXY_PORT}}/v1/${api}"
     local ts; ts="$(date +%Y%m%d_%H%M%S)"
     local logf="${LOG_PATH}/accuracy_${MODEL_NAME}_${PARALLEL_MODE}_${ts}.log"
     local outdir="${LOG_PATH}/lm_eval_${MODEL_NAME}_${PARALLEL_MODE}_${ts}"
@@ -193,10 +233,10 @@ run_accuracy() {
       # Model weights are already served (loaded offline in a separate process);
       # allow the Hub only here so lm_eval can fetch the eval dataset (e.g. gsm8k).
       export HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0
-      python3 -m lm_eval --model local-completions \
+      python3 -m lm_eval --model "${lm_model}" \
         --tasks "${ACCURACY_TASKS}" \
         --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True,timeout=${ACCURACY_TIMEOUT:-3600}" \
-        --output_path "${outdir}" \
+        "${chat[@]}" --output_path "${outdir}" \
         2>&1 | tee "${logf}"
     ) || eval_rc=$?
     if (( eval_rc != 0 )); then
@@ -277,8 +317,9 @@ exports = {
     "MODEL_EXPERIMENTAL_FLAGS": cfg.get("experimental_flags", "") or "",
 }
 for k, v in exports.items(): print(f"{k}={q(v)}")
-# Model-specific env: exported only if not already set (caller env wins).
-for k, v in (cfg.get("env", {}) or {}).items():
+# Model-specific env, then the mode's: exported only if not already set (caller env wins).
+env = {**(cfg.get("env", {}) or {}), **(cfg.get(f"{mode}_env", {}) or {})}
+for k, v in env.items():
     if k not in os.environ:
         print(f"export {k}={q(v)}")
 PY
@@ -309,6 +350,7 @@ build_tp_cmd() {
 }
 EOF
 )
+    if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
     CMD+=(--kv-transfer-config "${kv_cfg}")
     log "role=${ROLE} mode=tp host=${HOST_IP:-0.0.0.0}:${port} kv_role=${KV_ROLE} tp=${TP_SIZE} read_mode=${MORIIO_READ_MODE}"
 }
@@ -325,9 +367,9 @@ build_ep_cmd() {
     export VLLM_ALL2ALL_BACKEND="${VLLM_ALL2ALL_BACKEND:-${backend}}"
     local port="${SERVE_PORT}"
     CMD+=(
-        -tp 1
+        -tp "${TP_SIZE}"
         --data-parallel-size "${DP_GROUP_SIZE}"
-        --data-parallel-size-local "${GPUS_PER_NODE}"
+        --data-parallel-size-local "${DP_SIZE}"
         --data-parallel-address "${DP_MASTER_ADDR}"
         --data-parallel-rpc-port "${RPC_PORT}"
         --enable-expert-parallel
@@ -337,9 +379,13 @@ build_ep_cmd() {
         --distributed-timeout-seconds "${DISTRIBUTED_TIMEOUT_SECONDS}"
     )
     local _mc; read -ra _mc <<< "${MODEL_CONFIG}"; CMD+=("${_mc[@]}")
+    # 2P2D EP16 only. At 0.85 the AITER MoE sort buffer runs out of memory.
+    if [[ "${KV_CONNECTOR:-}" == Nixl* && "${ROLE}" == "prefill" && "${xP}" -gt 1 ]]; then
+        CMD+=(--gpu-memory-utilization 0.75)
+    fi
 
     if [[ "${IS_MASTER}" == "1" ]]; then
-        CMD+=(--api-server-count="${GPUS_PER_NODE}")
+        CMD+=(--api-server-count="${DP_SIZE}")
         local kv_cfg read_mode_kv
         read_mode_kv="$(moriio_read_mode_kv)"
         kv_cfg=$(cat <<EOF
@@ -359,11 +405,12 @@ build_ep_cmd() {
 }
 EOF
 )
+        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
         CMD+=(--kv-transfer-config "${kv_cfg}")
-        log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
+        log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_local=${DP_SIZE} tp=${TP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else
         CMD+=(--data-parallel-start-rank "${DP_START_RANK}" --headless)
-        log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} all2all=${backend}"
+        log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_local=${DP_SIZE} tp=${TP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} all2all=${backend}"
     fi
 }
 
@@ -371,9 +418,9 @@ EOF
 configure_prefill() {
     : "${NODE_RANK:=0}"                    # manual default: prefill master
     KV_ROLE="kv_producer"
-    DP_GROUP_SIZE=$(( xP * GPUS_PER_NODE ))
+    DP_GROUP_SIZE=$(( xP * DP_SIZE ))
     DP_MASTER_ADDR="${PREFILL_MASTER_ADDR}"
-    DP_START_RANK=$(( NODE_RANK * GPUS_PER_NODE ))
+    DP_START_RANK=$(( NODE_RANK * DP_SIZE ))
     [[ "${NODE_RANK}" -eq 0 ]] && IS_MASTER=1 || IS_MASTER=0
     TP_PORT="${PREFILL_PORT}"
 }
@@ -382,9 +429,9 @@ configure_prefill() {
 configure_decode() {
     : "${NODE_RANK:=${xP}}"               # manual default: decode master
     KV_ROLE="kv_consumer"
-    DP_GROUP_SIZE=$(( yD * GPUS_PER_NODE ))
+    DP_GROUP_SIZE=$(( yD * DP_SIZE ))
     DP_MASTER_ADDR="${DECODE_MASTER_ADDR}"
-    DP_START_RANK=$(( (NODE_RANK - xP) * GPUS_PER_NODE ))
+    DP_START_RANK=$(( (NODE_RANK - xP) * DP_SIZE ))
     [[ "${NODE_RANK}" -eq "${xP}" ]] && IS_MASTER=1 || IS_MASTER=0
     TP_PORT="${DECODE_PORT}"
 }

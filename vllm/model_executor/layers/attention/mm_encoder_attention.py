@@ -58,14 +58,14 @@ _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
 
-    Expected format (keys ``q_scale`` / ``k_scale`` / ``v_scale`` also accepted)::
+    Expected format (keys `q_scale` / `k_scale` / `v_scale` also accepted)::
 
         {
             "visual.blocks.0.attn.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
             "visual.blocks.1.attn.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
         }
 
-    To produce such a file, run with ``mm_encoder_fp8_scale_save_path`` set.
+    To produce such a file, run with `mm_encoder_fp8_scale_save_path` set.
     """
     if path is None:
         return {}
@@ -107,10 +107,10 @@ def _maybe_save_fp8_scales(
     buffer_wrapped: bool,
 ) -> None:
     """Accumulate a layer's scale tensors; on the first amax buffer wrap,
-    dump all accumulated scales to ``mm_encoder_fp8_scale_save_path``.
+    dump all accumulated scales to `mm_encoder_fp8_scale_save_path`.
 
     No-op unless auto-save is configured. Tensor references are stored on
-    every call (no GPU->CPU sync); ``.item()`` is only called at the single
+    every call (no GPU->CPU sync); `.item()` is only called at the single
     save point to avoid stalling the forward path.
     """
     global _fp8_scale_save_path
@@ -376,7 +376,7 @@ class MMEncoderAttention(CustomOp):
     def _init_fp8_state(self) -> None:
         """Initialize FP8 attention state from multimodal config.
 
-        No-op if FP8 is not requested. Raises ``ValueError`` if FP8 is
+        No-op if FP8 is not requested. Raises `ValueError` if FP8 is
         requested but the platform does not support it.
         """
         # Populate defaults so backend forward methods can check
@@ -456,13 +456,8 @@ class MMEncoderAttention(CustomOp):
             _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
             _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        """Populate FP8 scale buffers after weights are loaded.
-
-        ``act_dtype`` matches the signature used by :class:`Attention` and
-        :class:`MLAAttention` for the loader auto-scan but is unused:
-        FP8 scales are always float32.
-        """
+    def process_weights_after_loading(self) -> None:
+        """Populate FP8 scale buffers (always float32) after weights are loaded."""
         if not self.fp8_enabled:
             return
 
