@@ -62,7 +62,11 @@ from vllm.renderers.inputs.preprocess import (
     parse_dec_only_prompt,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import ChatParams, TokenizeParams
+from vllm.renderers.params import (
+    ChatParams,
+    TokenizeParams,
+    resolve_max_tokenize_tokens,
+)
 
 logger = init_logger(__name__)
 
@@ -83,7 +87,7 @@ class _CountTokensChatRequest(ChatCompletionRequest):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=None,
+            max_total_tokens=resolve_max_tokenize_tokens(model_config),
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )

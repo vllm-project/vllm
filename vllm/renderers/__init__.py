@@ -8,6 +8,7 @@ from .params import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+    resolve_max_tokenize_tokens,
 )
 from .registry import RendererRegistry, renderer_from_config
 
@@ -17,6 +18,7 @@ __all__ = [
     "renderer_from_config",
     "ChatParams",
     "TokenizeParams",
+    "resolve_max_tokenize_tokens",
     "merge_kwargs",
     "ReasoningEffort",
     "map_reasoning_effort",

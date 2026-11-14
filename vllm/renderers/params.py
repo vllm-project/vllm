@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
+import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -13,6 +14,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
+    from vllm.config.model import ModelConfig
     from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
@@ -611,3 +613,15 @@ class TokenizeParams:
                 prompt_dict[key] = parallel[truncation]
 
         return prompt
+
+
+def resolve_max_tokenize_tokens(model_config: "ModelConfig") -> int | None:
+    if getattr(model_config, "_max_tokenize_tokens_resolved", False):
+        return model_config.max_tokenize_tokens
+    limit = model_config.max_tokenize_tokens
+    if limit is not None:
+        return None if limit <= 0 else limit
+    env_limit = envs.VLLM_MAX_TOKENIZE_TOKENS
+    if env_limit is not None:
+        return None if env_limit <= 0 else env_limit
+    return max(model_config.max_model_len * 2, 131072)
