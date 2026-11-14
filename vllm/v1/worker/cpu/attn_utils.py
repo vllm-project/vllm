@@ -83,7 +83,7 @@ def get_kv_cache_layer_configs(
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if layer_config := attn_module.get_kv_cache_config(vllm_config):
             layer_configs[layer_name] = customize_layer_config(
-                attn_module.get_attn_backend(), layer_config
+                attn_module.get_attn_backend(), layer_config, layer_name
             )
     return layer_configs
 
