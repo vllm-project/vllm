@@ -19,7 +19,12 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
+from vllm.renderers import (
+    BaseRenderer,
+    ChatParams,
+    merge_kwargs,
+    recursively_merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -180,6 +185,7 @@ class OfflineInferenceMixin:
         """
         renderer = self.renderer
 
+        mm_config = self.model_config.multimodal_config
         chat_params = ChatParams(
             chat_template=(
                 self.chat_template if chat_template is None else chat_template
@@ -197,7 +203,12 @@ class OfflineInferenceMixin:
                     ),
                 ),
             ),
-            mm_processor_kwargs=mm_processor_kwargs,
+            # Engine-level `--mm-processor-kwargs` act as defaults, matching
+            # the online chat API path (`OnlineRenderer.preprocess_chat`).
+            mm_processor_kwargs=recursively_merge_kwargs(
+                mm_config.mm_processor_kwargs if mm_config else None,
+                mm_processor_kwargs,
+            ),
         )
         # The chat template is responsible for emitting BOS/EOS, so do not let
         # the tokenizer add them again unless the caller asks for it. This
