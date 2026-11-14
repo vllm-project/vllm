@@ -63,6 +63,10 @@ Modular kernels are supported by the following `FusedMoEMethodBase` classes.
 - [`GptOssMxfp4MoEMethod`][vllm.model_executor.layers.quantization.mxfp4.GptOssMxfp4MoEMethod]
 - [`UnquantizedFusedMoEMethod`][vllm.model_executor.layers.fused_moe.UnquantizedFusedMoEMethod]
 
+## DeepGEMM MegaMoE on SM120-family GPUs
+
+Enable DeepGEMM MegaMoE on SM120-family GPUs (including SM121) with `--moe-backend deep_gemm_mega_moe --enable-expert-parallel`. Requires a CUDA 13+ toolkit, a DeepGEMM build containing the SM120 kernel, and single-node, peer-accessible EP. Supports MXFP4 routed weights, MXFP8 activations, SwiGLU and BF16 output; hidden and intermediate sizes must be multiples of 128. Shared experts remain a separate MLP, and default backend selection is unchanged.
+
 ## Fused Experts Kernels
 
 There are a number of MoE experts kernel implementations for different quantization types and architectures. Most follow the general API of the base Triton [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts] function. Many have modular kernel adapters, so they can be used with compatible all2all backends. This table lists each experts kernel and its particular properties.
