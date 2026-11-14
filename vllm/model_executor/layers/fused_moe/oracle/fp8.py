@@ -142,6 +142,16 @@ def _get_priority_backends(
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
+    # On SM12x (SM120 and SM121/GB10) for Block Fp8, prefer Triton over
+    # DeepGEMM for TP and EP.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+        and activation_key == kFp8Dynamic128Sym
+        and weight_key == kFp8Static128BlockSym
+    ):
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
+
     if current_platform.is_xpu():
         # XPU platform supports TritonExperts and XPUExpertsFp8,
         # move XPU backend to the front.
