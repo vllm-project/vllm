@@ -286,10 +286,14 @@ if flashinfer_comm is not None:
             # Lamport buffer and produce NaN. This only fires for
             # num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS (the batch=1 / spec-decode
             # shapes, where the one-shot path is always selected). Complete at
-            # the end for the one-shot path; the two-shot path is synchronized
-            # and keeps the early completion. Related one-shot instability in
-            # the same kernel: flashinfer-ai/flashinfer#1223.
-            trigger_completion_at_end=(use_oneshot is True)
+            # the end whenever one-shot CAN be the dispatched strategy: not
+            # only when the engine forces it (use_oneshot is True) but also
+            # when the choice is deferred to FlashInfer AUTO (use_oneshot is
+            # None), which always selects one-shot at these sizes as well.
+            # Forced two-shot (use_oneshot is False) is synchronized and keeps
+            # the early completion. Related one-shot instability in the same
+            # kernel: flashinfer-ai/flashinfer#1223.
+            trigger_completion_at_end=(use_oneshot is not False)
             or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
