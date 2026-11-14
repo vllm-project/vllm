@@ -1177,8 +1177,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         # Keep sink attention available for dtypes/head shapes without a
         # correct AITER return-LSE kernel. gfx950's nonpersistent BF16 kernels
-        # for 33-128 heads are nondeterministic (ROCm/aiter#7631). Sink layers
-        # never need persistent metadata.
+        # for 33-128 heads are nondeterministic (ROCm/aiter#7631); drop the
+        # gfx950 clause once the pinned AITER has that fix. Sink layers never
+        # need persistent metadata.
         triton_sink_fallback = (
             need_lse
             and q.dtype == kv_c_and_k_pe_cache.dtype
