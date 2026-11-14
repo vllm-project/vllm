@@ -32,6 +32,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
 from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
+from vllm.models.muse_spark.amd.ops import fused_markov
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
@@ -339,6 +340,14 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         else:
             self.output_multiplier = 1.0
         self.output_soft_cap_temp = self.config.output_soft_cap_temp
+        # With --monokernel on ROCm, a Markov round of the speculator's
+        # sequential sampling is one launch. Batch-sharded sampling keeps its
+        # own sharded loop.
+        if (
+            vllm_config.kernel_config.monokernel
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            self.sample_sequential = fused_markov.sample_sequential  # type: ignore[assignment]
 
     def forward(  # type: ignore[override]
         self,
@@ -398,6 +407,9 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         super().process_weights_after_loading()
         materialize_residual_path_constants(self.model)
         maybe_attach_drafter(self)
+        if hasattr(self, "sample_sequential"):
+            # The fused rounds sample in draft ids, so they need d2t = 0.
+            self.d2t_is_identity = not self.draft_id_to_target_id.any().item()
 
 
 EntryClass = MuseSparkDSparkForCausalLM
