@@ -77,7 +77,10 @@ def test_kv_connector(
         ),
         kv_transfer_config=kv_transfer_config,
         parallel_config=ParallelConfig(
-            tensor_parallel_size=tp, pipeline_parallel_size=pp
+            tensor_parallel_size=tp,
+            pipeline_parallel_size=pp,
+            # Config-only test; skip the world-size vs local-GPU-count check.
+            distributed_executor_backend="mp" if tp * pp > 1 else None,
         ),
     )
 
