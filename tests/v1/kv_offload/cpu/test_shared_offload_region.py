@@ -663,6 +663,8 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
     # The reservation must not need a writable temp directory.
     monkeypatch.setattr(tempfile, "tempdir", "/nonexistent")
+    # Some CPython builds, such as python-build-standalone, lack it.
+    monkeypatch.delattr(os, "memfd_create", raising=False)
     map_segments = SharedOffloadRegion._map_segments
 
     def check_reservation(region):
