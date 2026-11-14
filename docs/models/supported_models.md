@@ -548,6 +548,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `Alpamayo2Edge` | Alpamayo 2 Edge (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Edge` | | ✅︎ |
 | `Alpamayo2Super` | Alpamayo 2 Super (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Super` | | ✅︎ |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
@@ -683,6 +684,21 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     tokens (`<i0>`, `<|traj_history_start|>`, ...) can be written in the prompt text, since
     vLLM selects the `alpamayo2_super` tokenizer mode, which adds them. To stop after the
     meta-actions, pass the id of `<|traj_future_start|>` in `stop_token_ids`.
+
+!!! note
+    `Alpamayo2Edge` serves the Cosmos3-Edge reasoning model of `nvidia/Alpamayo2-Edge`:
+    visual question answering and chain-of-causation reasoning with meta-actions. As with
+    `Alpamayo2Super`, the trajectory expert is not loaded, so trajectories are not
+    produced. Prompts follow the reference implementation
+    ([NVlabs/alpamayo2-edge](https://github.com/NVlabs/alpamayo2-edge)), whose tokenizer
+    already contains the trajectory and special tokens. The driving prompt resizes some
+    cameras below the default pixel budget; pass those frames pre-resized and disable
+    resizing, with `--mm-processor-kwargs '{"do_resize": false}'` for `vllm serve` (the
+    server rejects per-request `mm_processor_kwargs` unless started with
+    `--trust-request-mm-kwargs`) or `mm_processor_kwargs` in the prompt for offline `LLM`.
+    To stop after the meta-actions, pass the id of `<|traj_future_start|>` in
+    `stop_token_ids`. For routine scenes the model may answer `<NOMINAL>` instead of
+    reasoning.
 
 !!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
