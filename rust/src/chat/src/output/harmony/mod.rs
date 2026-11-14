@@ -94,9 +94,11 @@ impl HarmonyChatOutputProcessor {
 /// Validate that the generic parser selections are compatible with native
 /// Harmony output parsing.
 ///
-/// `gpt_oss` uses a model-specific token-level parser, so any generic
+/// `gpt_oss` uses a model-specific token-level parser, so a generic
 /// reasoning/tool parser override is rejected instead of being silently
-/// ignored.
+/// ignored. `none` is accepted like `auto`: it is what `vllm serve` passes
+/// when the parser flags are omitted, and Python ignores those flags for
+/// Harmony models.
 pub(crate) fn validate_harmony_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
@@ -107,7 +109,7 @@ pub(crate) fn validate_harmony_parser_overrides(
 }
 
 fn validate_harmony_override(kind: &'static str, selection: &ParserSelection) -> ChatResult<()> {
-    if matches!(selection, ParserSelection::Auto) {
+    if matches!(selection, ParserSelection::Auto | ParserSelection::None) {
         return Ok(());
     }
 
