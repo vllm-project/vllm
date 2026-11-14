@@ -9,9 +9,13 @@ give the default build's bits.
 - K2 (eight GPUs): flag off vs on at every width, both layer parities, back
   to back on re-armed sentinel regions; a graph replay; then a stalled rank
   still fails the step without a hang (the deadline checked every 64 polls).
+
+Every mono module keeps its launches in an in-process ``_BUILDS`` keyed by its
+build alone, so a flip clears them all (``_set_flag``).
 """
 
 import os
+import sys
 
 import pytest
 import ray
@@ -33,15 +37,39 @@ from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
 from tests.utils import multi_gpu_test, multi_process_parallel
 
 FLAG = "VLLM_K31_BEAT_K2SYNC"
+MONO_PKG = "vllm.models.kimi_k3.amd.specialized_decode.mono"
+MONO = (
+    "layer",
+    "attention.kda",
+    "attention.mla",
+    "attention.mla_back",
+    "attention.mla_attn",
+    "attention.dsa_pre",
+    "attention.dsa_attn",
+)
+
+
+def _clear_builds() -> None:
+    import importlib
+
+    for m in MONO:
+        importlib.import_module(f"{MONO_PKG}.{m}")._BUILDS.clear()
 
 
 def _set_flag(on: bool) -> None:
-    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import k2sync
 
     os.environ[FLAG] = "1" if on else "0"
-    k2._BUILDS.clear()  # K2's in-process build cache is keyed by K2Build alone
+    _clear_builds()  # the flag is in no build dataclass, only in the disk key
     assert k2sync() == on
+
+
+@pytest.fixture(autouse=True)
+def _fresh_builds():
+    """No launch traced under one flag value outlives its test."""
+    yield
+    if any(f"{MONO_PKG}.{m}" in sys.modules for m in MONO):
+        _clear_builds()
 
 
 def _k1_run(key, w):
@@ -94,6 +122,7 @@ def _k1_run(key, w):
 def test_k1_k2sync_bit_exact(
     monkeypatch: pytest.MonkeyPatch, S: int, L: int, write: bool
 ) -> None:
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         KdaPreBuild,
     )
@@ -111,8 +140,10 @@ def test_k1_k2sync_bit_exact(
     )
     _set_flag(False)
     want = _k1_run(key, w)
+    off = kda._BUILDS[key]
     _set_flag(True)
     got = _k1_run(key, w)
+    assert kda._BUILDS[key] is not off, "the flag-on run reused the off launch"
     for name, a, b in zip(("prefix", "blocks", "conv", "rstate", "core"), got, want):
         assert torch.equal(a, b), name
 
