@@ -212,6 +212,20 @@ def get_model_structural_tag(
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
         return None
+    if (
+        isinstance(tool_choice, ToolChoiceAllowed)
+        and model not in _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS
+    ):
+        # The model is shown function tools and custom-tool shims, so only
+        # they can be allowed.
+        callable_refs = [
+            ref
+            for ref in tool_choice.tools
+            if ref.get("type") in ("function", "custom")
+        ]
+        if not callable_refs:
+            return None
+        tool_choice = tool_choice.model_copy(update={"tools": callable_refs})
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
@@ -337,8 +351,9 @@ def _dump_tool_choice_for_xgrammar(
 
 
 def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedToolRef:
+    # Custom tools are dumped as function shims, so their refs name functions.
     if (
-        tool_ref.get("type") == "function"
+        tool_ref.get("type") in ("function", "custom")
         and "function" not in tool_ref
         and "name" in tool_ref
     ):

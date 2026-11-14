@@ -10,7 +10,11 @@ from collections.abc import Callable, Iterable, Sequence
 from math import inf
 from typing import TYPE_CHECKING, Any, cast
 
-from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
+from openai.types.responses import (
+    ToolChoiceAllowed,
+    ToolChoiceCustom,
+    ToolChoiceFunction,
+)
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -214,6 +218,8 @@ def _unsupported_tool_guarantee(
         return "required tool choice", "tool_choice"
     if _is_named_tool_choice(request):
         return "named tool choice", "tool_choice"
+    if isinstance(request.tool_choice, ToolChoiceAllowed):
+        return "allowed tools", "tool_choice"
     if getattr(request, "parallel_tool_calls", True) is False:
         return "parallel_tool_calls=False", "parallel_tool_calls"
     return None
