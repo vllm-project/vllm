@@ -25,6 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -238,6 +239,16 @@ class ECConnectorBase(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def on_new_request(self, request: "Request") -> None:
+        """Notify the connector after a new request is queued."""
+        return
+
+    def bind_encoder_cache_lookup(
+        self, lookup: Callable[["Request", int], int | None]
+    ) -> None:
+        """Provide a read-only query for each input's cached embedding count."""
+        return
 
     @abstractmethod
     def has_cache_item(

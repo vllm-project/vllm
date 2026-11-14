@@ -292,6 +292,10 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
+        if self.ec_connector is not None:
+            self.ec_connector.bind_encoder_cache_lookup(
+                self.encoder_cache_manager.get_cached_num_encoder_embeds
+            )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
@@ -3037,6 +3041,9 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+            if self.ec_connector is not None:
+                self.ec_connector.on_new_request(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
