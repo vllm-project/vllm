@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+    CompressedTensorsLutB,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -792,6 +793,14 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> "CompressedTensorsScheme":
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
+
+        codebook_type = getattr(QuantizationType, "CODEBOOK", None)
+        if codebook_type is not None and weight_quant.type == codebook_type:
+            if format != "lut-b":
+                raise ValueError("Codebook weights require format='lut-b'.")
+            if input_quant is not None or output_quant is not None:
+                raise ValueError("LUT-B linear layers do not quantize activations.")
+            return CompressedTensorsLutB(weight_quant)
 
         # Detect If Mixed Precision
         if self._is_nvfp4_format(weight_quant):
