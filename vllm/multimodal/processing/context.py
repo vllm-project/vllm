@@ -354,7 +354,9 @@ class InputProcessingContext:
             self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
         )
 
-        def _postprocess_one(x: object):
+        keep_fp32_keys = {"second_per_grid_ts"}
+
+        def _postprocess_one(x: object, *, cast_dtype: bool = True):
             if not isinstance(x, torch.Tensor):
                 return x
 
@@ -363,13 +365,24 @@ class InputProcessingContext:
             tensor = x
 
             # This mimics the behavior of transformers.BatchFeature
-            if tensor.is_floating_point():
+            if cast_dtype and tensor.is_floating_point():
                 tensor = tensor.to(dtype=self.model_config.dtype)
 
             if not tensor.is_cpu and not keep_on_device:
                 tensor = tensor.cpu()
 
             return tensor
+
+        if isinstance(output, Mapping):
+            return {
+                k: json_map_leaves(
+                    lambda x, keep=k in keep_fp32_keys: _postprocess_one(
+                        x, cast_dtype=not keep
+                    ),
+                    v,
+                )
+                for k, v in output.items()
+            }
 
         return json_map_leaves(_postprocess_one, output)
 
