@@ -120,16 +120,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
 
-        # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
-        config = get_current_vllm_config_or_none()
-        register = config is None or not config.use_cumem_cudagraph_pool
         # On MI200 (gfx90a), IPC-registered graph buffers give corrupted
         # all-reduce results under graph replay; copy them in, as eager mode does.
+        on_gfx90a = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx90a
+            from vllm.platforms.rocm import on_gfx90a as _on_gfx90a
 
-            if on_gfx90a():
-                register = False
+            on_gfx90a = _on_gfx90a()
+        if on_gfx90a:
+            register = False
+        else:
+            # cuMem graph buffers cannot be IPC-registered; capture copies them.
+            config = get_current_vllm_config_or_none()
+            register = config is None or not config.use_cumem_cudagraph_pool
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(

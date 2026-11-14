@@ -12,7 +12,6 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
-    GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
 )
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -236,29 +235,27 @@ class CustomAllreduce:
                 "group does not have MNNVL-capable GPUs on every rank."
             )
             return
+        # Per-architecture max sizes: the SM version on CUDA (with symmetric
+        # memory), the gfx architecture name on ROCm.
+        max_sizes_key: str | None = None
         device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
             and device_capability is not None
         ):
-            device_capability_str = device_capability.as_version_str()
-            if (
-                device_capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES
-                and world_size in CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str]
-            ):
-                max_size = min(
-                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
-                    max_size,
-                )
-        elif (
-            current_platform.is_rocm()
-            and world_size in GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES
+            max_sizes_key = device_capability.as_version_str()
+        elif current_platform.is_rocm():
+            gcn_arch = torch.cuda.get_device_properties(device).gcnArchName
+            max_sizes_key = gcn_arch.split(":")[0]
+        if (
+            max_sizes_key in CUSTOM_ALL_REDUCE_MAX_SIZES
+            and world_size in CUSTOM_ALL_REDUCE_MAX_SIZES[max_sizes_key]
         ):
-            from vllm.platforms.rocm import on_gfx90a
-
-            if on_gfx90a():
-                max_size = min(GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES[world_size], max_size)
+            max_size = min(
+                CUSTOM_ALL_REDUCE_MAX_SIZES[max_sizes_key][world_size],
+                max_size,
+            )
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:

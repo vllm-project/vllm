@@ -1061,3 +1061,20 @@ def test_one_and_two_stage_allreduce_bitwise_identical(
     if not current_platform.is_fully_connected(physical_ids):
         pytest.skip("Custom all-reduce needs fully connected GPUs above 2 ranks.")
     multi_process_parallel(monkeypatch, tp_size, 1, one_and_two_stage_allreduce)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize(
+    "arch, expected",
+    [
+        ("gfx942:sramecc+:xnack-", True),
+        ("gfx950:sramecc+:xnack-", True),
+        ("gfx90a:sramecc+:xnack-", True),
+        ("gfx1100", False),
+    ],
+)
+def test_rocm_use_custom_allreduce(monkeypatch, arch, expected):
+    from vllm.platforms import rocm
+
+    monkeypatch.setattr(rocm, "_GCN_ARCH", arch)
+    assert rocm.RocmPlatform.use_custom_allreduce() is expected
