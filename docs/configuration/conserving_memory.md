@@ -166,6 +166,7 @@ For backward compatibility, passing an integer works as before and is interprete
 !!! note
     - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
     - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
+    - Profiling runs as many hinted items as fit in the encoder budget, since the scheduler can fill one step with inputs of that size, so a smaller hint does not reduce the encoder activation reserved for linear-cost encoders.
     - For Qwen2-VL-family models, increasing `max_model_len` can increase the profiled video size and reduce the memory available for the KV cache. Profiling remains subject to the processor's pixel limits and the frame cap. Set `video` hints to profile the videos you expect instead.
 
 !!! warning
