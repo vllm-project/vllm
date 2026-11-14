@@ -171,6 +171,32 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
 
+    @staticmethod
+    def _routed_experts(
+        topk_ids: torch.Tensor, num_experts: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Experts used by this batch and topk_ids renumbered onto them, or
+        None to dequantize every expert."""
+        # Past a quarter of the experts, the gather costs about as much as the
+        # full dequantization saves.
+        limit = num_experts // 4
+        if topk_ids.size(0) == 1:
+            # One token (single-sequence decode), following #40055: sort() keeps
+            # the shape static and needs no host sync, so this also runs under
+            # graph capture. Repeated ids would only cost a duplicate gather.
+            if not 0 < topk_ids.numel() <= limit:
+                return None
+            flat = topk_ids.view(-1)
+            order = flat.argsort()
+            return flat[order], order.argsort()
+        # torch.unique syncs with the host, hence not under graph capture.
+        if torch.cuda.is_current_stream_capturing():
+            return None
+        used, local_ids = torch.unique(topk_ids, return_inverse=True)
+        if not 0 < used.numel() <= limit:
+            return None
+        return used, local_ids
+
     def apply(
         self,
         output: torch.Tensor,
@@ -197,13 +223,28 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         assert w1.dtype == torch.uint8
         assert w2.dtype == torch.uint8
 
+        w1_scale, w2_scale = self.w1_scale_val, self.w2_scale_val
+        # Dequantizing every local expert writes the whole layer in bf16/fp16
+        # on each call. When the batch routes to few experts, dequantize only
+        # those and renumber topk_ids onto them.
+        if (
+            expert_map is None
+            and self._lora_context is None
+            and self.quant_config.w1_bias is None
+            and self.quant_config.w2_bias is None
+        ):
+            routed = self._routed_experts(topk_ids, w1.size(0))
+            if routed is not None:
+                used, local_ids = routed
+                assert w1_scale is not None and w2_scale is not None
+                w1, w2 = w1[used], w2[used]
+                w1_scale, w2_scale = w1_scale[used], w2_scale[used]
+                topk_ids = local_ids.view_as(topk_ids).to(topk_ids.dtype)
+                global_num_experts = used.numel()
+
         # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-        w1_dequant = self._dequantize_weights(
-            w1, self.w1_scale_val, hidden_states.dtype
-        )
-        w2_dequant = self._dequantize_weights(
-            w2, self.w2_scale_val, hidden_states.dtype
-        )
+        w1_dequant = self._dequantize_weights(w1, w1_scale, hidden_states.dtype)
+        w2_dequant = self._dequantize_weights(w2, w2_scale, hidden_states.dtype)
 
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.
