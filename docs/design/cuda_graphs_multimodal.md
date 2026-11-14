@@ -1,11 +1,11 @@
-# Vision Encoder (ViT) CUDA Graphs
+# Encoder CUDA Graphs
 
-The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the **decoder** (language model) forward pass. vLLM also supports capturing the **encoder** (vision transformer) forward pass as CUDA Graphs, independently from the decoder. This is based on <https://github.com/vllm-project/vllm/pull/35963>.
+The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the **decoder** (language model) forward pass. vLLM also supports capturing vision and audio **encoder** forward passes as CUDA Graphs, independently from the decoder. This is based on <https://github.com/vllm-project/vllm/pull/35963>.
 
 For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tiling), a **dual-path graph** mode captures two independent sets of CUDA graphs — one for the global image path and one for the local patch path — enabling independent budget selection and partial eager fallback per path. This is based on <https://github.com/vllm-project/vllm/pull/43586>.
 
 !!! note
-    Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture the vision encoder execution (e.g., ViT in Qwen3-VL), while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
+    Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture vision or audio encoder execution, while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
 
 ## Supported Models
 
@@ -34,12 +34,33 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
 | `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
 
+Audio encoder support:
+
+| Architecture | Model | CG for Audio |
+| ------------ | ----- | ------------ |
+| `CohereAsrForConditionalGeneration` | `Cohere Transcribe` | ✅︎ |
+
 !!! note
-    Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
-    For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
-    Encoder CUDA Graph has also been tested with AMD MI350X (gfx950) used `--mm-encoder-attn-backend=FLASH_ATTN` (the ROCm default).
+    Vision encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs. For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested. Encoder CUDA Graph has also been tested with AMD MI350X (gfx950) used `--mm-encoder-attn-backend=FLASH_ATTN` (the ROCm default).
 
 ## Motivation
+
+### Cohere Transcribe audio encoder
+
+Enable encoder graphs for `CohereLabs/cohere-transcribe-03-2026` with:
+
+```bash
+vllm serve CohereLabs/cohere-transcribe-03-2026 --trust-remote-code \
+  --compilation-config '{"cudagraph_mm_encoder": true}'
+```
+
+This option is off by default. It captures the original Conformer encoder and encoder-to-decoder projection during startup, using the existing graph manager, memory profiling and pools. It preserves relative-position attention, weights, normalization and the audio frontend; no checkpoint conversion is required.
+
+Cohere uses a padded temporal layout. Graphs have separate batch and time axes: by default, batches of 1/2/4/8 and encoded time capacities of 64/128/192/256/320/384/448/512 frames. The existing `encoder_cudagraph_max_vision_items_per_batch` option also sets the maximum audio batch for this model. These axes use one aggregate token budget to avoid capturing redundant copies of the same padded layout. The manager groups audio by length into encoder microbatches before replay. Length metadata stays on the CPU for grouping; encoder lengths and selection indices use asynchronous host-to-device copies.
+
+Inputs outside the captured axes or aggregate budget use the unchanged eager encoder. No request-time capture is needed. Outputs are cropped to each audio's true length and copied before another graph replay can overwrite them. Extra padding and graph buffers can increase memory and computation; startup profiling accounts for the graph allocation before reserving the KV cache. Full-context attention is required, and encoder graphs do not currently support Cohere LoRA. BF16 padding can change floating-point rounding and greedy token choices, so validate WER on the target workload.
+
+### Vision encoders
 
 Vision encoder inference incurs CUDA kernel launch overhead on the host side. The overhead is more significant when the batch size is small or image size is small.
 
@@ -71,7 +92,7 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
-Budgets are auto-generated over the model-provided range of `get_encoder_cudagraph_budget_range()`: quarter-octave steps up to 1024 tokens, steps of 128 up to 2560 tokens, then 1/8-octave steps rounded up to a multiple of 128 (e.g., `[64, 80, ..., 1024, 1152, ..., 2560, 2816, 3072, 3456, 3840, 4224, 4608, 5120]`, 36 levels for the range `[64, 16384]` with the default maximum). The model-provided minimum and maximum are always included even when they do not fall on a grid point. The largest generated budget is `encoder_cudagraph_max_token_budget` in `CompilationConfig` (default 5120; `None` captures up to the model's largest budget), like the LLM's maximum capture size. The default balances graph memory against replay coverage; the point at which eager becomes faster depends on the model, batch shape, and hardware. Workloads that benefit from larger graphs can raise the maximum. Each batch replays at most one graph, the smallest budget that holds it; a larger batch runs eagerly in one forward. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`, which overrides both.
+Budgets are auto-generated over the model-provided range of `get_encoder_cudagraph_budget_range()`: quarter-octave steps up to 1024 tokens, steps of 128 up to 2560 tokens, then 1/8-octave steps rounded up to a multiple of 128 (e.g., `[64, 80, ..., 1024, 1152, ..., 2560, 2816, 3072, 3456, 3840, 4224, 4608, 5120]`, 36 levels for the range `[64, 16384]` with the default maximum). The model-provided minimum and maximum are always included even when they do not fall on a grid point. The largest generated budget is `encoder_cudagraph_max_token_budget` in `CompilationConfig` (default 5120; `None` captures up to the model's largest budget), like the LLM's maximum capture size. The default balances graph memory against replay coverage; the point at which eager becomes faster depends on the model, batch shape, and hardware. Workloads that benefit from larger graphs can raise the maximum. By default, each batch replays at most one graph, the smallest budget that holds it; a larger batch runs eagerly in one forward. Models with bounded microbatch support, including Cohere Transcribe, first group compatible items into smaller batches and apply this policy to each group. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`, which overrides both.
 
 The dense default table is affordable for every model because capture buffers are shared across budgets automatically, with no model opt-in: budgets are captured largest-first, the first capture of each (path, capture-axis) group provides one set of max-size input buffers and one max-size output buffer, and every later capture of the group records its graph into prefix views of them (the same pattern as decoder `input_ids[:num_tokens]`). At capture time the manager checks each probed buffer for prefix compatibility (same trailing dims and dtype, no more rows than the shared buffer) and copies it into the shared buffer; buffers that do not fit this pattern, including 0-dim scalars, keep their own per-budget allocation, so models need no code changes. Buffer memory therefore stays at ~1× the largest budget instead of scaling with the sum of all budgets.
 
