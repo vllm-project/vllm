@@ -1,0 +1,230 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import types
+
+import pytest
+import torch
+import torch.nn as nn
+
+from vllm.models.deepseek_v4.nvidia.ops import o_proj
+
+get_fp8_weight_scale = o_proj.get_fp8_weight_scale
+inv_rope_bf16_o_proj = o_proj.inv_rope_bf16_o_proj
+deep_gemm_fp8_o_proj = o_proj.deep_gemm_fp8_o_proj
+
+
+def test_get_fp8_weight_scale_prefers_weight_scale_inv():
+    """Verify inverse scales take precedence when both scale attributes exist."""
+    layer = nn.Module()
+    layer.weight_scale = nn.Parameter(torch.tensor([1.0]), requires_grad=False)
+    layer.weight_scale_inv = nn.Parameter(torch.tensor([2.0]), requires_grad=False)
+
+    assert get_fp8_weight_scale(layer) is layer.weight_scale_inv
+
+
+def test_get_fp8_weight_scale_accepts_weight_scale():
+    """Verify the weight_scale checkpoint convention is supported."""
+    layer = nn.Module()
+    layer.weight_scale = nn.Parameter(torch.tensor([1.0]), requires_grad=False)
+
+    assert get_fp8_weight_scale(layer) is layer.weight_scale
+
+
+def test_get_fp8_weight_scale_returns_none_without_scale():
+    """Verify unquantized layers have no FP8 scale."""
+    assert get_fp8_weight_scale(nn.Module()) is None
+
+
+class FakeWoA(nn.Module):
+    def __init__(self):
+        """Create an output-projection stub that records its input."""
+        super().__init__()
+        self.input = None
+
+    def forward(self, x):
+        """Record the projection input and return its first component."""
+        self.input = x
+        return x[..., :1]
+
+
+def test_inv_rope_bf16_o_proj_uses_unquantized_linear_path():
+    """Verify inverse RoPE feeds the unquantized output projection."""
+    wo_a = FakeWoA()
+    o = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]], dtype=torch.bfloat16)
+    cos_sin_cache = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+    out = inv_rope_bf16_o_proj(
+        o,
+        torch.tensor([0], dtype=torch.long),
+        cos_sin_cache,
+        wo_a,
+        n_groups=1,
+        heads_per_group=1,
+        nope_dim=2,
+        rope_dim=2,
+        o_lora_rank=1,
+    )
+
+    assert out.shape == (1, 1, 1)
+    assert wo_a.input is not None
+    expected = torch.tensor([[[1.0, 2.0, 4.0, -3.0]]], dtype=torch.bfloat16)
+    torch.testing.assert_close(wo_a.input, expected)
+
+
+class FakeGroupedWoA(nn.Module):
+    def __init__(self):
+        """Create distinct output weights for the two test groups."""
+        super().__init__()
+        self.weight = nn.Parameter(
+            torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+
+
+class FakeSingleGroupWoA(nn.Module):
+    def __init__(self):
+        """Create a single-group projection with a recorded input."""
+        super().__init__()
+        self.input = None
+        self.weight = nn.Parameter(
+            torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x):
+        """Project the recorded input with the optional checkpoint scale."""
+        self.input = x
+        scale = getattr(self, "weight_scale", 1)
+        if isinstance(scale, torch.Tensor):
+            scale = scale.to(x.dtype)
+        return torch.einsum("bgi,ri->bgr", x, self.weight) * scale
+
+
+def test_inv_rope_bf16_o_proj_reshapes_flat_grouped_weight():
+    """Verify flattened output weights preserve per-group projection results."""
+    o = torch.tensor(
+        [[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]], dtype=torch.bfloat16
+    )
+    out = inv_rope_bf16_o_proj(
+        o,
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        FakeGroupedWoA(),
+        n_groups=2,
+        heads_per_group=1,
+        nope_dim=2,
+        rope_dim=2,
+        o_lora_rank=2,
+    )
+
+    expected = torch.tensor([[[1.0, 2.0], [10.0, 12.0]]], dtype=torch.bfloat16)
+    torch.testing.assert_close(out, expected)
+
+
+class FakeWoB(nn.Module):
+    def __init__(self):
+        """Create a second-stage projection stub that records its input."""
+        super().__init__()
+        self.input = None
+
+    def forward(self, x):
+        """Record the second-stage input and add one to the output."""
+        self.input = x
+        return x + 1
+
+
+@pytest.mark.parametrize("with_weight_scale", [False, True])
+def test_deep_gemm_fp8_o_proj_uses_bf16_fallback(monkeypatch, with_weight_scale):
+    """Verify output projection falls back to BF16 without DeepGEMM support."""
+    monkeypatch.setattr(
+        o_proj,
+        "current_platform",
+        types.SimpleNamespace(support_deep_gemm=lambda: False),
+    )
+    wo_a = FakeSingleGroupWoA()
+    factor = 2.0 if with_weight_scale else 1.0
+    if with_weight_scale:
+        wo_a.weight_scale = nn.Parameter(torch.tensor([factor]), requires_grad=False)
+    wo_b = FakeWoB()
+
+    out = deep_gemm_fp8_o_proj(
+        torch.tensor([[[1.0, 2.0, 3.0, 4.0]]], dtype=torch.bfloat16),
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        wo_a,
+        wo_b,
+        n_groups=1,
+        heads_per_group=1,
+        nope_dim=2,
+        rope_dim=2,
+        o_lora_rank=2,
+        einsum_recipe=(1, 128, 128),
+        tma_aligned_scales=False,
+    )
+
+    if with_weight_scale:
+        assert wo_a.input is not None
+    assert wo_b.input is not None
+    expected = torch.tensor([[factor, 2 * factor]], dtype=torch.bfloat16)
+    expected_out = expected + 1
+    torch.testing.assert_close(wo_b.input, expected)
+    torch.testing.assert_close(out, expected_out)
+
+
+def test_output_projection_fallback_does_not_warm_fp8_quantization(monkeypatch):
+    """Avoid warming an unused FP8 kernel when projection uses its BF16 fallback."""
+    import importlib
+
+    module = importlib.import_module(
+        "vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant"
+    )
+    monkeypatch.setattr(
+        module,
+        "current_platform",
+        types.SimpleNamespace(support_deep_gemm=lambda: False),
+    )
+    assert module.FusedInvRopeFP8QuantKernel().get_warmup_keys(None) == []
+
+
+def test_output_projection_uses_logical_size_for_packed_weights():
+    """Packed weight dimensions must not change grouping of projection inputs."""
+    wo_a = nn.Module()
+    wo_a.input_size = 4
+    wo_a.weight = nn.Parameter(
+        torch.zeros((4, 8), dtype=torch.int32), requires_grad=False
+    )
+    wo_a.weight_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+
+    def project(x):
+        assert x.shape[-1] == 4
+        return torch.cat((x[..., :2], 2 * x[..., :2]), dim=-1)
+
+    wo_a.forward = project
+    out = inv_rope_bf16_o_proj(
+        torch.tensor([[[1, 2, 3, 4], [5, 6, 7, 8]]], dtype=torch.bfloat16),
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        wo_a,
+        n_groups=2,
+        heads_per_group=1,
+        nope_dim=2,
+        rope_dim=2,
+        o_lora_rank=2,
+    )
+    torch.testing.assert_close(
+        out, torch.tensor([[[1, 2], [10, 12]]], dtype=torch.bfloat16)
+    )
