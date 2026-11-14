@@ -1768,5 +1768,6 @@ def test_reset_running_requests_resumes_in_reporting_step():
 
     resumed = engine_scheduler.schedule()
     assert resumed.preempted_req_ids == {"req-0"}
+    assert isinstance(resumed.kv_connector_metadata, MooncakeStoreConnectorMetadata)
     (meta,) = resumed.kv_connector_metadata.requests
     assert meta.can_save

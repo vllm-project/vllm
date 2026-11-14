@@ -49,6 +49,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
     KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -405,7 +406,7 @@ _MAMBA = mamba_layer(
     mamba_cache_mode="align",
 )
 # Model shapes as KV cache groups: each group is (layer names, spec).
-_MODELS: dict[str, list[tuple[list[str], KVCacheSpec]]] = {
+_MODELS: dict[str, list[tuple[list[str], KVCacheSpec | KVCacheLayerConfig]]] = {
     "dense": [(["A0", "A1", "A2"], _ATTN)],
     "mla": [
         (
