@@ -19,7 +19,7 @@ vLLM also supports model implementations that are available in Transformers. We 
 
 Currently, the Transformers modeling backend works for the following:
 
-- Modalities: embedding models, language models, vision-language models and audio-language models
+- Modalities: embedding models, language models, vision-language models, audio-language models and omni models
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 
@@ -46,6 +46,9 @@ If a model has a vLLM implementation but you would prefer to use the Transformer
 
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+
+!!! note
+    For omni models, `use_audio_in_video` can only be set for the whole model with `mm_processor_kwargs` for [offline inference](../serving/offline_inference.md) or `--mm-processor-kwargs` for the [online serving](../serving/online_serving/README.md). In contrast the vLLM implementations of Qwen2.5-Omni and Qwen3-Omni also accept it per request.
 
 #### Custom models
 
