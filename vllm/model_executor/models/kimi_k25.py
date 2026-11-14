@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -487,13 +488,10 @@ class KimiK25ForConditionalGeneration(
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding (same as Qwen): tail slots repeat the last
-            # real offset, so FlashAttn schedules no work for padding rows.
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            if n < dst.shape[0]:
-                dst[n:] = src[-1] if n else 0
+        attn_backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],
@@ -506,7 +504,7 @@ class KimiK25ForConditionalGeneration(
                 "merge_gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
+            padding_logics=padding_logics,
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -650,8 +648,8 @@ class KimiK25ForConditionalGeneration(
         grid_thw_list = self._get_grid_thw_list(mm_kwargs)
         pixel_values = mm_kwargs["pixel_values"]
 
-        # Unpadded: pad_cu_seqlens pads the tail with zero-length sequences
-        # whose entries repeat the real total.
+        # Unpadded: the manager pads the cu_seqlens tail with zero-length
+        # sequences whose entries repeat the real total.
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thw_list,
             max_batch_size=None,
