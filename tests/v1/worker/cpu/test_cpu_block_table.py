@@ -225,3 +225,331 @@ def test_external_block_table_output_preserves_shared_rows() -> None:
     assert result[:, 0].tolist() == [4, 2, 0]
     tables.gather_block_tables(torch.tensor([3]), num_reqs_padded=1)
     assert torch.count_nonzero(tables.input_block_tables[0][1:]).item() == 0
+
+
+def test_edge_request_and_block_indices_still_map() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=4,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[6],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(
+        torch.arange(4 * 6, dtype=torch.int32).view(4, 6)
+    )
+    block_tables.num_blocks.copy_(torch.tensor([[6, 6, 6, 6]], dtype=torch.int32))
+    output_storage = torch.full((2, 6), -1, dtype=torch.int32)
+
+    gathered = block_tables.gather_block_tables(
+        idx_mapping=torch.tensor([3], dtype=torch.int64),
+        num_reqs_padded=2,
+        out=(output_storage,),
+    )
+    assert gathered[0].tolist() == [
+        [18, 19, 20, 21, 22, 23],
+        [0, 0, 0, 0, 0, 0],
+    ]
+
+    actual = block_tables.compute_slot_mappings(
+        idx_mapping=torch.tensor([3], dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        positions=torch.tensor([47], dtype=torch.int64),
+        num_tokens_padded=1,
+    )
+    assert actual[0].tolist() == [23 * 8 + 7]
+
+
+def test_gather_block_tables_rejects_out_of_range_request() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=4,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[6],
+        device=torch.device("cpu"),
+    )
+    block_tables.append_block_ids(0, ([1, 2],), overwrite=True)
+
+    with pytest.raises(
+        RuntimeError, match=r"idx_mapping\[0\] = -1 is out of range \[0, 4\)"
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([-1], dtype=torch.int64),
+            num_reqs_padded=1,
+        )
+    with pytest.raises(
+        RuntimeError, match=r"idx_mapping\[1\] = 4 is out of range \[0, 4\)"
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([0, 4], dtype=torch.int64),
+            num_reqs_padded=2,
+        )
+
+
+def test_compute_slot_mappings_rejects_out_of_range_request() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+
+    with pytest.raises(
+        RuntimeError, match=r"idx_mapping\[1\] = 2 is out of range \[0, 2\)"
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0, 2], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+
+
+def test_compute_slot_mappings_rejects_out_of_range_position() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"positions\[1\] = 25 maps to block 3, out of range \[0, 3\)",
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            positions=torch.tensor([0, 25], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+    with pytest.raises(RuntimeError, match=r"positions\[1\] = -1 is negative"):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            positions=torch.tensor([0, -1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+
+
+def test_compute_slot_mappings_rejects_bad_query_start_loc() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"query_start_loc\[2\] = 6 exceeds positions.numel\(\) \(2\)",
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+    with pytest.raises(
+        RuntimeError,
+        match=r"query_start_loc has 2 elements, expected num_reqs \+ 1 = 3",
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+    with pytest.raises(
+        RuntimeError,
+        match=r"query_start_loc\[2\] = 1 is out of range \[2, 2\]",
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 2, 1], dtype=torch.int32),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+
+
+def test_gather_block_tables_rejects_mapping_longer_than_padded_rows() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=4,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[6],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(
+        torch.arange(4 * 6, dtype=torch.int32).view(4, 6)
+    )
+    block_tables.num_blocks.copy_(torch.tensor([[6, 6, 6, 6]], dtype=torch.int32))
+    output_storage = torch.full((2, 6), -1, dtype=torch.int32)
+
+    gathered = block_tables.gather_block_tables(
+        idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+        num_reqs_padded=2,
+        out=(output_storage,),
+    )
+    assert gathered[0].tolist() == [
+        [0, 1, 2, 3, 4, 5],
+        [6, 7, 8, 9, 10, 11],
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"idx_mapping.size\(0\) \(2\) exceeds num_reqs_padded \(1\)",
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            num_reqs_padded=1,
+            out=(output_storage[:1],),
+        )
+    with pytest.raises(
+        RuntimeError,
+        match=r"num_reqs_padded \(3\) exceeds output.size\(0\) \(2\)",
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            num_reqs_padded=3,
+            out=(output_storage,),
+        )
+
+
+def test_gather_block_tables_rejects_bad_num_blocks() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+
+    # a per-request block count past min(block_table.size(1), output.size(1))
+    # becomes the memcpy length
+    block_tables.num_blocks.copy_(torch.tensor([[2, 4]], dtype=torch.int32))
+    with pytest.raises(
+        RuntimeError,
+        match=r"num_blocks\[1\] = 4 is out of range \[0, 3\]",
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([1], dtype=torch.int64),
+            num_reqs_padded=1,
+        )
+    block_tables.num_blocks.copy_(torch.tensor([[2, -1]], dtype=torch.int32))
+    with pytest.raises(
+        RuntimeError,
+        match=r"num_blocks\[1\] = -1 is out of range \[0, 3\]",
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([1], dtype=torch.int64),
+            num_reqs_padded=1,
+        )
+    # a num_blocks buffer shorter than block_table.size(0) lets the
+    # num_blocks_ptr[req_idx] read walk off the tensor
+    block_tables.num_blocks = torch.tensor([[2]], dtype=torch.int32)
+    with pytest.raises(
+        RuntimeError,
+        match=r"num_blocks has 1 elements, expected at least block_table.size\(0\) = 2",
+    ):
+        block_tables.gather_block_tables(
+            idx_mapping=torch.tensor([1], dtype=torch.int64),
+            num_reqs_padded=1,
+        )
+
+
+def test_compute_slot_mappings_rejects_nonpositive_block_size() -> None:
+    for block_size in (0, -16):
+        block_tables = CPUBlockTables(
+            block_sizes=[block_size],
+            max_num_reqs=2,
+            max_num_batched_tokens=8,
+            max_num_blocks_per_group=[3],
+            device=torch.device("cpu"),
+        )
+        block_tables.block_tables[0].copy_(
+            torch.arange(6, dtype=torch.int32).view(2, 3)
+        )
+
+        with pytest.raises(
+            RuntimeError, match=rf"block_size \(-?\d+\) must be positive"
+        ):
+            block_tables.compute_slot_mappings(
+                idx_mapping=torch.tensor([0], dtype=torch.int64),
+                query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+                positions=torch.tensor([5], dtype=torch.int64),
+                num_tokens_padded=1,
+            )
+
+
+def test_compute_slot_mappings_rejects_nonzero_first_query_offset() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+
+    with pytest.raises(RuntimeError, match=r"query_start_loc\[0\] \(1\) must be 0"):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0], dtype=torch.int64),
+            query_start_loc=torch.tensor([1, 2], dtype=torch.int32),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_tokens_padded=2,
+        )
+
+
+def test_compute_slot_mappings_rejects_output_shorter_than_active_tokens() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+    output = torch.full((1, 2), 99, dtype=torch.int64)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"query_start_loc\[2\] = 3 exceeds slot_mapping.numel\(\) \(2\)",
+    ):
+        block_tables.compute_slot_mappings(
+            idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
+            positions=torch.tensor([0, 1, 4], dtype=torch.int64),
+            num_tokens_padded=3,
+            out=output,
+        )
+
+
+def test_compute_slot_mappings_accepts_positions_longer_than_active_tokens() -> None:
+    block_tables = CPUBlockTables(
+        block_sizes=[8],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[3],
+        device=torch.device("cpu"),
+    )
+    block_tables.block_tables[0].copy_(torch.arange(6, dtype=torch.int32).view(2, 3))
+    output = torch.full((1, 2), 99, dtype=torch.int64)
+
+    actual = block_tables.compute_slot_mappings(
+        idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        positions=torch.tensor([0, 4, 9, 15], dtype=torch.int64),
+        num_tokens_padded=2,
+        out=output,
+    )
+
+    assert actual.tolist() == [[0, 3 * 8 + 4]]
+    assert output.tolist() == [[0, 3 * 8 + 4]]
