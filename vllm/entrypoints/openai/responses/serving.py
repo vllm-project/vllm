@@ -1273,7 +1273,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)
                 if target_state == _StateType.NONE:
+                    if dm.content == "" and dm.reasoning is None and not dm.tool_calls:
+                        processor.queue_content_logprobs(_get_logprobs(output))
                     continue
+                if target_state != _StateType.CONTENT:
+                    processor.clear_pending_logprobs()
 
                 if processor.needs_transition(target_state, tool_call):
                     for event in processor.close_current():
