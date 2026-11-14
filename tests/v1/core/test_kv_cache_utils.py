@@ -848,6 +848,26 @@ def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
     assert queue.num_free_blocks == 0
 
 
+def test_free_kv_cache_block_queue_retained_blocks_pop_last():
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    queue = FreeKVCacheBlockQueue(blocks[:2])
+    queue.append_n(blocks[2:], retained=True)
+    assert queue.num_free_blocks == 5
+    assert queue.get_all_free_blocks() == blocks
+    assert list(queue.iter_blocks_after(blocks[1])) == blocks[2:]
+
+    # A pop that drains the normal list continues into the retained one.
+    assert queue.popleft_n(3) == blocks[:3]
+    # The drained normal list still takes appends ahead of retained blocks.
+    queue.append_n(blocks[:1])
+    queue.remove(blocks[3])
+    assert queue.get_all_free_blocks() == [blocks[0], blocks[4]]
+    assert [queue.popleft(), queue.popleft()] == [blocks[0], blocks[4]]
+    assert queue.num_free_blocks == 0
+    with pytest.raises(ValueError):
+        queue.popleft()
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]

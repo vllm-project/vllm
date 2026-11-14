@@ -1211,6 +1211,9 @@ class AsyncLLM(EngineClient):
             reset_running_requests, reset_connector
         )
 
+    async def close_session(self, session_id: str) -> None:
+        await self.engine_core.close_session_async(session_id)
+
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 

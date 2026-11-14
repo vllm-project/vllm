@@ -610,6 +610,12 @@ class BlockPool:
         if block.block_hash is None:
             return []
 
+        if block.session_ref:
+            # The cached content is gone; so is every session's claim on it.
+            block.session_ref = 0
+            if block.ref_cnt == 0 and block.prev_free_block is not None:
+                self.free_block_queue.remove(block)
+                self.free_block_queue.prepend_n([block])
         block_hashes = [block.block_hash]
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
 
@@ -812,6 +818,7 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
         blocks_to_evict_first = []
+        blocks_to_retain = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
@@ -827,6 +834,9 @@ class BlockPool:
                     # LIFO reuse of non-cached blocks for better GPU locality,
                     # and of cached ones when asked to evict them first.
                     blocks_to_evict_first.append(block)
+                elif block.session_ref:
+                    # Referenced by a live session: evict after all others.
+                    blocks_to_retain.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
@@ -835,6 +845,7 @@ class BlockPool:
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        self.free_block_queue.append_n(blocks_to_retain, retained=True)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks, evict_first=evict_first)
 
@@ -889,6 +900,10 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            if block.session_ref:
+                block.session_ref = 0
+                self.free_block_queue.remove(block)
+                self.free_block_queue.append(block)
 
         if self.metrics_collector:
             self.metrics_collector.reset()

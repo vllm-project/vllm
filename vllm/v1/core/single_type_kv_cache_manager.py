@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -861,6 +861,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         if dcp_world_size > 1:
             # DCP shards each block's KV across ranks; hashes must be viewed at
@@ -892,9 +893,20 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
+        max_num_blocks = max_length // block_size
+        num_session_blocks = 0
+        if session_blocks is not None:
+            blocks = [session_blocks.get(g, ()) for g in kv_cache_group_ids]
+            num_session_blocks = min(max_num_blocks, *map(len, blocks))
+            for computed, group_blocks in zip(computed_blocks, blocks):
+                computed.extend(group_blocks[:num_session_blocks])
         # Phase 1: longest run of cached full blocks from the start. A missing
         # block implies every later block misses too (chained hashes).
-        for block_hash in itertools.islice(full_block_hashes, max_length // block_size):
+        for block_hash in (
+            full_block_hashes[num_session_blocks:max_num_blocks]
+            if num_session_blocks
+            else itertools.islice(full_block_hashes, max_num_blocks)
+        ):
             cached_block = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
             if not cached_block:
                 break

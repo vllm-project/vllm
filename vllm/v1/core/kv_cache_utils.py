@@ -183,6 +183,10 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Number of sessions whose retained prefix includes this block. Soft: a
+    # free cached block with a nonzero count is evicted after all others.
+    session_ref: int = 0
+
     def set_block_hash(
         self,
         block_hash: BlockHashWithGroupId,
@@ -263,6 +267,9 @@ class FreeKVCacheBlockQueue:
     Note that we maintain this order by reversing the block order when free
     blocks of a request. This operation is outside of this class.
 
+    Blocks appended with `retained=True` form a second list that is only
+    popped once the first is empty.
+
     Args:
         blocks: A list of KVCacheBlock objects.
 
@@ -298,6 +305,11 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_head.next_free_block = self.fake_free_list_tail
             self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
+        self.fake_retained_list_head = KVCacheBlock(block_id=-1)
+        self.fake_retained_list_tail = KVCacheBlock(block_id=-1)
+        self.fake_retained_list_head.next_free_block = self.fake_retained_list_tail
+        self.fake_retained_list_tail.prev_free_block = self.fake_retained_list_head
+
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
 
@@ -307,7 +319,10 @@ class FreeKVCacheBlockQueue:
         """
         head = self.fake_free_list_head
         first_block = head.next_free_block
-        if first_block is self.fake_free_list_tail or first_block is None:
+        if first_block is self.fake_free_list_tail:
+            head = self.fake_retained_list_head
+            first_block = head.next_free_block
+        if first_block is self.fake_retained_list_tail or first_block is None:
             assert self.num_free_blocks == 0, (
                 f"num_free_blocks ({self.num_free_blocks}) is out of sync "
                 "with the free list."
@@ -347,6 +362,12 @@ class FreeKVCacheBlockQueue:
         if n == 0:
             return []
         assert self.num_free_blocks >= n
+        if (
+            self.fake_retained_list_head.next_free_block
+            is not self.fake_retained_list_tail
+        ):
+            # The pop may cross into the retained list.
+            return [self.popleft() for _ in range(n)]
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
@@ -446,17 +467,19 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
-    def append_n(self, blocks: list[KVCacheBlock]) -> None:
+    def append_n(self, blocks: list[KVCacheBlock], retained: bool = False) -> None:
         """Put a list of blocks back into the free list
 
         Args:
             blocks: The blocks to append.
+            retained: Append to the retained list instead, which is only
+                popped once the free list is empty.
 
         """
         if not blocks:
             return
 
-        tail = self.fake_free_list_tail
+        tail = self.fake_retained_list_tail if retained else self.fake_free_list_tail
         last_block = tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist"
@@ -492,6 +515,10 @@ class FreeKVCacheBlockQueue:
         while curr_block.next_free_block is not None:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
+        retained_block = self.fake_retained_list_head.next_free_block
+        while retained_block is not None and retained_block.next_free_block:
+            ret.append(retained_block)
+            retained_block = retained_block.next_free_block
         return ret
 
     def iter_blocks_after(
@@ -504,7 +531,11 @@ class FreeKVCacheBlockQueue:
         else:
             curr_block = cursor.next_free_block
 
-        while curr_block is not None and curr_block is not self.fake_free_list_tail:
+        retained_tail = self.fake_retained_list_tail
+        while curr_block is not None and curr_block is not retained_tail:
+            if curr_block is self.fake_free_list_tail:
+                curr_block = self.fake_retained_list_head.next_free_block
+                continue
             yield curr_block
             curr_block = curr_block.next_free_block
 
