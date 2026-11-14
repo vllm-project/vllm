@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
 
@@ -213,10 +214,19 @@ def triton_scaled_mm(
 
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
+    num_warps = 4
     if use_heuristic:
         is_small_N = N < 8192
         next_power_of_2_M = max(32, triton.next_power_of_2(M))
-        if next_power_of_2_M <= 32:
+        if current_platform.is_xpu() and M > 64:
+            # With fewer warps per tile the int32 accumulator spills registers.
+            if M <= 128:
+                tile_shape = (128, 128, 32)
+                num_warps = 16
+            else:
+                tile_shape = (256, 128, 128)
+                num_warps = 32
+        elif next_power_of_2_M <= 32:
             tile_shape = (64, 64, 256) if is_small_N else (64, 128, 256)
         elif next_power_of_2_M <= 64:
             tile_shape = (64, 64, 256)
@@ -279,6 +289,7 @@ def triton_scaled_mm(
         BLOCK_SIZE_SCALE_B=block_size_sb,
         USE_TD=use_td,
         B_T=b_t,
+        num_warps=num_warps,
     )
 
     return result.to(out_dtype)
