@@ -28,7 +28,7 @@ BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMBuildCase:
     seq_lens: list[int]
     query_lens: list[int]
