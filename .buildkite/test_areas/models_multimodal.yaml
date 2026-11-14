@@ -78,8 +78,23 @@ steps:
   - vllm/
   - examples/generate/multimodal/vision_language_multi_image_offline.py
   - tests/models/multimodal/generation/test_unlimited_ocr.py
+  - tests/models/multimodal/processing/test_unlimited_ocr.py
   commands:
     - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Unlimited-OCR-2"
+      device: mi355_dpx
+      dind: false
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      commands:
+      - >-
+        pytest -v -s models/multimodal/generation/test_unlimited_ocr.py
+        -m core_model
+      - >-
+        pytest -v -s models/multimodal/processing/test_unlimited_ocr.py
 
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb

@@ -657,6 +657,11 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
+On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
+varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
+Select the DASH path explicitly with
+`attention_config={"backend": "ROCM_AITER_FA"}` when needed. NVIDIA defaults
+remain unchanged.
 Unlimited-OCR-2's optional page-count guard respects sampling constraints, preserving EOS
 when it is the only remaining permitted token.
 

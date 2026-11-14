@@ -9,21 +9,24 @@ from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
-# Should be fixed by https://github.com/vllm-project/vllm/pull/66031
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Unlimited-OCR-2 DASH attention is CUDA-only",
+DASH_BACKENDS = (
+    ["ROCM_AITER_FA"]
+    if current_platform.is_rocm()
+    else [
+        "FLASH_ATTN",
+        pytest.param(
+            "FLASHINFER",
+            marks=pytest.mark.skipif(
+                not has_flashinfer(), reason="requires FlashInfer"
+            ),
+        ),
+    ]
 )
 
-
-# FlashInfer is CUDA-only; run its cases only where present.
-DASH_BACKENDS = [
-    "FLASH_ATTN",
-    pytest.param(
-        "FLASHINFER",
-        marks=pytest.mark.skipif(not has_flashinfer(), reason="requires FlashInfer"),
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="Unlimited-OCR-2 DASH attention requires CUDA or ROCm",
+)
 
 
 def _attention_class_names(model):
@@ -107,8 +110,8 @@ def test_unlimited_ocr2_batched_pages(
         },
         enable_chunked_prefill=chunked_prefill,
         enable_prefix_caching=False,
-        mm_encoder_attn_backend="FLASHINFER"
-        if backend == "FLASHINFER"
+        mm_encoder_attn_backend=backend
+        if backend in ("FLASHINFER", "ROCM_AITER_FA")
         else "TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
         mm_processor_kwargs={"crop_mode": crop_mode},
