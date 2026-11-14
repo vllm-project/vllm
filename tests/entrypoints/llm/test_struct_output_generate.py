@@ -3,6 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import multiprocessing
+import os
+import sys
 from enum import StrEnum
 from typing import Any
 
@@ -11,6 +14,7 @@ import pytest
 import regex as re
 from pydantic import BaseModel
 
+import vllm.envs as envs
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
@@ -21,6 +25,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
+from vllm.utils.torch_utils import available_cpu_count
 
 SAMPLE_REGEX = (
     r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
@@ -203,6 +208,56 @@ class CarDescription(BaseModel):
     brand: str
     model: str
     car_type: CarType
+
+
+@pytest.fixture(params=[0, 1], ids=["auto", "override"])
+def compile_worker_env(request):
+    envs.disable_envs_cache()
+    affinity = None
+    try:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            if request.param == 0 and sys.platform == "linux":
+                affinity = os.sched_getaffinity(0)
+                os.sched_setaffinity(0, {min(affinity)})
+            monkeypatch.setenv(
+                "VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", str(request.param)
+            )
+            monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            yield request.param
+    finally:
+        envs.disable_envs_cache()
+        if sys.platform == "linux" and affinity is not None:
+            os.sched_setaffinity(0, affinity)
+
+
+def test_structured_output_compile_worker_limit(vllm_runner, compile_worker_env):
+    expected_workers = compile_worker_env or max(
+        1, min(multiprocessing.cpu_count() // 2, available_cpu_count(), 8)
+    )
+    with vllm_runner(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        enforce_eager=True,
+        max_model_len=256,
+        structured_outputs_config=dict(backend="xgrammar"),
+        **platform_args,
+    ) as runner:
+        manager = (
+            runner.llm.llm_engine.engine_core.engine_core.structured_output_manager
+        )
+        assert manager.executor._max_workers == expected_workers
+
+        outputs = runner.llm.generate(
+            ["Reply with yes.", "Reply with no."],
+            sampling_params=[
+                SamplingParams(
+                    temperature=0,
+                    max_tokens=16,
+                    structured_outputs=StructuredOutputsParams(choice=[answer]),
+                )
+                for answer in ["yes", "no"]
+            ],
+        )
+        assert [output.outputs[0].text for output in outputs] == ["yes", "no"]
 
 
 @pytest.mark.parametrize(

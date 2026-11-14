@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import multiprocessing
 import os
 import sqlite3
 import tempfile
@@ -17,6 +18,7 @@ from cachetools import LRUCache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import available_cpu_count
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -92,6 +94,20 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     else:
         executor.shutdown(wait=False)
         return result
+
+
+def grammar_compile_max_workers(cpu_count: int | None = None) -> int:
+    """Bound outer compilation concurrency by host and available CPUs.
+
+    Set ``VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS`` to a positive value
+    to override automatic sizing, including its available-CPU cap.
+    """
+    override = envs.VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS
+    if override > 0:
+        return override
+    if cpu_count is None:
+        cpu_count = multiprocessing.cpu_count()
+    return max(1, min(cpu_count // 2, available_cpu_count(), 8))
 
 
 class OutlinesVocabulary:
