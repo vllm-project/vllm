@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
+from vllm.v1.metrics.acceptance import acceptance_totals
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -415,16 +416,13 @@ class RequestSpecDecodeMetrics:
         draft-only, full precision. Per-step arrays are included only when
         populated (`detailed` level).
         """
-        num_spec_steps = sum(self.histogram)
-        num_accepted = sum(j * count for j, count in enumerate(self.histogram))
-        mean_al = 1.0 + num_accepted / num_spec_steps if num_spec_steps else 1.0
-        rate = num_accepted / self.num_draft_tokens if self.num_draft_tokens else 0.0
+        totals = acceptance_totals(self.histogram, self.num_draft_tokens)
         result: dict[str, Any] = {
-            "mean_acceptance_length": mean_al,
-            "draft_acceptance_rate": rate,
+            "mean_acceptance_length": totals.mean_acceptance_length,
+            "draft_acceptance_rate": totals.draft_acceptance_rate,
             "acceptance_histogram": list(self.histogram),
-            "num_spec_steps": num_spec_steps,
-            "num_accepted_draft_tokens": num_accepted,
+            "num_spec_steps": totals.num_spec_steps,
+            "num_accepted_draft_tokens": totals.num_accepted_draft_tokens,
             "num_draft_tokens": self.num_draft_tokens,
             "num_spec_tokens": self.num_spec_tokens,
             "num_verified_draft_tokens": self.num_verified_tokens,
