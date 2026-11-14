@@ -578,6 +578,53 @@ def test_rmsnorm_gated_int64_row_offset() -> None:
     torch.testing.assert_close(out[rows], ref, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="strided-z gated norm is ROCm-only"
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 32, 33])
+@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("norm_before_gate", [True, False])
+@pytest.mark.parametrize("contiguous_z", [False, True])
+@torch.inference_mode()
+def test_fla_rms_norm_gated_strided_z(
+    default_vllm_config,
+    num_tokens: int,
+    activation: str,
+    norm_before_gate: bool,
+    contiguous_z: bool,
+):
+    """Z is a head-contiguous view into the packed GDN in_proj row; the custom
+    op must match the reference whether or not it takes the in-place path."""
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+
+    set_random_seed(0)
+    num_heads, head_dim, eps = 48, 128, 1e-6
+    x = torch.randn(
+        num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    row = torch.randn(
+        num_tokens, num_heads * head_dim + 640, dtype=torch.bfloat16, device="cuda"
+    )
+    z = row[:, : num_heads * head_dim].view(num_tokens, num_heads, head_dim)
+    if contiguous_z:
+        z = z.contiguous()
+    weight = torch.randn(head_dim, dtype=torch.bfloat16, device="cuda")
+
+    out = torch.ops.vllm.fla_rms_norm_gated(
+        x, z, weight, eps, None, norm_before_gate, activation
+    )
+    ref = RMSNormGated.forward_static(
+        x,
+        z,
+        weight,
+        eps,
+        x.dtype,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+    )
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+
+
 if __name__ == "__main__":
     # Run a quick smoke test
     test_layer_norm_fwd_basic(128, 1024, torch.float16, 42, False)
