@@ -175,7 +175,7 @@ def _penalties_kernel(
         # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
         scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
         # If logits are positive, divide by penalty, otherwise multiply by penalty.
-        logits *= tl.where(logits > 0, 1.0 / scale, scale)
+        logits = tl.where(logits > 0, tl.div_rn(logits, scale), logits * scale)
 
     # Apply frequency penalties.
     logits -= freq_penalty * output_bin_counts
