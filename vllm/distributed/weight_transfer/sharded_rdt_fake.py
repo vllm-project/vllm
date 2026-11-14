@@ -41,7 +41,7 @@ class _UnsupportedFakeOp(NotImplementedError):
     """
 
 
-@dataclass
+@dataclass(slots=True)
 class _Scatter:
     """One recorded scatter: pull `src`, copy it into `layer`'s
     `param_name` at the recorded strided region. The bake's output unit; see
@@ -88,7 +88,7 @@ def _meta_copy_(dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
         return dest.copy_(meta_src)
 
 
-@dataclass
+@dataclass(slots=True)
 class BakeSink:
     """`copy_` sink for the dry-run bake: record how each slice would be fetched
     and where it would land, and move nothing.
