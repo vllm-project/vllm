@@ -202,7 +202,13 @@ class AiterMlaBs1Planner:
     ) -> bool:
         """Compare against aiter for a sweep of KV lengths. Uses scratch
         copies, so the live buffers are untouched. Results are cached per
-        configuration; call outside CUDA graph capture."""
+        configuration; call outside CUDA graph capture.
+
+        The default sweep samples the split law (dense at short contexts, the
+        tail-fold boundaries, strided to 1M); it is a check, not a proof. A
+        missed divergence would still plan a contiguous KV partition of at
+        most num_cu splits, only not aiter's. It takes ~0.5 s, so a draft
+        that runs eagerly pays it on its first single-request step."""
         key = (qlen, num_heads, is_causal, q_dtype, kv_dtype)
         if key in self.verified:
             return True
@@ -213,6 +219,14 @@ class AiterMlaBs1Planner:
         dev = self.work_indptr.device
         if kv_lens is None:
             kv_lens = default_verify_kv_lens()
+        logger.info(
+            "Checking the bs1 MLA planner against aiter (qlen=%d, heads=%d, "
+            "causal=%s) over %d KV lengths; runs once per shape.",
+            qlen,
+            num_heads,
+            is_causal,
+            len(kv_lens),
+        )
 
         def scratch(t: torch.Tensor) -> torch.Tensor:
             return torch.full_like(t, -7) if t.dtype != torch.uint64 else t.clone()
