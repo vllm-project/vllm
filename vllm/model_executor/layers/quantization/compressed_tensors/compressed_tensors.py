@@ -1084,6 +1084,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
+        self.supports_pre_processed_weights = (
+            layer.scheme.supports_pre_processed_weights
+        )
 
     def apply(
         self,
