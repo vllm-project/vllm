@@ -39,7 +39,7 @@ def decode_opencv(
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
     )
     source = loader_cls._prepare_source(
-        OpenCVVideoBackendMixin.get_video_metadata(data)
+        OpenCVVideoBackendMixin.get_video_metadata(data, cap=cap)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
@@ -94,8 +94,11 @@ class OpenCVVideoBackendMixin:
         return count
 
     @staticmethod
-    def get_video_metadata(data: bytes) -> VideoSourceMetadata:
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+    def get_video_metadata(
+        data: bytes, *, cap: "cv2.VideoCapture | None" = None
+    ) -> VideoSourceMetadata:
+        if cap is None:
+            cap = OpenCVVideoBackendMixin.open_video_capture(data)
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if total_frames_num <= 0:
