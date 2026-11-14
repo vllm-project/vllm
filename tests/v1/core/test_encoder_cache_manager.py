@@ -3,6 +3,11 @@
 import pytest
 import torch
 
+from vllm.distributed.ec_transfer.ec_events import (
+    AllECCleared,
+    ECRemoved,
+    ECStored,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -505,3 +510,50 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
+
+
+def test_events_disabled_by_default():
+    manager = EncoderCacheManager(cache_size=10)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    assert manager.take_events() == []
+
+
+def test_events_report_gpu_store_and_eviction():
+    manager = EncoderCacheManager(cache_size=4, enable_events=True)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    assert manager.take_events() == [ECStored(mm_hashes=["img1"], medium="GPU")]
+    assert manager.take_events() == []
+
+    # Drop the only reference so the entry becomes reclaimable.
+    manager.free_encoder_input(req, 0)
+    assert not manager.cached["img1"]
+
+    # No free slot is left, so allocating evicts "img1" first.
+    req2 = MockRequest("req2", ["img2"], [4])
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    assert manager.take_events() == [
+        ECRemoved(mm_hashes=["img1"], medium="GPU"),
+        ECStored(mm_hashes=["img2"], medium="GPU"),
+    ]
+
+
+def test_events_report_full_clear():
+    manager = EncoderCacheManager(cache_size=10, enable_events=True)
+    req = MockRequest("req1", ["img1"], [4])
+
+    assert manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    manager.reset()
+
+    assert manager.take_events() == [AllECCleared()]

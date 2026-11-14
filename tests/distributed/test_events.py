@@ -376,6 +376,58 @@ def test_event_publisher_factory(random_port):
     publisher.shutdown()
 
 
+def test_ec_event_publisher_factory(random_port):
+    """EC events use the same publisher plumbing as KV events."""
+    from vllm.config.ec_events import ECEventsConfig
+
+    # Disabled by default, even when a publisher is requested.
+    config = ECEventsConfig(publisher="zmq")
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    # A default config also resolves to the null publisher.
+    publisher = EventPublisherFactory.create(ECEventsConfig(), DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=f"tcp://*:{random_port + 100}",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK + 1)
+    assert isinstance(publisher, ZmqEventPublisher)
+    resolved_config = publisher.get_publisher_config()
+    assert isinstance(resolved_config, ECEventsConfig)
+    assert resolved_config.endpoint == f"tcp://*:{random_port + 1}"
+    assert resolved_config.replay_endpoint == f"tcp://*:{random_port + 101}"
+    assert config.endpoint == f"tcp://*:{random_port}"
+    publisher.shutdown()
+
+
+def test_ec_event_batch_roundtrip():
+    """EC events survive msgpack encode/decode like KV events do."""
+    from vllm.distributed.ec_transfer.ec_events import (
+        AllECCleared,
+        ECEventBatch,
+        ECRemoved,
+        ECStored,
+    )
+
+    events = [
+        ECStored(mm_hashes=["mm-a", "mm-b"], medium="GPU"),
+        ECRemoved(mm_hashes=["mm-c"], medium="CPU"),
+        AllECCleared(),
+    ]
+    batch = ECEventBatch(ts=123.0, events=events)
+
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=ECEventBatch)
+
+    assert decoded.ts == 123.0
+    assert decoded.events == events
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [("tcp://*:5557", "tcp://*:5558"), ("tcp://*:0", "tcp://*:0")],
