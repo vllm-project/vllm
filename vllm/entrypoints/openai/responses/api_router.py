@@ -4,8 +4,9 @@
 
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.responses.protocol import (
@@ -82,7 +83,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 async def retrieve_responses(
     response_id: str,
     raw_request: Request,
-    starting_after: int | None = None,
+    starting_after: Annotated[int | None, Query(ge=-1)] = None,
     stream: bool | None = False,
 ):
     handler = responses(raw_request)
