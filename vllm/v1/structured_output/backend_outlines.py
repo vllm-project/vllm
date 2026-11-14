@@ -40,6 +40,12 @@ class OutlinesBackend(StructuredOutputBackend):
     def __post_init__(self):
         self.vocabulary = get_outlines_vocabulary(self.tokenizer)
         self.cache = get_outlines_cache()
+        # None keeps outlines_core's default whitespace pattern.
+        self.whitespace_pattern = (
+            ""
+            if self.vllm_config.structured_outputs_config.disable_any_whitespace
+            else None
+        )
 
     def _compile_index(
         self, regex_string: str, vocabulary: OutlinesVocabulary
@@ -63,7 +69,9 @@ class OutlinesBackend(StructuredOutputBackend):
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            regex = json_schema.build_regex_from_schema(grammar_spec)
+            regex = json_schema.build_regex_from_schema(
+                grammar_spec, whitespace_pattern=self.whitespace_pattern
+            )
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
