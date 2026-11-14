@@ -50,7 +50,7 @@ SORT_NETS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MoeBuild:
     tokens: int
     # the TP size: every width a rank holds (``Dims``)
@@ -64,7 +64,7 @@ class MoeBuild:
     two_hop: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RouteShape:
     """A build's routing: `experts` routed experts, `topk` a token of
     `tokens`, the task counts and placements that follow, and the route table

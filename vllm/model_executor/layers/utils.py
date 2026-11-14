@@ -101,7 +101,7 @@ _FlashInferBf16RuntimeCheck = Callable[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FlashInferBf16Backend:
     flashinfer_backend: str
     is_supported: Callable[[], bool]
@@ -141,6 +141,10 @@ def _bf16_mm_tensors_supported(
     )
 
 
+# FlashInfer's cute-dsl BF16 mm only has low-M kernels; larger M goes to cuBLAS.
+_FLASHINFER_CUTEDSL_BF16_MAX_M = 32
+
+
 def _bf16_mm_shape_supported(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -164,7 +168,10 @@ def _can_use_flashinfer_cutedsl_bf16(
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
         return False
-    return _bf16_mm_shape_supported(x, weight, bias)
+    return (
+        _bf16_mm_shape_supported(x, weight, bias)
+        and x.numel() <= _FLASHINFER_CUTEDSL_BF16_MAX_M * x.shape[-1]
+    )
 
 
 def _can_use_flashinfer_auto_bf16(

@@ -43,7 +43,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -149,10 +149,6 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
-    # Whether every slot mapping the speculator builds goes through its attention
-    # groups' map_to_kernel_slot_mapping, so packed token caches may split.
-    maps_slot_mapping = False
-
     # Draft prefill runs on the target's batch, so it can reuse the target
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
@@ -403,15 +399,23 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Use the sizes the KV cache was allocated with: draft layers can share a
+        # group with target layers whose backends need smaller kernel blocks.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
-            maps_slot_mapping=self.maps_slot_mapping,
+            kernel_block_sizes=kernel_block_sizes,
+            no_attn_metadata_layer_names=(
+                self.draft_attn_layer_names
+                if self.speculative_config.prefill_context_kv_only
+                else ()
+            ),
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -462,7 +466,7 @@ class DraftModelSpeculator(BaseSpeculator):
             {
                 attn_group.backend.get_name()
                 for attn_groups in self.attn_groups
-                for attn_group in attn_groups
+                for attn_group in groups_with_metadata_builders(attn_groups)
                 if not attn_group.supports_draft_decode_metadata_update
             }
         )

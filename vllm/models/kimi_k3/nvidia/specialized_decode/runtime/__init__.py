@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 SPECIALIZED = "latency_specialized"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     max_context: int
     dcp: int

@@ -52,6 +52,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
+    nvfp4_backend_supports_csf_scales,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -133,6 +134,7 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
@@ -891,15 +893,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
+        scale_encoding: str | None = None,
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        if scale_encoding is None:
+            scale_encoding = quant_config.weight_scale_encoding
         # Whether the selected backend reads the activation input scales.
         self.uses_input_scales = True
         activation_key = None if self.use_a16 else kNvfp4Dynamic
@@ -923,9 +929,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_key=kNvfp4Static,
             activation_key=activation_key,
         )
-        if (
-            self.per_token_activation
-            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        # NONE: requantization source, which has no compute backend.
+        if self.per_token_activation and self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.NONE,
         ):
             raise ValueError(
                 "Per-token NVFP4 activation for pre-quantized weights "
@@ -935,6 +942,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+        # Backends that read `csf` scales keep them compressed; the others get
+        # the scales decoded at load.
+        self.csf_scales = (scale_encoding or "").lower() == "csf" and (
+            nvfp4_backend_supports_csf_scales(
+                self.nvfp4_backend, self.moe, self.use_a16
+            )
+        )
+        if self.csf_scales:
+            logger.info_once("Keeping CSF-compressed NVFP4 MoE scales on the GPU.")
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
@@ -1138,6 +1154,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 per_token_activation=self.per_token_activation,
                 is_act_and_mul=self.moe.is_act_and_mul,
             ),
+            csf_scales=self.csf_scales,
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1169,6 +1186,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
+            csf_scales=self.csf_scales,
         )
         self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
@@ -1209,6 +1227,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1226,6 +1245,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(
@@ -1748,6 +1768,147 @@ class ModelOptInt8Config(ModelOptQuantConfigBase):
 ModelOptInt8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+@triton.jit
+def _nvfp4_embedding_kernel(
+    ids_ptr,
+    packed_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    out_ptr,
+    hidden,
+    packed_stride,
+    scale_stride,
+    BLOCK: tl.constexpr,
+):
+    """Gather NVFP4 rows by token id and dequantize them in one pass."""
+    row = tl.program_id(0)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = col < hidden
+    tid = tl.load(ids_ptr + row).to(tl.int64)
+
+    byte = tl.load(packed_ptr + tid * packed_stride + col // 2, mask=mask, other=0)
+    code = (byte.to(tl.int32) >> ((col % 2) * 4)) & 0xF
+    # e2m1: exponent bits 2:1, mantissa bit 0, bias 1; exponent 0 is subnormal.
+    exp = (code >> 1) & 0x3
+    man = (code & 0x1).to(tl.float32)
+    pow2 = ((exp + 126) << 23).to(tl.float32, bitcast=True)
+    value = tl.where(exp == 0, man * 0.5, (1.0 + man * 0.5) * pow2)
+    value = tl.where(code >= 8, -value, value)
+
+    # e4m3fn block scale, decoded by hand so pre-fp8 GPUs work too.
+    s = tl.load(scale_ptr + tid * scale_stride + col // 16, mask=mask, other=0)
+    s = s.to(tl.int32)
+    s_exp = (s >> 3) & 0xF
+    s_man = (s & 0x7).to(tl.float32)
+    s_pow2 = ((s_exp + 120) << 23).to(tl.float32, bitcast=True)
+    scale = tl.where(s_exp == 0, s_man * 0.001953125, (1.0 + s_man * 0.125) * s_pow2)
+    scale = tl.where((s & 0x80) != 0, -scale, scale)
+
+    scale = scale * tl.load(global_scale_ptr)
+    out = value * scale
+    tl.store(out_ptr + row * hidden + col, out.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _nvfp4_embedding_triton(
+    layer: torch.nn.Module, ids: torch.Tensor, hidden: int
+) -> torch.Tensor:
+    out = torch.empty(ids.numel(), hidden, dtype=layer.output_dtype, device=ids.device)
+    if ids.numel() == 0:
+        return out
+    block = min(triton.next_power_of_2(hidden), 1024)
+    _nvfp4_embedding_kernel[(ids.numel(), triton.cdiv(hidden, block))](
+        ids,
+        layer.weight,
+        layer.weight_scale.view(torch.uint8),
+        layer.weight_scale_2,
+        out,
+        hidden,
+        layer.weight.stride(0),
+        layer.weight_scale.stride(0),
+        BLOCK=block,
+    )
+    return out
+
+
+_NVFP4_EMBEDDING_TIED = (
+    "NVFP4 embeddings cannot be tied to an LM head; quantize the LM head separately"
+)
+
+
+class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
+    """W4A16 NVFP4 token embedding.
+
+    Weights use the ModelOpt NVFP4 layout: two e2m1 values per byte (low nibble
+    first), one e4m3 scale per 16 values and a per-tensor fp32 scale. A lookup
+    gathers the packed rows and dequantizes only those.
+    """
+
+    # Post-load processing only builds a constant lookup table.
+    supports_pre_processed_weights = True
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % 16:
+            raise ValueError("NVFP4 embedding requires a hidden size divisible by 16")
+        rows = sum(output_partition_sizes)
+        weight = torch.nn.Parameter(
+            torch.empty(rows, input_size_per_partition // 2, dtype=torch.uint8),
+            requires_grad=False,
+        )
+        weight_scale = torch.nn.Parameter(
+            torch.empty(
+                rows, input_size_per_partition // 16, dtype=torch.float8_e4m3fn
+            ),
+            requires_grad=False,
+        )
+        weight_scale_2 = torch.nn.Parameter(
+            torch.empty(1, dtype=torch.float32), requires_grad=False
+        )
+        for name, param in (
+            ("weight", weight),
+            ("weight_scale", weight_scale),
+            ("weight_scale_2", weight_scale_2),
+        ):
+            if param.ndim == 2:
+                set_weight_attrs(param, {"output_dim": 0})
+            set_weight_attrs(param, extra_weight_attrs)
+            layer.register_parameter(name, param)
+        layer.output_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # A fixed dtype: reloads run without the loader's default dtype.
+        e2m1 = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=torch.float32,
+            device=layer.weight.device,
+        )
+        refill_derived(layer, "e2m1_lut", torch.cat((e2m1, -e2m1)))
+
+    def apply(self, layer, x, bias=None):
+        # Reached only when a model uses the embedding as its LM head.
+        raise NotImplementedError(_NVFP4_EMBEDDING_TIED)
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        if HAS_TRITON and input_.device.type != "cpu":
+            hidden = layer.weight.shape[1] * 2
+            ids = input_.reshape(-1).contiguous()
+            out = _nvfp4_embedding_triton(layer, ids, hidden)
+            return out.view(*input_.shape, hidden)
+        packed = layer.weight[input_]
+        scale = layer.weight_scale[input_].float() * layer.weight_scale_2
+        codes = torch.stack((packed & 0x0F, packed >> 4), dim=-1).flatten(-2)
+        values = layer.e2m1_lut[codes.int()].unflatten(-1, (-1, 16))
+        return (values * scale.unsqueeze(-1)).flatten(-2).to(layer.output_dtype)
+
+
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.
 
@@ -2089,6 +2250,21 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 f"{quant_algo} requires a linear, embedding or routed experts"
             )
 
+        if (
+            quant_algo == "W4A16_NVFP4"
+            and isinstance(layer, VocabParallelEmbedding)
+            and not isinstance(layer, ParallelLMHead)
+        ):
+            model_config = getattr(
+                get_current_vllm_config_or_none(), "model_config", None
+            )
+            # The language model ties according to its own (text) config.
+            if model_config is not None and getattr(
+                model_config.hf_text_config, "tie_word_embeddings", False
+            ):
+                raise ValueError(_NVFP4_EMBEDDING_TIED)
+            return ModelOptNvFp4EmbeddingMethod()
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.
             # resolve() reads group_size off whichever sub-config it is handed.
@@ -2113,11 +2289,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8FusedMoE(
@@ -2165,7 +2347,7 @@ WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
@@ -2173,7 +2355,7 @@ class CkptCtx:
     scale_block_size: tuple[int, int] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeDtypes:
     """Runtime/model dtypes kernels need — format-agnostic."""
 
@@ -2181,7 +2363,7 @@ class RuntimeDtypes:
     out_dtype: torch.dtype
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shapes:
     """Layer geometry from create_weights args."""
 
@@ -2735,6 +2917,7 @@ def select_linear_kernel(
         return init_mxfp8_linear_kernel(
             weight_shape=weight_shape or layer.weight.shape,
             bmm_batch_size=getattr(layer, "bmm_batch_size", None),
+            activation_quant_key=spec.activation,
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -2950,6 +3133,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
                 bmm_batch_size=layer.bmm_batch_size,
+                activation_quant_key=self.spec.activation,
             )
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
