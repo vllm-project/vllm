@@ -16,6 +16,15 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
     "audio": "audio_kwargs",
 }
 
+# Domain tags for multimodal cache keys. Content-addressed digests and
+# caller-chosen UUIDs share one string keyspace downstream
+# (MultiModalProcessorCache, EncoderCacheManager, prefix-cache block keys),
+# so every hash is prefixed with its source domain. Without the tags, a
+# caller could set `uuid` to the content digest of a target media item and
+# poison the cache for later callers that omit `uuid` (see #66422).
+_MM_HASH_TAG_CONTENT = "content:"
+_MM_HASH_TAG_UUID = "uuid:"
+
 
 @dataclass
 class ProcessorInputs:
@@ -93,7 +102,8 @@ class ProcessorInputs:
                     # if available for better performance.
                     item = uuid_item if uuid_item is not None else item
                     hashes.append(
-                        hasher.hash_kwargs(
+                        _MM_HASH_TAG_CONTENT
+                        + hasher.hash_kwargs(
                             hash_algorithm,
                             model_id=model_id,
                             **{modality: item},
@@ -102,7 +112,7 @@ class ProcessorInputs:
                     )
                 else:
                     # If there are no extra kwargs, use the client-provided UUID.
-                    hashes.append(uuid_item)
+                    hashes.append(_MM_HASH_TAG_UUID + uuid_item)
 
             mm_hashes[modality] = hashes
 
