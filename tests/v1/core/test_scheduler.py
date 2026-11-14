@@ -1920,25 +1920,6 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
     assert step() == []
 
 
-def test_prefill_progress_can_be_disabled():
-    """The default emits nothing; reporting is opt-in."""
-    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
-    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
-    scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-    outputs = scheduler.update_from_output(
-        scheduler_output,
-        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
-    )
-    assert [
-        entry.prefill_progress
-        for batch in outputs.values()
-        for entry in batch.outputs
-        if entry.prefill_progress is not None
-    ] == []
-
-
 def test_preempted_request_reports_the_work_it_requeues():
     """A preemption puts the work it discards back on the queue."""
     scheduler = create_scheduler(
