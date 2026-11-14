@@ -910,8 +910,6 @@ steps:
   - vllm/distributed/mooncake_store.py
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
-  env:
-    WITH_NVIDIA_PEERMEM: "0"
   commands:
   # Mooncake ships in the CI image (hash-locked); verify, never install.
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh

@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+    MOONCAKE_BACKEND,
     PEER_IPC_BACKEND,
-    RDMA_BACKEND,
     SeedBackend,
     WeightMover,
     acknowledge_lease,
@@ -131,7 +131,7 @@ class WeightShardSeed(Seedable):
     def request_params(self, ctx: Any) -> dict[str, Any]:
         """Ask this daemon's source for the shard, over the fitting mover."""
         source = self._daemon.d2d.source
-        backend = PEER_IPC_BACKEND if isinstance(source, str) else RDMA_BACKEND
+        backend = PEER_IPC_BACKEND if isinstance(source, str) else MOONCAKE_BACKEND
         return {"seed_backend": backend}
 
     def validate_payload(self, payload: Any) -> WeightsSeedPayload:

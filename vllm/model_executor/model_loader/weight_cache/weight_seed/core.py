@@ -16,17 +16,17 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     rebuild_tensors,
 )
 
-SeedBackend = Literal["peer_ipc", "rdma"]
+SeedBackend = Literal["peer_ipc", "mooncake"]
 
 PEER_IPC_BACKEND: SeedBackend = "peer_ipc"
-RDMA_BACKEND: SeedBackend = "rdma"
+MOONCAKE_BACKEND: SeedBackend = "mooncake"
 
 logger = init_logger(__name__)
 
 
 def parse_seed_backend(value: Any) -> SeedBackend:
     """Narrow a wire or config value to a known seed backend, or raise."""
-    if value in (PEER_IPC_BACKEND, RDMA_BACKEND):
+    if value in (PEER_IPC_BACKEND, MOONCAKE_BACKEND):
         return value
     raise ValueError(f"Unknown weight-cache seed backend {value!r}")
 
@@ -100,10 +100,10 @@ def get_mover(name: SeedBackend, *, device_index: int | None = None) -> WeightMo
         )
 
         return PeerIpcMover(device_index)
-    if name == RDMA_BACKEND:
-        from vllm.model_executor.model_loader.weight_cache.weight_seed.rdma import (
-            RdmaMover,
+    if name == MOONCAKE_BACKEND:
+        from vllm.model_executor.model_loader.weight_cache.weight_seed.mooncake import (
+            MooncakeMover,
         )
 
-        return RdmaMover()
+        return MooncakeMover()
     raise ValueError(f"Unknown weight-cache seed backend {name!r}")

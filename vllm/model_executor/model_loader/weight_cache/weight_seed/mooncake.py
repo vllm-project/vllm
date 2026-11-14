@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The `rdma` weight mover: pull storages through the Mooncake TransferEngine."""
+"""The Mooncake weight mover: pull storages through the TransferEngine."""
 
 from collections.abc import Mapping
 
@@ -8,7 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
-    RDMA_BACKEND,
+    MOONCAKE_BACKEND,
     WeightMover,
 )
 from vllm.utils.import_utils import PlaceholderModule
@@ -28,10 +28,10 @@ logger = init_logger(__name__)
 _retained_copies: list[tuple[object, list[torch.Tensor]]] = []
 
 
-class RdmaMover(WeightMover):
+class MooncakeMover(WeightMover):
     """Pull storages through the Mooncake TransferEngine."""
 
-    name = RDMA_BACKEND
+    name = MOONCAKE_BACKEND
 
     def __init__(self, protocol: str = "rdma"):
         self.protocol = protocol

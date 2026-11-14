@@ -1879,43 +1879,24 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
     assert mirror_outputs == baseline_outputs
 
 
-def _mooncake_has_hip_suballocation_bug() -> bool:
-    if not current_platform.is_rocm() or not has_mooncake():
-        return False
-    from importlib.metadata import PackageNotFoundError, version
-
-    from packaging.version import Version
-
-    try:
-        mooncake_version = version("mooncake-transfer-engine-rocm")
-    except PackageNotFoundError:
-        return False
-    return Version(mooncake_version) <= Version("0.3.14")
-
-
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not has_mooncake(),
     reason="Cross-host weight seeding requires Mooncake TransferEngine",
 )
-@pytest.mark.skipif(
-    _mooncake_has_hip_suballocation_bug(),
-    reason="Mooncake <=0.3.14 corrupts HIP IPC sub-allocations: "
-    "https://github.com/kvcache-ai/Mooncake/issues/3546",
-)
 def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
-    """Pull and release real RDMA leases over the remote JSON control plane.
+    """Pull and release remote-copy leases over the JSON control plane.
 
     Both daemons run on this host, but the exchange uses the token-authenticated
     TCP listener exactly as a cross-host seed would. The source uses GPU 0 and
     the mirror and engines use GPU 1. A non-empty per-quant backend tuple must
-    survive the JSON fingerprint round trip. Mooncake's dmabuf path supports
-    GPU-buffer registration without a working nvidia-peermem module.
+    survive the JSON fingerprint round trip. The data plane uses TCP so the
+    test does not require RDMA hardware or GPUDirect support.
     """
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
     _wait_for_previous_engines()
     _set_visible_devices(monkeypatch, "1")
-    monkeypatch.setenv("WITH_NVIDIA_PEERMEM", "0")
 
     kernel_config = {"linear_backend_per_quant": {"fp8": "cutlass"}}
     engine_case = replace(
@@ -1960,19 +1941,19 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
         ) as mirror:
             mirror.wait_until_ready()
             transfers = re.findall(
-                r"Mirrored .* in (\d+) storage\(s\) over rdma in ([\d.]+)s",
+                r"Mirrored .* in (\d+) storage\(s\) over \w+ in ([\d.]+)s",
                 mirror.logs,
             )
             assert len(transfers) == 1, mirror.logs
             assert int(transfers[0][0]) > 1
-            # Loopback RDMA is latency-dominated; bound stalls, not bandwidth.
+            # Remote copies are latency-dominated; bound stalls, not bandwidth.
             assert float(transfers[0][1]) < 10.0
 
             _exercise_lease_release(
                 source,
                 ("127.0.0.1", base_port),
                 source_sock,
-                "rdma",
+                "mooncake",
                 token,
             )
             mirror_outputs = generate(
