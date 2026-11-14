@@ -528,7 +528,7 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
@@ -620,7 +620,7 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
-@dataclass
+@dataclass(slots=True)
 class ElasticScalingCache:
     existing_core_engines: list[EngineIdentity]
     num_new_core_engines: int

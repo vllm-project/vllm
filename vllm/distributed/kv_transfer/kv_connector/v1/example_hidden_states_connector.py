@@ -80,7 +80,7 @@ def cleanup_hidden_states(path: str, keep_hidden_states: bool = False) -> None:
         os.remove(path)
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingSave:
     req_id: str
     filename: str

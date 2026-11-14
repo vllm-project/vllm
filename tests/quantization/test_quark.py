@@ -145,7 +145,7 @@ AITER_PTPC_KERNELS = (
 DEVICE_TYPE = current_platform.device_type
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QTensorConfig:
     name: str
     weight: QuarkQTensorHint
@@ -1998,7 +1998,7 @@ def test_quark_fp8_parity(dist_init, workspace_init):
         assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
 
 
-@dataclass
+@dataclass(slots=True)
 class AccuracyTestConfig:
     model_name: str
     excepted_value: float
