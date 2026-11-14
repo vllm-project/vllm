@@ -11,6 +11,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
+- [Hierarchical LM Head Backends (Experimental)](hierarchical_lm_head.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
