@@ -56,6 +56,36 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### Windowed MLA with Standard FP8 KV
+
+`FLASHMLA_SWA` is an opt-in windowed MLA backend. It retains Triton's standard
+FP8 KV page layout, gathers the visible window into temporary native FlashMLA
+records, and uses Triton for configurations outside the native kernel's support.
+There is no model-name check or padding of model dimensions or attention heads.
+
+For a DSpark draft, select it in the draft configuration:
+
+```bash
+vllm serve <target-model> --speculative-config \
+  '{"method":"dspark","model":"<draft-model>","num_speculative_tokens":8,"attention_backend":"FLASHMLA_SWA"}'
+```
+
+The native route uses BF16 queries, standard E4M3 KV, latent rank 512, RoPE
+dimension 64, 64 or 128 local query heads, and a window of at least 2048 on
+SM100-family devices. It handles causal and non-causal query blocks and keeps
+the original RoPE quantization values. Other dimensions, smaller windows,
+single-token queries, non-power-of-two KV scales, or missing
+native FlashMLA binaries use the original Triton implementation. Windowed
+prefill and DCP retain Triton's restrictions. Batch-invariant execution is not
+supported by this opt-in backend; select `TRITON_MLA` for that configuration.
+The common MLA layer's prefill-dimension validation is unchanged.
+
+Temporary storage is proportional to the visible window and query block size,
+not the logical context length. For eight queries with an 8192-token window,
+the temporary packed KV is about 5.2 MiB per request, plus 256 KiB of indices.
+This storage is additional to the persistent cache and can affect peak memory.
+The persistent cache, cache writer, and P/D transfer format remain unchanged.
+
 ### Triton/FlashAttention Composite
 
 On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix
