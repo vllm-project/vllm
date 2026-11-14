@@ -17,7 +17,7 @@ from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
-from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
+from vllm.benchmarks.forward.shapes import jitter_kv_lens, load_cases, parse_case
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
@@ -580,6 +580,73 @@ def test_jitter_kv_lens():
     assert jitter_kv_lens(case, 0, 2048, 0) == case
     with pytest.raises(ValueError, match="KV length"):
         jitter_kv_lens(case, 0, 1000, 0)
+
+
+def test_per_rank_cases(tmp_path):
+    """`|` (or `dp_requests` in a shapes file) gives each DP rank its own batch;
+    jitter keeps the split, and a rank count or empty batch that can't run
+    fails before any rank launches."""
+    case = parse_case("imb=8192|4*6@4096:5|2048,2*6@4096:5|6@1024:5")
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "imb",
+                        "dp_requests": [
+                            [{"query_len": 8192, "kv_len": 8192}],
+                            [
+                                {
+                                    "query_len": 6,
+                                    "kv_len": 4096,
+                                    "num_draft_tokens": 5,
+                                    "count": 4,
+                                }
+                            ],
+                            [
+                                {"query_len": 2048, "kv_len": 2048},
+                                {
+                                    "query_len": 6,
+                                    "kv_len": 4096,
+                                    "num_draft_tokens": 5,
+                                    "count": 2,
+                                },
+                            ],
+                            [{"query_len": 6, "kv_len": 1024, "num_draft_tokens": 5}],
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    assert load_cases(str(path)) == [case]
+    assert [len(case.for_dp_rank(r, 4).requests) for r in range(4)] == [1, 4, 3, 1]
+    assert [len(b) for b in jitter_kv_lens(case, 0.5, 8192, 0).rank_batches] == [
+        1,
+        4,
+        3,
+        1,
+    ]
+    with pytest.raises(ValueError, match="DP batches for DP size"):
+        case.for_dp_rank(0, 2)
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "bad",
+                        "dp_requests": [
+                            [{"query_len": 8192, "kv_len": 8192}],
+                            [],
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="at least one request"):
+        load_cases(str(path))
 
 
 def test_bench_packed_kv_blocks():
