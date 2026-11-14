@@ -120,7 +120,11 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
-        from .prepare_finalize.mori_epv2 import MoriEPv2PrepareAndFinalize
+        from .prepare_finalize.mori_epv2 import (
+            MoriEPv2PrepareAndFinalize,
+            mori_epv2_dispatch_args,
+            mori_epv2_dispatch_format,
+        )
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -351,6 +355,9 @@ def maybe_make_prepare_finalize(
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=moe.experts_per_token,
         )
+        # Dispatch what AITER's fused MoE consumes; combine is always BF16.
+        dispatch_format = mori_epv2_dispatch_format(moe, quant_config).format
+        all_to_all_args.update(mori_epv2_dispatch_args(dispatch_format, moe.hidden_dim))
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = MoriEPv2PrepareAndFinalize(
             handle,
@@ -358,6 +365,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=num_local_experts,
             rank_expert_offset=all2all_manager.rank * num_local_experts,
+            dispatch_format=dispatch_format,
         )
 
     elif moe.use_mori_epv1_kernels:
