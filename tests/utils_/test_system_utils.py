@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import psutil
@@ -129,3 +130,100 @@ raise SystemExit(1 if hung else proc.exitcode)
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=120)
     assert result.returncode == 0
+
+
+_PARENT_DEATH_PARENT = """
+import os
+import sys
+import threading
+import time
+
+from vllm.utils.system_utils import get_mp_context, set_parent_death_signal
+
+
+def child(pid_file, arm_delay):
+    time.sleep(arm_delay)
+    set_parent_death_signal()
+    with open(pid_file + ".tmp", "w") as f:
+        f.write(str(os.getpid()))
+    os.replace(pid_file + ".tmp", pid_file)
+    time.sleep(600)
+
+
+def start_and_wait_armed(proc, pid_file):
+    proc.start()
+    while not os.path.exists(pid_file):
+        time.sleep(0.05)
+
+
+if __name__ == "__main__":
+    mode, pid_file = sys.argv[1], sys.argv[2]
+    early = mode == "exit_before_arming"
+    proc = get_mp_context().Process(
+        target=child, args=(pid_file + ".child" if early else pid_file, 2.0 * early)
+    )
+    if mode == "thread":
+        starter = threading.Thread(target=start_and_wait_armed, args=(proc, pid_file))
+        starter.start()
+        starter.join()
+    elif early:
+        proc.start()
+        with open(pid_file, "w") as f:
+            f.write(str(proc.pid))
+        os._exit(0)
+    else:
+        start_and_wait_armed(proc, pid_file)
+    time.sleep(600)
+"""
+
+
+def _child_pid(pid_file: Path, timeout: float = 60) -> int:
+    deadline = time.monotonic() + timeout
+    while not pid_file.exists():
+        assert time.monotonic() < deadline, "child never armed"
+        time.sleep(0.05)
+    return int(pid_file.read_text())
+
+
+def _gone(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="prctl is Linux-only")
+@pytest.mark.parametrize("mode", ["kill_parent", "thread", "exit_before_arming"])
+def test_set_parent_death_signal(tmp_path, mode):
+    script = tmp_path / "parent.py"
+    script.write_text(_PARENT_DEATH_PARENT)
+    pid_file = tmp_path / "child.pid"
+    parent = subprocess.Popen(
+        [sys.executable, str(script), mode, str(pid_file)],
+        env={**os.environ, "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+    )
+    child_pid = None
+    try:
+        if mode == "exit_before_arming":
+            parent.wait(timeout=60)
+            child_pid = _child_pid(pid_file)
+            assert _gone(child_pid, timeout=30)
+            return
+        child_pid = _child_pid(pid_file)
+        if mode == "thread":
+            assert not _gone(child_pid, timeout=2)
+            return
+        parent.send_signal(signal.SIGKILL)
+        parent.wait(timeout=30)
+        assert _gone(child_pid, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            parent.kill()
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)

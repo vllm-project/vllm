@@ -59,6 +59,7 @@ from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
+    set_parent_death_signal,
     set_process_title,
 )
 from vllm.utils.torch_utils import (
@@ -996,6 +997,7 @@ class WorkerProc:
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
         This runs a background process"""
+        set_parent_death_signal()
         if logging_config := getattr(kwargs["vllm_config"], "logging_config", None):
             configure_logging(logging_config)
 
