@@ -450,6 +450,9 @@ class MatcherQuantFP8(MatcherCustomOp):
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
+        if self.has_col_major_scales:
+            # QuantFP8.forward_hip asks for M-major scales on gfx1250.
+            return self.QUANT_OP(input, quant_key_group_shape.col, True)  # type: ignore[no-any-return]
         return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
