@@ -61,8 +61,21 @@ def make_async_with_semaphore(
     async def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        async with semaphore:
-            return await loop.run_in_executor(executor, p_func)
+        await semaphore.acquire()
+        try:
+            future = loop.run_in_executor(executor, p_func)
+        except BaseException:
+            semaphore.release()
+            raise
+
+        def on_done(future: Future[T]) -> None:
+            semaphore.release()
+            # The caller may have been cancelled while the worker kept running.
+            if not future.cancelled():
+                future.exception()
+
+        future.add_done_callback(on_done)
+        return await asyncio.shield(future)
 
     return _async_wrapper
 
