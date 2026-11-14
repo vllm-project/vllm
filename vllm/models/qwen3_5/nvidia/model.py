@@ -254,11 +254,12 @@ class Qwen3_5RMSNorm(nn.Module):
             return None, *self(x, residual)
 
         assert linear is not None
-        nvfp4 = key == kNvfp4Dynamic
         if key == kFp8DynamicTokenSym:
             scale = None
+        elif key == kNvfp4Dynamic:
+            scale = linear.input_global_scale_inv
         else:
-            scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+            scale = linear.input_scale
         if allreduce:
             assert residual is not None
             if scale is not None:
@@ -272,7 +273,7 @@ class Qwen3_5RMSNorm(nn.Module):
             # norm-quant.
             x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
-            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+            x, residual, self.weight, self.variance_epsilon, scale, key, write_y
         )
         qa = QuantizedActivation(
             data=q,

@@ -14,6 +14,12 @@ as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -22,6 +28,13 @@ FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = tl.constexpr(448.0)
 # min_scaling_factor in csrc/quantization/utils.cuh: 1 / (448 * 512).
 FP8_MIN_SCALE = tl.constexpr(1.0 / (448.0 * 512.0))
+
+# Consumer input quant key -> the kernel's QUANT epilogue.
+_QUANT = {
+    kFp8StaticTensorSym: "fp8",
+    kFp8DynamicTokenSym: "fp8_token",
+    kNvfp4Dynamic: "nvfp4",
+}
 
 
 @triton.jit
@@ -162,7 +175,7 @@ def gemma_add_rms_norm_quant(
     weight: torch.Tensor,
     eps: float,
     scale: torch.Tensor | None,
-    nvfp4: bool,
+    key: QuantKey,
     write_y: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Gemma RMSNorm of `x (+ residual)` quantized for the next linear.
@@ -174,8 +187,8 @@ def gemma_add_rms_norm_quant(
         eps: RMS norm epsilon.
         scale: FP8: the static per-tensor input scale, or None for dynamic
             per-token FP8. NVFP4: the global scale (`input_global_scale_inv`).
-        nvfp4: quantize to NVFP4 with swizzled 128x4 block scales instead of
-            FP8.
+        key: the consumer's input quant key: static per-tensor FP8,
+            dynamic per-token FP8, or NVFP4 with swizzled 128x4 block scales.
         write_y: also return the bf16 normed activation.
 
     Returns:
@@ -190,15 +203,15 @@ def gemma_add_rms_norm_quant(
     assert x.dtype in (torch.bfloat16, torch.float16)
     assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
     assert weight.shape == (x.shape[1],) and weight.is_contiguous()
-    per_token = scale is None
+    quant = _QUANT[key]
+    assert (scale is None) == (quant == "fp8_token")
     if scale is not None:
         assert scale.numel() == 1 and scale.dtype == torch.float32
-    assert not (per_token and nvfp4)
     M, H = x.shape
-    if per_token:
+    if quant == "fp8_token":
         q = torch.empty((M, H), dtype=FP8_DTYPE, device=x.device)
         block_scale = torch.empty((M, 1), dtype=torch.float32, device=x.device)
-    elif nvfp4:
+    elif quant == "nvfp4":
         # Whole 4-column scale tiles: padded scale columns are not written.
         assert H % 64 == 0
         q = torch.empty((M, H // 2), dtype=torch.uint8, device=x.device)
@@ -217,20 +230,20 @@ def gemma_add_rms_norm_quant(
     # Swept on GB300 at H=5120, M=1..8192: within 3% of the best of 2/4/8/16
     # warps at every swept M except NVFP4 M=129 (4%). Per-token FP8 (swept
     # on SM120) needs 8 warps above that for its row amax, not 4.
-    max_m_16_warps = 128 if nvfp4 else 384
-    large_m_warps = 8 if per_token else 4
+    max_m_16_warps = 128 if quant == "nvfp4" else 384
+    large_m_warps = 8 if quant == "fp8_token" else 4
     _gemma_add_rms_norm_quant_kernel[(M,)](
         x,
         residual if residual is not None else x,
         weight,
-        block_scale if scale is None else scale,  # unread for dynamic FP8
+        scale,
         q,
         block_scale,
         y if y is not None else x,
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
-        QUANT="fp8_token" if per_token else "nvfp4" if nvfp4 else "fp8",
+        QUANT=quant,
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else large_m_warps,
         launch_pdl=current_platform.is_arch_support_pdl(),

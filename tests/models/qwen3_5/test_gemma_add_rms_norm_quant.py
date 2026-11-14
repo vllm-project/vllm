@@ -9,6 +9,11 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -64,6 +69,11 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     )
 
     nvfp4 = quant == "nvfp4"
+    key = {
+        "fp8": kFp8StaticTensorSym,
+        "fp8_token": kFp8DynamicTokenSym,
+        "nvfp4": kNvfp4Dynamic,
+    }[quant]
     g = torch.Generator(device="cuda").manual_seed(num_tokens)
     # Checkpoint-like Gemma weights: (1 + w) from ~0 (w near -1) to 3.5.
     w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
@@ -95,7 +105,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     x_in = x.clone()
     res = residual.clone()
     q, sf, y = gemma_add_rms_norm_quant(
-        x_in, res if has_residual else None, w, 1e-6, scale, nvfp4, write_y=True
+        x_in, res if has_residual else None, w, 1e-6, scale, key, write_y=True
     )
 
     torch.testing.assert_close(x_in, x, rtol=0, atol=0)
