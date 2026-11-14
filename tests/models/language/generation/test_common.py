@@ -10,6 +10,34 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
+
+@pytest.mark.cpu_model
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU backend selection")
+def test_cpu_default_triton_backend_matches_explicit_cpu(vllm_runner, monkeypatch):
+    """CPU generation must work even when a GPU driver is visible to Triton."""
+    prompts = ["The capital of France is", "The opposite of hot is"]
+    monkeypatch.setenv("VLLM_CPU_KVCACHE_SPACE", "1")
+    outputs = []
+    for backend in (None, "cpu"):
+        if backend is None:
+            monkeypatch.delenv("TRITON_DEFAULT_BACKEND", raising=False)
+        else:
+            monkeypatch.setenv("TRITON_DEFAULT_BACKEND", backend)
+        with vllm_runner(
+            "facebook/opt-125m",
+            dtype="float32",
+            max_model_len=128,
+            max_num_batched_tokens=128,
+            max_num_seqs=4,
+            enforce_eager=True,
+        ) as model:
+            outputs.append(model.generate_greedy(prompts, max_tokens=8))
+
+    assert len(outputs[0]) == len(prompts)
+    assert all(token_ids for token_ids, _ in outputs[0])
+    assert outputs[0] == outputs[1]
+
+
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
     "openbmb/MiniCPM4.1-8B",
