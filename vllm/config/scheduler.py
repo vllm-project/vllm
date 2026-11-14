@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
+SchedulerPolicy = Literal["fcfs", "priority", "shortest_prefill_first"]
 
 
 @config
@@ -188,7 +188,12 @@ class SchedulerConfig:
     - "fcfs" means first come first served, i.e. requests are handled in order 
       of arrival.
     - "priority" means requests are handled based on given priority (lower
-      value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties).
+    - "shortest_prefill_first" means that before each step, requests whose
+      remaining prefill length is known are ordered shortest first within each
+      queue: running prefills, requests holding KV blocks, and waiting requests
+      whose KV connector lookup has finished. Other requests keep their
+      positions and ties keep their order."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
