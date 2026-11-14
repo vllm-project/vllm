@@ -273,7 +273,9 @@ impl GenerateOutput {
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions.append(next.weight_versions);
         self.routed_experts.append(next.routed_experts);
-        self.prefill_progress = next.prefill_progress;
+        if next.prefill_progress.is_some() {
+            self.prefill_progress = next.prefill_progress;
+        }
         self.timestamps = next.timestamps;
     }
 }

@@ -82,8 +82,12 @@ impl OutputSender {
     /// delivered immediately, the latter together with any held-back outputs.
     pub fn send(&mut self, output: EngineCoreStreamOutput) {
         let finished = output.finished();
+        // Holding a progress-only output back would keep the worker's own view of
+        // its remaining work from the consumer until the next token arrives.
+        let progress_only = output.output.prefill_progress.is_some()
+            && output.output.new_token_ids.is_empty();
         if self.buffered.is_empty()
-            && (finished || !self.delivered_first || self.stream_interval == 1)
+            && (finished || progress_only || !self.delivered_first || self.stream_interval == 1)
         {
             self.delivered_first = true;
             self.deliver(Delivery::One(output));
@@ -92,7 +96,7 @@ impl OutputSender {
 
         self.buffered_tokens += output.new_token_ids.len();
         self.buffered.push(output);
-        if finished || self.buffered_tokens >= self.stream_interval {
+        if finished || progress_only || self.buffered_tokens >= self.stream_interval {
             self.flush();
         }
     }
@@ -172,6 +176,18 @@ mod tests {
         output_channel(NonZeroU32::new(stream_interval).unwrap())
     }
 
+    /// An output that carries prefill progress and nothing else.
+    fn progress(remaining: u64) -> EngineCoreStreamOutput {
+        let mut output = output(&[]);
+        output.output.prefill_progress = Some(Box::new(
+            crate::protocol::output::PrefillProgress {
+                request_id: "req".to_string(),
+                remaining_prefill_tokens: remaining,
+            },
+        ));
+        output
+    }
+
     /// Render a delivery as the token ids of its outputs.
     fn token_ids(delivery: Delivery) -> Vec<Vec<u32>> {
         delivery.into_iter().map(|output| output.output.new_token_ids).collect()
@@ -188,6 +204,20 @@ mod tests {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return deliveries,
             }
         }
+    }
+
+    #[test]
+    fn progress_only_output_is_not_held_back() {
+        let (mut sender, mut receiver) = channel(8);
+        sender.send(output(&[1]));
+        sender.send(progress(500));
+        // Both arrive now rather than waiting for eight tokens.
+        assert_eq!(
+            deliveries(&mut receiver),
+            vec![vec![vec![1]], vec![vec![]]]
+        );
+        sender.send(output(&[2, 3]));
+        assert!(deliveries(&mut receiver).is_empty(), "tokens stay held back");
     }
 
     #[test]

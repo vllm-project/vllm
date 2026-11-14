@@ -779,6 +779,17 @@ class OutputProcessor:
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
             )
 
+            # A frame that carries only prefill progress has no token, pooling or
+            # terminal event. Falling through would end the prefill bookkeeping
+            # below, and a pooling request has no detokenizer to reach.
+            if (
+                engine_core_output.prefill_progress is not None
+                and not engine_core_output.new_token_ids
+                and engine_core_output.pooling_output is None
+                and engine_core_output.finish_reason is None
+            ):
+                continue
+
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason

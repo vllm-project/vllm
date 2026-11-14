@@ -324,14 +324,13 @@ impl RequestRegistry {
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
-        let applied = self.apply_scheduler_counts(
+        self.apply_scheduler_counts(
             engine_index,
             EngineLoadSnapshot {
                 waiting: stats.num_waiting_reqs as usize,
                 running: stats.num_running_reqs as usize,
             },
-        );
-        applied
+        )
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.
