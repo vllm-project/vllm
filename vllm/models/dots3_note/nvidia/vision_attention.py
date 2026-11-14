@@ -68,7 +68,7 @@ def apply_rotary_pos_emb_vision(
 class VisionRotaryEmbedding(nn.Module):
     """2D vision RoPE frequency table.
 
-    When ``cache_seq_len`` is set, precomputes and reuses frequencies up to that
+    When `cache_seq_len` is set, precomputes and reuses frequencies up to that
     length (MoE default). Otherwise frequencies are computed on each forward
     (dense default).
     """
@@ -168,7 +168,7 @@ class _VisionAttentionBase(nn.Module):
     def _segment_ids(self, cu_seqlens: torch.Tensor, seq_length: int) -> torch.Tensor:
         """Assign every token position to its varlen segment, on the device.
 
-        Using the ``cu_seqlens`` elements as Python slice bounds would copy
+        Using the `cu_seqlens` elements as Python slice bounds would copy
         them back to the host once per segment.
         """
         positions = torch.arange(seq_length, device=cu_seqlens.device)
@@ -231,7 +231,7 @@ class VisionAttention(_VisionAttentionBase):
 
 
 class VisionAttentionV2(_VisionAttentionBase):
-    """Eager attention per varlen segment (lower peak memory than :class:`VisionAttention`)."""
+    """Eager attention per varlen segment (lower peak memory than `VisionAttention`)."""
 
     def forward(
         self,
@@ -265,7 +265,7 @@ class VisionAttentionV2(_VisionAttentionBase):
         return self.proj(attn_output)
 
 
-# MoE checkpoints historically named this implementation ``VisionEagerAttention``.
+# MoE checkpoints historically named this implementation `VisionEagerAttention`.
 VisionEagerAttention = VisionAttentionV2
 
 
@@ -384,9 +384,9 @@ def resolve_attn_implementation(
 ) -> str:
     """Apply FA3 → FA2 → eager fallback when backends are missing.
 
-    ``eager_fallback`` selects which eager backend is used when flash-attn is
-    unavailable. MoE historically used per-segment eager (``eager_v2``); dense
-    uses full-mask ``eager``.
+    `eager_fallback` selects which eager backend is used when flash-attn is
+    unavailable. MoE historically used per-segment eager (`eager_v2`); dense
+    uses full-mask `eager`.
     """
     if attn_implementation == "flash_attention_3" and not _flash_attn3_available:
         logger.warning_once(
@@ -411,7 +411,7 @@ def build_vision_attention(
     bias: bool | None = None,
     eager_fallback: str = "eager",
 ) -> nn.Module:
-    """Instantiate a vision attention module from ``attn_implementation`` and config."""
+    """Instantiate a vision attention module from `attn_implementation` and config."""
     attn_implementation = resolve_attn_implementation(
         attn_implementation, eager_fallback=eager_fallback
     )

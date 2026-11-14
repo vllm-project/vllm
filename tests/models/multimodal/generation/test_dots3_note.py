@@ -7,7 +7,7 @@ import torch
 from vllm.platforms import current_platform
 
 # The dots3_note vision tower is an NVIDIA-only implementation
-# (``vllm/models/dots3_note/nvidia``), so importing it is only safe on CUDA.
+# (`vllm/models/dots3_note/nvidia`), so importing it is only safe on CUDA.
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="dots3_note vision tower is CUDA only"
 )
@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 def _tiny_config():
     """Smallest config that still exercises the full vision path.
 
-    Leaving ``pyramid_num_routed`` unset selects the dense ``DotsSwiGLUFFN``
+    Leaving `pyramid_num_routed` unset selects the dense `DotsSwiGLUFFN`
     FFN, which keeps MoE routing and the FP8 MoE kernel out of the test.
     """
     from vllm.models.dots3_note.nvidia.vision import DotsMoEVitConfig
@@ -39,8 +39,8 @@ def _tiny_config():
 def test_dots3_note_vision_without_host_sync(dist_init):
     """The vision tower must run without blocking the host, including the mask.
 
-    The vision tower is replicated across TP ranks (it uses plain ``nn.Linear``,
-    not ``QKVParallelLinear``), so the copies covered here behave the same at
+    The vision tower is replicated across TP ranks (it uses plain `nn.Linear`,
+    not `QKVParallelLinear`), so the copies covered here behave the same at
     any TP size and a single process is enough to exercise them.
     """
     # Imported here so collection on non-CUDA platforms stays safe.
@@ -52,7 +52,7 @@ def test_dots3_note_vision_without_host_sync(dist_init):
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    # ``_SYNC_CHECK_MODE`` is captured when the module is imported, so the gate
+    # `_SYNC_CHECK_MODE` is captured when the module is imported, so the gate
     # must be armed from the environment (the CI image bakes it in) rather than
     # toggled here.
     if envs.VLLM_GPU_SYNC_CHECK is None:
