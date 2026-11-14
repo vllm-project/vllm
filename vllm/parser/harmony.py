@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
@@ -532,17 +533,19 @@ def get_harmony_structural_tag(
     )
 
 
-def _adjust_output_format(
-    request: ChatCompletionRequest | ResponsesRequest,
-) -> ChatCompletionRequest | ResponsesRequest:
-    """Canonicalize request constraints into a reasoning-aware StructuralTag."""
-    params = request.extract_structured_outputs()
-    if params is None:
-        return request
+def to_harmony_structured_outputs(
+    params: StructuredOutputsParams,
+) -> StructuredOutputsParams | None:
+    """Scope a plain constraint to the Harmony final channel.
 
+    Returns a new ``StructuredOutputsParams`` with its constraint wrapped in a
+    structural tag that allows an optional ``analysis`` turn before the
+    constrained ``final`` channel.  Returns ``None`` if ``params`` carries no
+    convertible constraint.
+    """
     final_content = structured_outputs_to_format(params)
     if final_content is None:
-        return request
+        return None
 
     if isinstance(final_content, JSONSchemaFormat):
         content = OrFormat(
@@ -563,7 +566,7 @@ def _adjust_output_format(
         allow_analysis=True, allow_commentary=False, content=content
     )
 
-    request.structured_outputs = replace(
+    return replace(
         params,
         json=None,
         regex=None,
@@ -572,6 +575,21 @@ def _adjust_output_format(
         json_object=None,
         structural_tag=json.dumps(structural_tag.model_dump()),
     )
+
+
+def _adjust_output_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> ChatCompletionRequest | ResponsesRequest:
+    """Canonicalize request constraints into a reasoning-aware StructuralTag."""
+    params = request.extract_structured_outputs()
+    if params is None:
+        return request
+
+    harmony_params = to_harmony_structured_outputs(params)
+    if harmony_params is None:
+        return request
+
+    request.structured_outputs = harmony_params
     if isinstance(request, ResponsesRequest):
         request.text = None
     else:
