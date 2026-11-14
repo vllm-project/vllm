@@ -11,6 +11,8 @@ use crate::{Result, Tokenizer};
 /// Mistral Tekken tokenizer from a `tekken.json` file.
 pub struct TekkenTokenizer {
     inner: Tekkenizer,
+    /// Control tokens, such as `[INST]`, with their IDs.
+    control_tokens: Vec<(String, u32)>,
 }
 
 impl TekkenTokenizer {
@@ -24,11 +26,63 @@ impl TekkenTokenizer {
                 path.display()
             )
         })?;
-        Ok(Self { inner })
+        Ok(Self::from_tekkenizer(inner))
+    }
+
+    fn from_tekkenizer(inner: Tekkenizer) -> Self {
+        // Tekken's special tokens are its control tokens; they take the IDs
+        // below `num_special_tokens`.
+        let control_tokens =
+            inner.vocab()[..inner.num_special_tokens()].iter().cloned().zip(0..).collect();
+        Self {
+            inner,
+            control_tokens,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TekkenTokenizer {
+    /// Build a byte-level tokenizer for tests. `control_tokens` take the IDs
+    /// from 0 and each byte follows them.
+    pub fn for_test(control_tokens: &[&str]) -> Self {
+        use base64::Engine as _;
+        use tekken::config::TokenizerVersion;
+        use tekken::{SpecialTokenInfo, TokenInfo};
+
+        let vocab = (0_u8..=255)
+            .map(|byte| TokenInfo {
+                rank: byte as usize,
+                token_bytes: base64::engine::general_purpose::STANDARD.encode([byte]),
+                token_str: None,
+            })
+            .collect();
+        let special_tokens: Vec<_> = control_tokens
+            .iter()
+            .enumerate()
+            .map(|(rank, token)| SpecialTokenInfo {
+                rank,
+                token_str: token.to_string(),
+                is_control: true,
+            })
+            .collect();
+        let inner = Tekkenizer::new(
+            vocab,
+            &special_tokens,
+            r"(?s).",
+            256 + special_tokens.len(),
+            special_tokens.len(),
+            TokenizerVersion::V3,
+            None,
+        )
+        .expect("build Tekken tokenizer");
+        Self::from_tekkenizer(inner)
     }
 }
 
 impl Tokenizer for TekkenTokenizer {
+    /// Control-token spellings in `text` stay plain text, as in Python's
+    /// `MistralTokenizer.encode`.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         self.inner
             .encode(text, add_special_tokens, false)
@@ -65,6 +119,11 @@ impl Tokenizer for TekkenTokenizer {
         self.inner.id_to_piece(id).ok()
     }
 
+    /// The control tokens, which [`encode`](Self::encode) does not match.
+    fn added_vocab(&self) -> &[(String, u32)] {
+        &self.control_tokens
+    }
+
     fn vocab_size(&self) -> usize {
         self.inner.vocab_size()
     }
@@ -76,41 +135,11 @@ impl Tokenizer for TekkenTokenizer {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use tekken::config::TokenizerVersion;
-    use tekken::{SpecialTokenInfo, TokenInfo};
-
     use super::*;
-
-    fn test_tokenizer() -> TekkenTokenizer {
-        let vocab = (0_u8..=255)
-            .map(|byte| TokenInfo {
-                rank: byte as usize,
-                token_bytes: base64::engine::general_purpose::STANDARD.encode([byte]),
-                token_str: None,
-            })
-            .collect();
-        let special_tokens = vec![SpecialTokenInfo {
-            rank: 0,
-            token_str: "<control>".to_string(),
-            is_control: true,
-        }];
-        let inner = Tekkenizer::new(
-            vocab,
-            &special_tokens,
-            r"(?s).",
-            257,
-            1,
-            TokenizerVersion::V3,
-            None,
-        )
-        .expect("build Tekken tokenizer");
-        TekkenTokenizer { inner }
-    }
 
     #[test]
     fn ordinary_matches_tekkens_empty_special_encoding() {
-        let tokenizer = test_tokenizer();
+        let tokenizer = TekkenTokenizer::for_test(&["<control>"]);
         let text = "user <control> text";
         let control_id = tokenizer.token_to_id("<control>").unwrap();
         let ordinary_ids = tokenizer.encode_ordinary(text).unwrap();

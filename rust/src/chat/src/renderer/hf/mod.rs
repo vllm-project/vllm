@@ -11,7 +11,9 @@ use vllm_text::Prompt;
 use vllm_text::backend::hf::{
     HfChatTemplate, HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
 };
+use vllm_text::tokenizer::DynTokenizer;
 
+use self::control_tokens::ControlTokenEncoder;
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption, ProbeContext,
 };
@@ -23,6 +25,7 @@ use crate::{
     AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
 };
 
+mod control_tokens;
 mod developer;
 mod error;
 mod format;
@@ -85,6 +88,9 @@ pub struct HfChatRenderer {
     trust_request_chat_template: bool,
     /// Fuel budget for request-supplied templates; `None` disables it.
     request_template_fuel: Option<u64>,
+    /// Encodes the rendered prompt when the tokenizer's `encode` would keep
+    /// its control tokens as text; `None` returns the prompt as text.
+    control_tokens: Option<ControlTokenEncoder>,
 }
 
 impl HfChatRenderer {
@@ -111,10 +117,19 @@ impl HfChatRenderer {
                 std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
             )
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+            control_tokens: None,
         };
         renderer.default_template =
             template.map(|template| renderer.compile_template(template, None)).transpose()?;
         Ok(renderer)
+    }
+
+    /// Render prompts to token IDs, mapping the control tokens in the rendered
+    /// prompt to their IDs in `tokenizer`'s added vocabulary. Use this for
+    /// tokenizers whose `encode` keeps control tokens as text, such as Tekken.
+    pub fn with_control_tokens(mut self, tokenizer: DynTokenizer) -> Self {
+        self.control_tokens = Some(ControlTokenEncoder::new(tokenizer));
+        self
     }
 
     /// Use a separate model template for requests with tools, as Transformers
@@ -309,8 +324,12 @@ impl HfChatRenderer {
             prompt, "rendered chat template prompt"
         );
 
+        let prompt = match &self.control_tokens {
+            Some(control_tokens) => Prompt::TokenIds(control_tokens.encode(&prompt)?),
+            None => Prompt::Text(prompt),
+        };
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(prompt),
+            prompt,
             media_order: None,
             effective_template_kwargs,
         })
