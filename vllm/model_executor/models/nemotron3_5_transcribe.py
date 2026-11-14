@@ -54,6 +54,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsMultiModalEmbeddings,
     SupportsPP,
+    SupportsReplaySSM,
     SupportsTranscription,
 )
 from .module_mapping import MultiModelKeys
@@ -410,6 +411,7 @@ class Nemotron3_5TranscribeForConditionalGeneration(
     IsHybrid,
     SupportsMambaPrefixCaching,
     SupportsEagle3,
+    SupportsReplaySSM,
     SupportsTranscription,
 ):
     packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
