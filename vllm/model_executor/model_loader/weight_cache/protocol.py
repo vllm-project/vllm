@@ -11,6 +11,7 @@ and are not group/world accessible before trusting them, so a different local
 user cannot pre-plant a malicious socket at a predictable path.
 """
 
+import array
 import glob
 import json
 import os
@@ -20,6 +21,7 @@ import stat
 import struct
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
@@ -31,6 +33,11 @@ import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.host_arena import (
+    HostArena,
+    HostArenaMapping,
+    HostTensorDescriptor,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
 )
@@ -246,6 +253,11 @@ def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> s
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
+def _hash_runtime_config(config: Any) -> str:
+    payload = json.dumps(normalize_value(config), sort_keys=True)
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
 def hash_rope_parameters(model_config: ModelConfig) -> str:
     """Fingerprint the text RoPE parameters used to construct cached buffers."""
 
@@ -337,6 +349,8 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    engram_config_hash: str = ""
+    attention_config_hash: str = ""
 
     @classmethod
     def from_model_config(
@@ -354,6 +368,8 @@ class WeightCacheKey:
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
         kernel_config: KernelConfig | None = None,
+        engram_config: Any = None,
+        attention_config: Any = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -401,6 +417,8 @@ class WeightCacheKey:
             linear_backend_per_quant=tuple(
                 sorted((kernel_config.linear_backend_per_quant or {}).items())
             ),
+            engram_config_hash=_hash_runtime_config(engram_config),
+            attention_config_hash=_hash_runtime_config(attention_config),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -415,57 +433,137 @@ class WeightCacheKey:
 class TensorEntry:
     """A single cached tensor.
 
-    CUDA tensors are exported as `torch.multiprocessing` reduction args
-    (CUDA IPC handles); non-CUDA tensors are shipped by value.
+    CUDA tensors are exported as `torch.multiprocessing` reduction args. Large
+    CPU tensors reference a host arena; small CPU tensors are shipped by value.
     """
 
     kind: str
     """Either "param" or "buffer"."""
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
+    host_tensor: HostTensorDescriptor | None = None
 
     @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
+    def from_tensor(
+        cls,
+        tensor: torch.Tensor,
+        kind: str,
+        arena: HostArena | None = None,
+    ) -> "TensorEntry":
+        host_tensor = arena.tensor_descriptor(tensor) if arena is not None else None
         tensor = tensor.detach()
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
             return cls(kind=kind, ipc_args=ipc_args)
+        if host_tensor is not None:
+            return cls(kind=kind, host_tensor=host_tensor)
         return cls(kind=kind, cpu_tensor=tensor.cpu())
 
-    def rebuild(self, device_index: int) -> torch.Tensor:
+    def rebuild(
+        self,
+        device_index: int,
+        host_arena: HostArenaMapping | None = None,
+        *,
+        copy: bool = False,
+    ) -> torch.Tensor:
+        if self.host_tensor is not None:
+            if host_arena is None:
+                raise ValueError(f"Tensor {self.kind} requires its host arena mapping")
+            return host_arena.get_tensor(self.host_tensor, copy=copy)
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
-            return self.cpu_tensor
+            return self.cpu_tensor.clone() if copy else self.cpu_tensor
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
         # have different CUDA_VISIBLE_DEVICES mappings.
         args[6] = device_index
-        return rebuild_cuda_tensor(*args)
+        tensor = rebuild_cuda_tensor(*args)
+        return tensor.clone() if copy else tensor
 
 
 class WeightCacheState(NamedTuple):
     """Client-side decode of a daemon's get_state response payload."""
 
     entries: dict[str, TensorEntry]
-    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    """Model tensors, exported by CUDA IPC, host arena, or by value."""
     aliases: dict[str, str]
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+    host_arena: HostArenaMapping | None = None
 
 
-def send_msg(sock: socket.socket, obj: Any) -> None:
+def send_msg(sock: socket.socket, obj: Any, fds: Iterable[int] | None = None) -> None:
     payload = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    header = _LEN_STRUCT.pack(len(payload))
+    if fds:
+        fd_array = array.array("i", fds)
+        sent = sock.sendmsg(
+            [header],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fd_array.tobytes())],
+        )
+        sock.sendall(header[sent:])
+    else:
+        sock.sendall(header)
     sock.sendall(payload)
 
 
-def recv_msg(sock: socket.socket) -> Any:
-    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
-    if length > MAX_MSG_SIZE:
-        raise ValueError(f"Message size {length} exceeds limit {MAX_MSG_SIZE}")
-    return pickle.loads(_recv_exact(sock, length))
+def _recv_header(
+    sock: socket.socket, deadline: float | None = None
+) -> tuple[bytes, list[int]]:
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Peer did not send its message in time")
+        sock.settimeout(remaining)
+    fd_size = array.array("i").itemsize
+    header, ancillary, flags, _ = sock.recvmsg(
+        _LEN_STRUCT.size, socket.CMSG_SPACE(16 * fd_size)
+    )
+    if not header:
+        raise ConnectionError("Socket closed while receiving message")
+    fds = array.array("i")
+    try:
+        if flags & socket.MSG_CTRUNC:
+            raise ValueError("Too many file descriptors in socket message")
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                if len(data) % fd_size:
+                    raise ValueError("Malformed file descriptor message")
+                fds.frombytes(data)
+        if len(fds) > 16:
+            raise ValueError("Too many file descriptors in socket message")
+        header += _recv_exact(sock, _LEN_STRUCT.size - len(header), deadline)
+    except Exception:
+        for fd in fds:
+            os.close(fd)
+        raise
+    return header, list(fds)
+
+
+def recv_msg(sock: socket.socket, with_fds: bool = False) -> Any:
+    header, fds = _recv_header(sock)
+    try:
+        (length,) = _LEN_STRUCT.unpack(header)
+        if length > MAX_MSG_SIZE:
+            raise ValueError(f"Message size {length} exceeds limit {MAX_MSG_SIZE}")
+        obj = pickle.loads(_recv_exact(sock, length))
+    except Exception:
+        for fd in fds:
+            os.close(fd)
+        raise
+    if with_fds:
+        return obj, fds
+    if fds:
+        for fd in fds:
+            os.close(fd)
+        raise ValueError("Received file descriptors without an FD-capable receiver")
+    return obj
+
+
+def recv_msg_with_fds(sock: socket.socket) -> tuple[Any, list[int]]:
+    return recv_msg(sock, with_fds=True)
 
 
 def send_json(sock: socket.socket, obj: Any) -> None:

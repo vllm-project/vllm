@@ -21,6 +21,8 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
     """Grouped MXFP8 einsum with per-row, 32-element weight scales."""
 
+    supports_pre_processed_weights = True
+
     def __init__(self, config: Mxfp8LinearLayerConfig):
         super().__init__(config)
         self.recipe = (1, 1, 32)

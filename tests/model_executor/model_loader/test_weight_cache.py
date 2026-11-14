@@ -941,6 +941,63 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
         assert server.vllm_config.parallel_config.rank == global_rank
 
 
+@pytest.mark.parametrize("unsupported_option", [None, "dp_shared_memory", "use_thp"])
+def test_daemon_engram_host_owner_options_fail_before_load(
+    tmp_path, monkeypatch, unsupported_option
+):
+    """Private CPU Engram passes; model-owned DP-shared/THP tables do not load."""
+    import torch
+
+    from vllm.config import EngramConfig, ModelConfig, ParallelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+    hf_config = DeepseekV41Config(
+        text_config={
+            "hidden_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "max_position_embeddings": 128,
+            "vocab_size": 1024,
+            "engram_layer_ids": [0],
+        }
+    )
+    hf_config.architectures = ["DeepseekV41ForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+    )
+    options = {unsupported_option: True} if unsupported_option else {}
+    parallel_config = (
+        ParallelConfig(data_parallel_size=2, nnodes=2)
+        if unsupported_option == "dp_shared_memory"
+        else ParallelConfig()
+    )
+    config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel_config,
+        engram_config=EngramConfig(**options),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    load_started = []
+
+    def fail_if_load_starts(*args, **kwargs):
+        load_started.append((args, kwargs))
+        raise RuntimeError("weight loading started")
+
+    monkeypatch.setattr(torch.accelerator, "set_device_index", lambda index: None)
+    monkeypatch.setattr(daemon, "init_distributed_environment", fail_if_load_starts)
+    if unsupported_option:
+        with pytest.raises(ValueError, match=unsupported_option):
+            server.load_model()
+        assert not load_started
+    else:
+        with pytest.raises(RuntimeError, match="weight loading started"):
+            server.load_model()
+        assert len(load_started) == 1
+
+
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
@@ -1049,11 +1106,10 @@ def test_ipc_rope_matching(
     import torch
     from transformers import DeepseekV2Config, Qwen3VLConfig
 
-    from vllm.config import LoadConfig, ModelConfig
+    from vllm.config import LoadConfig, ModelConfig, VllmConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
-        WeightCacheKey,
         hash_rope_parameters,
     )
 
@@ -1074,10 +1130,15 @@ def test_ipc_rope_matching(
         max_model_len=128,
     )
     model_config.hf_text_config.max_position_embeddings = 512
-    server = object.__new__(daemon.WeightCacheDaemon)
-    server.cache_key = WeightCacheKey.from_model_config(
-        model_config, 1, 0, cache_config=default_vllm_config.cache_config
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=default_vllm_config.cache_config,
+        parallel_config=default_vllm_config.parallel_config,
+        kernel_config=default_vllm_config.kernel_config,
+        engram_config=default_vllm_config.engram_config,
+        attention_config=default_vllm_config.attention_config,
     )
+    server = daemon.WeightCacheDaemon(vllm_config, 0, 0, "unused")
     rope = model_config.hf_text_config.rope_parameters
     # DeepseekV2 construction normalizes yarn to deepseek_yarn.
     rope["rope_type"] = "deepseek_yarn"
@@ -1086,7 +1147,6 @@ def test_ipc_rope_matching(
     model_config.hf_text_config.max_position_embeddings = max_position
     server.model = torch.nn.Module()
     server.model.register_buffer("rotary_cache", torch.ones(2), persistent=False)
-    server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
     for name in ("get_dp_group", "get_pp_group"):
@@ -1095,6 +1155,7 @@ def test_ipc_rope_matching(
         )
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: rank)
+    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     loader.fallback = fallback
@@ -1118,9 +1179,10 @@ def test_ipc_rope_matching(
                 else:
                     loader._fetch_entries(
                         model_config,
-                        default_vllm_config.cache_config,
-                        default_vllm_config.parallel_config,
-                        default_vllm_config.kernel_config,
+                        vllm_config.cache_config,
+                        vllm_config.parallel_config,
+                        vllm_config.kernel_config,
+                        vllm_config=vllm_config,
                     )
             if is_reload:
                 expected = torch.zeros(2) if mismatch else server.model.rotary_cache
@@ -1378,6 +1440,8 @@ def test_ipc_cache_key_tracks_kv_quantization(
         model_config=model_config,
         parallel_config=ParallelConfig(),
         speculative_config=None,
+        engram_config=None,
+        attention_config=None,
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
@@ -1463,6 +1527,8 @@ def test_ipc_cache_key_tracks_kernel_backends(
         model_config=model_config,
         parallel_config=ParallelConfig(),
         speculative_config=None,
+        engram_config=None,
+        attention_config=None,
         cache_config=CacheConfig(),
         kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
     )
@@ -2018,3 +2084,269 @@ def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
         target = CompileArtifactWarmupCache(store_names=["mooncake"])
         target.install(None, target.validate_payload(payload))
         assert (target_dir / "kernel.cubin").read_bytes() == b"compiled-kernel"
+
+
+def test_host_arena_socket_round_trip_and_tensor_lifetime(tmp_path, monkeypatch):
+    """Large CPU weights arrive by FD, not pickle, and outlive their owners."""
+    import gc
+    import weakref
+
+    import torch
+    from transformers import DeepseekV2Config
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, protocol
+    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
+    from vllm.model_executor.model_loader.weight_cache.host_arena import (
+        HostArena,
+        HostArenaMapping,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    hf_config = DeepseekV2Config()
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+    )
+    cache_daemon = daemon.WeightCacheDaemon(
+        VllmConfig(model_config=model_config), 0, 0, "unused"
+    )
+    monkeypatch.setattr(daemon, "get_current_device_uuid", lambda: "test-device")
+
+    model = torch.nn.Module()
+    storage = torch.arange(1 << 18, dtype=torch.float32).view(1024, 256)
+    model.weight = torch.nn.Parameter(storage[:, ::2], requires_grad=False)
+    model.register_buffer("weight_view", storage[1:, 1:4], persistent=False)
+    model.register_buffer("small", torch.tensor([1.0, 2.0]), persistent=False)
+    weight = model.weight
+    weight_view = model.weight_view
+    weight_stride = weight.stride()
+    view_stride = weight_view.stride()
+    expected_weight = weight.detach().clone()
+    expected_view = weight_view.detach().clone()
+
+    arena = HostArena.from_model(model, min_bytes=32)
+    assert arena is not None
+    assert model.weight is weight and model.weight_view is weight_view
+    assert weight.stride() == weight_stride
+    assert weight_view.stride() == view_stride
+    torch.testing.assert_close(weight, expected_weight)
+    torch.testing.assert_close(weight_view, expected_view)
+
+    entries, _ = export_entries(model, arena=arena)
+    assert entries["weight"].cpu_tensor is None
+    assert entries["weight"].host_tensor is not None
+    assert entries["weight_view"].host_tensor is not None
+    assert entries["small"].cpu_tensor is not None
+    assert entries["small"].host_tensor is None
+
+    cache_daemon.model = model
+    cache_daemon.host_arena = arena
+    client, server = socket.socketpair()
+    with client, server:
+        send_msg(client, {"cmd": "get_state", "cache_key": cache_daemon.cache_key})
+        cache_daemon._handle_connection(server)
+        response, fds = recv_msg(client, with_fds=True)
+    assert response["status"] == "ok"
+    assert len(protocol.pickle.dumps(response)) < 4096
+    assert len(fds) == 1
+
+    mapping = HostArenaMapping.from_fds(response["host_arena"], fds)
+    rebuilt = response["entries"]["weight"].rebuild(0, mapping)
+    rebuilt_view = response["entries"]["weight_view"].rebuild(0, mapping)
+    torch.testing.assert_close(rebuilt, expected_weight)
+    torch.testing.assert_close(rebuilt_view, expected_view)
+    assert rebuilt.stride() == weight_stride
+    assert rebuilt_view.stride() == view_stride
+    assert rebuilt.storage_offset() == weight.storage_offset()
+    copied = response["entries"]["weight"].rebuild(0, mapping, copy=True)
+    assert copied.data_ptr() != rebuilt.data_ptr()
+    torch.testing.assert_close(copied, expected_weight)
+
+    lifetime = weakref.ref(mapping._lifetime)
+    arena.close()
+    mapping.close()
+    del arena, mapping, model, weight, weight_view, entries, response, cache_daemon
+    gc.collect()
+    rebuilt[0, 0] = -7
+    assert rebuilt_view[0, 0] == 257
+    assert copied[0, 0] == 0
+    assert lifetime() is not None
+    del rebuilt, rebuilt_view, copied
+    gc.collect()
+    assert lifetime() is None
+
+
+def test_host_arena_releases_each_storage_before_pinning(monkeypatch):
+    import weakref
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import host_arena
+
+    model = torch.nn.Module()
+    model.first = torch.nn.Parameter(torch.arange(32.0), requires_grad=False)
+    model.second = torch.nn.Parameter(torch.arange(64.0), requires_grad=False)
+    first, second = model.first, model.second
+    expected_first, expected_second = first.detach().clone(), second.detach().clone()
+    first_storage = weakref.ref(first.untyped_storage())
+    second_storage = weakref.ref(second.untyped_storage())
+
+    monkeypatch.setattr(
+        host_arena._TensorGroup, "pin_required", property(lambda self: True)
+    )
+    cache_checks = []
+
+    def check_releases():
+        cache_checks.append((first_storage() is None, second_storage() is None))
+
+    def register(ptr, nbytes):
+        assert first_storage() is None
+        assert second_storage() is None
+        return True
+
+    monkeypatch.setattr(host_arena, "_empty_host_cache", check_releases)
+    monkeypatch.setattr(host_arena, "host_register", register)
+    monkeypatch.setattr(host_arena, "host_unregister", lambda ptr: None)
+
+    arena = host_arena.HostArena.from_model(model, min_bytes=1)
+    assert arena is not None
+    assert cache_checks == [(True, False), (True, True)]
+    assert model.first is first and model.second is second
+    torch.testing.assert_close(model.first, expected_first)
+    torch.testing.assert_close(model.second, expected_second)
+    arena.close()
+
+
+def test_host_arena_rejects_bad_descriptor_and_closes_fd():
+    import os
+
+    import pytest
+
+    from vllm.model_executor.model_loader.weight_cache.host_arena import (
+        HostArenaDescriptor,
+        HostArenaMapping,
+    )
+
+    read_fd, write_fd = os.pipe()
+    try:
+        with pytest.raises((OSError, ValueError)):
+            HostArenaMapping.from_fds(
+                HostArenaDescriptor(nbytes=4096, pin_required=False), [read_fd]
+            )
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+    finally:
+        os.close(write_fd)
+
+
+def test_weight_cache_key_tracks_engram_and_attention_configs(
+    tmp_path, default_vllm_config
+):
+    from dataclasses import replace
+
+    from transformers import DeepseekV2Config
+
+    from vllm.config import AttentionConfig, EngramConfig, ModelConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    hf_config = DeepseekV2Config()
+    hf_config.architectures = ["DeepseekV2ForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+    )
+    kwargs = dict(
+        tp_size=1,
+        tp_rank=0,
+        cache_config=default_vllm_config.cache_config,
+        engram_config=EngramConfig(),
+        attention_config=AttentionConfig(),
+    )
+    key = WeightCacheKey.from_model_config(model_config, **kwargs)
+    different_engram = WeightCacheKey.from_model_config(
+        model_config,
+        **{**kwargs, "engram_config": EngramConfig(cpu_offload=False)},
+    )
+    different_attention = WeightCacheKey.from_model_config(
+        model_config,
+        **{**kwargs, "attention_config": AttentionConfig(indexer_kv_dtype="fp8")},
+    )
+    assert key.mismatched_fields(different_engram) == ["engram_config_hash"]
+    assert key.mismatched_fields(different_attention) == ["attention_config_hash"]
+    assert key.mismatched_fields(replace(key, engram_config_hash="bad")) == [
+        "engram_config_hash"
+    ]
+
+
+def test_ipc_loader_fills_placeholders_referenced_outside_the_model():
+    """References to a parameter held outside the module tree (e.g. a MoE
+    router's e_score_correction_bias) must see the cached data, not the meta
+    placeholder. Placeholders that cannot or must not be swapped still load."""
+    import weakref
+
+    import torch
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        IpcModelLoader,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        TensorEntry,
+        WeightCacheState,
+    )
+
+    class SlottedParameter(torch.nn.Parameter):
+        __slots__ = ("tag",)
+
+    with torch.device("meta"):
+        model = torch.nn.Module()
+        model.gate = torch.nn.Module()
+        model.gate.bias = torch.nn.Parameter(torch.empty(4))
+        model.experts = torch.nn.Module()
+        model.experts.bias = torch.nn.Parameter(torch.empty(4))
+        model.head = torch.nn.Module()
+        model.head.bias = model.gate.bias
+        model.conv = torch.nn.Module()
+        model.conv.weight = torch.nn.Parameter(torch.empty(4, 1, 2))
+        model.conv.register_buffer("view", model.conv.weight.view(4, 2))
+        model.norm = torch.nn.Module()
+        model.norm.weight = torch.nn.Parameter(torch.empty(4))
+        model.norm.weight_ref = weakref.ref(model.norm.weight)
+        model.scale = torch.nn.Module()
+        model.scale.weight = SlottedParameter(torch.empty(4), requires_grad=False)
+        model.act = torch.nn.Module()
+        model.act.register_buffer("scale", torch.empty(4, requires_grad=True) * 2)
+        model.act.scale.retain_grad()
+    router_bias = model.gate.bias
+
+    bias = torch.arange(4.0)
+    conv_weight = torch.arange(8.0).view(4, 1, 2)
+    state = WeightCacheState(
+        entries={
+            "gate.bias": TensorEntry(kind="param", cpu_tensor=bias),
+            "head.bias": TensorEntry(kind="param", cpu_tensor=torch.ones(4)),
+            "conv.weight": TensorEntry(kind="param", cpu_tensor=conv_weight),
+            "conv.view": TensorEntry(kind="buffer", cpu_tensor=conv_weight.view(4, 2)),
+            "norm.weight": TensorEntry(kind="param", cpu_tensor=torch.ones(4)),
+            "scale.weight": TensorEntry(kind="param", cpu_tensor=torch.ones(4)),
+            "act.scale": TensorEntry(kind="buffer", cpu_tensor=torch.ones(4)),
+        },
+        aliases={"experts.bias": "gate.bias"},
+        attrs={},
+    )
+    IpcModelLoader(LoadConfig(load_format="ipc_cache"))._apply_entries(
+        model, state, device_index=0
+    )
+
+    torch.testing.assert_close(router_bias, bias)
+    assert model.gate.bias is router_bias and model.experts.bias is router_bias
+    torch.testing.assert_close(model.head.bias, torch.ones(4))
+    torch.testing.assert_close(model.conv.weight, conv_weight)
+    torch.testing.assert_close(model.conv.view, conv_weight.view(4, 2))
+    torch.testing.assert_close(model.norm.weight, torch.ones(4))
+    torch.testing.assert_close(model.scale.weight, torch.ones(4))
+    torch.testing.assert_close(model.act.scale, torch.ones(4))
