@@ -306,7 +306,9 @@ def _check_pool_tables(store_dir: str):
 
     for transport, host, node in modes:
         group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}{node}/store")
-        pool = EngramPool(group, transport, host, 9 * len(HEAD_SIZES), 72)
+        # Engines batch differently (P/D): owners size each requester's mailbox.
+        max_items = 9 * len(HEAD_SIZES) * (1 + group.rank_in_group % 2)
+        pool = EngramPool(group, transport, host, max_items, 72)
         if node == 1:
             pool.transport.node = str(group.rank_in_group)  # type: ignore[attr-defined]
         with torch.device("cuda"):

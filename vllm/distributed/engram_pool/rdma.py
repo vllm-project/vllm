@@ -575,6 +575,7 @@ class RdmaTransport:
                 info["mtu"],
                 info["notices"],
                 [qpn for _, qpn in made],
+                max_items,
             ]
         )
         # Every owner posts our WRs, so they fit every NIC and path.
@@ -582,7 +583,14 @@ class RdmaTransport:
         self.mtu = min(e[3] for e in everyone)
         # Per (table, gatherer): a partial WR, and a READ and a flag WR per QP.
         rows_per_wr = self.rows_per_wr(max_row_bytes)
-        box_wrs = triton.cdiv(max_items, rows_per_wr) + 1 + 2 * self.qps_per_peer
+        # Owners keep a mailbox per requester and table, sized for that
+        # requester's fetches (engines may batch differently, as P and D do).
+        box_sizes = [
+            proxy.mailbox_bytes(
+                triton.cdiv(e[6], rows_per_wr) + 1 + 2 * self.qps_per_peer, e[6]
+            )
+            for e in everyone
+        ]
         groups = self.world * max_tables
         self.max_wrs = triton.cdiv(total, rows_per_wr) + groups * (
             1 + 2 * self.qps_per_peer
@@ -595,8 +603,7 @@ class RdmaTransport:
                 if peer != self.rank
             ],
             [[peer, e[0], e[5][self.rank]] for peer, e in enumerate(everyone)],
-            box_wrs,
-            max_items,
+            box_sizes,
             max_tables,
         )
         for (qp, _), e in zip(made, everyone):
@@ -632,9 +639,10 @@ class RdmaTransport:
         boxes = self._all_gather(mailboxes)
         # This GPU's first mailbox at each owner, in that owner proxy's
         # addresses; one follows per table.
-        self.box_bytes = proxy.mailbox_bytes(box_wrs, max_items)
+        self.box_bytes = box_sizes[self.rank]
+        mine = sum(box_sizes[: self.rank]) * max_tables
         self.boxes = torch.tensor(
-            [box + self.rank * max_tables * self.box_bytes for box, _, _ in boxes],
+            [box + mine for box, _, _ in boxes],
             dtype=torch.int64,
             device=gpu,
         )
@@ -649,12 +657,8 @@ class RdmaTransport:
         address = memory.map()
         self.desc = device_view(address, desc_bytes, memory).view(torch.int64)
         fd = memory.dmabuf_fd(address)
-        try:
-            self.desc_lkey = self.verbs.reg_dmabuf(
-                fd, address, desc_bytes, verbs.LOCAL
-            )[1]
-        finally:
-            os.close(fd)
+        self.desc_lkey = self.verbs.reg_dmabuf(fd, address, desc_bytes, verbs.LOCAL)[1]
+        os.close(fd)
         self.queues = torch.tensor(
             self._map_queues(made), dtype=torch.int64, device=gpu
         )
