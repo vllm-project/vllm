@@ -175,6 +175,10 @@ class WorkerBase:
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
+    def set_kv_identity(self, digest: str, components: dict[str, str]) -> None:
+        self.cache_config.kv_identity = digest
+        self.cache_config.kv_identity_components = components
+
     def supports_draft_weight_updates(self) -> bool:
         """Whether this worker can update its configured speculative model."""
         return False
