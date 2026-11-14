@@ -12,6 +12,11 @@ no rollback, the next full update repairs it.
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
 of every `padding_fill_params()` parameter, which `begin` zero-fills whole.
+
+Online-quantized layers are the exception to "PWAL at `finish`": they load
+into buffers and run PWAL when their last shard arrives (`online.py`), so
+`finish` processes them first and then leaves them alone. They have no
+checkpoint layout record; a partial update of one raises at `finish`.
 """
 
 from collections.abc import Iterator
@@ -26,6 +31,8 @@ from vllm.model_executor.utils import (
     is_weights_pre_processed,
     storage_view,
 )
+
+from .online import begin_online_reload, finalize_online, has_online_buffers
 
 logger = init_logger(__name__)
 
@@ -85,8 +92,21 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
+def _unvalidated_online_methods() -> tuple[type, ...]:
+    """Online quantization methods no direct reload test covers yet."""
+    from vllm.model_executor.layers.quantization.online.fp8_requant import (
+        Fp8BlockExpertsAsMxfp4FusedMoE,
+    )
+    from vllm.model_executor.layers.quantization.online.lut_b import (
+        LutBOnlineMoEMethod,
+    )
+
+    return (Fp8BlockExpertsAsMxfp4FusedMoE, LutBOnlineMoEMethod)
+
+
 def _check_supported_modules(model: torch.nn.Module) -> None:
     # config-level refusals: VllmConfig._verify_direct_reload_compat
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
@@ -98,14 +118,30 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
-        # also without an online config (experts_int8); fused shared experts
-        # quantize staging parameters that post-load processing deletes
-        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
-            getattr(module, "shared_expert_online_loader", None) is not None
+        online = isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase))
+        # Online quantization reloads through its buffers, except: a
+        # requantization source, whose PWAL releases the source parameters;
+        # fused shared experts, which quantize staging parameters that PWAL
+        # deletes; a method wrapping an online one (input Hadamard); and the
+        # schemes no reload test covers yet.
+        if (
+            (online and not has_online_buffers(module))
+            or getattr(module, "shared_expert_online_loader", None) is not None
+            or (has_online_buffers(module) and not online)
+            or isinstance(method, _unvalidated_online_methods())
         ):
             raise RuntimeError(
-                f"direct reload: online quantization is not supported "
+                f"direct reload: this online quantization is not supported "
                 f"({name}: {type(method).__name__})"
+            )
+        if (
+            isinstance(module, MLAAttention)
+            and getattr(module, "is_amx_bmm_enabled", False)
+            and has_online_buffers(module.kv_b_proj)
+        ):
+            # its PWAL empties the online-quantized kv_b_proj weight
+            raise RuntimeError(
+                f"direct reload: AMX MLA with online-quantized kv_b_proj ({name})"
             )
         if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
@@ -125,8 +161,14 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
+    online = {  # already processed, reloaded through their buffers
+        id(t)
+        for module in model.modules()
+        if has_online_buffers(module)
+        for t in (*module._parameters.values(), *module._buffers.values())
+    }
     for _, t in loadable_tensors(model):
-        if not t.is_meta and not hasattr(t, "_ckpt"):
+        if id(t) not in online and not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
@@ -216,6 +258,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
+    begin_online_reload(model)
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in loadable_tensors(model):
@@ -249,12 +292,16 @@ def finish_direct_reload(
         )
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
+    finalize_online(model, strict=True)  # before any module reads them
 
     # One-shot "already processed" guards would make the rerun below a no-op
     # and leave the freshly written checkpoint layout in place. Only quant
-    # methods' guards: other modules set it for other reasons.
+    # methods' guards: other modules set it for other reasons. Online layers
+    # keep theirs: they are processed already.
     for module in model.modules():
-        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+        if isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        ) and not has_online_buffers(module):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
     process_weights_after_loading(model, model_config, device)

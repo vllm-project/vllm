@@ -334,7 +334,10 @@ class AutoWeightsLoader:
                     f"into a single parameter {base_prefix!r}"
                 )
 
-            if param.dtype != weight_data.dtype:
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            # online quantization loads into a checkpoint-dtype buffer
+            buffered = getattr(weight_loader, "loads_into_buffer", False)
+            if param.dtype != weight_data.dtype and not buffered:
                 # An exact widening -- an fp32 accumulator reading a bf16
                 # table, say -- keeps every stored value, so it is a debug
                 # line. Every other mismatch still warns.
@@ -350,7 +353,6 @@ class AutoWeightsLoader:
                     weight_data.dtype,
                     param.dtype,
                 )
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, weight_data)
 
             logger.debug("Loaded weight %s with shape %s", weight_qualname, param.shape)

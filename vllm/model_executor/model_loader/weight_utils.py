@@ -1647,7 +1647,7 @@ def initialize_single_dummy_weight(
     +-1e-3, or +-1 for 8-bit floats.
     """
     if param.device.type == "meta":
-        return  # deferred to finalize_layerwise_processing (e.g. online quant)
+        return  # online quantization: processed from zeros by finalize_online
 
     if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
         param.fill_(dummy_weight_value)

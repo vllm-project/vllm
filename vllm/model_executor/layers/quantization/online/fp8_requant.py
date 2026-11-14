@@ -29,9 +29,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
-from vllm.model_executor.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
+from vllm.model_executor.model_loader.reload.online import install_online_buffers
 from vllm.model_executor.utils import replace_parameter
 
 logger = init_logger(__name__)
@@ -58,8 +56,8 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
     weight error is of the order of an MXFP4 quantization of the bf16 weights.
     """
 
-    # FP8 expert parameters live on the meta device and are materialized one
-    # layer at a time by the layerwise online-processing loader, so each layer
+    # FP8 expert parameters live on the meta device and are loaded one layer
+    # at a time into online quantization buffers (`reload/online.py`), so each layer
     # is re-quantized as soon as its experts are loaded: peak memory is the
     # MXFP4 model plus one layer of FP8 experts (TP4 would not fit otherwise).
     uses_meta_device = True
@@ -148,7 +146,7 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
             )
             meta.__dict__.update(param.__dict__)
             layer.register_parameter(name, meta)
-        initialize_online_processing(layer)
+        install_online_buffers(layer)
 
     def _requant(self, weight: torch.Tensor, scale_inv: torch.Tensor):
         num_experts, n, k = weight.shape

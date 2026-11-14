@@ -17,15 +17,13 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
-from vllm.model_executor.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
+from vllm.model_executor.model_loader.reload.online import install_online_buffers
 from vllm.model_executor.utils import set_weight_attrs
 
 
 class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     """Base for MoE methods that load full-precision weights on meta device
-    and quantize them after loading via the QeRL layerwise processing system.
+    and quantize each layer once its weights are loaded (`reload/online.py`).
     """
 
     uses_meta_device: bool = True
@@ -118,7 +116,7 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        initialize_online_processing(layer)
+        install_online_buffers(layer)
 
     def get_weights_for_quantization(
         self, layer: torch.nn.Module

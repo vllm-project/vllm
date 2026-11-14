@@ -25,7 +25,13 @@ For more information on implementation, see [Low Level `layerwise` API](#low-lev
 
 ## Layerwise Loading with Online Quantization
 
-Online quantization refers to when a user provides full precision weights and those weights are quantized on-the-fly as they are loaded into the model. The layerwise reloading system handles this by treating online quantization as a **processing** step, which is then handled in an online way both during first-time load and during reload. A typical online quantization method implementation should look like this:
+Online quantization refers to when a user provides full precision weights and those weights are quantized on-the-fly as they are loaded into the model. Online-quantized layers load through their own buffers ([online.py](../../vllm/model_executor/model_loader/reload/online.py)) rather than the layerwise wrappers, both during first-time load and during reload (layerwise or direct):
+
+1. Each checkpoint tensor is written by the layer's weight loader into a zero-filled buffer of the checkpoint shape.
+2. When every expected shard of the layer has arrived (stacked linear shard ids, or each local expert's `w1`/`w3`/`w2`), the layer's `process_weights_after_loading` quantizes the buffers.
+3. During a reload, the result is copied into the layer's existing tensors, which keeps their addresses for captured CUDA graphs.
+
+A typical online quantization method implementation should look like this:
 
 ```python
 class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
@@ -41,8 +47,8 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
 
-        # set up online processing
-        initialize_online_processing(layer)
+        # load through buffers, quantized once the layer is complete
+        install_online_buffers(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -106,11 +112,11 @@ llm.collective_rpc("reload_weights", kwargs={"weights_iterator": weights_iterato
 | Function | Purpose | Quantized Reload | Online Quantization |
 | - | - | - | - |
 | `record_metadata_for_reloading` | Record tensor metadata so that layers can be restored on the meta device | Called by `BaseModelLoader` | Called by `BaseModelLoader` |
-| `restore_layer_on_meta` | Restore layer to model format at start of reload | Called by `initialize_layerwise_reload` | Not called. Online quantized weights already start on meta device via `...OnlineLinearMethod.create_weights` |
-| `initialize_online_processing` | Wrap weight loaders with the `online_process_loader` wrapper, which buffers weights until all layer weights have been loaded | Called by `initialize_layerwise_reload` | Called by `...OnlineLinearMethod.create_weights` |
-| `_layerwise_process` | Process layer once all weights are loaded | Called by `online_process_loader` during loading | Called by `online_process_loader` during loading |
-| `_copy_and_restore_kernel_tensors` | Copy processed weights into original tensor locations to affect compiled cuda graphs, etc. | Called by `_layerwise_process` after `process_weights_after_loading` | Not called. There is no compiled cuda graph yet |
-| `finalize_layerwise_processing` | Catch any layers which did not load all weights (for example attention weights or weights with padding) | Called by `BaseModelLoader` | Called by `BaseModelLoader` |
+| `restore_layer_on_meta` | Restore layer to model format at start of reload | Called by `initialize_layerwise_reload` | Not called. Online quantized layers load through their own buffers (`online.py`) |
+| `initialize_online_processing` | Wrap weight loaders with the `online_process_loader` wrapper, which buffers weights until all layer weights have been loaded | Called by `initialize_layerwise_reload` | Not called. `...OnlineLinearMethod.create_weights` calls `install_online_buffers` instead |
+| `_layerwise_process` | Process layer once all weights are loaded | Called by `online_process_loader` during loading | Not called. The buffered loader processes the layer once its last shard arrives |
+| `_copy_and_restore_kernel_tensors` | Copy processed weights into original tensor locations to affect compiled cuda graphs, etc. | Called by `_layerwise_process` after `process_weights_after_loading` | Not called. The buffered loader copies into the layer's tensors on reload |
+| `finalize_layerwise_processing` | Catch any layers which did not load all weights (for example attention weights or weights with padding) | Called by `finalize_layerwise_reload` | Calls `finalize_online`, which `BaseModelLoader` also calls at first-time load |
 
 You can plug into this lifecycle directly by calling the `initialize_layerwise_reload`, loading weights, then calling `finalize_layerwise_processing`:
 

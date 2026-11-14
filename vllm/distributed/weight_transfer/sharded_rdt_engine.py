@@ -569,6 +569,18 @@ class ShardedRDTWeightTransferEngine(
         RPCs to the producers, so this is a heavyweight one-off; every later
         `update_weights` is pure replay.
         """
+        from vllm.model_executor.model_loader.reload.online import (
+            has_online_buffers,
+        )
+
+        if self.model is not None and any(
+            has_online_buffers(m) for m in self.model.modules()
+        ):
+            # its replay scatters into the layers, bypassing the loaders that
+            # fill online quantization buffers
+            raise NotImplementedError(
+                "sharded RDT weight transfer does not support online quantization"
+            )
         validate_sharded_rdt_settings(
             staging_device=init_info.staging_device,
             stages_in_flight=init_info.stages_in_flight,
