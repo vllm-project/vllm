@@ -146,13 +146,6 @@ def xpu_platform_plugin() -> str | None:
     try:
         import torch
 
-        if torch.distributed.is_xccl_available():
-            dist_backend = "xccl"
-            from vllm.platforms.xpu import XPUPlatform
-
-            XPUPlatform.dist_backend = dist_backend
-            logger.debug("Confirmed %s backend is available.", XPUPlatform.dist_backend)
-
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             is_xpu = True
             logger.debug("Confirmed XPU platform is available.")
