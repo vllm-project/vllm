@@ -89,3 +89,37 @@ def test_per_token_head_kv_cache_accuracy(
             name_0="bf16_kv_cache",
             name_1=f"{kv_cache_dtype}_kv_cache",
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Per-token-head KV cache requires CUDA or ROCm GPU.",
+)
+def test_qwen2_int4_key_bias_accuracy(vllm_runner, monkeypatch) -> None:
+    """Qwen2's large key bias must not destroy int4 generation quality."""
+    model = "Qwen/Qwen2.5-1.5B-Instruct"
+    prompts = [
+        "Explain why the sky is blue in one sentence.",
+        "What is 19 times 23? Show the calculation.",
+    ]
+    common_args = dict(
+        max_model_len=1024,
+        enforce_eager=True,
+        attention_config={"backend": "TRITON_ATTN"},
+    )
+
+    with monkeypatch.context() as m:
+        m.setenv("TOKENIZERS_PARALLELISM", "true")
+        with vllm_runner(model, kv_cache_dtype="auto", **common_args) as runner:
+            baseline = runner.generate_greedy_logprobs(prompts, 16, 8)
+        with vllm_runner(
+            model, kv_cache_dtype="int4_per_token_head", **common_args
+        ) as runner:
+            quantized = runner.generate_greedy_logprobs(prompts, 16, 8)
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=quantized,
+        name_0="bf16_kv_cache",
+        name_1="int4_per_token_head_kv_cache",
+    )
