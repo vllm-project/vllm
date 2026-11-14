@@ -307,7 +307,12 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     """The reasoning content for interleaved thinking."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
-    """The tools for developer role."""
+    """Message-level tools, kept for "developer" and "system" roles.
+
+    Used by encoders that accept tools attached to a system or developer
+    message (e.g. DeepSeek-V3.2, DeepSeek-V4), as opposed to the
+    request-level `tools` parameter.
+    """
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
@@ -344,7 +349,12 @@ class ConversationMessage(TypedDict, total=False):
     """Deprecated: The reasoning content for interleaved thinking."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
-    """The tools for developer role."""
+    """Message-level tools, kept for "developer" and "system" roles.
+
+    Used by encoders that accept tools attached to a system or developer
+    message (e.g. DeepSeek-V3.2, DeepSeek-V4), as opposed to the
+    request-level `tools` parameter.
+    """
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
