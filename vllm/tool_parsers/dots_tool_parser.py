@@ -23,7 +23,11 @@ from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    is_complete_json,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -80,35 +84,22 @@ class DotsToolParser(ToolParser):
 
     @staticmethod
     def _convert_param_value(value: str, param_type: Any) -> Any:
-        if value.lower() == "null":
-            return None
-
         if isinstance(param_type, list):
-            param_type = next((item for item in param_type if item != "null"), "string")
-        if not isinstance(param_type, str):
-            param_type = str(param_type)
-        param_type = param_type.lower()
-
-        if param_type in {"string", "str", "text"}:
-            return value
-        if param_type in {"integer", "int"}:
+            schema_types = [str(item) for item in param_type]
+        elif param_type is None:
+            schema_types = []
+        else:
+            schema_types = [str(param_type)]
+        if not schema_types:
+            # Unresolvable schema: keep the previous lenient JSON fallback.
             try:
-                return int(value)
-            except (TypeError, ValueError):
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError, ValueError):
                 return value
-        if param_type in {"number", "float"}:
-            try:
-                number = float(value)
-                return int(number) if number.is_integer() else number
-            except (TypeError, ValueError):
-                return value
-        if param_type in {"boolean", "bool"}:
-            return value.lower() in {"true", "1"}
-
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return value
+        # Shared helper: keeps a literal "null" for string params, nulls it
+        # when the schema allows null, and never emits non-finite floats
+        # (inf/nan) that would serialize as invalid JSON.
+        return coerce_to_schema_type(value, schema_types)
 
     def _resolve_param_type(
         self,
@@ -131,12 +122,21 @@ class DotsToolParser(ToolParser):
             alternatives = schema.get(keyword)
             if not isinstance(alternatives, list):
                 continue
+            nullable = any(
+                isinstance(alternative, dict) and alternative.get("type") == "null"
+                for alternative in alternatives
+            )
             for alternative in alternatives:
                 if isinstance(alternative, dict) and alternative.get("type") == "null":
                     continue
                 resolved = self._resolve_param_type(alternative, defs, depth + 1)
-                if resolved is not None:
+                if resolved is None:
+                    continue
+                if not nullable:
                     return resolved
+                if isinstance(resolved, list):
+                    return resolved if "null" in resolved else [*resolved, "null"]
+                return [resolved, "null"]
         return None
 
     @staticmethod
