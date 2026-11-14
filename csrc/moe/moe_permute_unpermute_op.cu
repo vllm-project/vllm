@@ -112,6 +112,16 @@ torch::stable::Tensor moe_sort_routing(
   auto topk_ids_for_sort = maybe_allocate_tensor(
       maybe_topk_ids_for_sort, topk_ids.sizes(),
       torch::headeronly::ScalarType::Int, device, "topk_ids_for_sort");
+  if (expanded_rows <= 128) {
+    smallSortAndScanExperts(
+        get_ptr<const int>(topk_ids), get_ptr<const int>(token_expert_indices),
+        expert_map_ptr, get_ptr<int>(topk_ids_for_sort),
+        get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
+        get_ptr<int64_t>(expert_first_token_offset),
+        build_inverse ? get_ptr<int>(inv_permuted_idx) : nullptr, expanded_rows,
+        n_expert, n_local_expert, stream);
+    return sorted_row_idx;
+  }
   torch::stable::copy_(topk_ids_for_sort, topk_ids);
   preprocessTopkIdLauncher(get_ptr<int>(topk_ids_for_sort), n_token * topk,
                            expert_map_ptr, n_expert, stream);
