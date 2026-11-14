@@ -311,3 +311,170 @@ def test_cpu_requested_output_logprobs_without_topk() -> None:
         torch.tensor([[2.0, 1.0, 3.0], [2.0, -math.inf, -math.inf]]),
     )
     assert output.selected_token_ranks.tolist() == [3, 3]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("offset", [0.0, 16384.0, -16384.0, 32768.0, -32768.0])
+def test_cpu_token_logprobs_preserve_common_offsets(dtype, offset):
+    # Use the actual rounded input values as the reference, including FP16 ties.
+    storage = torch.tensor(
+        [
+            [-4.0, 99.0, 0.0, 99.0, 1.0, 99.0, 3.0, 99.0],
+            [2.0, 99.0, -1.0, 99.0, 4.0, 99.0, 0.0, 99.0],
+        ],
+        dtype=dtype,
+    )
+    logits = (storage + offset)[:, ::2]
+    original = logits.clone()
+    token_ids = torch.tensor([[3, 1, 1], [2, 0, 3]], dtype=torch.int32)
+    expected = logits.double().log_softmax(-1).gather(-1, token_ids.long()).float()
+
+    actual = compute_token_logprobs(logits, token_ids)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+    assert actual.dtype == torch.float32
+
+
+@pytest.mark.parametrize("offset", [1e8, -1e8])
+def test_cpu_token_logprobs_uniform_large_offset(offset):
+    logits = torch.full((3, 16), offset)
+    ids = torch.tensor([[0, 15], [9, 9], [4, 7]])
+    expected = torch.full((3, 2), -math.log(16))
+    torch.testing.assert_close(
+        compute_token_logprobs(logits, ids), expected, rtol=1e-6, atol=1e-6
+    )
+
+
+def test_cpu_token_logprobs_preserve_masked_and_nonfinite_inputs():
+    logits = torch.tensor(
+        [
+            [-math.inf, 1.0, 2.0, 3.0],
+            [-math.inf, -math.inf, -math.inf, -math.inf],
+            [1.0, math.inf, 2.0, -math.inf],
+            [1.0, math.nan, 2.0, 3.0],
+        ]
+    )
+    ids = torch.tensor([[0, 2], [1, 3], [0, 1], [2, 3]])
+    # Preserve the existing semantics of invalid all-masked/nonfinite rows.
+    expected = logits.gather(-1, ids) - torch.logsumexp(logits, -1, keepdim=True)
+    actual = compute_token_logprobs(logits, ids)
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("shape", [(0, 16), (3, 16)])
+def test_cpu_token_logprobs_empty_selected_tokens(shape):
+    logits = torch.ones(shape)
+    ids = torch.empty((shape[0], 0), dtype=torch.int32)
+    actual = compute_token_logprobs(logits, ids)
+    assert actual.shape == ids.shape
+    assert actual.dtype == torch.float32
+
+
+@pytest.mark.parametrize("logits_mode", [False, True])
+def test_cpu_topk_and_prompt_scores_with_common_offset(logits_mode):
+    logits = torch.full((3, 16), 1e8)
+    ids = torch.tensor([2, 5, 9])
+    result = compute_topk_scores(logits, 3, ids, logits_mode=logits_mode)
+    expected_value = 1e8 if logits_mode else -math.log(16)
+    torch.testing.assert_close(
+        result.logprobs,
+        torch.full_like(result.logprobs, expected_value),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert result.logprob_token_ids[:, 0].tolist() == ids.tolist()
+    assert result.selected_token_ranks.tolist() == [16, 16, 16]
+    _, scores, _ = compute_prompt_logprobs_with_chunking(
+        ids,
+        logits,
+        lambda hidden: hidden,
+        3,
+        logprobs_mode="raw_logits" if logits_mode else "raw_logprobs",
+    )
+    torch.testing.assert_close(
+        scores, torch.full_like(scores, expected_value), rtol=1e-6, atol=1e-6
+    )
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e8, -1e8])
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "processed_logprobs"])
+def test_standalone_cpu_engine_logprobs_with_uniform_large_logits(
+    tmp_path, vllm_runner, offset, logprobs_mode
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import GPT2Config, GPT2LMHeadModel, TokenizersBackend
+
+    # A real model whose final layernorm and output projection produce known
+    # uniform logits. Both prompt scoring and autoregressive decoding still run.
+    config = GPT2Config(
+        vocab_size=16,
+        n_positions=32,
+        n_embd=32,
+        n_layer=1,
+        n_head=1,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        tie_word_embeddings=False,
+    )
+    with torch.random.fork_rng(devices=[]), torch.no_grad():
+        torch.manual_seed(37)
+        reference = GPT2LMHeadModel(config).eval()
+        reference.transformer.ln_f.weight.zero_()
+        reference.transformer.ln_f.bias.fill_(1.0)
+        reference.lm_head.weight.zero_()
+        reference.lm_head.weight[:, 0].fill_(offset)
+        reference.save_pretrained(tmp_path)
+    vocabulary = {
+        "[PAD]": 0,
+        "[BOS]": 1,
+        "[EOS]": 2,
+        "[UNK]": 3,
+        "alpha": 4,
+        "beta": 5,
+        "gamma": 6,
+    }
+    vocabulary.update({f"unused{i}": i for i in range(7, 16)})
+    backend = Tokenizer(WordLevel(vocabulary, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        dtype="float32",
+        enforce_eager=True,
+        max_model_len=32,
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        enable_prefix_caching=False,
+        logprobs_mode=logprobs_mode,
+    ) as model:
+        outputs = model.llm.generate(
+            ["alpha beta gamma", "gamma alpha"],
+            SamplingParams(
+                temperature=0,
+                max_tokens=2,
+                ignore_eos=True,
+                logprobs=-1,
+                prompt_logprobs=-1,
+            ),
+            use_tqdm=False,
+        )
+    for result in outputs:
+        assert result.prompt_logprobs[0] is None
+        rows = [*result.prompt_logprobs[1:], *result.outputs[0].logprobs]
+        assert len(result.outputs[0].token_ids) == 2
+        for row in rows:
+            assert set(row) == set(range(16))
+            assert [item.logprob for item in row.values()] == pytest.approx(
+                [-math.log(16)] * 16, rel=1e-6, abs=1e-6
+            )
