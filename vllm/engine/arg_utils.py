@@ -2531,7 +2531,15 @@ class EngineArgs:
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
-            if self.data_parallel_start_rank is not None and not headless:
+            # A start rank only means something when there are several DP ranks
+            # to hand out. With a single rank the autoswitch below would flip to
+            # external LB, which ParallelConfig rejects for dp_size <= 1, so the
+            # engine never starts.
+            if (
+                self.data_parallel_start_rank is not None
+                and not headless
+                and self.data_parallel_size > 1
+            ):
                 # Infer hybrid LB mode.
                 self.data_parallel_hybrid_lb = True
 
