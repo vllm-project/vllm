@@ -684,12 +684,14 @@ class BlockPool:
         Note that we do not check block cache in this function.
 
         Args:
-            num_blocks: The number of blocks to allocate.
+            num_blocks: The number of blocks to allocate. Must be non-negative.
 
         Returns:
             A list of new block.
 
         """
+        if num_blocks < 0:
+            raise ValueError(f"num_blocks must be non-negative, got {num_blocks}")
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
