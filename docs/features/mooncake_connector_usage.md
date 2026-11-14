@@ -68,7 +68,7 @@ For layerwise transfer, use a proxy that sends requests to P and D concurrently,
 
 In both modes, D starts decoding after all required KV transfers finish, and P keeps the source blocks until transfer completes.
 
-At the start of each step, P can send complete cached-prefix blocks, including blocks from earlier prefill chunks, once D provides its destination buffers. This behavior is enabled by default for layers whose cache regions all use `FullAttentionSpec` with one token per state, including ordinary MLA and indexer caches. Incomplete blocks wait for layer computation. Windowed and recurrent/ring states wait until their final state is ready.
+At the start of each step, P can send complete cached-prefix blocks, including blocks from earlier prefill chunks, once D provides its destination buffers. This behavior is enabled by default for layers whose cache regions all use `FullAttentionManager` with one token per state, including ordinary MLA and indexer caches. Incomplete blocks wait for layer computation. Windowed and recurrent/ring states wait until their final state is ready.
 
 ### Layerwise limits
 

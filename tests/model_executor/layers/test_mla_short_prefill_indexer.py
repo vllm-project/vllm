@@ -392,6 +392,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     index_k = torch.zeros(num_tokens, 4)
     rocm.DeepseekV32MLAAttention._fused_attention(
         layer,
+        MLA_LAYER,
         torch.arange(num_tokens),
         torch.zeros(num_tokens, 8),
         torch.zeros(num_tokens, 4),

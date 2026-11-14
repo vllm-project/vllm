@@ -96,9 +96,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    iter_layer_specs,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -132,7 +129,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
     from vllm.v1.request import Request
 
 WorkerKey = tuple[str, int, int, int]
@@ -1541,20 +1538,9 @@ class MooncakeConnectorScheduler:
         if self._layerwise:
             self._prefill_requests: dict[str, Request] = {}
             for index, group in enumerate(self.kv_cache_config.transfer_groups):
-                specs = list(iter_layer_specs(group.kv_cache_spec))
-                windows = {getattr(spec, "sliding_window", None) for spec in specs}
-                if len(windows) != 1:
-                    raise ValueError("Mixed window semantics within a transfer group")
-                # A windowed FullAttentionSpec still uses the full-attention
-                # manager. Its whole allocated suffix must be populated before D
-                # can publish prefix-cache hashes for those blocks.
-                window_specs = [
-                    spec for spec in specs if isinstance(spec, SlidingWindowSpec)
-                ]
-                if window_specs and len(window_specs) == len(specs):
-                    self.blocks_per_sw[index] = max(
-                        cdiv(spec.num_retained_tokens, spec.block_size) + 1
-                        for spec in window_specs
+                if issubclass(group.manager_cls, SlidingWindowManager):
+                    self.blocks_per_sw[index] = (
+                        cdiv(group.sliding_window_reach, group.block_size) + 1
                     )
 
     def get_sw_clipped_blocks(
@@ -3125,7 +3111,9 @@ class MooncakeConnectorWorker:
 
                 if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
                     ratio = (
-                        self._physical_blocks_for_spec(layer_spec)
+                        self._physical_blocks_for_group(
+                            self.kv_cache_config.transfer_groups[group_index]
+                        )
                         if self._layerwise
                         else self._physical_blocks_per_logical_kv_block
                     )
@@ -4241,8 +4229,11 @@ class MooncakeConnectorWorker:
                     region, group_index=group, shared_group_ids=(group,)
                 )
         for kv_cache_name in set(self._layer_specs) & set(meta.registered_layer_names):
-            if isinstance(
-                self._layer_specs[kv_cache_name], (MambaSpec, CircularBufferSpec)
+            cache_group = self.kv_cache_config.transfer_groups[
+                self.get_group_from_layer_name(kv_cache_name)
+            ]
+            if issubclass(
+                cache_group.manager_cls, (MambaManager, CircularBufferManager)
             ) and (meta.remote_tp_size != self.tp_size):
                 raise ValueError("Recurrent states currently require equal TP sizes")
             if meta.cache_specs.get(kv_cache_name) != self._cache_specs[kv_cache_name]:
@@ -4322,7 +4313,12 @@ class MooncakeConnectorWorker:
             index
             for index in self._layer_index_by_name.values()
             if all(
-                isinstance(self._layer_specs[name], FullAttentionSpec)
+                issubclass(
+                    self.kv_cache_config.transfer_groups[
+                        self.get_group_from_layer_name(name)
+                    ].manager_cls,
+                    FullAttentionManager,
+                )
                 and self._layer_specs[name].tokens_per_state == 1
                 for name, layer_index in self._layer_index_by_name.items()
                 if layer_index == index
@@ -4334,9 +4330,7 @@ class MooncakeConnectorWorker:
             name: self._spec_signature(name) for name in self._layer_specs
         }
         self._kernel_block_ratios = tuple(
-            self._physical_blocks_for_spec(
-                next(iter(iter_layer_specs(group.kv_cache_spec)))
-            )
+            self._physical_blocks_for_group(group)
             for group in self.kv_cache_config.transfer_groups
         )
         self._local_transfer_regions = [
@@ -4382,9 +4376,15 @@ class MooncakeConnectorWorker:
 
     def _spec_signature(self, kv_cache_name: str) -> str:
         spec = self._layer_specs[kv_cache_name]
-        if isinstance(spec, CircularBufferSpec):
+        group = self.kv_cache_config.transfer_groups[
+            self.get_group_from_layer_name(kv_cache_name)
+        ]
+        policy = (group.manager_cls.__name__, group.manager_config.params)
+        if issubclass(group.manager_cls, CircularBufferManager):
+            assert isinstance(spec, AttentionSpec)
             return repr(
                 (
+                    *policy,
                     type(spec).__name__,
                     spec.block_size,
                     spec.page_size_bytes,
@@ -4396,14 +4396,12 @@ class MooncakeConnectorWorker:
         if isinstance(spec, MambaSpec):
             return repr(
                 (
+                    *policy,
                     type(spec).__name__,
                     spec.block_size,
                     spec.shapes,
                     tuple(str(dtype) for dtype in spec.dtypes),
                     spec.mamba_type,
-                    spec.mamba_cache_mode,
-                    spec.num_speculative_blocks,
-                    spec.num_prefill_checkpoint_blocks,
                     spec.tokens_per_state,
                     spec.tp_replicated,
                 )
@@ -4411,6 +4409,7 @@ class MooncakeConnectorWorker:
         assert isinstance(spec, AttentionSpec)
         return repr(
             (
+                *policy,
                 type(spec).__name__,
                 spec.block_size,
                 str(spec.dtype),
@@ -4420,18 +4419,15 @@ class MooncakeConnectorWorker:
                 getattr(spec, "cache_dtype_str", None),
                 str(spec.kv_quant_mode),
                 getattr(spec, "model_version", None),
-                getattr(spec, "sliding_window", None),
-                getattr(spec, "extra_retained_tokens", 0),
-                getattr(spec, "bounded_replay", False),
             )
         )
 
-    def _physical_blocks_for_spec(self, spec):
-        if isinstance(spec, (MambaSpec, CircularBufferSpec)):
+    def _physical_blocks_for_group(self, group: "KVCacheGroup") -> int:
+        if issubclass(group.manager_cls, (MambaManager, CircularBufferManager)):
             return 1
-        if spec.block_size % self.block_size:
+        if group.block_size % self.block_size:
             raise ValueError("Group block size must divide into kernel blocks")
-        return spec.block_size // self.block_size
+        return group.block_size // self.block_size
 
     def _build_layer_transfer_params(
         self, task: SendTask, block_runs: BlockRuns | None = None
@@ -4519,6 +4515,7 @@ class MooncakeConnectorWorker:
         # P's prompt already reflects any Mamba/bounded-replay truncation.
         token_start = state.num_prompt_tokens - num_external_tokens
         spec = self._layer_specs[kv_cache_name]
+        group = self.kv_cache_config.transfer_groups[local_group_index]
         block_size = spec.block_size
         layer_index = self._layer_index_by_name[kv_cache_name]
         available_tokens = state.available_tokens[layer_index]
@@ -4526,8 +4523,8 @@ class MooncakeConnectorWorker:
             state.is_final_chunk and available_tokens == state.scheduled_end_tokens
         )
         sent_tokens = state.sent_tokens.get((meta.worker_key, kv_cache_name))
-        is_state = isinstance(spec, (MambaSpec, CircularBufferSpec))
-        is_window = getattr(spec, "sliding_window", None) is not None
+        is_state = issubclass(group.manager_cls, (MambaManager, CircularBufferManager))
+        is_window = issubclass(group.manager_cls, SlidingWindowManager)
         # State and window caches are sent once, when this layer's final KV is ready.
         if (is_state or is_window) and (
             not final_layer_ready or sent_tokens is not None
@@ -4552,8 +4549,8 @@ class MooncakeConnectorWorker:
                     token_end=state.num_prompt_tokens,
                     null_block=NULL_BLOCK_ID,
                     num_speculative_blocks=(
-                        spec.num_speculative_blocks
-                        if isinstance(spec, MambaSpec)
+                        group.manager_config.params.num_speculative_blocks
+                        if isinstance(group.manager_config.params, MambaManager.Params)
                         else 0
                     ),
                 )
