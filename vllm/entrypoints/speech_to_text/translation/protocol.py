@@ -221,6 +221,7 @@ class TranslationRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            extra_args=self.vllm_xargs,
         )
 
     def to_sampling_params(
