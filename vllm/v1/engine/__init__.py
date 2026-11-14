@@ -5,6 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.exceptions import GracefulHTTPError
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -161,6 +163,65 @@ class EngineCoreReadyResponse:
     enable_expert_parallel: bool = False
 
 
+StreamAdmissionReason = Literal[
+    "request_id_in_use",
+    "capacity",
+    "active_limit",
+    "engine_paused",
+]
+StreamUpdateRejection = Literal[
+    "validation_error",
+    "mm_cache_miss",
+    "preprocessing_error",
+    "shutdown",
+    "engine_paused",
+    "unknown_admission",
+    "identity_mismatch",
+    "unsupported_update",
+    "input_closed",
+    "empty_update",
+]
+
+
+class StreamAdmissionContext(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Marks a request as an input of an admitted stream, which its request
+    ID names (see docs/design/persistent_state.md)."""
+
+    # Closes the stream's input.
+    input_closed: bool = False
+    # Numbers the input within its stream; 0 before any input is applied.
+    update_seq: int = 0
+
+
+class StreamOutput(msgspec.Struct, frozen=True, array_like=True):  # type: ignore[call-arg]
+    """The context of the input an output of an admitted stream belongs to
+    and, for a refused input, the rejection reason."""
+
+    context: StreamAdmissionContext | None
+    rejection: StreamUpdateRejection | None = None
+
+
+class StreamAdmissionResult(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """The reply to a stream admission; `reason` is set on a refusal."""
+
+    accepted: bool
+    request_id: str
+    reason: StreamAdmissionReason | None = None
+
+
+class StreamAdmissionError(GracefulHTTPError):
+    """A refused stream admission, carrying its result."""
+
+    def __init__(self, result: StreamAdmissionResult):
+        super().__init__(
+            f"Stream admission refused: {result.reason}",
+            HTTPStatus.CONFLICT
+            if result.reason == "request_id_in_use"
+            else HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+        self.result = result
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -224,6 +285,9 @@ class EngineCoreRequest(
     # Prompt block hashes computed by the frontend with the engine's
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
+
+    # Set on an input of an admitted stream.
+    stream_admission: StreamAdmissionContext | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -312,6 +376,15 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Set with a finish reason when the engine ended a resumable request's
+    # stream, which then takes no further input. Appended last for array_like
+    # compatibility.
+    ends_stream: bool = False
+
+    # Set on the outputs of an admitted stream. Appended last for array_like
+    # compatibility.
+    stream_output: StreamOutput | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -357,6 +430,9 @@ class EngineCoreOutputs(
 
     # Weight version used for this step.
     weight_version: str | None = None
+
+    # Admitted streams whose state slots were released since the last outputs.
+    retired_streams: list[str] | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

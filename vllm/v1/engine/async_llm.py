@@ -4,9 +4,12 @@ import asyncio
 import os
 import socket
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any
+
+import msgspec
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -54,11 +57,18 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    PauseMode,
+    StreamAdmissionContext,
+    StreamAdmissionError,
+    StreamAdmissionResult,
+)
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
-from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.engine.input_processor import REQUEST_ID_SUFFIX_LEN, InputProcessor
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
@@ -89,6 +99,17 @@ class InputStreamError(Exception):
     def __init__(self, cause: Exception):
         self.cause = cause
         super().__init__(str(cause))
+
+
+@dataclass
+class _AdmittedCaller:
+    """The latest stream admission under a caller's request ID."""
+
+    # The internal request ID; waits that start once the ID is reserved
+    # follow this admission.
+    request_id: str
+    # Held from the reservation until the stream can no longer hold a slot.
+    reserved: bool = True
 
 
 class AsyncLLM(EngineClient):
@@ -217,6 +238,9 @@ class AsyncLLM(EngineClient):
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
+        self._admitted_callers: dict[str, _AdmittedCaller] = {}
+        # Session aborts that must finish even if their caller is cancelled.
+        self._stream_aborts: set[asyncio.Task] = set()
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -427,8 +451,13 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         kv_hints: KvHintsEnvelope | None = None,
+        stream_admission: bool = False,
     ) -> RequestOutputCollector:
-        """Add new request to the AsyncLLM."""
+        """Add new request to the AsyncLLM.
+
+        With `stream_admission`, an async generator prompt is admitted first:
+        the engine reserves its state slot before any input is read.
+        """
         if self.errored:
             raise EngineDeadError()
 
@@ -453,6 +482,21 @@ class AsyncLLM(EngineClient):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 
+            if stream_admission:
+                return await self._add_admitted_stream(
+                    request_id,
+                    prompt,
+                    params,
+                    arrival_time,
+                    lora_request,
+                    tokenization_kwargs,
+                    trace_headers,
+                    priority,
+                    data_parallel_rank,
+                    session_id,
+                    kv_hints,
+                )
+
             # Streaming input case.
             return await self._add_streaming_input_request(
                 request_id,
@@ -466,6 +510,11 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank,
                 session_id,
                 kv_hints,
+            )
+
+        if stream_admission:
+            raise VLLMValidationError(
+                "Stream admission requires an async generator of StreamingInput"
             )
 
         # Convert Input --> Request.
@@ -628,20 +677,9 @@ class AsyncLLM(EngineClient):
             session_id=session_id,
             kv_hints=kv_hints,
         )
-
-        if not sampling_params.skip_clone:
-            sampling_params = sampling_params.clone()
-            sampling_params.skip_clone = True
-
-        # Create request for validation, also used as the finished signal
-        # once the input stream is closed.
-        final_req = self.input_processor.process_inputs(
-            request_id=request_id,
-            prompt=TokensPrompt(prompt_token_ids=[0]),
-            params=sampling_params,
-            **inputs,  # type: ignore[arg-type]
+        sampling_params, final_req = self._make_final_streaming_request(
+            request_id, sampling_params, inputs
         )
-        self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
         queue = StreamingInputOutputCollector(
@@ -661,26 +699,12 @@ class AsyncLLM(EngineClient):
                         internal_req_id
                     ):
                         break
-                    sp = input_chunk.sampling_params
-                    if sp:
-                        self._validate_streaming_input_sampling_params(sp)
-                    else:
-                        sp = sampling_params
-                    # TODO(nick): Avoid re-validating reused sampling parameters
-                    req = self.input_processor.process_inputs(
-                        request_id=internal_req_id,
-                        prompt=input_chunk.prompt,
-                        params=sp,
-                        resumable=True,
-                        **inputs,  # type: ignore[arg-type]
-                    )
-                    req.external_req_id = request_id
-                    if req.prompt_embeds is not None:
-                        raise VLLMValidationError(
-                            "prompt_embeds not supported for streaming inputs"
-                        )
-                    prompt_text, _, _ = extract_prompt_components(
-                        self.model_config, input_chunk.prompt
+                    req, prompt_text = self._make_streaming_input_request(
+                        final_req,
+                        input_chunk,
+                        sampling_params,
+                        self._validate_streaming_input_sampling_params,
+                        inputs,
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
                     any_added = True
@@ -708,6 +732,293 @@ class AsyncLLM(EngineClient):
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
+
+    def _make_final_streaming_request(
+        self,
+        request_id: str,
+        sampling_params: SamplingParams,
+        inputs: dict[str, Any],
+    ) -> tuple[SamplingParams, EngineCoreRequest]:
+        """The sampling parameters a streaming-input request owns, and the
+        request that validates them and later signals the end of its input."""
+        if not sampling_params.skip_clone:
+            sampling_params = sampling_params.clone()
+            sampling_params.skip_clone = True
+
+        # Create request for validation, also used as the finished signal
+        # once the input stream is closed.
+        final_req = self.input_processor.process_inputs(
+            request_id=request_id,
+            prompt=TokensPrompt(prompt_token_ids=[0]),
+            params=sampling_params,
+            **inputs,
+        )
+        self.input_processor.assign_request_id(final_req)
+        return sampling_params, final_req
+
+    def _make_streaming_input_request(
+        self,
+        final_req: EngineCoreRequest,
+        input_chunk: StreamingInput,
+        sampling_params: SamplingParams,
+        validate_sampling_params: Callable[[SamplingParams], None],
+        inputs: dict[str, Any],
+    ) -> tuple[EngineCoreRequest, str | None]:
+        """The request for one item of an input stream, and its prompt text."""
+        sp = input_chunk.sampling_params
+        if sp:
+            validate_sampling_params(sp)
+        else:
+            sp = sampling_params
+        # TODO(nick): Avoid re-validating reused sampling parameters
+        req = self.input_processor.process_inputs(
+            request_id=final_req.request_id,
+            prompt=input_chunk.prompt,
+            params=sp,
+            resumable=True,
+            **inputs,
+        )
+        req.external_req_id = final_req.external_req_id
+        if req.prompt_embeds is not None:
+            raise VLLMValidationError(
+                "prompt_embeds not supported for streaming inputs"
+            )
+        prompt_text, _, _ = extract_prompt_components(
+            self.model_config, input_chunk.prompt
+        )
+        return req, prompt_text
+
+    def _abort_in_background(self, request_ids: list[str]) -> asyncio.Future:
+        """Abort requests in the engine, in a task that outlives the
+        cancellation of its caller."""
+        abort = asyncio.ensure_future(
+            self.engine_core.abort_requests_async(request_ids)
+        )
+        self._stream_aborts.add(abort)
+        abort.add_done_callback(self._stream_aborts.discard)
+        return abort
+
+    async def _add_admitted_stream(
+        self,
+        request_id: str,
+        input_stream: AsyncGenerator[StreamingInput, None],
+        sampling_params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+        session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
+    ) -> RequestOutputCollector:
+        """Admit a streaming-input request before reading any of its input
+        (see docs/design/persistent_state.md, "Admitted streams in AsyncLLM")."""
+        # Checked before anything is reserved or sent. The internal ID is the
+        # caller's, plus the "-" and the random characters that
+        # InputProcessor.assign_request_id adds unless randomization is
+        # disabled.
+        suffix = (
+            0
+            if envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION
+            else REQUEST_ID_SUFFIX_LEN + 1
+        )
+        if not 1 <= len(request_id) + suffix <= 256:
+            raise VLLMValidationError(
+                "Stream admission requires an internal request ID of 1 to "
+                "256 characters."
+            )
+        if not self.model_config.has_persistent_state:
+            raise VLLMValidationError("Stream admission requires persistent state.")
+        self._validate_resumable_request()
+        if (
+            self.vllm_config.kv_transfer_config is not None
+            or self.vllm_config.ec_transfer_config is not None
+        ):
+            raise VLLMValidationError(
+                "Stream admission does not support transfer connectors."
+            )
+        if data_parallel_rank not in (None, 0):
+            raise VLLMValidationError(
+                "Stream admission does not support a data parallel rank."
+            )
+        self._validate_admitted_stream_sampling_params(sampling_params)
+        assert isinstance(sampling_params, SamplingParams)
+
+        inputs = dict(
+            supported_tasks=await self._supported_tasks_or_dead(),
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
+            kv_hints=kv_hints,
+        )
+        # The close; its placeholder prompt is ignored by the engine.
+        sampling_params, close = self._make_final_streaming_request(
+            request_id, sampling_params, inputs
+        )
+        internal_req_id = close.request_id
+
+        # Nothing awaits from the reservation of the caller's request ID until
+        # the client tracks the admission, so every wait that finds the
+        # reservation finds the tracked stream.
+        callers = self._admitted_callers
+        earlier = callers.get(request_id)
+        if (
+            earlier is not None and earlier.reserved
+        ) or self.output_processor.has_request(internal_req_id):
+            raise StreamAdmissionError(
+                StreamAdmissionResult(False, request_id, "request_id_in_use")
+            )
+        caller = callers[request_id] = _AdmittedCaller(internal_req_id)
+
+        def release(error: BaseException | None = None) -> None:
+            if callers.get(request_id) is caller:
+                caller.reserved = False
+
+        def forget() -> None:
+            if callers.get(request_id) is caller and not caller.reserved:
+                del callers[request_id]
+
+        try:
+            # Checked once, where an unadmitted stream's first input is.
+            self.check_admission(request_id=internal_req_id)
+            admission = msgspec.structs.replace(
+                close, prompt_token_ids=None, resumable=True
+            )
+            queue = StreamingInputOutputCollector(
+                sampling_params.output_kind, internal_req_id, first_end_wins=True
+            )
+            self._run_output_handler()
+            # Register the output state, with no input applied, before admission.
+            self.output_processor.add_request(
+                msgspec.structs.replace(admission, prompt_token_ids=[]),
+                None,
+                None,
+                0,
+                queue,
+            )
+        except BaseException:
+            self.output_processor.abort_requests([internal_req_id], internal=True)
+            release()
+            forget()
+            raise
+
+        def abort_late() -> None:
+            # Nobody can feed a stream admitted after its call was cancelled.
+            self._abort_in_background([internal_req_id])
+
+        try:
+            # The client releases the reservation once the stream can no
+            # longer hold a slot, including when this call is cancelled.
+            result = await self.engine_core.admit_stream_async(
+                admission,
+                on_release=release,
+                on_forget=forget,
+                on_late_accept=abort_late,
+            )
+        except BaseException as error:
+            self.output_processor.abort_requests([internal_req_id], internal=True)
+            if not isinstance(error, asyncio.CancelledError):
+                # The admission may have failed before the client tracked it.
+                release(error)
+                forget()
+            raise
+        if not result.accepted:
+            self.output_processor.abort_requests([internal_req_id], internal=True)
+            raise StreamAdmissionError(result)
+
+        async def handle_inputs():
+            update_seq = 0
+            try:
+                async for input_chunk in input_stream:
+                    # Stop once the session has ended (aborted, expired or errored).
+                    if not self.output_processor.has_request(internal_req_id):
+                        return
+                    req, prompt_text = self._make_streaming_input_request(
+                        close,
+                        input_chunk,
+                        sampling_params,
+                        self._validate_admitted_stream_sampling_params,
+                        inputs,
+                    )
+                    # Only an input that passed frontend validation is numbered.
+                    update_seq += 1
+                    req.stream_admission = StreamAdmissionContext(update_seq=update_seq)
+                    self.output_processor.add_request(req, prompt_text, None, 0, queue)
+                    await self.engine_core.add_request_async(req)
+                if self.output_processor.has_request(internal_req_id):
+                    close.stream_admission = StreamAdmissionContext(
+                        input_closed=True, update_seq=update_seq + 1
+                    )
+                    self.output_processor.add_request(close, None, None, 0, queue)
+                    await self.engine_core.add_request_async(close)
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            except Exception as error:
+                # The first end to reach the collector wins; this task, not
+                # generate(), aborts the session.
+                if self.output_processor.has_request(internal_req_id):
+                    queue.put(InputStreamError(error))
+                    request_ids = self.output_processor.abort_requests(
+                        [internal_req_id], internal=True
+                    )
+                    # generate() may close the collector, cancelling this
+                    # task, as soon as it reads the error.
+                    await asyncio.shield(self._abort_in_background(request_ids))
+            finally:
+                queue._input_stream_task = None
+
+        queue._input_stream_task = asyncio.create_task(handle_inputs())
+        return queue
+
+    def _validate_admitted_stream_sampling_params(
+        self, params: SamplingParams | PoolingParams
+    ) -> None:
+        self._validate_streaming_input_sampling_params(params)
+        assert isinstance(params, SamplingParams)
+        extra_args = params.extra_args or {}
+        if (
+            params.structured_outputs is not None
+            or extra_args.get("kv_transfer_params")
+            or extra_args.get("ec_transfer_params")
+        ):
+            raise VLLMValidationError(
+                "Stream admission does not support structured outputs or KV "
+                "or EC transfer parameters."
+            )
+
+    async def wait_stream_retired(self, request_id: str) -> None:
+        """Return once the stream admitted under `request_id` has retired,
+        so its state slot is back in the free pool."""
+        caller = self._admitted_callers.get(request_id)
+        if caller is None:
+            raise ValueError(f"No stream was admitted under {request_id!r}")
+        await self.engine_core.wait_stream_retired_async(caller.request_id)
+
+    async def _supported_tasks_or_dead(self) -> tuple[SupportedTask, ...]:
+        """The supported tasks, which the first call asks the engine for;
+        raises EngineDeadError if the engine dies before it replies."""
+        if hasattr(self, "_supported_tasks"):
+            return self._supported_tasks
+        self._run_output_handler()
+        assert self.output_handler is not None
+        reply = asyncio.ensure_future(self.get_supported_tasks())
+        try:
+            await asyncio.wait(
+                {reply, self.output_handler}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            dead = not reply.done()
+            if dead:
+                reply.cancel()
+        if dead:
+            # The output handler ends only with the engine.
+            raise EngineDeadError()
+        return reply.result()
 
     def _validate_resumable_request(self) -> None:
         if self.vllm_config.is_mm_encoder_only or self.model_config.is_diffusion:
@@ -756,6 +1067,7 @@ class AsyncLLM(EngineClient):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        stream_admission: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -769,6 +1081,13 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        With `stream_admission=True` and an async generator of
+        `StreamingInput` as the prompt, a model with persistent state admits
+        the stream before reading any input: the engine reserves its state
+        slot, or the call raises `StreamAdmissionError`. A refused input is
+        yielded as an unfinished output with `stream_rejection` set. See
+        docs/design/persistent_state.md.
 
         Note:
             Passing a raw prompt string directly to this method is deprecated.
@@ -798,6 +1117,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                stream_admission=stream_admission,
             )
 
             # The output_handler task pushes items into the queue.
@@ -842,7 +1162,8 @@ class AsyncLLM(EngineClient):
 
         # Error from input stream generator - propagate directly.
         except InputStreamError as e:
-            if q is not None:
+            # An admitted stream's input task has already aborted the session.
+            if q is not None and not stream_admission:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (input error): %s.", request_id, e)

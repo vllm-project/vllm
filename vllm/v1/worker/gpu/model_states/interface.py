@@ -14,13 +14,14 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.state_slots import StateSlotBindings
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -55,6 +56,7 @@ class ModelState(ABC):
         self.scheduler_config = vllm_config.scheduler_config
         self.model = model
         self.device = device
+        self.state_slots: StateSlotBindings | None = None
 
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -118,6 +120,12 @@ class ModelState(ABC):
             supported_tasks.append("realtime")
         return tuple(supported_tasks)
 
+    def prepare_step(
+        self, scheduler_output: SchedulerOutput, *, dummy_run: bool, is_profile: bool
+    ) -> None:
+        """Prepare model-local state with explicit profiling/lifecycle identity."""
+        return None
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
@@ -127,10 +135,69 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def initialize_state_slots(self, bindings: StateSlotBindings) -> None:
+        """Bind session views; models register every auxiliary state-writing stream."""
+        self.state_slots = bindings
+
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
         """Hook run after the KV cache tensors are allocated and bound."""
+        return None
+
+    def prepare_execution_memory(self) -> None:
+        """Allocate the long-lived working memory this state's steps keep.
+
+        Called once, before the profiling forward pass and before any KV
+        cache exists, so that memory profiling counts what it leaves
+        allocated. Do not capture CUDA graphs here.
+        """
+        return None
+
+    def needs_cudagraph_capture(self) -> bool:
+        """Whether this state captures CUDA graphs in `capture_cudagraphs`.
+
+        Answer from configuration alone: the runner can ask before any KV
+        cache or state binding exists, and asks more than once. Return the
+        same value on every call, and `False` on a platform where this state
+        cannot capture.
+        """
+        return False
+
+    def capture_cudagraphs(
+        self,
+        *,
+        graph_pool: Any,
+        stream: torch.cuda.Stream,
+        profile_only: bool,
+    ) -> None:
+        """Capture the CUDA graphs this state runs outside the model's
+        forward, into `graph_pool` and on `stream`.
+
+        Called by `GPUModelRunner.capture_model` when
+        `needs_cudagraph_capture()` returns `True`. With `profile_only`, the
+        capture is measured for the graph-memory estimate and then released
+        through `clear_cudagraphs`. Finish every warm-up and replay this call
+        started before returning or raising.
+        """
+        return None
+
+    def clear_cudagraphs(self) -> None:
+        """Release the graphs captured with `profile_only=True` and whatever
+        else was kept from the profiling pools. Must tolerate a state that
+        captured nothing."""
+        return None
+
+    def post_warmup(self) -> None:
+        """Hook run at the end of the worker's warmup, after the stages that
+        run the model and before the worker resets the random seed. After a
+        capture the workspace is locked, so this must not enlarge it."""
+        return None
+
+    def shutdown(self) -> None:
+        """Hook run when the runner shuts down, before it releases the state
+        bindings and the KV cache. It must tolerate a state whose
+        initialization did not complete."""
         return None
 
     def capture_inner_cudagraphs(

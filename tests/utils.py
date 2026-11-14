@@ -1975,6 +1975,59 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
     return wrapper
 
 
+def _send_call_result(sender: Any, target: Callable[..., Any], args: tuple) -> None:
+    """Run `target(*args)` and send `(True, result)`, or `(False, traceback)`."""
+    import traceback
+
+    try:
+        result = (True, target(*args))
+    except BaseException:
+        result = (False, traceback.format_exc())
+    sender.send(result)
+    sender.close()
+
+
+def call_in_spawned_process(
+    target: Callable[..., Any], *args: Any, timeout: float
+) -> Any:
+    """Return `target(*args)` computed in a new, spawned process.
+
+    `target`, `args` and the result must be picklable. A call that raises,
+    exits without a result or takes longer than `timeout` seconds raises
+    `RuntimeError` here; the process is terminated before this returns, so a
+    call that hangs cannot outlive it.
+    """
+    context = get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_send_call_result, args=(sender, target, args))
+    process.start()
+    sender.close()
+    call = f"{target.__name__}{args}"
+    try:
+        if not receiver.poll(timeout):
+            raise RuntimeError(f"{call} did not finish within {timeout} s")
+        try:
+            succeeded, value = receiver.recv()
+        except EOFError:
+            process.join(10)
+            raise RuntimeError(
+                f"{call} exited without a result (exit code {process.exitcode})"
+            ) from None
+    finally:
+        receiver.close()
+        # The result is in; a process that is slow to exit is not waited for.
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    if not succeeded:
+        raise RuntimeError(f"{call} failed in its process:\n{value}")
+    return value
+
+
 def create_new_process_for_each_test(
     method: Literal["spawn", "fork"] | None = None,
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:

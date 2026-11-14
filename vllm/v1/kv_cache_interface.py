@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 from fractions import Fraction
@@ -630,6 +630,192 @@ def is_mamba_prefill_checkpoint_valid(
     )
 
 
+StateInitializer = Callable[..., torch.Tensor]
+
+
+@dataclass(frozen=True)
+class PersistentStateDescriptor:
+    """One typed component inside an aggregate persistent-state page."""
+
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    offset_bytes: int
+    alignment_bytes: int
+    initializer: StateInitializer
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("persistent-state descriptor name must be nonempty")
+        if not self.shape or any(
+            not isinstance(dimension, int) or dimension <= 0 for dimension in self.shape
+        ):
+            raise ValueError(f"invalid persistent-state shape for {self.name!r}")
+        if self.offset_bytes < 0:
+            raise ValueError(f"negative persistent-state offset for {self.name!r}")
+        if self.alignment_bytes <= 0:
+            raise ValueError(f"invalid persistent-state alignment for {self.name!r}")
+        if self.offset_bytes % self.alignment_bytes:
+            raise ValueError(f"misaligned persistent-state offset for {self.name!r}")
+        if self.offset_bytes % self.element_size_bytes:
+            raise ValueError(
+                f"dtype-misaligned persistent-state offset for {self.name!r}"
+            )
+        if not callable(self.initializer):
+            raise TypeError(
+                f"persistent-state initializer for {self.name!r} must be callable"
+            )
+
+    @property
+    def element_size_bytes(self) -> int:
+        return torch.empty((), dtype=self.dtype).element_size()
+
+    @property
+    def size_bytes(self) -> int:
+        return math.prod(self.shape) * self.element_size_bytes
+
+
+@dataclass(frozen=True, init=False)
+class PersistentStateSpec(KVCacheSpec):
+    """The layout of one page of persistent state: an atomic bundle of
+    components, one page per slot."""
+
+    descriptors: tuple[PersistentStateDescriptor, ...]
+    _page_size_bytes: int = field(compare=True, repr=False)
+    # Names of the model options that enlarge the model's execution memory or
+    # its graphs. Diagnostic only: not part of the layout or of equality.
+    memory_contributors: tuple[str, ...] = field(default=(), compare=False)
+
+    def __init__(
+        self,
+        *,
+        descriptors: Sequence[PersistentStateDescriptor],
+        page_size_bytes: int,
+        block_size: int = 1,
+        memory_contributors: Sequence[str] = (),
+    ) -> None:
+        descriptor_tuple = tuple(descriptors)
+        if block_size != 1:
+            raise ValueError("persistent state requires block_size=1")
+        self._validate_layout(descriptor_tuple, page_size_bytes)
+        contributors = self._validate_memory_contributors(memory_contributors)
+
+        object.__setattr__(self, "block_size", 1)
+        object.__setattr__(self, "dcp_sharded", False)
+        object.__setattr__(self, "block_stride_alignment", None)
+        object.__setattr__(self, "descriptors", descriptor_tuple)
+        object.__setattr__(self, "_page_size_bytes", page_size_bytes)
+        object.__setattr__(self, "memory_contributors", contributors)
+
+    @staticmethod
+    def _validate_memory_contributors(names: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(names, str):
+            raise TypeError(
+                "persistent-state memory contributors must be a sequence of "
+                "names, not a str"
+            )
+        contributors = tuple(names)
+        if not all(isinstance(name, str) for name in contributors):
+            raise TypeError("persistent-state memory contributor names must be str")
+        if not all(contributors):
+            raise ValueError(
+                "persistent-state memory contributor names must be nonempty"
+            )
+        if len(set(contributors)) != len(contributors):
+            raise ValueError("persistent-state memory contributor names must be unique")
+        return contributors
+
+    @staticmethod
+    def _validate_layout(
+        descriptors: tuple[PersistentStateDescriptor, ...],
+        page_size_bytes: int,
+    ) -> None:
+        if not descriptors:
+            raise ValueError("persistent-state layout must not be empty")
+        names = [descriptor.name for descriptor in descriptors]
+        if len(set(names)) != len(names):
+            raise ValueError("persistent-state descriptor names must be unique")
+        maximum_alignment = math.lcm(*(d.alignment_bytes for d in descriptors))
+        if any(
+            page_size_bytes % descriptor.element_size_bytes
+            for descriptor in descriptors
+        ):
+            raise ValueError("persistent-state page size must satisfy dtype alignment")
+        intervals = sorted(
+            (
+                descriptor.offset_bytes,
+                descriptor.offset_bytes + descriptor.size_bytes,
+                descriptor.name,
+            )
+            for descriptor in descriptors
+        )
+        for (_, previous_end, previous_name), (
+            next_start,
+            _,
+            next_name,
+        ) in zip(intervals, intervals[1:]):
+            if previous_end > next_start:
+                raise ValueError(
+                    "persistent-state descriptors overlap: "
+                    f"{previous_name!r}, {next_name!r}"
+                )
+        aligned_extent = (
+            (max(end for _, end, _ in intervals) + maximum_alignment - 1)
+            // maximum_alignment
+            * maximum_alignment
+        )
+        if page_size_bytes != aligned_extent:
+            raise ValueError(
+                "persistent-state page size is not the aligned layout extent"
+            )
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+    @property
+    def num_heads(self) -> int:
+        # The aggregate is one opaque content bundle in core's byte layout.
+        return 1
+
+    @property
+    def tokens_per_state(self) -> int:
+        # Core's fixed-state sentinel: no token-history dimension.
+        return -1
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return self.page_size_bytes
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self._page_size_bytes
+
+    def copy_with_new_block_size(self, block_size: int) -> PersistentStateSpec:
+        if block_size != 1:
+            raise ValueError("persistent-state block size is fixed at one")
+        return self
+
+
+@dataclass(frozen=True)
+class StateSlotHandle:
+    engine_epoch: str
+    slot: int
+    generation: int
+
+
+@dataclass(frozen=True)
+class StateCompletion:
+    step_seq: int
+    handles: dict[str, dict[str, StateSlotHandle]]
+    cleanup_handles: dict[str, dict[str, StateSlotHandle]] = field(default_factory=dict)
+    failed_req_ids: frozenset[str] = frozenset()
+
+
 @dataclass(slots=True)
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
@@ -804,6 +990,24 @@ class KVCacheGroup:
         )
 
 
+def memory_contributors_note(groups: Sequence[KVCacheGroup]) -> str | None:
+    """State which options the persistent-state specs of `groups` declare as
+    using device memory; `None` when they declare none."""
+    names = [
+        name
+        for group in groups
+        for spec in group.distinct_specs
+        if isinstance(spec, PersistentStateSpec)
+        for name in spec.memory_contributors
+    ]
+    if not names:
+        return None
+    return (
+        "The model declares these options as using device memory: "
+        f"{', '.join(dict.fromkeys(names))}."
+    )
+
+
 class PrefixLookupGroup(NamedTuple):
     """KV cache groups looked up jointly for cache hits: they share a manager
     policy, block size and DCP sharding."""
@@ -885,6 +1089,15 @@ class KVCacheConfig:
         self.needs_kv_cache_zeroing = (
             self.has_mamba_layers or self.has_mixed_precision_kv_cache
         )
+
+    @property
+    def state_groups(self) -> list[KVCacheGroup]:
+        """The groups that hold persistent state."""
+        return [
+            group
+            for group in self.kv_cache_groups
+            if any(isinstance(s, PersistentStateSpec) for s in group.distinct_specs)
+        ]
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:

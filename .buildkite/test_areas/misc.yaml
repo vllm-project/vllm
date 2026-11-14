@@ -86,6 +86,7 @@ steps:
     - vllm/transformers_utils/
     - vllm/utils/
     - vllm/v1/
+    - tests/utils.py
     - tests/v1/core
     - tests/v1/executor
     - tests/v1/kv_offload

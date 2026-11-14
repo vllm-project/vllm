@@ -752,6 +752,13 @@ class Worker(WorkerBase):
                 self.init_snapshot,
                 weights_memory=int(self.model_runner.model_memory_usage),
             ) as profile_result,
+            set_current_vllm_config(self.vllm_config),
+        ):
+            # Memory the model keeps for its steps is measured here, before
+            # the split limit: under the limit a cached block at or above it
+            # is not reused for a smaller request, so each mid-size buffer
+            # would keep a segment of its own.
+            self.model_runner.prepare_execution_memory()
             # Workspaces (e.g. the MoE workspace) grow in steps during this pass,
             # freeing each smaller buffer. Without a split limit, a later small
             # allocation can be carved out of a freed multi-GiB block and pin the
@@ -759,10 +766,10 @@ class Worker(WorkerBase):
             # counted as consumed and taken from the KV cache. Blocks above the
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
-            self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
-            set_current_vllm_config(self.vllm_config),
-        ):
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            with self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
         # Profile CUDA graph memory if graphs will be captured. The runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
@@ -1229,6 +1236,11 @@ class Worker(WorkerBase):
                 assert sample_hidden_states is not None
                 self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
             del sample_hidden_states
+
+        # Every stage that runs the model is done; the model state may draw
+        # from the global random state, which is reset next.
+        with torch.inference_mode():
+            self.model_runner.model_state.post_warmup()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
