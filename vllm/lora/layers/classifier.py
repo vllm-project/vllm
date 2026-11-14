@@ -70,12 +70,8 @@ class BaseClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
 
 class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
     def forward(self, input_: torch.Tensor) -> torch.Tensor | list[torch.Tensor]:
-        # TODO base_result maybe don't need compute truly.
-        base_result = super().forward(input_)
-        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
-
         slot_indices = self._output_lora_indices
-        assert len(slot_indices) == base_result.size(0), (
+        assert len(slot_indices) == input_.size(0), (
             "Classification rows do not match LoRA request mapping"
         )
         num_labels = [
@@ -83,11 +79,19 @@ class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
             for index in slot_indices
         ]
 
-        if not any(num_labels):
-            return base_result
-
-        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
-        output[:, : self.output_size].copy_(base_result)
+        if num_labels and all(num_labels):
+            output = self.full_bias_stacked.new_zeros(
+                input_.size(0), self.padded_num_labels
+            )
+        else:
+            base_result = super().forward(input_)
+            base_result = (
+                base_result[0] if isinstance(base_result, tuple) else base_result
+            )
+            if not any(num_labels):
+                return base_result
+            output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+            output[:, : self.output_size].copy_(base_result)
         self.punica_wrapper.apply_lora_full_linear(
             output,
             input_.to(self.full_weight_stacked.dtype),
@@ -139,10 +143,20 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
         ]
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        base_result = super().forward(input_)
-        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
-        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
-        output[:, : self.output_size].copy_(base_result)
+        if self._output_lora_indices and all(
+            index >= 0 and self.full_module_num_labels[index] > 0
+            for index in self._output_lora_indices
+        ):
+            output = self.full_bias_stacked.new_zeros(
+                input_.size(0), self.padded_num_labels
+            )
+        else:
+            base_result = super().forward(input_)
+            base_result = (
+                base_result[0] if isinstance(base_result, tuple) else base_result
+            )
+            output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+            output[:, : self.output_size].copy_(base_result)
         adapter_output = torch.zeros(
             (1, output.size(0), self.padded_num_labels),
             dtype=torch.float32,
