@@ -373,6 +373,53 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+# top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
+_ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
+
+
+def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
+    """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
+    block_configs = getattr(model_config.hf_text_config, "block_configs", None)
+    if not block_configs:
+        return False
+
+    def field(block: Any, name: str) -> Any:
+        if isinstance(block, dict):
+            return block.get(name)
+        return getattr(block, name, None)
+
+    shapes = {
+        (field(block, "n_routed_experts"), field(block, "num_experts_per_tok"))
+        for block in block_configs
+        if field(block, "block_type") == "moe"
+    }
+    return len(shapes) > 1
+
+
+def _one_sided_model_unsupported_reason(model_config: "ModelConfig") -> str | None:
+    """Why a model's MoE layers cannot use flashinfer_nvlink_one_sided."""
+    # One shared communication object serves every MoE layer, so all of them
+    # must have the same num_experts and top_k (e.g. Nemotron Puzzle varies them
+    # per layer).
+    if _has_heterogeneous_moe_layers(model_config):
+        return "MoE layers with different num_experts or top_k"
+    top_k = model_config.get_num_experts_per_tok()
+    if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+        return f"top_k={top_k}"
+    # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
+    quantization = model_config.quantization
+    if quantization is None:
+        if model_config.dtype in (torch.bfloat16, torch.float16):
+            return None
+        return f"dtype={model_config.dtype}"
+    if quantization == "modelopt_fp4":
+        return None
+    quant_cfg = model_config.model_arch_config.quantization_config or {}
+    if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
+        return None
+    return f"quantization={quantization!r}"
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -1044,6 +1091,78 @@ class VllmConfig:
                     self._set_config_default(config_obj, key, value)
 
         apply_recursive(self, defaults)
+
+    def _one_sided_all2all_unsupported_reason(self) -> str | None:
+        """Why the deployment cannot use flashinfer_nvlink_one_sided, if it can't."""
+        if self.lora_config is not None:
+            return "LoRA"
+        # Experts picked with --moe-backend decide on their own whether they
+        # take one-sided dispatch, and most (triton, deep_gemm, cutlass,
+        # emulation, ...) reject it, so any explicit choice keeps the old
+        # allgather_reducescatter default.
+        moe_backend = self.kernel_config.moe_backend
+        if moe_backend != "auto":
+            return f"moe_backend={moe_backend!r}"
+        # No kernel is both batch invariant and one-sided compatible.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "VLLM_BATCH_INVARIANT=1"
+        model_config = self.model_config
+        if model_config is None:
+            return None
+        if reason := _one_sided_model_unsupported_reason(model_config):
+            return reason
+        # A separate MoE draft model builds its MoE layers on the same
+        # communication object, so it has to fit it and match the target.
+        spec = self.speculative_config
+        draft = spec.draft_model_config if spec is not None else None
+        if spec is not None and draft is not None and draft.is_moe:
+            if spec.moe_backend not in (None, "auto"):
+                return f"draft moe_backend={spec.moe_backend!r}"
+            if reason := _one_sided_model_unsupported_reason(draft):
+                return f"draft model {reason}"
+            if model_config.is_moe and (
+                draft.get_num_experts(),
+                draft.get_num_experts_per_tok(),
+            ) != (
+                model_config.get_num_experts(),
+                model_config.get_num_experts_per_tok(),
+            ):
+                return "a draft model with different num_experts or top_k"
+        return None
+
+    def _maybe_fall_back_from_auto_one_sided_all2all(self) -> None:
+        """Keep the "auto" all2all default to models one-sided supports."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config._all2all_backend_auto_one_sided
+            or parallel_config.all2all_backend != "flashinfer_nvlink_one_sided"
+        ):
+            return
+        reason = self._one_sided_all2all_unsupported_reason()
+        if reason is None:
+            return
+        logger.info_once(
+            "all2all_backend='auto': using 'allgather_reducescatter' instead of "
+            "'flashinfer_nvlink_one_sided', which does not support %s.",
+            reason,
+        )
+        parallel_config.all2all_backend = "allgather_reducescatter"
+
+    def _sync_draft_all2all_backend(self) -> None:
+        """Make the draft follow the target's final all2all backend.
+
+        The draft's ParallelConfig is built before this config, so it holds the
+        target's backend from before any fallback, while both share one EP
+        communicator.
+        """
+        spec = self.speculative_config
+        draft = spec.draft_parallel_config if spec is not None else None
+        if (
+            draft is not None
+            and draft is not self.parallel_config
+            and draft.enable_expert_parallel
+        ):
+            draft.all2all_backend = self.parallel_config.all2all_backend
 
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
@@ -1796,10 +1915,15 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
+        # Must run before binding a MoE-EP backend, which rejects one-sided.
+        self._maybe_fall_back_from_auto_one_sided_all2all()
+
         # This populates IR op priorities,
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
+        # After every fallback of the target's backend.
+        self._sync_draft_all2all_backend()
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)

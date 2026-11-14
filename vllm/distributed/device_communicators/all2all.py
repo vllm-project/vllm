@@ -3,7 +3,7 @@
 import os
 import threading
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -767,10 +767,47 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         self.communications.clear()
 
 
+def _require_single_node_without_mnnvl() -> None:
+    """Fail clearly if one-sided all2all would span hosts without MNNVL.
+
+    GB200/GB300/VR200 connect hosts over MNNVL. On other hardware (HGX B200 and
+    B300) the NVLink domain ends at the node, so every rank must share one host.
+    """
+    from vllm.config.parallel import _is_gb200_gb300_or_vr200
+    from vllm.distributed.parallel_state import get_node_count
+
+    if _is_gb200_gb300_or_vr200():
+        return
+    try:
+        node_count = get_node_count()
+    except AssertionError:
+        # Used outside vLLM's distributed environment: the node count is unknown.
+        return
+    if node_count == 1:
+        return
+    auto = False
+    with suppress(Exception):
+        auto = get_current_vllm_config().parallel_config._all2all_backend_auto_one_sided
+    origin = (
+        " It was picked by default (all2all_backend='auto'), which assumes a "
+        "single physical node."
+        if auto
+        else ""
+    )
+    raise RuntimeError(
+        "The 'flashinfer_nvlink_one_sided' all2all backend needs every rank on "
+        "one physical node on this GPU, which has no NVLink between hosts, but "
+        f"the ranks span {node_count} nodes.{origin} Switch to the "
+        "'allgather_reducescatter' backend manually with "
+        "`--all2all-backend allgather_reducescatter`."
+    )
+
+
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
+        _require_single_node_without_mnnvl()
         assert has_flashinfer_nvlink_one_sided(), (
             "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
             "Please install FlashInfer 0.7.2 or later."
@@ -865,10 +902,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
-            # Keep the fence transport; FlashInfer otherwise picks CFT counted
-            # writes or the Lamport transport where the platform supports them.
-            cft=False,
-            lamport=False,
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
