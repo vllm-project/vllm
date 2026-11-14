@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncInput:
     prompt: str
     api_url: str
@@ -37,7 +37,7 @@ class RequestFuncInput:
     request_id: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False

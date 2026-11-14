@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MxFp4LinearLayerConfig:
     """Configuration for an MXFP4 linear layer.
 

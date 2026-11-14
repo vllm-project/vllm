@@ -8,7 +8,7 @@ import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 
-@dataclass
+@dataclass(slots=True)
 class MoELoRAContext:
     """Carries all LoRA state for one MoE forward pass.
 

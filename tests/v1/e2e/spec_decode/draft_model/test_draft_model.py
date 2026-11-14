@@ -27,7 +27,7 @@ from ..utils import (
 
 # Tomas R: TODO: Improve naming of this class and
 # assert_draft_model_correctness and move to common SD test utils
-@dataclass
+@dataclass(slots=True)
 class ArgsTest:
     target_model: str
     draft_model: str

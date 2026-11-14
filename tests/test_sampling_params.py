@@ -12,7 +12,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20

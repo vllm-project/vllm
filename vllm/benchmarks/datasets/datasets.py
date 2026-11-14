@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_NUM_PROMPTS = 1000
 
 
-@dataclass
+@dataclass(slots=True)
 class SampleRequest:
     """Represents a single inference request for benchmarking."""
 
