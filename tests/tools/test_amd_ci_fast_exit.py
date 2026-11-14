@@ -145,3 +145,48 @@ def test_without_the_library_the_tests_run_as_before(tmp_path):
     result = _run(tmp_path, PASSING, env={"VLLM_CI_FAULT_TRAP_LIB": "/nonexistent.so"})
     assert result.returncode == 0, result.stderr
     assert "no native fault reporter" in result.stderr
+
+
+# A test that hangs on a child engine which hangs on its own child, as an
+# EngineCore under `vllm serve` does; it outlives faulthandler_timeout, then waits
+# for the plugin's dump before killing them.
+HANGING_CHILDREN = """
+import os, signal, subprocess, sys, threading, time
+
+GRANDCHILD = (
+    "import time\\n"
+    "def hang_in_grandchild():\\n    time.sleep(60)\\n"
+    "hang_in_grandchild()"
+)
+CHILD = (
+    "import subprocess, sys, time\\n"
+    "def hang_in_child():\\n"
+    f"    subprocess.Popen([sys.executable, '-c', {GRANDCHILD!r}])\\n"
+    "    time.sleep(60)\\n"
+    "hang_in_child()"
+)
+
+def test_hangs_on_a_child():
+    child = subprocess.Popen([sys.executable, "-c", CHILD], start_new_session=True)
+    try:
+        time.sleep(3)
+        for t in threading.enumerate():
+            if isinstance(t, threading.Timer):
+                t.join(120)
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+"""
+
+
+def test_a_timed_out_test_dumps_the_stacks_of_its_child_processes(tmp_path):
+    result = _run(tmp_path, HANGING_CHILDREN, args=("-o", "faulthandler_timeout=1"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    err = result.stderr
+    assert "Timeout (0:00:01)!" in err
+    assert "stacks of 2 child processes" in err
+    assert err.count("[amd-ci] ---- pid") == 2
+    assert err.count("[amd-ci] kernel wait channels: ") == 2
+    assert "end of child process stacks" in err
+    if shutil.which("py-spy") or shutil.which("gdb"):
+        assert "hang_in_child" in err and "hang_in_grandchild" in err, err
