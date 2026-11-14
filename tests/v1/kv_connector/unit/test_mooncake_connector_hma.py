@@ -299,7 +299,7 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
             lengths,
             err_reqs,
             err_msg,
-        ) = await worker._build_transfer_params(
+        ) = worker._build_transfer_params(
             ready_reqs, xfer_meta, local_regions, remote_regions
         )
 
@@ -390,7 +390,7 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             lengths,
             err_reqs,
             err_msg,
-        ) = await worker._build_transfer_params(
+        ) = worker._build_transfer_params(
             ready_reqs, xfer_meta, local_regions, remote_regions
         )
 
