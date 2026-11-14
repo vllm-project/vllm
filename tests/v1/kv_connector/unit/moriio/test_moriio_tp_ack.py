@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import socket
+import subprocess
+import sys
 import threading
 from collections import defaultdict
 from types import SimpleNamespace
@@ -10,6 +13,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
@@ -25,6 +29,75 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.timeout(10)
+def test_notify_listener_bind_failure_reaches_caller():
+    """A notification bind failure must stop startup, not just its thread."""
+    wrapper = MoRIIOWrapper()
+
+    with socket.socket() as occupied_port:
+        occupied_port.bind(("", 0))
+        occupied_port.listen()
+        wrapper.notify_port = occupied_port.getsockname()[1]
+
+        try:
+            with pytest.raises(HandshakeError, match="Address already in use"):
+                wrapper.async_wait_reqid()
+        finally:
+            # Hold the port until the listener has attempted to bind.
+            if wrapper.notify_thread is not None:
+                wrapper.notify_thread.join(timeout=5)
+                assert not wrapper.notify_thread.is_alive()
+
+    assert wrapper.notify_thread is None
+
+
+@pytest.mark.cpu_test
+def test_notify_listener_exit_before_ready_reaches_caller():
+    """A listener that exits without a startup result must not hang its caller."""
+    script = """
+from unittest.mock import patch
+
+import zmq
+
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
+)
+
+def exit_context(*args, **kwargs):
+    print("EXIT_BEFORE_STARTUP_RESULT", flush=True)
+    raise SystemExit("injected ZeroMQ initialization exit")
+
+wrapper = MoRIIOWrapper()
+wrapper.notify_port = 0
+with patch.object(zmq, "Context", side_effect=exit_context):
+    try:
+        wrapper.async_wait_reqid()
+    except HandshakeError as error:
+        assert "exited before reporting startup status" in str(error), str(error)
+    else:
+        raise AssertionError("Startup returned without reporting listener exit")
+assert wrapper.notify_thread is None
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = (error.stdout or b"").decode(errors="replace")
+        assert "EXIT_BEFORE_STARTUP_RESULT" in output, output
+        pytest.fail("Listener exited, but startup did not report it before timeout")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "EXIT_BEFORE_STARTUP_RESULT" in result.stdout
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
