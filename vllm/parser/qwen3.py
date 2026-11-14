@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.parser.engine.events import EventType
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ArgValueExtender,
@@ -57,6 +65,9 @@ _PARAM_RE = re.compile(
 )
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 _PARAM_OPENER_RE = re.compile(r"<\s*parameter\s*=")
+_PARAM_OPEN_RE = re.compile(r"<\s*parameter\s*=\s*([^>]*)>")
+_FUNC_OPEN_RE = re.compile(r"<function=([^>]*)>")
+_FUNC_BODY_RE = re.compile(r"<function=[^>]*>(.*)</function>", re.DOTALL)
 
 
 def _trim_wrapping_newlines(value: str) -> str:
@@ -66,6 +77,37 @@ def _trim_wrapping_newlines(value: str) -> str:
     if value.endswith("\n"):
         value = value[:-1]
     return value
+
+
+def _has_repeated_params(raw_args: str) -> bool:
+    seen: set[str] = set()
+    for match in _PARAM_OPEN_RE.finditer(raw_args):
+        name = match.group(1)
+        if name in seen:
+            return True
+        seen.add(name)
+    return False
+
+
+def _greedy_qwen_args(raw_args: str) -> str:
+    """Keep the first parameter through the final closer.
+
+    Used when closers outnumber openers, so a later ``<parameter=`` tag is
+    text inside the value rather than another parameter.
+    """
+    match = _PARAM_OPEN_RE.search(raw_args)
+    if match is None:
+        return "{}"
+    name = match.group(1).strip()
+    if not name:
+        return "{}"
+    end = raw_args.rfind(PARAM_END)
+    value_start = match.end()
+    value = raw_args[value_start:] if end < value_start else raw_args[value_start:end]
+    return json.dumps(
+        {name: _trim_wrapping_newlines(value)},
+        ensure_ascii=False,
+    )
 
 
 class _ClosedParams:
@@ -355,6 +397,9 @@ class Qwen3Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        self._qwen_source_chunks: list[str] = []
+        self._held_later_calls: list[DeltaToolCall] = []
+        self._first_call_emitted = False
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
@@ -381,6 +426,143 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+
+    def _reset(self, initial_state: ParserState | None = None) -> None:
+        super()._reset(initial_state=initial_state)
+        self._qwen_source_chunks.clear()
+        self._held_later_calls = []
+        self._first_call_emitted = False
+
+    def _feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> list[SemanticEvent]:
+        self._qwen_source_chunks.append(delta_text)
+        return super()._feed(delta_text, delta_token_ids)
+
+    def _closers_exceed_openers(self, text: str) -> bool:
+        """True when a closer was copied into a parameter value.
+
+        The model's own closer then has no matching opener. Balanced
+        parallel calls do not.
+        """
+        pairs = (
+            (PARAM_START, PARAM_END),
+            (FUNC_PREFIX, FUNC_END),
+            (self.TOOL_START, self.TOOL_END),
+        )
+        return any(text.count(closer) > text.count(opener) for opener, closer in pairs)
+
+    def _collapsed_call(self, text: str) -> tuple[str, str] | None:
+        opened = _FUNC_OPEN_RE.search(text)
+        if opened is None:
+            return None
+        name = opened.group(1).strip()
+        if not name or not self._accept_tool_name(name):
+            return None
+        body_match = _FUNC_BODY_RE.search(text)
+        body = body_match.group(1) if body_match is not None else ""
+        args_json = self._fix_arg_types(_greedy_qwen_args(body), name)
+        return name, args_json
+
+    def _build_extracted_result(
+        self,
+        *deltas: DeltaMessage | None,
+    ) -> ExtractedToolCallInformation:
+        result = super()._build_extracted_result(*deltas)
+        if not result.tool_calls:
+            return result
+
+        repeated = {
+            slot.id for slot in self._tool_slots if _has_repeated_params(slot.args)
+        }
+
+        text = "".join(self._qwen_source_chunks)
+        if self._closers_exceed_openers(text):
+            first = result.tool_calls[0]
+            if first.id in repeated:
+                result.tool_calls = []
+            else:
+                collapsed = self._collapsed_call(text)
+                if collapsed is not None:
+                    name, args_json = collapsed
+                    first = ToolCall(
+                        id=first.id,
+                        function=FunctionCall(name=name, arguments=args_json),
+                    )
+                result.tool_calls = [first]
+        elif repeated:
+            result.tool_calls = [
+                call for call in result.tool_calls if call.id not in repeated
+            ]
+        result.tools_called = bool(result.tool_calls)
+        return result
+
+    def _handle_arg_chunk(
+        self,
+        event: SemanticEvent,
+        deltas: list[DeltaToolCall],
+    ) -> None:
+        # A later parameter can make an already streamed call ambiguous.
+        if event.value:
+            self._tool_slots[event.tool_index].append_args(event.value)
+
+    def _handle_tool_end(
+        self,
+        event: SemanticEvent,
+        deltas: list[DeltaToolCall],
+    ) -> None:
+        index = event.tool_index
+        if index < len(self._tool_slots) and _has_repeated_params(
+            self._tool_slots[index].args
+        ):
+            return
+        super()._handle_tool_end(event, deltas)
+
+    def _park_later_calls(self, delta: DeltaMessage | None) -> DeltaMessage | None:
+        if delta is None or not delta.tool_calls:
+            return delta
+        kept: list[DeltaToolCall] = []
+        for call in delta.tool_calls:
+            if call.index > 0:
+                self._held_later_calls.append(call)
+            else:
+                self._first_call_emitted = True
+                kept.append(call)
+        delta.tool_calls = kept
+        if not delta.tool_calls and not delta.content and not delta.reasoning:
+            return None
+        return delta
+
+    def _release_held_calls(self, delta: DeltaMessage | None) -> DeltaMessage | None:
+        delta = self._park_later_calls(delta)
+        later = self._held_later_calls
+        self._held_later_calls = []
+        if not later or self._closers_exceed_openers("".join(self._qwen_source_chunks)):
+            return delta
+        for index, call in enumerate(later, start=int(self._first_call_emitted)):
+            call.index = index
+        if delta is None:
+            return DeltaMessage(tool_calls=later)
+        delta.tool_calls = list(delta.tool_calls) + later
+        return delta
+
+    def _events_to_delta(
+        self,
+        events: list[SemanticEvent],
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        delta = super()._events_to_delta(events, finished=finished)
+        if finished:
+            return self._release_held_calls(delta)
+        return self._park_later_calls(delta)
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        delta = super().finish_streaming()
+        if self._held_later_calls:
+            return self._release_held_calls(delta)
+        return delta
 
     def extract_reasoning(
         self,

@@ -537,6 +537,11 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+The Qwen3 XML parser drops tool calls with repeated parameter names. With
+automatic tool choice and streaming, the parser checks a call for repeated
+names before emitting it. Calls after the first are held until generation ends
+so the parser can also check for extra closing tags.
+
 ### MiMo-V2.6 Models (`mimo`)
 
 Supported models:
