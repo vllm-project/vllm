@@ -18,12 +18,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _worker(vocab_size: int) -> CPUStructuredOutputsWorker:
+def _worker(vocab_size: int, mask_stride: int = 1) -> CPUStructuredOutputsWorker:
     return CPUStructuredOutputsWorker(
-        max_num_logits=8,
+        max_num_logits=8 * mask_stride,
         vocab_size=vocab_size,
         device=torch.device("cpu"),
-        mask_stride=1,
+        mask_stride=mask_stride,
     )
 
 
@@ -59,3 +59,26 @@ def test_cpu_grammar_mask_handles_word_boundaries_and_sign_bit() -> None:
     _worker(70).apply_grammar_bitmask(logits, input_batch, ["grammar"], packed)
 
     assert torch.isfinite(logits[0]).nonzero().flatten().tolist() == [0, 31, 32, 69]
+
+
+def test_cpu_grammar_mask_skips_inactive_positions() -> None:
+    input_batch = _input_batch(["plain", "grammar-a", "grammar-b"])
+    input_batch.cu_num_logits = torch.tensor([0, 1, 3, 4], dtype=torch.int32)
+    input_batch.cu_num_logits_np = input_batch.cu_num_logits.numpy()
+    grammar_bitmask = np.zeros((6, 2), dtype=np.int32)
+    grammar_bitmask[0, 0] = 1 << 0
+    grammar_bitmask[1, 0] = 1 << 1
+    grammar_bitmask[3, 0] = 1 << 2
+    logits = torch.zeros((4, 35))
+
+    _worker(35, mask_stride=3).apply_grammar_bitmask(
+        logits,
+        input_batch,
+        ["grammar-a", "grammar-b"],
+        grammar_bitmask,
+    )
+
+    assert torch.isfinite(logits[0]).all()
+    assert torch.isfinite(logits[1]).nonzero().flatten().tolist() == [0]
+    assert torch.isfinite(logits[2]).nonzero().flatten().tolist() == [1]
+    assert torch.isfinite(logits[3]).nonzero().flatten().tolist() == [2]

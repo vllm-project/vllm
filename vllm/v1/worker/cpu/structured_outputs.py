@@ -47,13 +47,21 @@ class CPUStructuredOutputsWorker:
             return
 
         logit_rows = starts[active] + positions[active]
-        packed = torch.from_numpy(grammar_bitmask).to(logits.device)[active]
-        token_ids = torch.arange(
-            logits.shape[1], dtype=torch.int64, device=logits.device
+        packed = (
+            grammar_bitmask if torch.all(active) else grammar_bitmask[active.numpy()]
         )
-        words = packed[:, token_ids // 32]
-        allowed = ((words >> (token_ids % 32)) & 1).bool()
+        # Normalize byte order before unpacking from the least-significant bit.
+        packed_bytes = np.ascontiguousarray(packed, dtype="<i4").view(np.uint8)
+        disallowed = np.unpackbits(
+            packed_bytes,
+            axis=1,
+            count=logits.shape[1],
+            bitorder="little",
+        )
+        np.bitwise_xor(disallowed, 1, out=disallowed)
 
         masked_logits = logits.index_select(0, logit_rows)
-        masked_logits.masked_fill_(~allowed, -torch.inf)
+        masked_logits.masked_fill_(
+            torch.from_numpy(disallowed.view(np.bool_)), -torch.inf
+        )
         logits.index_copy_(0, logit_rows, masked_logits)
