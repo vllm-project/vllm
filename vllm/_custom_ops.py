@@ -12,6 +12,7 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -2571,6 +2572,11 @@ def reshape_and_cache_flash(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
 ) -> None:
+    # The op knows "auto" and the quantized formats only. A plain dtype string
+    # naming the K/V's own dtype (an explicit "bfloat16", e.g. a draft's
+    # speculative kv_cache_dtype) is the same write as "auto".
+    if STR_DTYPE_TO_TORCH_DTYPE.get(kv_cache_dtype) == key.dtype:
+        kv_cache_dtype = "auto"
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         key,
         value,
