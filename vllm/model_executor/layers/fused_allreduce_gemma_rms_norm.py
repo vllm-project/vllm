@@ -24,6 +24,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
+from vllm.v1.worker.ubatching import dbo_enabled
 
 MiB = 1024 * 1024
 
@@ -174,7 +175,8 @@ def fused_allreduce_gemma_rms_norm(
         )
         return norm_out, hidden_states
 
-    if _can_use_aiter_fused_ar_rms(hidden_states):
+    # Skip under DBO: the fused all-reduce bypasses the microbatch hand-off hook.
+    if not dbo_enabled() and _can_use_aiter_fused_ar_rms(hidden_states):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
