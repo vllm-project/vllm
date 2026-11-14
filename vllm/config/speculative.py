@@ -822,6 +822,9 @@ class SpeculativeConfig:
             factors["resolved_draft_num_redundant_experts"] = (
                 self.resolved_draft_num_redundant_experts
             )
+        # Parallel drafting depth changes static query shapes.
+        if self.speculator_config.parallel_drafting:
+            factors["num_speculative_tokens"] = self.num_speculative_tokens
         if self.draft_model_config is not None:
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
