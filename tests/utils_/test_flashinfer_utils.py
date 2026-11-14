@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+import sys
+import types
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -58,3 +60,53 @@ def test_has_flashinfer_requires_ninja(
     _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
     monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()
+
+
+@pytest.fixture
+def tuner_loads(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    loads: list[str] = []
+
+    class FakeTuner:
+        def load_configs(self, path: str) -> bool:
+            loads.append(Path(path).name)
+            if Path(path).name == "broken.json":
+                raise ValueError("bad file")
+            return Path(path).name != "other-gpu.json"
+
+    class FakeAutoTuner:
+        @staticmethod
+        def get() -> FakeTuner:
+            return FakeTuner()
+
+    module = types.ModuleType("flashinfer.autotuner")
+    module.AutoTuner = FakeAutoTuner  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "flashinfer.autotuner", module)
+    fi.load_flashinfer_bf16_tuning_dir.cache_clear()
+    yield loads
+    fi.load_flashinfer_bf16_tuning_dir.cache_clear()
+
+
+def test_load_tuning_dir_loads_every_json(
+    tuner_loads: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    for name in ("b.json", "a.json", "other-gpu.json", "broken.json", "notes.txt"):
+        (tmp_path / name).write_text("{}")
+    monkeypatch.setenv("VLLM_FLASHINFER_BF16_TUNING_DIR", str(tmp_path))
+    fi.load_flashinfer_bf16_tuning_dir()
+    assert tuner_loads == ["a.json", "b.json", "broken.json", "other-gpu.json"]
+
+
+def test_load_tuning_dir_unset_loads_nothing(
+    tuner_loads: list[str], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("VLLM_FLASHINFER_BF16_TUNING_DIR", raising=False)
+    fi.load_flashinfer_bf16_tuning_dir()
+    assert tuner_loads == []
+
+
+def test_load_tuning_dir_empty_dir_loads_nothing(
+    tuner_loads: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("VLLM_FLASHINFER_BF16_TUNING_DIR", str(tmp_path))
+    fi.load_flashinfer_bf16_tuning_dir()
+    assert tuner_loads == []
