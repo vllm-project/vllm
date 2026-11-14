@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Union
 
@@ -162,7 +163,7 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer CUTLASS backends
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
-    # vLLM CUTLASS backend
+    # vLLM's own CUTLASS W4A4 kernel (not the FlashInfer CUTLASS ones above)
     CUTLASS_MXFP4_MXFP4 = "CUTLASS_MXFP4_MXFP4"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
@@ -210,6 +211,16 @@ TRITON_BACKENDS = (
 B12X_BACKENDS = (
     Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
     Mxfp4MoeBackend.B12X_MXFP4_BF16,
+)
+
+# Candidate backends, in preference order, for quant methods that load the
+# packed MXFP4 checkpoint layout (uint8 `w13/w2_weight_packed` plus uint8 E8M0
+# `weight_scale`, group_size=32): compressed-tensors W4A4 and AutoRound/INC.
+PACKED_MXFP4_CANDIDATE_BACKENDS = (
+    Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+    Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+    Mxfp4MoeBackend.XPU,
+    Mxfp4MoeBackend.MARLIN,
 )
 
 # Megakernels consume the checkpoint's MXFP4 tensors through the shared
@@ -423,6 +434,33 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         f"moe_backend='{runner_backend}' is not supported for MXFP4 MoE. "
         f"Expected one of {list(mapping.keys())}."
     )
+
+
+def _narrow_mxfp4_candidates(
+    runner_backend: MoEBackend,
+    candidates: Sequence[Mxfp4MoeBackend],
+) -> list[Mxfp4MoeBackend]:
+    """Narrow `candidates` to the backends a non-auto `moe_backend` names.
+
+    `map_mxfp4_backend` deliberately omits `"cutlass"`, which names vLLM's
+    own W4A4 kernel rather than either FlashInfer CUTLASS backend, so resolve
+    that spelling here.
+
+    Args:
+        runner_backend: Requested `moe_backend`; never `"auto"`.
+        candidates: Backends the caller prepares weights for, in preference
+            order.
+
+    Returns:
+        The subset of `candidates` the request names, order preserved. Empty
+        if the request names no backend the caller implements.
+
+    """
+    if runner_backend == "cutlass":
+        requested = [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4]
+    else:
+        requested = map_mxfp4_backend(runner_backend)
+    return [b for b in candidates if b in requested]
 
 
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
@@ -682,7 +720,8 @@ def _get_requested_backends(
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+    candidates: Sequence[Mxfp4MoeBackend] | None = None,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary MXFP4 MoE backend.
 
     Args:
@@ -691,6 +730,12 @@ def select_mxfp4_moe_backend(
             the checkpoint. Backends that match it are preferred, with BF16
             activation backends as a fallback.
             Use kFp8StaticTensorSym for W4A8 scheme.
+        candidates: Restrict the selection to these backends, in preference
+            order. Quant methods whose checkpoint can only be converted for a
+            subset of the backends pass that subset (e.g.
+            `PACKED_MXFP4_CANDIDATE_BACKENDS`); `None` considers every
+            backend. Ignored for `moe_backend="b12x"`, which picks its own
+            precision.
 
     Note: Shape-specific fallbacks may still occur at runtime.
     Returns `NONE` and a placeholder experts class for requantization sources.
@@ -707,9 +752,18 @@ def select_mxfp4_moe_backend(
     activation_format = config.activation_format
 
     if runner_backend != "auto":
-        requested_backends = _get_requested_backends(
-            runner_backend, requested_activation_key
-        )
+        if candidates is not None and runner_backend != "b12x":
+            requested_backends = _narrow_mxfp4_candidates(runner_backend, candidates)
+            if not requested_backends:
+                raise ValueError(
+                    f"moe_backend={runner_backend!r} is not supported for this "
+                    f"MXFP4 MoE checkpoint; expected one of "
+                    f"{[b.value for b in candidates]}."
+                )
+        else:
+            requested_backends = _get_requested_backends(
+                runner_backend, requested_activation_key
+            )
         if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -748,9 +802,17 @@ def select_mxfp4_moe_backend(
         raise last_error
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _filter_by_activation(
-        _get_priority_backends_for_gpt_oss(), requested_activation_key
-    )
+    if candidates is not None:
+        AVAILABLE_BACKENDS = list(candidates)
+        if activation_format.is_batched:
+            AVAILABLE_BACKENDS = [
+                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
+                for b in AVAILABLE_BACKENDS
+            ]
+    else:
+        AVAILABLE_BACKENDS = _filter_by_activation(
+            _get_priority_backends_for_gpt_oss(), requested_activation_key
+        )
 
     unsupported_reasons: list[tuple[Mxfp4MoeBackend, str | None]] = []
     oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
@@ -1685,6 +1747,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             prepare_moe_mxfp4_layer_for_marlin,
         )
 
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         return prepare_moe_mxfp4_layer_for_marlin(
             layer,
             w13_weight,
