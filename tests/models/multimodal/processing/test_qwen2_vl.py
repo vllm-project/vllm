@@ -343,7 +343,9 @@ def test_processor_override(
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
     image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values"].shape
+    pixel_values = processed_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    pixel_shape = pixel_values.shape
 
     assert img_tok_count == expected_toks_per_img * num_imgs
     assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
@@ -371,6 +373,7 @@ def test_get_image_size_with_most_features(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
 
     hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
     merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
@@ -391,10 +394,162 @@ def test_get_image_size_with_most_features(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=mm_processor_kwargs,
         )
-        grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"].tolist()
+        image_grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"]
+        assert isinstance(image_grid_thw, torch.Tensor)
+        grid_thw = image_grid_thw.tolist()
         t, h, w = grid_thw[0]
         tokens = (t * h * w) // (merge_size**2)
         assert tokens < max_tokens
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "mm_processor_kwargs"),
+    [
+        ("Qwen/Qwen2-VL-2B-Instruct", 20000, None),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, None),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, {"max_pixels": 4096 * 28 * 28}),
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            20000,
+            {
+                "videos_kwargs": {
+                    "size": {
+                        "shortest_edge": 4 * 28 * 28,
+                        "longest_edge": 4096 * 28 * 28,
+                    }
+                }
+            },
+        ),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", 20000, {"videos_kwargs": {"do_resize": False}}),
+        ("LGAI-EXAONE/EXAONE-4.5-33B", 20000, None),
+    ],
+)
+def test_max_video_tokens_fills_context(
+    model_id: str,
+    max_model_len: int,
+    mm_processor_kwargs: dict[str, object] | None,
+) -> None:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_video_tokens = processor.info.get_mm_max_tokens_per_item(
+        max_model_len, {"video": 1}
+    )["video"]
+    dummy_inputs = processor.get_dummy_mm_inputs({"video": 1})
+    dummy_video_tokens = sum(
+        placeholder.get_num_embeds()
+        for placeholder in dummy_inputs["mm_placeholders"]["video"]
+    )
+
+    assert max_video_tokens == max_model_len
+    assert dummy_video_tokens == max_video_tokens
+
+
+def _count_video_tokens(processor_inputs) -> int:
+    return sum(
+        placeholder.get_num_embeds()
+        for placeholder in processor_inputs["mm_placeholders"]["video"]
+    )
+
+
+def test_dummy_video_follows_size_hint() -> None:
+    width, height, num_frames = 1400, 2800, 2
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"max_model_len": 40000},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {
+                "count": 1,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+            },
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert _count_video_tokens(
+        processor.get_dummy_mm_inputs({"video": 1})
+    ) == _count_video_tokens(processed)
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "mm_processor_kwargs", "video_options"),
+    [
+        (40000, None, {"count": 1, "width": 3584, "height": 3584}),
+        (40000, None, {"count": 1, "num_frames": 4}),
+        (5000, {"min_pixels": 4096 * 28 * 28, "max_pixels": 4096 * 28 * 28}, 1),
+    ],
+)
+def test_max_video_tokens_matches_dummy_video(
+    max_model_len: int,
+    mm_processor_kwargs: dict[str, object] | None,
+    video_options: dict[str, int] | int,
+) -> None:
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        mm_processor_kwargs=mm_processor_kwargs,
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": video_options},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen2VLProcessingInfo)
+
+    max_video_tokens = processor.info.get_mm_max_tokens_per_item(
+        max_model_len, {"video": 1}
+    )["video"]
+
+    assert max_video_tokens <= max_model_len
+    assert (
+        _count_video_tokens(processor.get_dummy_mm_inputs({"video": 1}))
+        == max_video_tokens
+    )
+
+
+def test_max_video_tokens_with_pruning_keeps_full_size_frames() -> None:
+    max_model_len = 40000
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    ctx.model_config.multimodal_config.video_pruning_rate = 0.75
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, Qwen2VLProcessingInfo)
+
+    max_size = info.get_image_size_with_most_features()
+    assert info.get_max_video_tokens(
+        max_model_len, {"video": 1}
+    ) == info.get_num_video_tokens(
+        image_width=max_size.width,
+        image_height=max_size.height,
+        num_frames=info.get_num_frames_with_most_features(max_model_len, 1),
+        image_processor=info.get_image_processor(),
+        mm_kwargs={},
+    )
 
 
 def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
@@ -422,7 +577,9 @@ def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
     for fps in (1.0, 30.0):
         mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
         processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
-        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        item = processed["mm_kwargs"]["video"][0]
+        assert item is not None
+        spg = item.get_data()["second_per_grid_ts"]
         assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)
 
 
@@ -436,7 +593,7 @@ def test_mm_device_do_normalize(
 ) -> None:
     """Device-side normalisation must reproduce the on-CPU processor result.
 
-    Runs on any platform: the CPU platform exercises the ``forward_native``
+    Runs on any platform: the CPU platform exercises the `forward_native`
     fallback, accelerators exercise the fused kernel.
     """
     device = current_platform.device_type
@@ -458,6 +615,7 @@ def test_mm_device_do_normalize(
     pixel_values_with_normalize = processed_inputs_with_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
+    assert isinstance(pixel_values_with_normalize, torch.Tensor)
     dtype = pixel_values_with_normalize.dtype
 
     processed_inputs_without_normalize = processor(
@@ -468,6 +626,7 @@ def test_mm_device_do_normalize(
     pixel_values_without_normalize = processed_inputs_without_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
+    assert isinstance(pixel_values_without_normalize, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     input_norm = build_mm_input_norm(ctx.model_config).to(device)

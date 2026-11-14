@@ -319,7 +319,7 @@ impl JsonType {
         })
     }
 
-    fn of_value(value: &Value) -> Self {
+    pub(crate) fn of_value(value: &Value) -> Self {
         match value {
             Value::String(_) => Self::String,
             Value::Number(number) if number.is_f64() => Self::Number,

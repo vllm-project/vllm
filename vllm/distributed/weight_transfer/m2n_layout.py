@@ -60,7 +60,7 @@ def _destination_placements(shard_dim: int) -> Placements:
     return cast(Placements, tuple(placements))
 
 
-@dataclass
+@dataclass(slots=True)
 class M2NDestination:
     """Where one checkpoint parameter lands on this worker."""
 
@@ -83,7 +83,7 @@ def _base_loader_shard_dim(
     """Return a known-safe loader's declared shard dim, or reject it.
 
     Loader identity is deliberately fail-closed. A missing loader is not
-    treated as ``default_weight_loader`` because a model-level ``load_weights``
+    treated as `default_weight_loader` because a model-level `load_weights`
     implementation may transform the tensor before it reaches that default.
     Wrappers and partials are also rejected: recognizing their wrapped callable
     would ignore behavior added by the wrapper.

@@ -18,9 +18,9 @@ handing off through the tagged mailbox:
             (pushed to the ATTN region) summed in the all-reduce's order ->
             ``pend_lds``, where its slice reads it
 
-The collapse takes the gate's own pre-mix (aiter's ``mhc_pre``: the four streams
+The collapse takes the gate's own pre-mix (aiter's `mhc_pre`: the four streams
 by pre in fp32, then bf16). Every other elementwise step follows aiter's
-``mhc_fused_post_pre_delayed_rmsnorm`` rounding; the mix projection and the sums
+`mhc_fused_post_pre_delayed_rmsnorm` rounding; the mix projection and the sums
 of squares, split-K reductions, differ only in their split and order.
 """
 
@@ -96,7 +96,7 @@ def scratch_layout(tokens: int) -> dict[str, tuple[int, int]]:
 
 
 def attn_peer_bytes(tokens: int, d: Dims) -> int:
-    """ATTN: the attention output's all-reduce (``allreduce``)."""
+    """ATTN: the attention output's all-reduce (`allreduce`)."""
     return allreduce.region_bytes(tokens, d)
 
 
@@ -105,7 +105,7 @@ def fma(a, b, c):
 
 
 def sigmoid(z):
-    """Triton's ``tl.sigmoid``: 1 / (1 + exp2(-z log2(e)))."""
+    """Triton's `tl.sigmoid`: 1 / (1 + exp2(-z log2(e)))."""
     return fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(z * fx.Float32(-LOG2E)))
 
 
@@ -115,7 +115,7 @@ def lane_f32(v, src):
 
 def pend_value(c, t, col, cc):
     """The owed post's sublayer output at (token t, column col): read from
-    ``pend``, or where a caller staged it (``pend_lds``, ``[token][32]`` of this
+    `pend`, or where a caller staged it (`pend_lds`, `[token][32]` of this
     task's columns: a reduction it did first)."""
     if const_expr(c.get("pend_lds") is None):
         return ld_bf(c["args"]["pend"], t * HIDDEN + col)
@@ -129,7 +129,7 @@ def slice_at(c0, e):
 
 
 def slice_loads(c, c0, e):
-    """Element e's loads of ``stage_slice`` (e clamped into the step's)."""
+    """Element e's loads of `stage_slice` (e clamped into the step's)."""
     a, hidden = c["args"], HIDDEN
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -140,7 +140,7 @@ def slice_loads(c, c0, e):
 
 
 def slice_row(c, c0, e, got):
-    """Element e of ``stage_slice``'s R_new from ``slice_loads``' values."""
+    """Element e of `stage_slice`'s R_new from `slice_loads`' values."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -210,7 +210,7 @@ def stage_slice(c, task):
 
 @traced
 def slice_mix(c, task, t0, n):
-    """The mix projection partials of tokens t0 .. t0 + n (``stage_slice``)."""
+    """The mix projection partials of tokens t0 .. t0 + n (`stage_slice`)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl, red = c["rl"], c["fl"], c["red"]
     tok = plus(t0, fx.min(lane % 16, n - 1))
@@ -243,7 +243,7 @@ def slice_mix(c, task, t0, n):
 
 # ---------------------------------------------------------------- gate
 def _row(v, lane, q):
-    """Comb lanes 8..23 hold ``comb[r][c]`` at lane 8 + 4 r + c: element q of
+    """Comb lanes 8..23 hold `comb[r][c]` at lane 8 + 4 r + c: element q of
     the row."""
     return lane_f32(v, (lane - 8) // 4 * 4 + 8 + q)
 
@@ -318,10 +318,10 @@ def stage_gate(c, t):
 # ---------------------------------------------------------------- norm
 @traced
 def stage_norm(c, t, store):
-    """Token t's input collapse (``collapse_chunk``) and its RMSNorm, aiter's
-    ``mhc_pre``: rstd = rsq(sum / H + eps) of the fp32 collapse, bf16((x w)
+    """Token t's input collapse (`collapse_chunk`) and its RMSNorm, aiter's
+    `mhc_pre`: rstd = rsq(sum / H + eps) of the fp32 collapse, bf16((x w)
     rstd); 256 threads, chunks of 8 at 8 t + 2048 c, each chunk's bf16 values
-    handed to ``store(t, col, ys, live)`` by every thread (``live``: a thread's
+    handed to `store(t, col, ys, live)` by every thread (`live`: a thread's
     chunk in the row; threads 256.. mirror thread 255)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a, hidden = c["args"], HIDDEN
@@ -360,7 +360,7 @@ def collapse_chunk(c, t, col, pre):
     """Token t's layer input at columns col .. col + 8, fp32: R_new's four
     streams (res_out, written device-wide by this launch's slices, whose
     partials the gate waited on) by the pre-mix, summed pairwise as aiter's
-    ``mhc_pre`` reduces across its stream lanes."""
+    `mhc_pre` reduces across its stream lanes."""
     a, hidden = c["args"], HIDDEN
     rs = []
     for h in range(HC):
@@ -388,8 +388,8 @@ def collapse_chunk(c, t, col, pre):
 @traced
 def stage_reduce(c, task):
     """The attention output at this slice's 32 columns: the TP ranks' partials
-    in the all-reduce's order (``sum_partials``), in fp32 -> bf16 ->
-    ``pend_lds``."""
+    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 ->
+    `pend_lds`."""
     s, tid = c["S"], c["tid"]
     if const_expr(c.get("two_hop", False)):
         # this slice's columns' owner sums them for every rank (``allreduce``)
@@ -407,9 +407,9 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_attn_pair(c, task, idx, how="sum"):
-    """Thread ``idx``'s column pair of token idx / 16 (``stage_reduce``;
-    ``how``: the ``allreduce`` way, ``reduce_pair`` / ``_owned`` /
-    ``_gathered``)."""
+    """Thread `idx`'s column pair of token idx / 16 (`stage_reduce`;
+    `how`: the `allreduce` way, `reduce_pair` / `_owned` /
+    `_gathered`)."""
     s, d = c["S"], c["d"]
     c0 = task * COLS
     if idx < s * COLS // 2:

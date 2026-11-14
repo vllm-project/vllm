@@ -534,7 +534,7 @@ class LlavaNextForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for LlaVA-NeXT.
+        r"""Run forward pass for LlaVA-NeXT.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -543,7 +543,7 @@ class LlavaNextForConditionalGeneration(
         `"A chat between a curious human and an artificial intelligence
         assistant. The assistant gives helpful, detailed, and polite answers to
         the human's questions.
-        USER: <image>\\nWhat is shown in this image? ASSISTANT:"`.
+        USER: <image>\nWhat is shown in this image? ASSISTANT:"`.
 
         Tokenizer outputs:
         `[1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255,

@@ -32,7 +32,7 @@ class MistralToolParser(MistralParserToolAdapter):  # type: ignore[valid-type, m
 
     @property
     def bot_token_id(self) -> int | None:
-        """Return the token id for :attr:`bot_token`."""
+        """Return the token id for `bot_token`."""
         return self._parser_engine.bot_token_id
 
     def adjust_request(

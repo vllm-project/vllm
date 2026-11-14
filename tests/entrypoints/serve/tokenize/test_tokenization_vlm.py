@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test: ``/tokenize`` must expand image placeholders for VLM models.
+"""Regression test: `/tokenize` must expand image placeholders for VLM models.
 
 Fixed by PR #34560 ("Move InputPreprocessor into Renderer (2/2)").
-Before that change, ``/tokenize`` returned ~26 tokens for a message with an
+Before that change, `/tokenize` returned ~26 tokens for a message with an
 image instead of the expected 1451.  Confirmed broken on 0.15.1 and 0.16.0.
 """
 

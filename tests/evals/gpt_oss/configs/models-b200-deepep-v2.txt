@@ -1,0 +1,9 @@
+# B200 DeepEP v2 (PaddedStandard) configurations.
+# Requires EP_DISABLE_GIN=1 on a single-node NVLink box.
+#
+# Only the mxfp8 TRTLLM path lives here. gpt-oss cannot use
+# --moe-backend=deep_gemm: it is swigluoai (gpt_oss.py:399) and
+# DeepGemmFP4Experts._supports_activation accepts only SILU/SWIGLUSTEP/SITU.
+# The DeepGemmFP4Experts psum coverage is in the gsm8k suite instead, via
+# moe-refactor-dp-ep/Qwen3-30B-A3B-MXFP4A16-deepgemm-deepep-v2.yaml.
+gpt-oss-20b-sm100-fi-mxfp4-mxfp8-trtllm-deepep-v2.yaml

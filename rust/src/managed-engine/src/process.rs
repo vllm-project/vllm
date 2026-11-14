@@ -44,6 +44,11 @@ pub struct ManagedEngineConfig {
     /// The per-node replica count is forwarded separately in `python_args` as
     /// `--data-parallel-size-local`.
     pub data_parallel_size: usize,
+    /// Handshake endpoint of the colocated frontend when it serves only this
+    /// node's engines (hybrid or external DP LB). The engines then also
+    /// handshake there for their input/output addresses, after fetching the
+    /// coordinator and DP rendezvous from the frontend owning rank 0.
+    pub client_handshake_address: Option<String>,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
 }
@@ -76,8 +81,11 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
-            .arg(self.data_parallel_size.to_string())
-            .args(&self.python_args);
+            .arg(self.data_parallel_size.to_string());
+        if let Some(client_handshake_address) = &self.client_handshake_address {
+            command.arg("--headless-client-handshake-address").arg(client_handshake_address);
+        }
+        command.args(&self.python_args);
         command.envs(Self::rust_frontend_envs());
         command
     }
@@ -101,6 +109,11 @@ impl ManagedEngineHandle {
             "starting managed Python headless engine"
         );
 
+        Self::spawn_command(command).await
+    }
+
+    /// Spawn one managed engine child in its own process group.
+    async fn spawn_command(command: StdCommand) -> Result<Self> {
         let mut command = Command::from(command);
         command.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
@@ -131,7 +144,14 @@ impl ManagedEngineHandle {
         }
     }
 
-    /// Terminate the managed engine process group and wait for it to stop.
+    /// Shut down the managed engine and wait for it to stop.
+    ///
+    /// SIGTERM goes only to the Python launcher process, not to the whole
+    /// process group: the engine workers exit immediately on SIGTERM, which
+    /// would fail every in-flight request, while the launcher drains them for
+    /// up to `--shutdown-timeout` and then stops the workers in order. The
+    /// group is still SIGKILLed if the launcher does not exit in time, and
+    /// once more after it exits to reap any stragglers.
     pub async fn shutdown(&self, timeout: Duration) -> Result<()> {
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -145,29 +165,49 @@ impl ManagedEngineHandle {
         // clean up.
         let shutdown_timeout = std::cmp::max(timeout, MIN_SHUTDOWN_TIMEOUT);
 
-        // First, try to gracefully terminate.
+        // First, try to gracefully terminate the launcher alone.
         info!(
             pid,
             ?shutdown_timeout,
             "shutting down managed engine with SIGTERM"
         );
-        process_group::terminate(pid)?;
+        terminate(pid)?;
 
         // Wait for the process to exit on its own.
-        if tokio::time::timeout(shutdown_timeout, self.wait_for_exit()).await.is_ok() {
-            return Ok(());
+        if tokio::time::timeout(shutdown_timeout, self.wait_for_exit()).await.is_err() {
+            // If it doesn't exit within the timeout, force kill it.
+            info!(
+                pid,
+                "managed engine did not exit within timeout, sending SIGKILL"
+            );
+            process_group::kill(pid)?;
+            let _ = self.wait_for_exit().await;
         }
 
-        // If it doesn't exit within the timeout, force kill it.
-        info!(
-            pid,
-            "managed engine did not exit within timeout, sending SIGKILL"
-        );
+        // Tear down the rest of the process subtree; an empty group is fine.
         process_group::kill(pid)?;
-
-        let _ = self.wait_for_exit().await;
         Ok(())
     }
+}
+
+/// Send SIGTERM to one process.
+fn terminate(pid: u32) -> Result<()> {
+    signal(pid as i32, libc::SIGTERM)
+}
+
+/// Deliver one signal to a process or, for a negative `target`, to the process
+/// group of that id.
+fn signal(target: i32, signal: i32) -> Result<()> {
+    let rc = unsafe { libc::kill(target, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(code) if code == libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("failed to signal managed engine")
 }
 
 /// Process group helper functions for managing the Python subprocess and its
@@ -188,36 +228,23 @@ mod process_group {
         }
     }
 
-    /// Send SIGTERM to the managed Python process group.
-    pub fn terminate(pid: u32) -> Result<()> {
-        signal(pid, libc::SIGTERM)
-    }
-
     /// Send SIGKILL to the managed Python process group.
     pub fn kill(pid: u32) -> Result<()> {
-        signal(pid, libc::SIGKILL)
-    }
-
-    /// Deliver one signal to the managed Python process group.
-    fn signal(pid: u32, signal: i32) -> Result<()> {
-        let rc = unsafe { libc::kill(-(pid as i32), signal) };
-        if rc == 0 {
-            return Ok(());
-        }
-
-        let error = io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(code) if code == libc::ESRCH) {
-            return Ok(());
-        }
-        Err(error).context("failed to signal managed engine process group")
+        signal(-(pid as i32), libc::SIGKILL)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
     use expect_test::expect;
 
-    use super::{ManagedEngineConfig, allocate_handshake_port};
+    use super::{
+        MIN_SHUTDOWN_TIMEOUT, ManagedEngineConfig, ManagedEngineHandle, allocate_handshake_port,
+    };
 
     #[test]
     fn command_snapshot() {
@@ -227,6 +254,7 @@ mod tests {
             handshake_host: "127.0.0.1".to_string(),
             handshake_port: 62100,
             data_parallel_size: 4,
+            client_handshake_address: None,
             python_args: vec![
                 "--data-parallel-size-local".to_string(),
                 "2".to_string(),
@@ -297,5 +325,94 @@ mod tests {
     fn allocate_handshake_port_returns_non_zero_port() {
         let port = allocate_handshake_port("127.0.0.1").unwrap();
         assert_ne!(port, 0);
+    }
+
+    async fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn spawn_script(dir: &Path, script: &str) -> ManagedEngineHandle {
+        let path = dir.join("child.sh");
+        fs::write(&path, script).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command.arg(&path).arg(dir);
+        ManagedEngineHandle::spawn_command(command).await.unwrap()
+    }
+
+    fn process_alive(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        // A zombie has been killed but not reaped yet; treat it as gone.
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        !matches!(stat.rsplit(") ").next(), Some(rest) if rest.starts_with('Z'))
+    }
+
+    #[tokio::test]
+    async fn shutdown_signals_only_launcher_and_reaps_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("grandchild.sh"),
+            "#!/bin/sh\ntrap 'touch \"$1/grandchild-term\"' TERM\necho $$ > \"$1/grandchild.pid\"\nsleep 600\n",
+        )
+        .unwrap();
+        let handle = spawn_script(
+            dir.path(),
+            "#!/bin/sh\ntrap 'touch \"$1/child-term\"; exit 0' TERM\nsh \"$1/grandchild.sh\" \"$1\" &\ntouch \"$1/child-ready\"\nwait\n",
+        )
+        .await;
+
+        wait_for_file(&dir.path().join("child-ready")).await;
+        wait_for_file(&dir.path().join("grandchild.pid")).await;
+        let grandchild_pid: i32 = fs::read_to_string(dir.path().join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        handle.shutdown(Duration::from_secs(30)).await.unwrap();
+
+        assert!(dir.path().join("child-term").exists());
+        assert!(!dir.path().join("grandchild-term").exists());
+
+        // The post-exit group SIGKILL reaps the grandchild; allow a brief
+        // window for the zombie to be reaped.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while process_alive(grandchild_pid) {
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {grandchild_pid} still alive"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_group_when_launcher_ignores_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = spawn_script(
+            dir.path(),
+            "#!/bin/sh\ntrap '' TERM\ntouch \"$1/child-ready\"\nsleep 600\n",
+        )
+        .await;
+        wait_for_file(&dir.path().join("child-ready")).await;
+
+        let started = Instant::now();
+        handle.shutdown(Duration::from_secs(1)).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(elapsed >= MIN_SHUTDOWN_TIMEOUT);
+        assert!(elapsed < Duration::from_secs(15));
+        assert!(handle.try_wait().await.is_some());
     }
 }

@@ -16,5 +16,3 @@ server_args: >-
   --kv-cache-dtype bfloat16
   --attention-config '{"hisparse_config":{}}'
   --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":32}}'
-env:
-  VLLM_USE_V2_MODEL_RUNNER: "1"

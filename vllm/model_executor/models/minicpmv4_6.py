@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 import torch
+import transformers
+from packaging.version import Version
 from PIL import Image as PILImage
 from torch import nn
 from transformers import MiniCPMV4_6Config
@@ -122,6 +124,12 @@ def _expand_flags(value: object, num_items: int) -> list[bool | None]:
     return [any(bool(v) for v in raw)] * num_items
 
 
+# Transformers >= 5.21 sizes images by the `downsample_mode` merge factor
+RESIZE_TAKES_DOWNSAMPLE_MODE = Version(transformers.__version__) >= Version(
+    "5.21.0.dev0"
+)
+
+
 def _vision_downsample_mode(flag: bool | None) -> str | None:
     if flag is None:
         return None
@@ -193,7 +201,7 @@ def _scoped_mm_kwarg(
 ) -> Any:
     """Read a processor kwarg for one modality.
 
-    ``merged`` is what ``_merge_and_resolve_mm_processor_kwargs`` returns: it
+    `merged` is what `_merge_and_resolve_mm_processor_kwargs` returns: it
     routes a flat key into every scope whose processor declares it, and a value
     scoped to the other modality stays there, so it is not visible here.
     """
@@ -723,7 +731,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         Args:
             image_size: Size of the source image.
             max_slice_nums: Maximum number of slices, or None for the default.
-            downsample_mode: ``"16x"`` (default, full merge) or ``"4x"``
+            downsample_mode: `"16x"` (default, full merge) or `"4x"`
                 (skip vit_merger, 4x more visual tokens).
 
         Returns:
@@ -739,6 +747,9 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         scale_res = image_processor.scale_resolution
         downsample_mode = self._get_downsample_mode(downsample_mode)
         token_divisor = 4 if downsample_mode == "4x" else 16
+        resize_kwargs = (
+            {"downsample_mode": downsample_mode} if RESIZE_TAKES_DOWNSAMPLE_MODE else {}
+        )
 
         # vLLM ImageSize is (width, height); transformers expects (height, width)
         hf_image_size = (image_size.height, image_size.width)
@@ -762,6 +773,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
                 scale_res,
                 patch_size,
                 allow_upscale=True,
+                **resize_kwargs,
             )
             source_tokens = (
                 best_size[0] * best_size[1] // (patch_size * patch_size * token_divisor)
@@ -772,6 +784,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             hf_image_size,
             scale_res,
             patch_size,
+            **resize_kwargs,
         )
         source_tokens = (
             best_resize[0] * best_resize[1] // (patch_size * patch_size * token_divisor)
@@ -782,6 +795,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             scale_res,
             patch_size,
             allow_upscale=True,
+            **resize_kwargs,
         )
         patch_w = refine_size[0] // grids[0]
         patch_h = refine_size[1] // grids[1]

@@ -20,7 +20,9 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -30,6 +32,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
     sampling_params: SamplingParams | list[SamplingParams] | None = None
+    use_llm_chat: bool = False
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -126,7 +129,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
-    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
+    # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
         model="Salesforce/blip2-opt-2.7b",
@@ -187,8 +190,6 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
 
 
 def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     assert modality == "image"
 
     model_name = "deepseek-ai/DeepSeek-OCR"
@@ -196,7 +197,6 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
-        logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     # deepseek-ocr use plain prompt template
@@ -204,19 +204,12 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Avoid skipping special tokens for this model for the
+    # optimal OCR performance.
     sampling_params = [
         SamplingParams(
             temperature=0.0,
             max_tokens=8192,
-            # ngram logit processor args
-            extra_args=dict(
-                ngram_size=30,
-                window_size=90,
-                # whitelist: <td>, </td>
-                whitelist_token_ids={128821, 128822},
-            ),
             skip_special_tokens=False,
         )
         for _ in questions
@@ -230,8 +223,6 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
 
 def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     assert modality == "image"
 
     model_name = "deepseek-ai/DeepSeek-OCR-2"
@@ -239,7 +230,6 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
-        logits_processors=[NGramPerReqLogitsProcessor],
     )
 
     # deepseek-ocr use plain prompt template
@@ -247,19 +237,12 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Avoid skipping special tokens for this model for the
+    # optimal OCR performance.
     sampling_params = [
         SamplingParams(
             temperature=0.0,
             max_tokens=8192,
-            # ngram logit processor args
-            extra_args=dict(
-                ngram_size=30,
-                window_size=90,
-                # whitelist: <td>, </td>
-                whitelist_token_ids={128821, 128822},
-            ),
             skip_special_tokens=False,
         )
         for _ in questions
@@ -935,80 +918,6 @@ def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Keye-VL
-def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        trust_remote_code=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<|im_start|>user\n{placeholder}"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Keye-VL-1.5
-def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1.5-8B"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        trust_remote_code=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<|im_start|>user\n{placeholder}"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1235,7 +1144,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
-    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630 # noqa
+    # For more details, please see: See: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
     # model_name = "HwwwH/MiniCPM-V-2"
 
     # 2.5
@@ -1319,18 +1228,20 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
+        tokenizer_mode="mistral",
+        config_format="mistral",
+        load_format="mistral",
+        ignore_patterns=["model*.safetensors"],
         max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
-        ignore_patterns=["consolidated.safetensors"],
     )
-
-    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
-        prompts=prompts,
+        prompts=questions,
+        use_llm_chat=True,
     )
 
 
@@ -1491,40 +1402,33 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
+# OpenVLA
+def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
 
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
+    model_name = "openvla/openvla-7b"
+    chat_template = get_chat_template_fallback_path("openvla", model_name)
+    assert chat_template is not None
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [{"role": "user", "content": "pick up the red block"}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=chat_template.read_text(),
+        tokenize=False,
+    ).removeprefix(tokenizer.bos_token)
+    prompts = [prompt for _ in questions]
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
-        max_num_seqs=4,
         trust_remote_code=True,
-        enforce_eager=True,
-        limit_mm_per_prompt=mm_limit,
+        max_model_len=512,
+        limit_mm_per_prompt={modality: 1},
     )
-
-    image_placeholder = "[unused19]"
-    video_placeholder = "[unused32]"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
-        )
-        for question in questions
-    ]
 
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=7),
     )
 
 
@@ -2163,7 +2067,6 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=8,
         limit_mm_per_prompt={modality: 1},
         reasoning_parser="step3",
@@ -2235,8 +2138,6 @@ model_example_map = {
     "interns1_pro": run_interns1_pro,
     "internvl_chat": run_internvl,
     "kanana_v": run_kanana_v,
-    "keye_vl": run_keye_vl,
-    "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
@@ -2254,7 +2155,7 @@ model_example_map = {
     "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
-    "openpangu_vl": run_openpangu_vl,
+    "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,
@@ -2405,7 +2306,7 @@ def apply_image_repeat(
                 new_val = (i // 256 // 256, i // 256, i % 256)
                 cur_image.putpixel((0, 0), new_val)
 
-        uuid = "uuid_{}".format(i)
+        uuid = f"uuid_{i}"
 
         inputs.append(
             {
@@ -2458,7 +2359,7 @@ def time_counter(enable: bool):
         yield
         elapsed_time = time.time() - start_time
         print("-" * 50)
-        print("-- generate time = {}".format(elapsed_time))
+        print(f"-- generate time = {elapsed_time}")
         print("-" * 50)
     else:
         yield
@@ -2643,7 +2544,7 @@ def main(args):
             inputs = []
             inputs_with_empty_media = []
             for i in range(args.num_prompts):
-                uuid = "uuid_{}".format(i)
+                uuid = f"uuid_{i}"
                 inputs.append(
                     {
                         "prompt": prompts[i % len(prompts)],
@@ -2663,6 +2564,44 @@ def main(args):
     lora_request = (
         req_data.lora_requests * args.num_prompts if req_data.lora_requests else None
     )
+
+    if req_data.use_llm_chat:
+        if args.verify_mm_cache_hit_with_uuids:
+            raise ValueError(
+                "verify-mm-cache-hit-with-uuids is not supported when "
+                "use_llm_chat is True."
+            )
+
+        images = (
+            [inputs["multi_modal_data"][modality]]
+            if args.num_prompts == 1
+            else [inp["multi_modal_data"][modality] for inp in inputs]
+        )
+        messages = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompts[i % len(prompts)]},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(images[i])},
+                        },
+                    ],
+                }
+            ]
+            for i in range(args.num_prompts)
+        ]
+
+        with time_counter(args.time_generate):
+            outputs = llm.chat(messages, sampling_params=sampling_params)
+
+        print("-" * 50)
+        for o in outputs:
+            generated_text = o.outputs[0].text
+            print(generated_text)
+            print("-" * 50)
+        return
 
     with time_counter(args.time_generate):
         outputs = llm.generate(
