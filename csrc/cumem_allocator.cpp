@@ -1,6 +1,7 @@
 // A CUDAPluggableAllocator based on cumem* APIs.
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle*
 // need to be unsigned long long
+#include <atomic>
 #include <iostream>
 
 #include "cumem_allocator_compat.h"
@@ -103,6 +104,14 @@ CUresult error_code = no_error;  // store error code
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
 
+#ifndef USE_ROCM
+// Per-device FABRIC handle state. Latch to POSIX fds only if FABRIC fails
+// before it has ever succeeded on this device; otherwise retry per allocation.
+static constexpr int kMaxFabricDevices = 64;
+enum FabricState : int { kFabricUnknown = 0, kFabricWorks, kFabricUnusable };
+static std::atomic<int> g_fabric_state[kMaxFabricDevices] = {};
+#endif
+
 // ---------------------------------------------------------------------------
 // Helper functions:
 
@@ -141,22 +150,38 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
-  CUresult fab_result = cuDeviceGetAttribute(
-      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
-  if (fab_result == CUDA_SUCCESS &&
-      fab_flag) {  // support fabric handle if possible
-    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  if (device < kMaxFabricDevices &&
+      g_fabric_state[device].load() == kFabricUnusable) {
+    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  } else {
+    CUresult fab_result = cuDeviceGetAttribute(
+        &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+    if (fab_result == CUDA_SUCCESS &&
+        fab_flag) {  // support fabric handle if possible
+      prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+    }
   }
 #endif
 
 #ifndef USE_ROCM
   // Allocate memory using cuMemCreate
   CUresult ret = (CUresult)cuMemCreate(p_memHandle, size, &prop, 0);
+  if (ret == CUDA_SUCCESS && fab_flag && device < kMaxFabricDevices &&
+      g_fabric_state[device].load() != kFabricWorks) {
+    g_fabric_state[device].store(kFabricWorks);
+  }
   if (ret) {
     if (fab_flag &&
         (ret == CUDA_ERROR_NOT_PERMITTED || ret == CUDA_ERROR_NOT_SUPPORTED)) {
       // Fabric allocation may fail without multi-node nvlink,
       // fallback to POSIX file descriptor
+      int expected = kFabricUnknown;
+      if (device < kMaxFabricDevices &&
+          g_fabric_state[device].compare_exchange_strong(expected,
+                                                         kFabricUnusable)) {
+        std::cerr << "cumem_allocator: FABRIC handles unavailable on device "
+                  << device << ", using POSIX file descriptors" << std::endl;
+      }
       prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
       CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
     } else {
