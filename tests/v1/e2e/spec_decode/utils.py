@@ -103,23 +103,52 @@ def stochastic_sampling() -> SamplingParams:
     return SamplingParams(temperature=1.0, max_tokens=10, ignore_eos=False)
 
 
-def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) -> None:
+def evaluate_llm_for_gsm8k(
+    llm: LLM, expected_accuracy_threshold: float = 0.70, **gsm8k_kwargs: Any
+) -> None:
     """Evaluate the LLM on GSM8K and check that accuracy is above a sanity threshold.
 
     The default threshold assumes the LLM uses the same target model as the "model_name"
     fixture, with max model len == 4096. Precomputed reference value is 75% to 80%
     on GSM8K with greedy decoding, so we check that it's above a sanity threshold of 70%
     to verify that the model is correct.
+
+    Extra keyword arguments are forwarded to ``evaluate_gsm8k_offline`` for
+    suites that need non-default sampling or prompting.
     """
     if expected_accuracy_threshold <= 0.0:
         print("Skipping GSM8K evaluation")
         return
-    results = evaluate_gsm8k_offline(llm)
+    results = evaluate_gsm8k_offline(llm, **gsm8k_kwargs)
     accuracy = results["accuracy"]
     print(f"GSM8K accuracy: {accuracy:.3f}")
     assert accuracy >= expected_accuracy_threshold, (
         f"Expected GSM8K accuracy >= {expected_accuracy_threshold}, got {accuracy:.3f}"
     )
+
+
+def assert_spec_decode_metrics(
+    metrics: list[Metric],
+    expected_acceptance_rate: float | None,
+    expected_acceptance_len: float | None,
+    context: str,
+) -> None:
+    """Assert acceptance rate/length from spec-decode counters.
+
+    Thresholds stay at the call site; pass None to skip a check.
+    """
+    if expected_acceptance_rate is not None:
+        acceptance_rate = compute_acceptance_rate(metrics)
+        assert acceptance_rate >= expected_acceptance_rate, (
+            f"{context}; expected acceptance_rate >= "
+            f"{expected_acceptance_rate:.3f}, got {acceptance_rate:.3f}"
+        )
+    if expected_acceptance_len is not None:
+        acceptance_len = compute_acceptance_len(metrics)
+        assert acceptance_len >= expected_acceptance_len, (
+            f"{context}; expected acceptance_len >= "
+            f"{expected_acceptance_len:.3f}, got {acceptance_len:.3f}"
+        )
 
 
 def assert_request_outputs_match(
