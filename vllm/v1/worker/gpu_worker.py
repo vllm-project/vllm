@@ -623,7 +623,13 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
             self._external_weight_charges.track(),
         ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            snapshot = None if load_dummy_weights else self._weight_snapshot_path()
+            if snapshot is None:
+                self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            else:
+                from vllm.device_allocator import weight_snapshot
+
+                weight_snapshot.load_model(self.model_runner, snapshot)
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -657,6 +663,20 @@ class Worker(WorkerBase):
         # for profiling and compilation so Dynamo's global-state guards remain
         # valid when requests arrive.
         set_torch_threads_for_runtime()
+
+    def _weight_snapshot_path(self):
+        """Snapshot file of this rank's post-processed weights, if enabled."""
+        if not envs.VLLM_WEIGHT_SNAPSHOT_DIR:
+            return None
+        from vllm.device_allocator import weight_snapshot
+
+        return weight_snapshot.resolve(
+            envs.VLLM_WEIGHT_SNAPSHOT_DIR,
+            weight_snapshot.weights_key(self.vllm_config),
+            self.rank,
+            clear=envs.VLLM_WEIGHT_SNAPSHOT_CLEAR,
+            rebuild=envs.VLLM_WEIGHT_SNAPSHOT_REBUILD,
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
