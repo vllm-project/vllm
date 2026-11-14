@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -20,9 +21,15 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+    _layer_name_type,
+    _resolve_layer_name,
+    get_layer_from_name,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
@@ -39,6 +46,10 @@ class ROCmLatentMoERunner(MoERunner):
     Native path: the replicated up-proj produces the full hidden dim on every
     rank, so the base runner combines routed + shared correctly at any TP size.
     """
+
+    merged_front_core: (
+        Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None
+    ) = None
 
     def __init__(
         self,
@@ -195,6 +206,13 @@ class ROCmLatentMoERunner(MoERunner):
 
         return self._maybe_add_zero_expert_output(result)
 
+    def forward_merged_front(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        shared_output, fused_output = torch.ops.vllm.kimi_k3_moe_front(
+            hidden_states, self._encode_layer_name(), self.moe_config.hidden_dim
+        )
+        result = self._shard_up_proj_tail(fused_output, shared_output, None)
+        return self._maybe_add_zero_expert_output(result)
+
 
 class KimiLatentAiterExperts(AiterMxfp4Experts):
     def output_hidden_dim(self, hidden_dim: int) -> int:
@@ -285,3 +303,28 @@ def enable_quantized_routed_input(runner) -> bool:
         ),
     )
     return True
+
+
+def _kimi_k3_moe_front(
+    hidden_states: torch.Tensor, layer_name: _layer_name_type, latent_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    runner = get_layer_from_name(_resolve_layer_name(layer_name))
+    assert isinstance(runner, ROCmLatentMoERunner)
+    assert runner.merged_front_core is not None
+    return runner.merged_front_core(hidden_states)
+
+
+def _kimi_k3_moe_front_fake(
+    hidden_states: torch.Tensor, layer_name: _layer_name_type, latent_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(hidden_states), hidden_states.new_empty(
+        (hidden_states.shape[0], latent_size)
+    )
+
+
+direct_register_custom_op(
+    op_name="kimi_k3_moe_front",
+    op_func=_kimi_k3_moe_front,
+    fake_impl=_kimi_k3_moe_front_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
