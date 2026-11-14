@@ -52,6 +52,7 @@ shard_1_kernel_tests_1() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
+    pytest -x -v -s tests/kernels/test_cpu_slot_mapping.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
