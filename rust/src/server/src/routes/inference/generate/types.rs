@@ -76,7 +76,9 @@ pub struct GenerateRequest {
     pub priority: i32,
     pub kv_transfer_params: Option<HashMap<String, Value>>,
     pub ec_transfer_params: Option<HashMap<String, Value>>,
-    /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
+    /// Raw multimodal input; server resolves media and expands its
+    /// placeholders. With `features`, these placeholders must follow the last
+    /// `features` range, which is left as is.
     pub content_parts: Option<Vec<MediaContentPart>>,
     /// Multimodal items already preprocessed by render, aligned with the
     /// expanded placeholders in `token_ids`.
