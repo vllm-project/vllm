@@ -154,6 +154,120 @@ def test_get_open_port_ephemeral_without_dp_master_port(
             s.bind(("localhost", port))
 
 
+def test_get_open_port_concurrent_subprocesses_unique(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Concurrent independent processes sharing VLLM_PORT and VLLM_RPC_BASE_PATH
+    must receive distinct ports instead of colliding (#43206)."""
+    import os
+    import subprocess
+    import sys
+
+    probe = """
+import os, sys, time
+from pathlib import Path
+from vllm.utils.network_utils import get_open_port
+
+ready_dir = Path(sys.argv[1])
+idx = sys.argv[2]
+(ready_dir / f"ready_{idx}").touch()
+while not (ready_dir / "go").exists():
+    time.sleep(0.01)
+print(get_open_port())
+"""
+    ready_dir = tmp_path / "sync"
+    ready_dir.mkdir()
+    env = os.environ.copy()
+    env["VLLM_PORT"] = "43100"
+    env["VLLM_RPC_BASE_PATH"] = str(tmp_path)
+    env.pop("VLLM_DP_MASTER_PORT", None)
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", probe, str(ready_dir), str(i)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for i in range(4)
+    ]
+    import time
+
+    deadline = time.monotonic() + 45.0
+    while len(list(ready_dir.glob("ready_*"))) < 4:
+        if time.monotonic() > deadline:
+            for p in procs:
+                p.kill()
+            pytest.fail("Subprocesses did not finish importing within 45s")
+        time.sleep(0.05)
+
+    (ready_dir / "go").touch()
+    ports = []
+    for p in procs:
+        out, err = p.communicate(timeout=15)
+        assert p.returncode == 0, f"subprocess failed: {err}"
+        ports.append(int(out.strip()))
+
+    assert len(set(ports)) == 4, f"Expected 4 unique ports, got {ports}"
+
+
+def test_get_open_port_handles_unprivileged_or_symlink_lock_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """If the lock path is a symlink or fcntl is unavailable, port allocation
+    still succeeds instead of crashing."""
+    import os
+
+    target = tmp_path / "sensitive"
+    target.write_text("keep")
+    link = tmp_path / "vllm_port_reservations.lock"
+    link.symlink_to(target)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_RPC_BASE_PATH", str(tmp_path))
+        m.setenv("VLLM_PORT", "43200")
+        port = _call_with_timeout(get_open_port)
+        assert port >= 43200
+        assert target.read_text() == "keep"
+
+        m.setattr(network_utils, "fcntl", None)
+        port_no_fcntl = _call_with_timeout(get_open_port)
+        assert port_no_fcntl >= 43200
+        assert os.path.islink(link)
+
+
+def test_get_open_port_survives_reservation_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """A failed reservation write (e.g. disk full) must not discard the port
+    that was already selected."""
+    import errno
+
+    def disk_full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_RPC_BASE_PATH", str(tmp_path))
+        m.setenv("VLLM_PORT", "43300")
+        m.setattr(network_utils.os, "ftruncate", disk_full)
+        port = _call_with_timeout(get_open_port)
+        assert port >= 43300
+
+
+def test_port_reservation_state_propagates_body_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Errors raised while choosing a port surface as-is, not as
+    'generator didn't stop'."""
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", str(tmp_path))
+    with (
+        pytest.raises(OSError, match="bind failed"),
+        network_utils._port_reservation_state(),
+    ):
+        raise OSError("bind failed")
+
+
 @pytest.mark.parametrize(
     "path,expected",
     [
