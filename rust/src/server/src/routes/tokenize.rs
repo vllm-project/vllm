@@ -13,7 +13,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
 
 use crate::error::{ApiError, chat_submit_error, text_submit_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -22,15 +21,13 @@ use crate::routes::tokenize::types::{
     TokenizeRequest, TokenizeResponse,
 };
 use crate::state::AppState;
-use crate::utils::resolve_base_request_id;
+use crate::utils::{header_value, resolve_base_request_id};
 
 /// Match Python `tokenize-{base}` where base is `X-Request-Id` or a new UUID.
-fn tokenize_request_id(headers: &HeaderMap) -> String {
-    let base = resolve_base_request_id(
-        headers.get("X-Request-Id").and_then(|value| value.to_str().ok()),
-        None,
-    );
-    format!("tokenize-{base}")
+fn tokenize_request_id(headers: &HeaderMap) -> Result<String, ApiError> {
+    let header: Option<String> = header_value(headers, "X-Request-Id")?;
+    let base = resolve_base_request_id(header.as_deref(), None);
+    Ok(format!("tokenize-{base}"))
 }
 
 /// Build the `token_strs` vector when requested, via the tokenizer vocab.
@@ -43,29 +40,23 @@ pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<TokenizeRequest>,
-) -> Response {
-    let request_id = tokenize_request_id(&headers);
+) -> Result<Json<TokenizeResponse>, ApiError> {
+    let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
 
-    let result = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
-        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
+    let (tokens, want_strs) = match body {
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req)?,
+        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await?,
     };
 
-    match result {
-        Ok((tokens, want_strs)) => {
-            let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
-            Json(TokenizeResponse {
-                count: tokens.len(),
-                max_model_len,
-                tokens,
-                token_strs,
-            })
-            .into_response()
-        }
-        Err(error) => error.into_response(),
-    }
+    let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
+    Ok(Json(TokenizeResponse {
+        count: tokens.len(),
+        max_model_len,
+        tokens,
+        token_strs,
+    }))
 }
 
 fn tokenize_completion(
@@ -115,15 +106,13 @@ async fn tokenize_chat(
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
-) -> Response {
-    if let Err(error) = state.base_model_names().check(body.model.as_deref()) {
-        return error.into_response();
-    }
+) -> Result<Json<DetokenizeResponse>, ApiError> {
+    state.base_model_names().check(body.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
-    match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
-        Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
-        Err(error) => text_submit_error("detokenize failed", error.into()).into_response(),
-    }
+    let prompt = tokenizer
+        .decode(&body.tokens, /* skip_special_tokens = */ false)
+        .map_err(|error| text_submit_error("detokenize failed", error.into()))?;
+    Ok(Json(DetokenizeResponse { prompt }))
 }
 
 #[cfg(test)]
@@ -136,13 +125,16 @@ mod tests {
     fn tokenize_request_id_prefers_x_request_id_header() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Request-Id", HeaderValue::from_static("client-req-1"));
-        assert_eq!(tokenize_request_id(&headers), "tokenize-client-req-1");
+        assert_eq!(
+            tokenize_request_id(&headers).unwrap(),
+            "tokenize-client-req-1"
+        );
     }
 
     #[test]
     fn tokenize_request_id_generates_uuid_when_header_missing() {
         let headers = HeaderMap::new();
-        let id = tokenize_request_id(&headers);
+        let id = tokenize_request_id(&headers).unwrap();
         assert!(id.starts_with("tokenize-"));
         assert_ne!(id, "tokenize-");
     }
