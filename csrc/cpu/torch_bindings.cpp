@@ -244,6 +244,13 @@ at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
                               std::optional<at::Tensor> bias);
 
+#if defined(__riscv)
+// SpacemiT A100 vmadot.hp int4 GEMM. A is float [M, K], qweight is packed
+// nibbles uint8 [N, K/32, 16], scales is float [N, K/32].
+at::Tensor ime2_hp_gemm_cpu(const at::Tensor& a, const at::Tensor& qweight,
+                            const at::Tensor& scales);
+#endif
+
 // Adapted from sglang: GDN
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
@@ -917,6 +924,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
       "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
   ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
+#endif
+
+#if defined(__riscv)
+  ops.def(
+      "ime2_hp_gemm_cpu(Tensor a, Tensor qweight, Tensor scales) -> Tensor");
+  ops.impl("ime2_hp_gemm_cpu", torch::kCPU, &ime2_hp_gemm_cpu);
 #endif
 
   // Adapted from sglang: GDN kernels
