@@ -196,6 +196,11 @@ P99 ITL (ms):                            8.39
 With standard decoding, each streamed output usually contains one token, so ITL
 and TPOT are typically similar.
 
+For the `openai`, `vllm`, and `openai-chat` backends, token counts reported in
+streamed `usage` are recorded whether usage arrives alongside output text or in
+a separate trailing event. Usage accompanying text does not add another ITL
+sample.
+
 With speculative decoding, one streamed output can contain multiple tokens,
 such as several accepted draft tokens within a single engine step. ITL records
 only the gaps between streamed outputs; it does not add zero-duration gaps for
