@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from math import ceil
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
@@ -165,6 +166,20 @@ class MoRIIOWriter:
         with self._write_state_lock:
             return layer_name in self._scheduled_layers.get(transfer_id, set())
 
+    def ack_refused_transfers(self, transfer_ids: Iterable[TransferId]) -> None:
+        """Ack each transfer that is terminal and has no write scheduled.
+
+        No completion, failure or timeout acks a request whose writes were all
+        refused. `resolve_moriio_transfer_ack` drops a duplicate of a release.
+        """
+        wrapper = self.worker.moriio_wrapper
+        with self._write_state_lock, wrapper.lock:
+            for transfer_id in set(transfer_ids):
+                if transfer_id not in self._scheduled_writes and (
+                    wrapper._is_transfer_terminal_locked(transfer_id)
+                ):
+                    wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
+
     def seal_pending_transfers(self) -> None:
         """Seal expected WRITE counts after the model forward has run.
 
@@ -204,6 +219,7 @@ class MoRIIOWriter:
                 continue
 
             if self._is_transfer_terminal(task.transfer_id):
+                self._clear_transfer_state(task.transfer_id)
                 continue
 
             # Check if remote blocks are ready
@@ -237,6 +253,7 @@ class MoRIIOWriter:
 
         for task in self._deferred_tasks:
             if self._is_transfer_terminal(task.transfer_id):
+                self._clear_transfer_state(task.transfer_id)
                 continue
             if self._is_remote_ready(task):
                 try:

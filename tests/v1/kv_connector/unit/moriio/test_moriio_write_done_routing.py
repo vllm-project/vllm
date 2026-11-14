@@ -11,8 +11,12 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_connector,
+    moriio_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     LayerTransferPlan,
@@ -23,6 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ReqMeta,
     WriteTask,
     get_port_offset,
+    get_role,
+    set_role,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
@@ -35,8 +41,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     compute_write_tp_mapping,
 )
+from vllm.v1.request import RequestStatus
 
-from ..utils import make_moriio_writer
+from ..utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    make_moriio_writer,
+)
+from .test_moriio_connector import _setup_kv_transfer_request, create_vllm_config
 
 pytestmark = pytest.mark.cpu_test
 
@@ -725,3 +738,250 @@ def test_hybrid_write_requires_exactly_one_running_state_slot(local_state):
 
     with pytest.raises(MoRIIOError, match="one running-state slot"):
         writer._prepare_mamba_transfer_plans(task, RemoteAllocInfo(block_ids=[[], [9]]))
+
+
+_DECODE_HOST = "127.0.0.1"
+_DECODE_PORT = 4789
+_TOKEN_BUDGET = 64
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def producer_role():
+    role = get_role()
+    set_role(ROLE.PRODUCER)
+    yield
+    set_role(role)
+
+
+@pytest.fixture
+def scheduler_clock(monkeypatch) -> _Clock:
+    clock = _Clock()
+    monkeypatch.setattr(
+        moriio_connector,
+        "time",
+        SimpleNamespace(
+            monotonic=clock.monotonic, perf_counter=time.perf_counter, sleep=time.sleep
+        ),
+    )
+    return clock
+
+
+@pytest.fixture
+def write_producer(monkeypatch, producer_role):
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
+    monkeypatch.setattr(
+        torch.cuda, "Event", lambda: SimpleNamespace(record=lambda stream: None)
+    )
+    scheduler = create_scheduler(
+        create_vllm_config(role="kv_producer", max_num_batched_tokens=_TOKEN_BUDGET)
+    )
+    wrapper = _real_wrapper()
+    wrapper.async_wait_reqid = lambda: None
+    wrapper.paths = {}
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    vars(worker).update(
+        is_producer=True,
+        mode=MoRIIOMode.WRITE,
+        tp_rank=0,
+        world_size=1,
+        use_mla=False,
+        _has_mamba=False,
+        model_config=SimpleNamespace(get_total_num_kv_heads=lambda: 8),
+        moriio_wrapper=wrapper,
+        moriio_config=SimpleNamespace(transfer_timeout=30.0),
+        kv_caches={"layer0": None, "layer1": None},
+        _remote_agents={f"{_DECODE_HOST}:{_DECODE_PORT}_dp0": {"agent"}},
+        write_ready_flags={f"{_DECODE_HOST}:{_DECODE_PORT}": True},
+        _handshake_lock=threading.Lock(),
+        _ready_requests=queue.Queue(),
+        transfer_id_to_request_id={},
+        _pending_unmapped_acks=[],
+        _consumer_notification_counts={},
+        _completed_consumer_notifications=set(),
+        _completed_notification_owners={},
+    )
+    worker._writer = make_moriio_writer(worker)
+    return SimpleNamespace(
+        scheduler=scheduler,
+        connector=scheduler.connector.connector_scheduler,
+        worker=worker,
+        free_blocks=scheduler.kv_cache_manager.block_pool.get_num_free_blocks,
+    )
+
+
+def _add_write_request(producer, transfer_id: str, num_tokens: int):
+    request = create_request(num_tokens=num_tokens, do_remote_decode=True)
+    _setup_kv_transfer_request(
+        request,
+        remote_host=_DECODE_HOST,
+        fake_port=_DECODE_PORT,
+        fake_transfer_id=transfer_id,
+    )
+    producer.scheduler.add_request(request)
+    return request
+
+
+def _step(producer) -> None:
+    scheduler, worker = producer.scheduler, producer.worker
+    step = scheduler.schedule()
+    metadata = step.kv_connector_metadata
+    worker.start_load_kv(metadata)
+    worker.wait_for_save(metadata)
+    finished_sending, _ = worker.get_finished()
+    requests = [scheduler.requests[req_id] for req_id in step.num_scheduled_tokens]
+    output = create_model_runner_output(requests, finished_sending=finished_sending)
+    output.sampled_token_ids = [
+        [] if request.num_computed_tokens < request.num_prompt_tokens else sampled
+        for request, sampled in zip(requests, output.sampled_token_ids)
+    ]
+    scheduler.update_from_output(step, output)
+
+
+def _decode_releases(producer, transfer_id: str) -> None:
+    producer.worker.moriio_wrapper._handle_structured_message(
+        {"type": "release", "transfer_id": transfer_id, "consumer_tp_size": 1}
+    )
+
+
+class _WriteQueueDrained(Exception):
+    pass
+
+
+def _run_write_worker(writer) -> None:
+    tasks = writer._write_task_q
+
+    def next_task(timeout):
+        try:
+            return tasks.get_nowait()
+        except queue.Empty:
+            raise _WriteQueueDrained from None
+
+    writer._write_task_q = SimpleNamespace(get=next_task)
+    try:
+        with pytest.raises(_WriteQueueDrained):
+            writer._write_worker_loop()
+    finally:
+        writer._write_task_q = tasks
+
+
+def test_decode_release_during_a_long_prefill_frees_its_blocks_when_it_finishes(
+    write_producer, scheduler_clock
+):
+    producer = write_producer
+    free_before = producer.free_blocks()
+    request = _add_write_request(producer, "tA", num_tokens=4 * _TOKEN_BUDGET)
+
+    _step(producer)
+    _decode_releases(producer, "tA")
+    _step(producer)
+    scheduler_clock.now += 10 * producer.connector._defer_timeout
+    _step(producer)
+    _step(producer)
+
+    assert request.is_finished()
+    assert request.request_id not in producer.scheduler.requests
+    assert producer.free_blocks() == free_before
+
+
+def test_queued_request_frees_its_blocks_when_its_unmatched_release_was_dropped(
+    write_producer,
+):
+    producer = write_producer
+    running = _add_write_request(producer, "tA", num_tokens=4 * _TOKEN_BUDGET)
+    queued = _add_write_request(producer, "tB", num_tokens=_TOKEN_BUDGET)
+    _step(producer)
+    _decode_releases(producer, "tB")
+    _step(producer)
+    assert producer.worker._pending_unmapped_acks
+    # #50674 and #65690 drop unmatched releases after a timeout.
+    producer.worker._pending_unmapped_acks.clear()
+    _step(producer)
+    _step(producer)
+    assert running.is_finished()
+    free_while_queued = producer.free_blocks()
+
+    _step(producer)
+
+    assert queued.is_finished()
+    assert queued.request_id not in producer.scheduler.requests
+    assert producer.free_blocks() == free_while_queued
+
+
+@pytest.mark.parametrize("queued_writes", [False, True], ids=["unwritten", "queued"])
+def test_request_reusing_an_ended_transfer_id_frees_its_blocks_when_it_finishes(
+    write_producer, queued_writes
+):
+    producer = write_producer
+    free_before = producer.free_blocks()
+    first = _add_write_request(producer, "tA", num_tokens=_TOKEN_BUDGET)
+    if queued_writes:
+        _step(producer)
+        _run_write_worker(producer.worker._writer)
+        _decode_releases(producer, "tA")
+        producer.worker._writer._process_deferred_tasks()
+    else:
+        _decode_releases(producer, "tA")
+    _step(producer)
+    assert first.request_id not in producer.scheduler.requests
+
+    second = _add_write_request(producer, "tA", num_tokens=_TOKEN_BUDGET)
+    _step(producer)
+
+    assert second.is_finished()
+    assert second.request_id not in producer.scheduler.requests
+    assert producer.free_blocks() == free_before
+    assert producer.worker._writer._write_task_q.empty()
+
+
+@pytest.mark.parametrize("queued", [True, False], ids=["queued", "deferred"])
+def test_release_of_a_transfer_with_scheduled_writes_leaves_no_writer_state(
+    producer_role, queued
+):
+    wrapper = _real_wrapper()
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
+    for layer_name in ("layer0", "layer1"):
+        task = _write_task("tA", "10.0.0.1")
+        task.layer_name = layer_name
+        assert writer.schedule_write(task)
+    writer.seal_pending_transfers()
+    if not queued:
+        _run_write_worker(writer)
+        assert len(writer._deferred_tasks) == 2
+
+    wrapper._handle_structured_message({"type": "release", "transfer_id": "tA"})
+    _run_write_worker(writer)
+
+    assert writer._deferred_tasks == []
+    assert "tA" not in writer._scheduled_writes
+    assert "tA" not in writer._scheduled_layers
+    assert "tA" not in writer._sealed_writes
+
+
+def test_parked_ack_of_an_aborted_prefill_is_dropped_after_the_defer_timeout(
+    write_producer, scheduler_clock
+):
+    producer = write_producer
+    free_before = producer.free_blocks()
+    request = _add_write_request(producer, "tA", num_tokens=4 * _TOKEN_BUDGET)
+    _step(producer)
+    _decode_releases(producer, "tA")
+    _step(producer)
+    assert request.request_id in producer.connector._pending_sent_acks
+
+    producer.scheduler.finish_requests(
+        request.request_id, RequestStatus.FINISHED_ABORTED
+    )
+    scheduler_clock.now += producer.connector._defer_timeout + 1
+    _step(producer)
+
+    assert producer.connector._pending_sent_acks == {}
+    assert request.request_id not in producer.scheduler.requests
+    assert producer.free_blocks() == free_before

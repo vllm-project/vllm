@@ -27,6 +27,7 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
     """Minimal prefill-side (producer) scheduler stand-in for request_finished."""
     s = SimpleNamespace(
         is_producer=True,
+        _unfinished_write_sends=set(),
         _is_hma_required=False,
         _has_mamba=False,
         blocks_per_sw=[0],
