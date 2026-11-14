@@ -85,10 +85,12 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe as k2b
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
-O0, O1 = NA, BLOCKS  # o_proj CTAs: every CTA past AttnRes's
-O_N = O1 - O0  # 200
+O0 = NA  # o_proj task index origin: gi = (bid - O0) mod BLOCKS
 OTASKS = k2a.OTASKS  # 448
-O_ROUNDS = (OTASKS + O_N - 1) // O_N  # 5
+# o_proj tasks on every CTA, gi = (bid - NA) mod BLOCKS: the second round on
+# CTAs 56 .. 247, the AttnRes CTAs (gi 200 ..) one task
+O_N = BLOCKS
+O_ROUNDS = (OTASKS + O_N - 1) // O_N  # 2
 E0 = 160  # router / latent CTAs (their weights in flight under their o_proj)
 H0 = 8  # the shared SiTU's CTAs (after their AttnRes work)
 SD0 = k2b.DOWN_TASKS  # 224: the shared down's CTAs
@@ -430,8 +432,8 @@ def xl_words(s):
 
 @traced
 def stage_oproj(c, gi):
-    """o_proj tasks gi, gi + 200, gi + 400 (< 448): every task's weights in
-    flight at once (one memory latency, not three), then the MFMAs a core tile
+    """o_proj tasks gi, gi + 256 (< 448): every task's weights in
+    flight at once (one memory latency, not two), then the MFMAs a core tile
     of 16 rows at a time."""
     ops = [
         k2a.o_loads(
@@ -962,6 +964,7 @@ def build(key: K2Build):
                 k2b.early_compute(c, 2, gi, 0, k2b.early_loads(c, 2, gi, 0))
         # ---- AttnRes: the reduced o_proj -> x; then route / SiTU
         if bid < NA:
+            stage_oproj(c, bid + BLOCKS - NA)
             if const_expr(key.opt & OPT_PRELOAD):
                 # the slice's loads before the AR poll
                 sld = k2a.slice_loads(c, bid)
