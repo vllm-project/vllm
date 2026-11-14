@@ -5,10 +5,13 @@ cheap spin-wait polls (health / deadline every ``sync.CHECK_POLLS`` polls), the
 single-word sentinel poll's one load and the router's bounded candidate rank
 give the default build's bits.
 
-- K1 (one GPU): flag off vs on, every output and state bit for bit.
+- K1, D1a (one GPU): flag off vs on, every output and state bit for bit.
 - K2 (eight GPUs): flag off vs on at every width, both layer parities, back
-  to back on re-armed sentinel regions; a graph replay; then a stalled rank
+  to back on re-armed sentinel regions; with M1b in its launch; on tied
+  router keys at 17, 63 and 64 candidates; a graph replay; then a stalled rank
   still fails the step without a hang (the deadline checked every 64 polls).
+- M1 at DCP8 (M1a, M1b, K2 + M1b / M1c) and K2 + DSA (eight GPUs):
+  ``test_numerics`` / ``test_dsa_numerics``' workers under the flag.
 
 Every mono module keeps its launches in an in-process ``_BUILDS`` keyed by its
 build alone, so a flip clears them all (``_set_flag``).
@@ -22,6 +25,9 @@ import ray
 import torch
 import torch.distributed as dist
 
+from tests.models.kimi_k3.amd_specialized_decode.test_dsa_numerics import (
+    _dsa_k2_worker,
+)
 from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
     K1_SHAPES,
     K2_CASES,
@@ -30,6 +36,8 @@ from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
     _k2_inputs,
     _k2_launch,
     _kda_inputs,
+    _m1_worker,
+    _mla_back_inputs,
     _moe_weights,
     bf,
     needs_gfx950,
@@ -37,6 +45,7 @@ from tests.models.kimi_k3.amd_specialized_decode.test_numerics import (
 from tests.utils import multi_gpu_test, multi_process_parallel
 
 FLAG = "VLLM_K31_BEAT_K2SYNC"
+M1B_IN = ("o", "lse", "seq_lens", "qsl", "w_v", "w_v_scale", "gate")
 MONO_PKG = "vllm.models.kimi_k3.amd.specialized_decode.mono"
 MONO = (
     "layer",
@@ -148,6 +157,40 @@ def test_k1_k2sync_bit_exact(
         assert torch.equal(a, b), name
 
 
+@needs_gfx950
+@pytest.mark.parametrize("S", [1, 8])
+@pytest.mark.parametrize("idx", [False, True])
+@torch.inference_mode()
+def test_d1a_k2sync_bit_exact(S: int, idx: bool) -> None:
+    """D1a (with and without the indexer's prep): flag off vs on."""
+    from tests.models.kimi_k3.amd_specialized_decode.test_dsa_prologue import (
+        _indexer_state,
+        _inputs,
+        _launch,
+        _state,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre as d
+
+    nb = 4
+    key = d.DsaPreBuild(tokens=S, nblocks=nb, delta=True, idx=idx, iw_scale=0.5)
+    got = []
+    for on in (False, True):
+        _set_flag(on)
+        w = _inputs(S, nb, seed=3)
+        storage, ix = _indexer_state(S, seed=7) if idx else (None, None)
+        scratch = torch.zeros(d.scratch_bytes(key), dtype=torch.uint8, device="cuda")
+        epoch, health, flags = _state()
+        out = _launch(key, w, scratch, epoch, health, flags, idx=ix)
+        torch.accelerator.synchronize()
+        assert not health.any() and not flags.any(), on
+        out.update(prefix=w["prefix"], blocks=w["blocks"], kv=w["kv_cache"])
+        if idx:
+            out.update(storage=storage, topk=ix["topk"])
+        got.append(out)
+    for name in got[0]:
+        assert torch.equal(got[0][name], got[1][name]), name
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _k2sync_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -184,6 +227,56 @@ def _k2sync_worker(
                 assert torch.equal(out, want[i][0]), (S, reset, layer, i)
                 assert torch.equal(prefix, want[i][1]), (S, reset, layer, i)
     assert not runner.health.any() and not runner.flags.any()
+
+    # M1b in K2's launch (DCP1): core, prefix and the MoE output
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import GROWS
+
+    for S, q in ((8, 8), (16, 4)):
+        k = _k2_inputs(rank, device, S)
+        b = _mla_back_inputs(S, q, 1, rank)
+        b["lse"] = None
+        m1b = (dict({n: b[n] for n in M1B_IN}), q, 1)
+        got = []
+        for on in (False, True):
+            _set_flag(on)
+            runner.step_begin()
+            core = torch.zeros(S, GROWS, dtype=bf, device=device)
+            prefix = k["prefix"].clone()
+            out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+            _k2_launch(runner, dict(k, core=core), mw, prefix, out, False, m1b=m1b)
+            torch.accelerator.synchronize()
+            assert not runner.health.any() and not runner.flags.any(), (S, q, on)
+            got.append((core, prefix, out))
+        for x, y in zip(*got):
+            assert torch.equal(x, y), (S, q)
+
+    # the router on tied keys (no gate logits: every sigmoid 0.5): 5 experts
+    # ahead, the rest of n_c tied, each in a lane of its own -> n_c candidates;
+    # the bounded rank's last round partial (17, 63) or full (64)
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import E
+
+    S = 8
+    k = _k2_inputs(rank, device, S, seed=5)
+    g = torch.Generator().manual_seed(17)
+    for n_c in (17, 63, 64):
+        lanes = torch.randperm(64, generator=g)[:n_c]
+        experts = lanes + 64 * torch.randint(0, E // 64, (n_c,), generator=g)
+        bias = torch.zeros(E, dtype=torch.float32)
+        bias[experts] = 1.0
+        bias[experts[:5]] = 2.0
+        mt = dict(mw, w_gate=torch.zeros_like(mw["w_gate"]), bias=bias.to(device))
+        got = []
+        for on in (False, True):
+            _set_flag(on)
+            runner.step_begin()
+            prefix = k["prefix"].clone()
+            out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+            _k2_launch(runner, k, mt, prefix, out, True)
+            torch.accelerator.synchronize()
+            assert not runner.health.any() and not runner.flags.any(), (n_c, on)
+            got.append(out)
+        assert torch.equal(got[0], got[1]), n_c
+    _set_flag(True)
 
     # a graph of one step replayed under the flag: every replay the first's bits
     S = 8
@@ -264,3 +357,34 @@ def test_k2sync_stalled_rank_fails_without_a_hang(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2sync_fault_worker)
+
+
+# ``test_numerics`` / ``test_dsa_numerics``' workers under the flag: their own
+# bit-equality checks (fused vs split launches, replays, a stalled rank) on the
+# flag's builds
+@ray.remote(num_gpus=1, max_calls=1)
+def _m1_k2sync_worker(*args) -> None:
+    _set_flag(True)
+    _m1_worker._function(*args)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _dsa_k2sync_worker(*args) -> None:
+    _set_flag(True)
+    _dsa_k2_worker._function(*args)
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_m1_tp8_dcp8_under_k2sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``test_m1_tp8_dcp8_matches_vllm_ops_and_replays``: M1a / M1b at DCP8,
+    K2 with M1b / M1c in its launch."""
+    multi_process_parallel(monkeypatch, 8, 1, _m1_k2sync_worker)
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_dsa_fused_tp8_under_k2sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``test_dsa_fused_tp8_bit_equal_replays_and_faults``: K2 with the DSA
+    stage, the fold or not, its epoch wrap and a stalled DSA CTA."""
+    multi_process_parallel(monkeypatch, 8, 1, _dsa_k2sync_worker)
