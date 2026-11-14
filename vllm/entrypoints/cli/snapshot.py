@@ -17,6 +17,8 @@ else:
 
 
 def validate_create_args(args: argparse.Namespace) -> None:
+    if getattr(args, "checkpoint_prepare_on_startup", False):
+        raise ValueError("snapshot create cannot use --checkpoint-prepare-on-startup")
     model = str(getattr(args, "model_tag", None) or args.model)
     revision = str(getattr(args, "revision", None) or "")
     if (
@@ -37,6 +39,8 @@ def validate_create_args(args: argparse.Namespace) -> None:
     for name, size in parallel_sizes:
         if size != 1:
             raise ValueError(f"snapshot create currently requires {name} size 1")
+    if args.distributed_executor_backend not in (None, "mp", "uni"):
+        raise ValueError("snapshot create requires a local executor")
     unsupported_frontend = (
         args.api_server_count not in (None, 1)
         or args.grpc

@@ -1252,6 +1252,12 @@ class AsyncLLM(EngineClient):
     async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
         return await self.engine_core.checkpoint_state_async()
 
+    async def prepare_snapshot_resources(self) -> None:
+        await self.engine_core.prepare_snapshot_resources_async()
+
+    async def restore_snapshot_resources(self) -> None:
+        await self.engine_core.restore_snapshot_resources_async()
+
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 

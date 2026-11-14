@@ -4,19 +4,24 @@ Initialized engine snapshots are an experimental way to trade local disk space
 and host privileges for a faster vLLM activation. Snapshot creation initializes
 the engine and records deterministic generation output before CRIU captures the
 process tree and CUDA state. Restore validates the saved environment, restores
-the engine, binds the HTTP server, and reproduces the recorded token and sampled
-token log probability before returning.
+the engine, and checks the recorded token and sampled-token log probability
+before binding HTTP. The controller repeats the check through the public API
+before returning.
 
 This path is intended for repeatedly activating the same model and engine
 configuration on the same machine. It is not a portable model artifact.
 
 ## Requirements
 
-Snapshots currently require:
+The `vllm snapshot create/restore` CLI currently requires:
 
 - Linux on x86-64 with one NVIDIA GPU.
 - TP1 with one unauthenticated plaintext HTTP server. Other parallel sizes,
   TLS, middleware, Unix sockets, and speculative decoding are unsupported.
+- A local executor (`mp`, `uni`, or the default). Ray, external launchers and
+  custom executors are unsupported.
+- The CLI rejects `--checkpoint-prepare-on-startup`; the snapshot session owns
+  resource preparation.
 - Because snapshot mode requires an unauthenticated plaintext HTTP server, use
   a trusted host or network boundary, or external controls. See the vLLM
   [Security guide](../usage/security.md).
@@ -99,6 +104,7 @@ Stop and remove it only after the restored API server is no longer needed.
 
 Create initializes the engine, records a one-token canary, releases and reloads
 weights and KV cache to rehearse restore, then releases them again for capture.
+Preparation and recovery also await the existing communicator checkpoint hooks.
 The manifest is published only after CRIU completes and the source tree stops.
 Creation is offline preparation and is not part of restore latency.
 
@@ -108,18 +114,23 @@ Literal API keys and Hugging Face tokens are redacted from the manifest's engine
 arguments. The manifest records selected environment names plus deterministic
 name-bound fingerprints, not their values. The protected CRIU artifact can
 still contain process secrets, so treat it as sensitive data. Restore reloads
-model files and KV cache before binding HTTP, then reproduces the canary or
-tears down the restored tree. The inspect command prints that identity and
-canary without executing the saved process.
+model files and KV cache, then validates the canary before binding HTTP.
+The inspect command prints that identity and canary without executing the saved
+process.
 
 ## Restore behavior
 
 Restore fails before CRIU runs if the saved identity does not match the current
 host. It does not silently fall back to ordinary startup. After CRIU restores
-the process tree, vLLM releases the saved engine to bind the requested HTTP
-address and checks the first generated token and sampled-token log probability
-against the snapshot canary. The command returns only after that check passes.
+the process tree, vLLM completes communicator and memory recovery and checks
+the snapshot canary on the private engine. Only then does it bind the requested
+HTTP address. The command returns after a second canary check through HTTP.
 The restored API server continues to run as a detached process.
+
+A failed engine preparation or recovery terminates the attempt without opening
+HTTP. The artifact's `error.json` records the phase and error before worker
+cleanup, since the restored process's launch-log streams are detached. Each
+activation clears the previous recovery error before attempting recovery.
 
 The pre-release port probe is best-effort only. It neither reserves the port
 nor authenticates the listener that appears afterward.
@@ -133,6 +144,35 @@ solely because its PID appears in the manifest, since PIDs can be reused.
 
 The artifact is reusable after its previous restored tree stops. Only one
 snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
+
+## Shared engine resource operations
+
+Snapshot sessions and the `/checkpoint/*` lifecycle drive the same engine-side
+executor. `SnapshotEngineOps` runs a `SnapshotResourcePlan`: a memory
+release/restore pair, communicator prepare/restore hooks, and a device
+synchronization step. Both current plans release memory before preparing
+communicators and restore communicators before memory. A failed operation
+retains its phase and is terminal for the engine.
+
+`SnapshotSession` is the session lifecycle used by the CLI. It records a
+reference canary, pauses the engine with `wait`, releases level-2 memory,
+restores it once to rehearse recovery, then releases it again for capture. A
+final restore runs the communicator and memory recovery, then validates the
+canary before the caller binds HTTP. The engine must be a private startup
+engine; a failed session is not retried in the same process.
+
+The checkpoint endpoints are the second consumer, not a session backend. They
+keep their existing states, pause modes, repeated-call behavior, supported
+configurations and `/health` semantics. Their plan keeps model weights resident,
+releases and restores only KV memory, and still runs the existing communicator
+hooks. Resource recovery does not reopen request admission; each caller owns
+that decision.
+
+Snapshot session preparation requires that no worker reports an incomplete
+weight update, so an interrupted weight-transfer session cannot be captured as a
+valid engine. The checkpoint endpoints keep their existing behavior. Pausing
+keeps inference readiness false through preparation, and recovery only makes the
+engine ready after memory restoration and the session canary complete.
 
 ## Tradeoffs and limitations
 
