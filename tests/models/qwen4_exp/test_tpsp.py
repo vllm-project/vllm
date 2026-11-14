@@ -132,10 +132,32 @@ def _make_decoder(config: VllmConfig, rank: int) -> Qwen4ExpDecoderLayer:
     return layer
 
 
+def _count_calls(layer, names: tuple[str, ...]) -> dict[str, int]:
+    """Count the calls of `layer`'s collective attributes, calling through."""
+    calls = dict.fromkeys(names, 0)
+
+    def counted(name, fn):
+        def wrapper(x):
+            calls[name] += 1
+            return fn(x)
+
+        return wrapper
+
+    for name in names:
+        setattr(layer, name, counted(name, getattr(layer, name)))
+    return calls
+
+
 def _check_decoder_ple(rank: int) -> None:
     """Compare HC SP with full tokens across a PLE prefill and cached decode."""
     configs = [_make_config(rank, hc_sp=enabled) for enabled in (False, True)]
     layers = [_make_decoder(config, rank) for config in configs]
+    # only the ROCm layer runs its SP collectives through attributes of its own
+    calls = (
+        _count_calls(layers[1], ("sp_all_gather", "sp_reduce_scatter"))
+        if current_platform.is_rocm()
+        else None
+    )
     states = []
     for layer in layers:
         ple = layer.ple
@@ -147,10 +169,11 @@ def _check_decoder_ple(rank: int) -> None:
         states.append(state)
 
     # Three prefill tokens straddle the TP=2 boundary and require SP padding.
-    for case in (
+    cases = (
         _ConvBatchCase(prefill_query_lens=(3,)),
         _ConvBatchCase(num_decodes=1),
-    ):
+    )
+    for case in cases:
         layout, num_tokens = _make_conv_metadata(case, torch.device("cuda", rank))
         metadata_args = {
             f.name: None
@@ -193,6 +216,19 @@ def _check_decoder_ple(rank: int) -> None:
                 outputs.append(tuple(x.clone() for x in output))
         torch.testing.assert_close(outputs[1], outputs[0], atol=0.002, rtol=0.02)
         torch.testing.assert_close(states[1], states[0], atol=0.002, rtol=0.02)
+
+    if calls is not None:
+        # The forward runs its SP collectives through the layer's own attributes
+        # (the pair `decoder_layer_sp_collectives` picks): per forward, a gather
+        # for the attention input and one for the MLP input, a reduce-scatter of
+        # the attention output, and one of the MLP output when its experts skip
+        # their all-reduce.
+        forwards = len(cases)
+        reduce_output = layers[1].mlp.experts.moe_config.skip_final_all_reduce
+        assert calls == {
+            "sp_all_gather": 2 * forwards,
+            "sp_reduce_scatter": (1 + reduce_output) * forwards,
+        }
 
 
 def _check_moe_sp(rank: int, config: VllmConfig) -> None:
