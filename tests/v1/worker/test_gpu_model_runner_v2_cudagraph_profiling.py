@@ -29,6 +29,71 @@ GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
 
 
+def test_full_graph_sample_excludes_released_warmup_cache(monkeypatch):
+    """Warmup cache released on graph entry must not make the sample negative."""
+    memory = {"free": 1000, "cached": 0}
+
+    def empty_cache():
+        memory["free"] += memory["cached"]
+        memory["cached"] = 0
+
+    @contextlib.contextmanager
+    def graph(*args, **kwargs):
+        empty_cache()
+        yield
+
+    manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
+    desc = cgu.BatchExecutionDescriptor(CUDAGraphMode.FULL, 1, 1)
+    manager.device = torch.device("cuda")
+    manager.ubatch_runner = None
+    manager._capture_descs = {CUDAGraphMode.FULL: [desc]}
+    manager._max_full_descs_to_capture = 2
+    manager._capture_mem_samples = []
+    manager.use_breakable_cg = False
+    manager.graphs = {}
+    manager.pool = THROWAWAY_POOL
+    manager.vllm_config = None
+    monkeypatch.setattr(
+        cgu,
+        "graph_capture",
+        lambda *args: contextlib.nullcontext(SimpleNamespace(stream=None)),
+    )
+    monkeypatch.setattr(
+        cgu, "capture_pool", lambda pool, cfg: contextlib.nullcontext(pool)
+    )
+    monkeypatch.setattr(cgu, "is_global_first_rank", lambda: False)
+    monkeypatch.setattr(
+        cgu,
+        "get_offloader",
+        lambda: SimpleNamespace(
+            sync_prev_onload=lambda: None, join_after_forward=lambda: None
+        ),
+    )
+    monkeypatch.setattr(manager, "_capture_stream", lambda desc: None)
+    monkeypatch.setattr(cgu.torch.cuda, "CUDAGraph", object)
+    monkeypatch.setattr(cgu.torch.cuda, "graph", graph)
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", empty_cache)
+    monkeypatch.setattr(
+        cgu.torch.accelerator, "get_memory_info", lambda: (memory["free"], 1000)
+    )
+
+    def create_forward_fn(desc, warmup):
+        def forward(mode):
+            if warmup:
+                memory["free"] -= 64
+                memory["cached"] = 64
+            else:
+                memory["free"] -= 1
+
+        return forward
+
+    manager.capture(create_forward_fn)
+
+    assert len(manager._capture_mem_samples) == 1
+    assert manager._capture_mem_samples == [1]
+
+
 class _FakeCudaGraphManager:
     def __init__(
         self, needs_capture: bool, num_full_descs: int, piecewise_only: bool = False
