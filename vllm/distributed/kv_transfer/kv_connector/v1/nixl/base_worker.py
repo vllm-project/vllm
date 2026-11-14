@@ -465,7 +465,7 @@ class NixlBaseConnectorWorker:
         if self._supports_pp_hma and self._has_packed_cache:
             # PP can reorder the same backends across stages of a packed model.
             return ",".join(sorted({backend.get_name() for backend in backends}))
-        return backends[0].get_name()
+        return backends[0].get_name() if backends else self.backend_name
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers
