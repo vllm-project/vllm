@@ -24,7 +24,9 @@ logger = init_logger(__name__)
 
 # aiter v1_2: fixed_over_head_num_blocks = max(1, cdiv(16, page_size)).
 _FIXED_OVERHEAD_BLOCKS = 16
-# aiter v1_2 MLA_V12_SPLIT_COEF (1.2f, hard-coded in the kernel below).
+# aiter v1_2 MLA_V12_SPLIT_COEF; Triton lowers it to the same fp32 1.2f that
+# aiter multiplies sqrtf() by. Must track aiter's value (verify catches drift).
+_SPLIT_COEF = 1.2
 
 
 @triton.jit
@@ -43,6 +45,7 @@ def _mla_bs1_meta_kernel(
     KV_GRAN: tl.constexpr,
     FIXED_OH: tl.constexpr,
     TAIL_THR: tl.constexpr,
+    SPLIT_COEF: tl.constexpr,
     REDUCE_INDPTR_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -52,7 +55,7 @@ def _mla_bs1_meta_kernel(
     sum_blocks = num_blocks + FIXED_OH
     # eff = clamp(lrintf(1.2f * sqrtf(float(max(1, sum)) * float(num_splits))))
     work = tl.maximum(sum_blocks, 1).to(tl.float32) * NUM_CU
-    eff = tldevice.rint(1.2 * tl.sqrt_rn(work)).to(tl.int32)
+    eff = tldevice.rint(SPLIT_COEF * tl.sqrt_rn(work)).to(tl.int32)
     eff = tl.minimum(tl.maximum(eff, 1), NUM_CU)
     c = (sum_blocks + eff - 1) // eff
     # Last split index if no tail folds earlier.
@@ -182,6 +185,7 @@ class AiterMlaBs1Planner:
             KV_GRAN=16,
             FIXED_OH=_FIXED_OVERHEAD_BLOCKS,
             TAIL_THR=qlen,
+            SPLIT_COEF=_SPLIT_COEF,
             REDUCE_INDPTR_SIZE=self.reduce_indptr.numel(),
             BLOCK=block,
             num_warps=4,
