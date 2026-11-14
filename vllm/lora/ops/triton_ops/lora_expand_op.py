@@ -13,6 +13,7 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_b_ptr,
     get_lora_op_configs,
+    is_batch_invariant,
     supports_pdl,
 )
 from vllm.platforms import current_platform
@@ -51,6 +52,7 @@ def _lora_expand_kernel(
     SLICE_NUM: tl.constexpr,
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
+    FP32_ADD_INPUTS: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
@@ -129,6 +131,7 @@ def _lora_expand_kernel(
         CAST_TYPE,
         ADD_INPUTS,
         USE_GDC,
+        FP32_ADD_INPUTS,
     )
 
 
@@ -278,6 +281,9 @@ def _lora_expand(
         NUM_SLICES,
         same_stride,
         use_gdc,
+        # Batch-invariant mode adds the LoRA delta to the base output with a
+        # single rounding, matching an fp32 reference of base + delta.
+        is_batch_invariant,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
