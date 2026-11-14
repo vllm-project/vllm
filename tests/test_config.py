@@ -4288,6 +4288,24 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     )
 
 
+@pytest.mark.parametrize("model_type", ["gemma4_assistant", "gemma4_unified_assistant"])
+def test_gemma4_assistant_needs_no_eagle_block_drop(model_type):
+    # The Gemma-4 MTP drafter reads the target's KV and writes none of its own.
+    from transformers import PreTrainedConfig
+
+    hf_config = PreTrainedConfig(architectures=["Gemma4AssistantForCausalLM"])
+    hf_config.model_type = model_type
+    hf_config = SpeculativeConfig.hf_config_override(hf_config)
+    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
+    speculative_config.method = "mtp"
+    speculative_config.draft_model_config = SimpleNamespace(hf_config=hf_config)
+
+    assert speculative_config.use_gemma4_mtp()
+    assert speculative_config.use_eagle()
+    assert not speculative_config.needs_eagle_block_drop()
+    assert not speculative_config.use_eagle_block_drop()
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
