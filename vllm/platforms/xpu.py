@@ -279,6 +279,18 @@ class XPUPlatform(Platform):
                 "Falling back to Triton Attention backend."
             )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif (
+            selected_backend is None
+            and not AttentionBackendEnum.FLASH_ATTN.get_class().supports_head_size(
+                attn_selector_config.head_size
+            )
+        ):
+            logger.warning_once(
+                "Flash Attention on XPU does not support head size %d. "
+                "Falling back to Triton Attention backend.",
+                attn_selector_config.head_size,
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             return cls._get_flash_attn_path(attn_selector_config.block_size)
         elif selected_backend:
