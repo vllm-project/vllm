@@ -771,6 +771,39 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                     function["arguments"] = {}
 
 
+def _order_tool_results(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Order complete adjacent tool-result batches by their assistant call IDs."""
+    ordered = list(messages)
+    index = 0
+    while index < len(ordered):
+        message = ordered[index]
+        calls = message.get("tool_calls") if message["role"] == "assistant" else None
+        if not isinstance(calls, list) or len(calls) < 2:
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(ordered) and ordered[end]["role"] == "tool":
+            end += 1
+        batch = ordered[index + 1 : end]
+        call_ids = [
+            call.get("id") if isinstance(call, dict) else None for call in calls
+        ]
+        result_ids = [result.get("tool_call_id") for result in batch]
+        if (
+            len(batch) == len(calls)
+            and all(isinstance(value, str) and value for value in call_ids + result_ids)
+            and len(set(call_ids)) == len(call_ids)
+            and set(result_ids) == set(call_ids)
+        ):
+            by_id = {result.get("tool_call_id"): result for result in batch}
+            ordered[index + 1 : end] = [by_id[call_id] for call_id in call_ids]
+        index = end
+    return ordered
+
+
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
@@ -788,7 +821,7 @@ def parse_chat_messages(
         media_io_kwargs=media_io_kwargs,
     )
 
-    for msg in messages:
+    for msg in _order_tool_results(messages):
         sub_messages = parse_chat_message_content(
             msg,
             mm_tracker,
@@ -827,7 +860,7 @@ async def parse_chat_messages_async(
         media_io_kwargs=media_io_kwargs,
     )
 
-    for msg in messages:
+    for msg in _order_tool_results(messages):
         sub_messages = parse_chat_message_content(
             msg,
             mm_tracker,
