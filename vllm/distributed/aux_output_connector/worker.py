@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
+    num_retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -118,14 +119,9 @@ class AuxOutputWorkerConnector:
         vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
-        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
+        _, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
-        if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+        max_bytes = num_retained_objects(vllm_config, kv_cache_config) * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
