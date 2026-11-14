@@ -76,7 +76,7 @@ def _wait_for_server_exit(proc: subprocess.Popen, timeout: float) -> None:
         pytest.fail(f"Server did not exit within {timeout}s")
 
 
-@dataclass
+@dataclass(slots=True)
 class ShutdownState:
     got_503: bool = False
     got_500: bool = False

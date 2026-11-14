@@ -28,7 +28,7 @@ def compute_mhc_pre_num_splits(input_size: int, num_tokens: int) -> int:
 
 
 class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         rms_eps: float
@@ -110,7 +110,7 @@ MHC_PRE_NORM_KERNEL = MHCPreNormKernel()
 class HCPrenormGemmKernel(VllmJitKernel["HCPrenormGemmKernel.CompileKey"]):
     """DeepGEMM's `tf32_hc_prenorm_gemm`, which JITs once per (n, k, splits)."""
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         n: int
         k: int

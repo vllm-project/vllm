@@ -356,7 +356,7 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TinyModel:
     lm: Any
     vllm_config: VllmConfig
@@ -624,7 +624,7 @@ class StockLaunches:
                 _device_view(b[name], t.shape, t.dtype).copy_(t)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _Key:
     S: int
     W: int

@@ -63,7 +63,7 @@ class StreamedResponseHandler:
         return messages
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncInput:
     """The input for the request function."""
 
@@ -86,7 +86,7 @@ class RequestFuncInput:
     chat_messages: list[dict[str, Any]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncOutput:
     """The output of the request function including metrics."""
 
