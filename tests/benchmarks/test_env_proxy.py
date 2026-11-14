@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import urllib.request
+
 import pytest
 
 from vllm.benchmarks.serve import env_netrc_applies, env_proxy_applies
@@ -12,6 +14,13 @@ def clean_env(monkeypatch):
     for name in PROXY_VARS:
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
+    # On macOS and Windows, getproxies() also reads the system proxy.
+    monkeypatch.setattr(
+        urllib.request, "getproxies", urllib.request.getproxies_environment
+    )
+    monkeypatch.setattr(
+        urllib.request, "proxy_bypass", urllib.request.proxy_bypass_environment
+    )
     return monkeypatch
 
 

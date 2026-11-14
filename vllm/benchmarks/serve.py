@@ -818,10 +818,15 @@ def calculate_metrics(
 def env_proxy_applies(api_url: str) -> bool:
     """Whether a proxy from the environment applies to `api_url`.
 
-    The benchmark session trusts the environment only in that case. With
-    `trust_env=True`, aiohttp also looks up `~/.netrc` in a worker thread for
-    every request, which delays each request by tens of milliseconds at a few
+    The benchmark session trusts the environment only in that case, or when
+    `env_netrc_applies` finds credentials for the host. With `trust_env=True`,
+    aiohttp looks up the netrc file and the proxy in worker threads for every
+    request, which delays each request by tens of milliseconds at a few
     hundred concurrent requests and inflates the measured TTFT.
+
+    Runs that go through a proxy, or that use netrc credentials, keep
+    `trust_env=True`. They still do these lookups for every request, so their
+    TTFT still includes this delay.
     """
     url = urllib.parse.urlsplit(api_url)
     proxies = urllib.request.getproxies()
@@ -829,7 +834,10 @@ def env_proxy_applies(api_url: str) -> bool:
 
 
 def env_netrc_applies(api_url: str) -> bool:
-    """Whether `~/.netrc` (or `$NETRC`) has credentials for `api_url`'s host.
+    """Whether the netrc file has credentials for `api_url`'s host.
+
+    The file is the one that aiohttp reads: `$NETRC`, or `~/.netrc` (`~/_netrc`
+    on Windows).
 
     aiohttp only reads netrc with `trust_env=True`, so keep it on in that case
     to not drop auth for endpoints that rely on it.
@@ -837,7 +845,10 @@ def env_netrc_applies(api_url: str) -> bool:
     host = urllib.parse.urlsplit(api_url).hostname
     if not host:
         return False
-    path = os.environ.get("NETRC") or os.path.expanduser("~/.netrc")
+    path = os.environ.get("NETRC")
+    if path is None:
+        name = "_netrc" if os.name == "nt" else ".netrc"
+        path = os.path.join(os.path.expanduser("~"), name)
     try:
         return netrc.netrc(path).authenticators(host) is not None
     except (OSError, netrc.NetrcParseError):
