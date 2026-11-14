@@ -24,6 +24,7 @@ import contextlib
 import importlib.util
 import json
 import math
+import netrc
 import os
 import random
 import shutil
@@ -827,6 +828,22 @@ def env_proxy_applies(api_url: str) -> bool:
     return url.scheme in proxies and not urllib.request.proxy_bypass(url.hostname or "")
 
 
+def env_netrc_applies(api_url: str) -> bool:
+    """Whether `~/.netrc` (or `$NETRC`) has credentials for `api_url`'s host.
+
+    aiohttp only reads netrc with `trust_env=True`, so keep it on in that case
+    to not drop auth for endpoints that rely on it.
+    """
+    host = urllib.parse.urlsplit(api_url).hostname
+    if not host:
+        return False
+    path = os.environ.get("NETRC") or os.path.expanduser("~/.netrc")
+    try:
+        return netrc.netrc(path).authenticators(host) is not None
+    except (OSError, netrc.NetrcParseError):
+        return False
+
+
 async def benchmark(
     task_type: TaskType,
     endpoint_type: str,
@@ -881,7 +898,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
-            trust_env=env_proxy_applies(api_url),
+            trust_env=env_proxy_applies(api_url) or env_netrc_applies(api_url),
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
 
