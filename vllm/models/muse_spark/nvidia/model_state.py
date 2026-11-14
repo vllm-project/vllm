@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark's model runner state: the default state, plus the lifecycle of the
-specialized decode when ``decode_backend=latency_specialized`` selects it."""
+specialized decode when `decode_backend=latency_specialized` selects it."""
 
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 

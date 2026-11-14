@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernels of the specialized decode's deferred RecoverSSM: the stock
 RecoverSSM verify with its records written to each request's record slot, and the
-commit-plan steps that defer (``_defer_commit_kernel``) or flush
-(``_prepare_flush_plan_kernel``) a request's pending replay."""
+commit-plan steps that defer (`_defer_commit_kernel`) or flush
+(`_prepare_flush_plan_kernel`) a request's pending replay."""
 
 from typing import TYPE_CHECKING
 
@@ -207,7 +207,7 @@ def _defer_commit_kernel(
 ):
     """Deferred RecoverSSM after a plan: request b's commit length becomes the
     pending replay of its record slot (and no commit runs for it), unless the row is
-    committed now (``eager``: pending 0, the plan kept). Rows without a state slot
+    committed now (`eager`: pending 0, the plan kept). Rows without a state slot
     (padding, dummy batches) or a record slot leave every pending count."""
     spec_idx = tl.program_id(0)
     record_row = tl.load(record_rows_ptr + spec_idx)
@@ -272,8 +272,8 @@ def kda_recoverssm_verify(
     record_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint. Request
-    ``b`` writes its verify records to row ``b`` of ``records``, or to row
-    ``record_indices[b]`` (deferred RecoverSSM: records indexed by request slot)."""
+    `b` writes its verify records to row `b` of `records`, or to row
+    `record_indices[b]` (deferred RecoverSSM: records indexed by request slot)."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape

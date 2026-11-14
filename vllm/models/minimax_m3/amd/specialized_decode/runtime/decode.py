@@ -130,7 +130,7 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
-        """Mono for a plain-decode step of at most ``max_rows`` rows, eager or
+        """Mono for a plain-decode step of at most `max_rows` rows, eager or
         inside a FULL graph capture (padded rows are inert in the kernel);
         stock otherwise. Every predicate reads metadata every TP rank holds
         alike."""

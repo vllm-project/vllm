@@ -334,10 +334,10 @@ def check_marlin_supports_layer(
 def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1) -> int:
     """Smallest MoE intermediate size satisfying the Marlin MoE thread tiles.
 
-    The kernel needs gate-up ``2 * intermediate % 128 == 0`` and down
-    ``intermediate % 64 == 0``, i.e. ``intermediate % 64 == 0``. A misaligned
+    The kernel needs gate-up `2 * intermediate % 128 == 0` and down
+    `intermediate % 64 == 0`, i.e. `intermediate % 64 == 0`. A misaligned
     size is zero-padded to the next valid tile at weight prep, kept a multiple
-    of ``group_size`` so the group count stays integral. The padded region never
+    of `group_size` so the group count stays integral. The padded region never
     reaches the MoE output: w13's padded output channels are zeroed by the
     zero-padded scales, so the padded inputs to w2 are zero.
     """
@@ -357,9 +357,9 @@ def check_moe_marlin_supports_config(
     group_size: int,
     allow_tile_padding: bool = False,
 ) -> bool:
-    """Whether the fused MoE Marlin kernel supports ``config``.
+    """Whether the fused MoE Marlin kernel supports `config`.
 
-    With ``allow_tile_padding=True``, a tile-misaligned intermediate size is
+    With `allow_tile_padding=True`, a tile-misaligned intermediate size is
     zero-padded to a valid thread tile at weight prep (see
     marlin_moe_padded_intermediate), so only a group straddling the padded
     boundary stays unsupported. hidden_size is the MoE I/O extent and is never

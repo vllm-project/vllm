@@ -7,10 +7,14 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
+    humming_executed_input_quant_key,
     prepare_humming_linear_layer_config,
     quant_key_to_input_schema,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp6E2M3Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp6E2M3Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
@@ -43,6 +47,22 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
         except ValueError as error:
             return False, str(error)
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        # E2M3 and E3M2 weights accept the same activations.
+        return humming_executed_input_quant_key(
+            {
+                "quant_method": "humming",
+                "dtype": "float6e3m2",
+                "scale_dtype": "float8e8m0",
+                "group_size": 32,
+                "weight_scale_type": "group",
+            },
+            activation_quant_key,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_dtype = "float6e3m2"

@@ -74,13 +74,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
-
     if request.media_io_kwargs.is_some() {
         bail_invalid_request!(
             param = "media_io_kwargs",
@@ -156,6 +149,13 @@ mod tests {
             validate_request_compat(&request),
             Err(ApiError::InvalidRequest { .. })
         ));
+    }
+
+    #[test]
+    fn spaces_between_special_tokens_false_is_accepted() {
+        let mut request = base_request();
+        request.spaces_between_special_tokens = false;
+        assert!(validate_request_compat(&request).is_ok());
     }
 
     #[test]

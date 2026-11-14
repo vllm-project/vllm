@@ -1539,7 +1539,7 @@ def test_mm_prompt_tokens_details():
 async def test_streaming_first_chunk_reports_prompt_tokens_details():
     """The first chunk's prompt split matches the final usage chunk.
 
-    The Anthropic Messages stream builds ``message_start`` usage from the first
+    The Anthropic Messages stream builds `message_start` usage from the first
     chunk, so a missing split there reads as the whole prompt being uncached.
     """
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
@@ -3213,7 +3213,7 @@ def test_make_request_with_harmony_rejects_invalid_kv_transfer_prompt_token_ids(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[], [-1], [1.5], [1.0], ["1"], [True], "abc", 5])
 async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
-    """``kv_transfer_params`` is untyped, so the ids are checked on reuse."""
+    """`kv_transfer_params` is untyped, so the ids are checked on reuse."""
     serving_chat = _build_serving_chat(_build_mock_engine())
 
     request = ChatCompletionRequest(
@@ -3259,7 +3259,7 @@ async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
 async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
-    """``echo`` needs the rendered conversation, so the ids are not used."""
+    """`echo` needs the rendered conversation, so the ids are not used."""
     serving_chat = _build_serving_chat(_build_mock_engine())
 
     request = ChatCompletionRequest(
@@ -3267,6 +3267,29 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
         messages=[{"role": "user", "content": "hi"}],
         kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
         echo=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_return_prompt_text(ids):
+    """`return_prompt_text` needs the rendered conversation, so the ids are
+    not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        return_prompt_text=True,
     )
     result = await serving_chat.render_chat_request(request)
     assert not isinstance(result, ErrorResponse)
@@ -3302,7 +3325,7 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
     ],
 )
 def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content):
-    """The ids are dropped so that ``messages`` is rendered with its media."""
+    """The ids are dropped so that `messages` is rendered with its media."""
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": content}],
@@ -3391,8 +3414,8 @@ _NAMED_WEATHER_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weat
 def test_resolve_finish_reason(
     tool_choice, engine_finish_reason, tool_calls_made, expected
 ):
-    """``tool_calls`` needs a real call, a natural stop and no forced tool;
-    ``length`` is never hidden behind a parsed call."""
+    """`tool_calls` needs a real call, a natural stop and no forced tool;
+    `length` is never hidden behind a parsed call."""
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "test"}],
@@ -3422,8 +3445,8 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     engine_finish_reason: str,
     expected_finish_reason: str,
 ):
-    """Non-streaming ``finish_reason`` must agree with ``message.tool_calls``
-    and never hide a ``length`` truncation (#53255, #58228)."""
+    """Non-streaming `finish_reason` must agree with `message.tool_calls`
+    and never hide a `length` truncation (#53255, #58228)."""
     serving_chat = _build_serving_chat(
         _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
     )

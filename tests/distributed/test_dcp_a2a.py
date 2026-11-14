@@ -391,14 +391,31 @@ class TestPackedA2AKernels:
             cp_attn_out,
             cp_attn_lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            D,
-            lse_pack_dim,
+            None,
+            None,
+            has_mask=False,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual = _dcp_a2a_unpack_combine(
-            send_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        # The send buffer stands in for the all-to-all receive buffer.
+        out = torch.empty((B, h_per_rank, D), device=device, dtype=dtype)
+        out_lse = torch.empty(
+            (B, h_per_rank) if return_lse else (1, 1),
+            device=device,
+            dtype=torch.float32 if return_lse else dtype,
         )
+        _dcp_a2a_unpack_combine(
+            send_buffer,
+            out,
+            out_lse,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
+            return_lse=return_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+        )
+        actual = (out, out_lse) if return_lse else out
         expected_out, expected_lse = _packed_a2a_reference(
             cp_attn_out, cp_attn_lse, world_size, h_per_rank, is_lse_base_on_e
         )
@@ -450,17 +467,26 @@ class TestPackedA2AKernels:
             output,
             lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            head_dim,
-            lse_pack_dim,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
+            seq_lens,
+            query_start_loc,
+            has_mask=True,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual_output, actual_lse = _dcp_a2a_unpack_combine(
+        actual_output = torch.empty(
+            (num_tokens, h_per_rank, head_dim), device=device, dtype=output.dtype
+        )
+        actual_lse = torch.empty(
+            (num_tokens, h_per_rank), device=device, dtype=torch.float32
+        )
+        _dcp_a2a_unpack_combine(
             send_buffer,
-            head_dim,
-            lse_pack_dim,
+            actual_output,
+            actual_lse,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
             return_lse=True,
             is_lse_base_on_e=True,
         )
@@ -685,6 +711,61 @@ def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(
         world_size=2,
         extra_env={"TEST_DTYPE": dtype_name, "TEST_NUM_TOKENS": str(num_tokens)},
     )
+
+
+@pytest.mark.parametrize(
+    "tp_size,pcp_size,dcp_size",
+    [(4, 1, 2), (4, 1, 4), (2, 2, 2), (2, 2, 4), (1, 4, 4)],
+)
+def test_dcp_group_ranks_match_collective_order(
+    monkeypatch, tp_size: int, pcp_size: int, dcp_size: int
+):
+    """torch.distributed orders group members by global rank, so each DCP
+    group must list them in that order or rank_in_group (which selects this
+    rank's LSE in the DCP merge) disagrees with the all-gathered layout."""
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import parallel_state
+
+    world_size = tp_size * pcp_size
+    config = SimpleNamespace(
+        model_config=None,
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        engram_config=None,
+    )
+    for name in ("_TP", "_ETP", "_ENGRAM_DP", "_DCP", "_PCP", "_PP", "_DP"):
+        monkeypatch.setattr(parallel_state, name, None)
+    monkeypatch.setattr(parallel_state, "_EP", None)
+    monkeypatch.setattr(parallel_state, "_EPLB", None)
+    monkeypatch.setattr(parallel_state, "_WORLD", SimpleNamespace(local_rank=0))
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+
+    groups: dict[str, list[list[int]]] = {}
+
+    def make_group(group_ranks, *args, group_name: str, **kwargs):
+        groups[group_name] = group_ranks
+        ranks = next(ranks for ranks in group_ranks if 0 in ranks)
+        return SimpleNamespace(ranks=ranks, rank_in_group=0, world_size=len(ranks))
+
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
+    with set_current_vllm_config(config):
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=tp_size,
+            prefill_context_model_parallel_size=pcp_size,
+            decode_context_model_parallel_size=dcp_size,
+            backend="gloo",
+        )
+
+    dcp_groups = groups["dcp"]
+    assert all(len(ranks) == dcp_size for ranks in dcp_groups)
+    assert all(ranks == sorted(ranks) for ranks in dcp_groups)
+    assert sorted(r for ranks in dcp_groups for r in ranks) == list(range(world_size))
+    if pcp_size > 1 and dcp_size == pcp_size:
+        assert dcp_groups == groups["pcp"]
 
 
 if __name__ == "__main__":

@@ -120,8 +120,8 @@ def _stock_verify(layer, heads, projected, caches, table, q, record_indices=None
 
 
 def _reference(layer, state, inputs, q, n_prev, prev):
-    """FP64: the replay of ``n_prev`` accepted tokens of the previous step's
-    operands ``prev`` (normalized keys, decays, corrections) and this step's verify
+    """FP64: the replay of `n_prev` accepted tokens of the previous step's
+    operands `prev` (normalized keys, decays, corrections) and this step's verify
     from it; returns (replayed checkpoint, corrections, core outputs)."""
     qs, ks, vs, g1, beta, _ = inputs
     heads = state.shape[0]
@@ -152,7 +152,7 @@ def _reference(layer, state, inputs, q, n_prev, prev):
 
 
 def _record_operands(layer, records, row, heads, n):
-    """FP64 normalized keys, decays and corrections of record slot ``row``."""
+    """FP64 normalized keys, decays and corrections of record slot `row`."""
     a = layer.A_log.double().exp()
     dt = layer.dt_bias.double().view(heads, D)
     kg = records.key_gate[row].double()
@@ -449,7 +449,7 @@ def test_padded_rows_and_graph(split, path):
 @torch.inference_mode()
 def test_stock_verify_record_indices():
     """The deferred RecoverSSM's Triton verify (the stock one, indexed) writes
-    request b's records to slot ``record_indices[b]`` (deferred steps the stock path
+    request b's records to slot `record_indices[b]` (deferred steps the stock path
     runs), else to row b."""
     heads, requests, q = 12, 4, 5
     dim, slots = heads * D, 1 + requests

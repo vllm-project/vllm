@@ -951,7 +951,7 @@ def _require_sm103_and_cute() -> None:
 def _glm52_device_plan(
     weight: torch.Tensor, num_tokens: int, backend: str
 ) -> dict[int, glm52_gemm.ResolvedCall]:
-    """Plan from the device's own table, checked to route M to ``backend``."""
+    """Plan from the device's own table, checked to route M to `backend`."""
     plan = glm52_gemm.build_glm52_plan(weight, torch.bfloat16)
     assert plan is not None and plan[num_tokens][0] == backend
     return plan

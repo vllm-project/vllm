@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The draft model must honour ``moe_backend`` from --speculative-config.
+"""The draft model must honour `moe_backend` from --speculative-config.
 
 The draft is loaded with the target's VllmConfig, so without an explicit
 override it inherits the target's --moe-backend. An MTP head on a quantized
@@ -9,7 +9,6 @@ server fails to start rather than falling back.
 """
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -33,10 +32,13 @@ class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
     kv_cache_dtype: str | None = None
+    draft_enable_eplb: bool = True
+    resolved_draft_num_redundant_experts: int | None = None
     draft_model_config: object = None
     draft_load_config: object = None
 
     apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
+    apply_draft_eplb_overrides = SpeculativeConfig.apply_draft_eplb_overrides
 
 
 @dataclass
@@ -68,10 +70,6 @@ def _capture_draft_config(cfg):
 
     with (
         patch("vllm.v1.worker.gpu.spec_decode.eagle.utils.get_model", _fake_get_model),
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
         pytest.raises(_Captured) as exc,
     ):
         load_eagle_model(object(), cfg)

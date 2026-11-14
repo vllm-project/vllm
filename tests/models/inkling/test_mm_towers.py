@@ -3,7 +3,7 @@
 """Correctness tests for the fused Inkling vision/audio tower kernels.
 
 Each kernel is checked against a pure-PyTorch reference implementing the
-towers' original op sequence (native ``rms_norm`` semantics: fp32 variance,
+towers' original op sequence (native `rms_norm` semantics: fp32 variance,
 bf16-rounded weight multiply; exact-erf GELU; fp32-accumulated embedding sum).
 The fused kernels keep the same accumulation dtype and rounding points, so
 outputs differ from the reference only by reduction order — a few bf16 ulps.
@@ -39,9 +39,9 @@ def _assert_close_ulps(
 ) -> None:
     """Fused vs reference differ only by fp32 reduction order, which shows up
     as a few bf16 ulps at any magnitude — a fixed rtol misrepresents that, so
-    compare against the reference's local ulp spacing. ``pre_act`` (the
+    compare against the reference's local ulp spacing. `pre_act` (the
     reference pre-activation) adds derivative-propagated slack: near
-    ``gelu(x) ~ 0`` an ulp-level input flip legitimately moves the output by
+    `gelu(x) ~ 0` an ulp-level input flip legitimately moves the output by
     many of ITS (tiny) ulps, bounded by |gelu'| <= 1.13 times the input ulps."""
     g, r = got.float(), ref.float()
     tol = torch.clamp(max_ulps * _bf16_spacing(ref), min=atol)
