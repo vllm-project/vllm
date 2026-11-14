@@ -281,6 +281,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB: int = 0
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1543,6 +1544,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # ROCm, default 0 (off). With data parallelism and the default
+    # allgather_reducescatter all2all backend, a nonzero value makes the eager
+    # (prefill) MoE combine reduce-scatter BF16/FP16 hidden states over the DP
+    # group with QuickReduce instead of RCCL, using the codec set by
+    # VLLM_ROCM_QUICK_REDUCE_QUANTIZATION (FP, INT8, INT6 or INT4; lossy unless
+    # FP; NONE, the default, disables this too). The value is the size in MB
+    # of each of the kernel's two buffers, so each rank uses twice this much
+    # extra device memory; calls that do not fit fall back to RCCL. A call needs
+    # about world_size * (largest per-rank chunk) * codec ratio (0.28 for
+    # INT4, 1 for FP); 768 covers 16384 rows of hidden size 5120 per rank on
+    # DP4 with any codec.
+    "VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB": lambda: int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_COLL_MAX_SIZE_MB", "0")
     ),
     # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
     # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.
