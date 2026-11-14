@@ -1115,10 +1115,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank_tensor = torch.tensor(
             self.dcp_rank, dtype=torch.int32, device=self.device
         )
-        # Only decode tokens are expanded: at most next_n per request. Allocated
-        # after the memory profile, so it must not scale with the token budget.
+        # PCP replay capture can use both local segments of each request as
+        # short decode rows. Keep this bounded by request count, not token budget.
+        max_local_reqs = scheduler_config.max_num_seqs * (2 if self.use_pcp else 1)
         max_decode_tokens = min(
-            scheduler_config.max_num_seqs * next_n,
+            max_local_reqs * next_n,
             scheduler_config.max_num_batched_tokens,
         )
         self.expanded_block_table_buffer = torch.zeros(
@@ -1168,6 +1169,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int64,
                 device=self.device,
             )
+            if self.use_pcp:
+                self.pcp_compressed_slot_mapping_buffer = torch.empty(
+                    scheduler_config.max_num_batched_tokens * self.pcp_world_size,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
             # Buffer for compressed seq_lens in decode path
             self.expanded_seq_lens_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
@@ -1508,6 +1515,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
                 )
+                compressed_slot_mapping = self.pcp_compressed_slot_mapping_buffer[
+                    : compressed_slot_mapping.numel()
+                ].copy_(compressed_slot_mapping)
 
         # PCP decode sharding keeps a zero-token placeholder on ranks that own
         # no request in a step so collectives retain a uniform rank shape. Do
