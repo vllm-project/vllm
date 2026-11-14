@@ -637,10 +637,21 @@ class AnthropicServingMessages(OpenAIServingChat):
         if role == "user":
             cls._convert_user_tool_result(block, openai_messages)
         else:
-            tool_result_text = str(block.content) if block.content else ""
+            tool_result_text = cls._mark_tool_error(
+                str(block.content) if block.content else "", block.is_error
+            )
             content_parts.append(
                 {"type": "text", "text": f"Tool result: {tool_result_text}"}
             )
+
+    @classmethod
+    def _mark_tool_error(cls, tool_text: str, is_error: bool | None) -> str:
+        """Prefix a tool result with ``Error:`` when the tool call failed,
+        so the model can tell failed tool calls from successful ones."""
+        tool_text = tool_text or ""
+        if is_error:
+            return f"Error: {tool_text}" if tool_text else "Error"
+        return tool_text
 
     @classmethod
     def _convert_user_tool_result(
@@ -674,6 +685,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
             tool_text = "\n".join(text_parts)
 
+        tool_text = cls._mark_tool_error(tool_text, block.is_error)
+        
         tool_content: str | list[dict[str, Any]] = tool_text or ""
         if tool_reference:
             # One tool message per tool_result. Chat templates that expand
