@@ -1286,6 +1286,7 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         backend = SimpleNamespace(
             full_cls_name=lambda name=name: (__name__, name),
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_attn_backend=lambda backend=backend: backend,
