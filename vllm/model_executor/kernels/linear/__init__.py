@@ -110,8 +110,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
@@ -380,6 +381,8 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterFlyDSLMxfp8LinearKernel,
+        AiterTritonMxfp8LinearKernel,
         AiterMxfp4LinearKernel,
     },
     "machete": {
@@ -597,11 +600,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
-        # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes
-        # AITER has tuned, the rest fall through to the next kernel. Kept out
-        # of the "aiter" --linear-backend set, which would leave those shapes
-        # without a kernel.
+        # AITER FlyDSL, then AITER Triton: each claims only its tuned (N, K).
         AiterFlyDSLMxfp8LinearKernel,
+        AiterTritonMxfp8LinearKernel,
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
         RocmDotScaledMxfp8LinearKernel,

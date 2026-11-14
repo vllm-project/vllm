@@ -10,7 +10,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
+from vllm.model_executor.kernels.linear.mxfp8.aiter import row_major_weight
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.minimax_m3.amd.mono.config import MonoUnsupported
 from vllm.models.minimax_m3.amd.mono.drafter import layout
