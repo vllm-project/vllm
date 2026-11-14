@@ -42,6 +42,7 @@ pub(crate) enum AssistantEvent {
         delta: String,
         /// Number of generated tokens attributed to this delta, when available.
         token_count: Option<usize>,
+        text_logprobs: Option<DecodedLogprobs>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {

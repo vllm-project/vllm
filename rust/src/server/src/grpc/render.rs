@@ -256,6 +256,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
         // Rendering does not decode.
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        attribute_text_logprobs: false,
         return_prompt_text: false,
         prompt_truncation: chat.truncation.map(truncation_from_proto).transpose()?,
         priority: 0,

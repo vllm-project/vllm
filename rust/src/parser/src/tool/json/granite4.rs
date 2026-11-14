@@ -77,7 +77,7 @@ enum Granite4Event {
 /// value may be a JSON object (kept verbatim) **or** a JSON string whose decoded
 /// contents are the arguments (the `# test granite behavior` case in Python).
 pub struct Granite4ToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: Granite4Mode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -87,7 +87,7 @@ impl Granite4ToolParser {
     /// Create a Granite 4 tool parser.
     fn new(_tools: &[Tool]) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: Granite4Mode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -97,7 +97,7 @@ impl Granite4ToolParser {
     /// Apply one parsed Granite 4 event to parser state and output.
     fn apply_event(&mut self, event: Granite4Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
-            Granite4Event::Text { len } => output.push_text(&self.buffer[..len]),
+            Granite4Event::Text { len } => output.push_text(self.buffer.prefix(len)),
             Granite4Event::ToolCallStart => self.mode = Granite4Mode::Header,
             Granite4Event::ToolCallHeader { function_name } => {
                 let tool_index = self.emitted_tool_count;
@@ -111,7 +111,7 @@ impl Granite4ToolParser {
                 });
             }
             Granite4Event::ObjectArgsDelta { len, complete } => {
-                let arguments = self.buffer[..len].to_string();
+                let arguments = self.buffer.text[..len].to_string();
                 self.push_arguments(arguments, output)?;
                 if complete {
                     self.mode = Granite4Mode::Close;
@@ -144,7 +144,7 @@ impl Granite4ToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = Granite4Mode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
@@ -161,13 +161,13 @@ impl ToolParser for Granite4ToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_granite4_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -176,7 +176,7 @@ impl ToolParser for Granite4ToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            Granite4Mode::Text => output.push_text(&self.buffer),
+            Granite4Mode::Text => output.push_text(self.buffer.take()),
             Granite4Mode::Header | Granite4Mode::Args { .. } | Granite4Mode::Close => {
                 return Err(ToolParserError::IncompleteToolCall { parser: "Granite4" });
             }
@@ -185,7 +185,7 @@ impl ToolParser for Granite4ToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         Granite4ToolParser::reset(self)
     }
 }
@@ -367,7 +367,11 @@ mod tests {
             ToolParserOutput {
                 events: [
                     Text(
-                        "before  middle  after",
+                        DecodedText {
+                            text: "before  middle  after",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                     ToolCall(
                         ToolCallDelta {
@@ -491,7 +495,11 @@ mod tests {
             ToolParserOutput {
                 events: [
                     Text(
-                        "Here goes the bbox call: \n Now the stock price call: \n  Now another bbox call: \n  See? I'm a helpful assistant.",
+                        DecodedText {
+                            text: "Here goes the bbox call: \n Now the stock price call: \n  Now another bbox call: \n  See? I'm a helpful assistant.",
+                            attributions: [],
+                            sources: [],
+                        },
                     ),
                     ToolCall(
                         ToolCallDelta {

@@ -605,6 +605,22 @@ pub enum ResponseItemStatus {
     Completed,
 }
 
+/// One sampled token's probability in an output text part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
+    pub top_logprobs: Vec<ResponseTopLogprob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseTopLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
+}
+
 /// One `output_text` content part of an output message item.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -613,12 +629,8 @@ pub enum ResponseOutputContentPart {
     OutputText {
         text: String,
         annotations: Vec<Value>,
-        /// Empty on `response.content_part.added`, like Python; omitted
-        /// elsewhere.
-        ///
-        /// TODO: populated when `include=message.output_text.logprobs` is
-        /// implemented.
-        logprobs: Option<Vec<Value>>,
+        /// Empty on `response.content_part.added`; populated on completion when requested.
+        logprobs: Option<Vec<ResponseLogprob>>,
     },
     Refusal {
         refusal: String,

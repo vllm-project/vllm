@@ -569,6 +569,7 @@ mod tests {
     fn text_delta(
         text: impl Into<String>,
         attributions: impl IntoIterator<Item = TokenAttribution>,
+        sources: impl IntoIterator<Item = (usize, std::ops::Range<u32>)>,
         sampled_token_ids: Vec<u32>,
         finished: Option<Finished>,
     ) -> DecodedTextEvent {
@@ -576,6 +577,10 @@ mod tests {
             decoded: DecodedText {
                 text: text.into(),
                 attributions: attributions.into_iter().collect(),
+                sources: sources
+                    .into_iter()
+                    .map(|(token_index, bytes)| vllm_tokenizer::TokenSource { token_index, bytes })
+                    .collect(),
             },
             sampled: SampledDelta {
                 token_ids: sampled_token_ids,
@@ -645,10 +650,11 @@ mod tests {
                         prompt_logprobs: None,
                         prompt_token_id_logprobs: None,
                     },
-                    text_delta("", [], vec![0xe4], None),
+                    text_delta("", [], [], vec![0xe4], None),
                     text_delta(
                         "你",
                         [visible(0xe4, 0), visible(0xbd, 0), visible(0xa0, 0)],
+                        [(0, 0..3), (1, 0..3), (2, 0..3)],
                         vec![0xbd, 0xa0],
                         Some(Finished {
                             usage: TokenUsage {
@@ -693,6 +699,7 @@ mod tests {
                     text_delta(
                         "a",
                         [visible(b'a' as u32, 0)],
+                        [(0, 0..1)],
                         ascii_tokens("a!"),
                         Some(Finished {
                             usage: TokenUsage {

@@ -129,6 +129,7 @@ fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
     // A filtered special token produces a zero-width attribution with no text;
     // it must survive as a reasoning piece rather than being dropped.
     let delta = parser.push(DecodedText {
+        sources: Default::default(),
         text: String::new(),
         attributions: [TokenAttribution {
             token_id: 42,
@@ -350,6 +351,7 @@ pub(crate) fn attributed_chunks(pieces: &[Option<&str>]) -> Vec<DecodedText> {
                 piece.and_then(|text| tokenizer.token_to_id(text)).unwrap_or(index as u32 + 1);
             match piece {
                 Some(text) => DecodedText {
+                    sources: Default::default(),
                     text: (*text).to_string(),
                     attributions: [TokenAttribution {
                         token_id,
@@ -359,6 +361,7 @@ pub(crate) fn attributed_chunks(pieces: &[Option<&str>]) -> Vec<DecodedText> {
                     .collect(),
                 },
                 None => DecodedText {
+                    sources: Default::default(),
                     text: String::new(),
                     attributions: [TokenAttribution {
                         token_id,

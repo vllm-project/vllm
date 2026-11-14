@@ -72,7 +72,7 @@ impl ToolParser for DeepSeekV4ToolParser {
         self.0.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.0.reset()
     }
 }

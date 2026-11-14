@@ -49,7 +49,7 @@ enum LlamaJsonEvent {
 /// Natural text at the beginning of the stream permanently disables tool
 /// parsing for that assistant output.
 pub struct Llama3JsonToolParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: LlamaJsonMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -59,7 +59,7 @@ impl Llama3JsonToolParser {
     /// Create a Llama JSON tool parser.
     fn new(_tools: &[Tool]) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: LlamaJsonMode::Start,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -72,11 +72,11 @@ impl Llama3JsonToolParser {
             return true;
         }
 
-        if self.buffer.is_empty() {
+        if self.buffer.text.is_empty() {
             return false;
         }
 
-        if self.buffer.starts_with('{') {
+        if self.buffer.text.starts_with('{') {
             self.mode = LlamaJsonMode::Header;
         } else {
             self.mode = LlamaJsonMode::Passthrough;
@@ -109,7 +109,7 @@ impl Llama3JsonToolParser {
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..consumed_len].to_string(),
+                    arguments: self.buffer.text[..consumed_len].to_string(),
                 });
             }
             LlamaJsonEvent::ToolCallClose => {
@@ -124,7 +124,7 @@ impl Llama3JsonToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.mode = LlamaJsonMode::Start;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
@@ -145,23 +145,22 @@ impl ToolParser for Llama3JsonToolParser {
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(&chunk.text);
+        self.buffer.append(chunk);
 
         if !self.commit_start() {
             return Ok(());
         }
 
         if matches!(self.mode, LlamaJsonMode::Passthrough) {
-            output.push_text(&self.buffer);
-            self.buffer.clear();
+            output.push_text(self.buffer.take());
             return Ok(());
         }
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_llama_json_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let _ = self.buffer.drain_prefix(consumed_len);
         }
 
         Ok(())
@@ -171,9 +170,9 @@ impl ToolParser for Llama3JsonToolParser {
         let mut output = ToolParserOutput::default();
         match &self.mode {
             LlamaJsonMode::Start | LlamaJsonMode::Passthrough => {
-                output.push_text(&self.buffer);
+                output.push_text(self.buffer.take());
             }
-            LlamaJsonMode::AfterCall if self.buffer.trim().is_empty() => {}
+            LlamaJsonMode::AfterCall if self.buffer.text.trim().is_empty() => {}
             LlamaJsonMode::Header | LlamaJsonMode::Arguments { .. } => {
                 return Err(ToolParserError::IncompleteToolCall {
                     parser: "Llama JSON",
@@ -187,7 +186,7 @@ impl ToolParser for Llama3JsonToolParser {
         Ok(output)
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         Llama3JsonToolParser::reset(self)
     }
 }

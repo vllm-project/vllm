@@ -66,7 +66,7 @@ impl ToolParser for Qwen3JsonToolParser {
         self.inner.finish()
     }
 
-    fn reset(&mut self) -> String {
+    fn reset(&mut self) -> DecodedText {
         self.inner.reset()
     }
 }

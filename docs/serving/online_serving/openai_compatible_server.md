@@ -217,6 +217,35 @@ In addition to the OpenAI request fields, the Responses API forwards vLLM
 [sampling parameters](../../api/README.md#inference-parameters) such as `top_k`,
 `min_p`, `repetition_penalty`, `seed`, `stop`, and `ignore_eos` to the engine.
 
+#### Output logprobs with the Rust frontend
+
+With `VLLM_USE_RUST_FRONTEND=1`, request output token probabilities using
+`include=["message.output_text.logprobs"]`. They are omitted by default.
+`top_logprobs` defaults to `0` (the sampled token only); positive values request
+alternatives subject to the server's `--max-logprobs` limit. Like the Python
+frontend, `top_logprobs` alone does not enable logprobs.
+
+```python
+response = client.responses.create(
+    model=model,
+    input="Say hello.",
+    include=["message.output_text.logprobs"],
+    top_logprobs=2,
+)
+```
+
+Logprobs are available on message `output_text` parts and, with `stream=True`,
+on `response.output_text.delta` and `response.output_text.done` events.
+They describe the original sampled tokens. A token that spans hidden markup
+and visible text appears once, with its original token string and probability,
+on the first visible text delta it contributes to. Hidden-only tokens and
+parser-inserted separators have no output-text logprob entries. Consequently,
+concatenating logprob token strings need not reproduce the displayed text.
+Setting `include_reasoning=false` suppresses output logprobs as well, since
+an original token string can contain reasoning text.
+
+Harmony/GPT-OSS output logprobs remain unsupported and return HTTP 400.
+
 #### Extra parameters
 
 The following extra parameters in the request object are supported:
