@@ -236,7 +236,7 @@ def is_aiter_found_and_supported_on_rdna() -> bool:
 
 
 def _triton_gemm_config_is_tuned(
-    config_name: str, N: int, K: int, B: int | None = None
+    config_name: str, N: int, K: int, M: int | None = None, B: int | None = None
 ) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
@@ -244,7 +244,9 @@ def _triton_gemm_config_is_tuned(
     M_TUNE_PROBE = 128
 
     batch = {} if B is None else {"B": B}
-    return get_gemm_config(config_name, M_TUNE_PROBE, N, K, **batch)[1]
+    return get_gemm_config(
+        config_name, M_TUNE_PROBE if M is None else M, N, K, **batch
+    )[1]
 
 
 def _ck_gemm_shape_is_tuned(
@@ -4612,6 +4614,32 @@ class rocm_aiter_ops:
             prequant=prequant,
             y_scale=y_scale,
         )
+
+    @staticmethod
+    def triton_bf16_bmm(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        Y: torch.Tensor,
+    ) -> torch.Tensor:
+        """Y[b] = X[b] @ W[b]^T with X (B, M, K), W (B, N, K), Y (B, M, N).
+
+        Inputs and output may be strided views.
+        """
+        from aiter.ops.triton.batched_gemm_bf16 import batched_gemm_bf16
+
+        return batched_gemm_bf16(X, W, dtype=Y.dtype, YQ=Y, backend="triton")
+
+    @staticmethod
+    @functools.cache
+    def is_triton_bf16_bmm_tuned(B: int, M: int, N: int, K: int) -> bool:
+        """Whether AITER has a tuned triton_bf16_bmm config for this shape on
+        the current GPU."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("BATCHED_GEMM-A16W16", N, K, M=M, B=B)
+        except (AssertionError, ImportError, KeyError, OSError, TypeError):
+            return False
 
     @staticmethod
     def fused_bf16_bmm_cat_quant_pad_mla(
