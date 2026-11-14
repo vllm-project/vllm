@@ -338,17 +338,21 @@ class CacheConfig:
     Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required. On Qwen GDN
-    architectures with speculative decoding it selects RecoverSSM instead, which
-    pays off at K >= 3 under load; at K=1 it is a correctness path, not a
-    speed-up (see `use_gdn_recoverssm`)."""
+    architectures with speculative decoding it selects RecoverSSM instead. Measured
+    gains are at K >= 3 under load, with none at concurrency 1 and -3% at K=1
+    (one run), where it is a correctness path, not a speed-up (see
+    `use_gdn_recoverssm`)."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
     use_gdn_recoverssm: bool = field(default=False, init=False)
     """Whether Qwen GDN (Qwen3-Next, Qwen3.5, Qwen4Exp GDN and PLE) uses RecoverSSM
-    speculative decode (selected by `use_replayssm` with speculative decoding). It
-    pays off at K >= 3 under load (Yuchi017 measured +7-11% at concurrency 32 for
-    K=3/5/7 on an L40S with Qwen3.5-4B); at concurrency 1 or K=1 the commit's
-    fixed cost cancels the saving."""
+    speculative decode (selected by `use_replayssm` with speculative decoding).
+    Yuchi017's output-throughput numbers, on an L40S with Qwen3.5-4B at concurrency
+    32: on a v0.31.0 port (#58863) +10.1% at K=3 and +7.6% at K=5 (3 runs each),
+    +11% at K=7 and -3% at K=1 (1 run each), and within 1% at concurrency 1; on
+    #61309's head (stacked on #58863) +8.6% at K=5 and +3.4% (noisy) at K=3
+    (3 runs each). At concurrency 1 or K=1 the commit's fixed cost cancels the
+    saving."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
