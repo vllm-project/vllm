@@ -200,6 +200,9 @@ def get_flash_attn_version(
 
 
 def is_fa_version_supported(fa_version: int) -> bool:
+    if current_platform.is_xpu():
+        # Must agree with get_flash_attn_version(), which always picks FA2.
+        return fa_version == 2
     try:
         from vllm.vllm_flash_attn.flash_attn_interface import (
             is_fa_version_supported as _is_fa_version_supported,
