@@ -463,35 +463,14 @@ To discard queued requests for a particular retry, include `"abort": true` in
 the retry request's `params`. This parameter must be a JSON boolean and defaults
 to `false`; resumption still requires `request_failure_policy="recompute"`.
 
-`engine_recovery_timeout_sec` (default `120`, set with
-`--fault-tolerance-config`) bounds how long an engine waits for recovery
-instructions. A rank that is blocked in one of the timeouts below reports a
-fault only when that wait expires, so vLLM warns when an applicable timeout is
-at least as long as `engine_recovery_timeout_sec`. Such a fault is observed
-after the recovery window has expired.
-
-| Timeout | Default | Applies when | Configured by |
-| --- | --- | --- | --- |
-| DeepEP low-latency kernel | about 100 s | `deepep_low_latency` | DeepEP `NUM_TIMEOUT_CYCLES` |
-| NIXL EP kernel | 30 s | `nixl_ep` | NIXL EP `timeout_ms` default |
-| CPU distributed groups | 1800 s if unset | TP, PP or DP > 1 | `--cpu-distributed-timeout-seconds` |
-| Startup DP store | 1800 s | DP > 1 | PyTorch gloo default |
-| `execute_model` RPC | 300 s | TP > 1 | `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` |
-| Worker recovery store | 300 s | any FT deployment | PyTorch `TCPStore` default |
-| NIXL EPLB post-read barrier | 300 s | EPLB with the `nixl` communicator | hard-coded |
-
-Lower the configurable timeouts, or raise `engine_recovery_timeout_sec` above
-them with `--fault-tolerance-config '{"engine_recovery_timeout_sec": 600}'`, to
-clear the warning.
-
-The `execute_model` RPC wraps a model step, so its timeout has to be longer than
-the kernel and CPU distributed group timeouts; otherwise the RPC fails before
-the timeout that reports the peer fault expires. vLLM warns when it is not.
-
-An NCCL-based EPLB communicator (`torch_nccl` or `pynccl`) does not work with
-fault tolerance: the NCCL watchdog aborts the process when a collective fails,
-which rules out recovery. Use the `nixl` or `torch_gloo` communicator, or leave
-`--eplb-config.communicator` unset to let vLLM select one.
+With fault tolerance enabled, vLLM warns at startup when a timeout that reports
+a peer fault (the all2all kernel timeout, `--cpu-distributed-timeout-seconds`,
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`) is not shorter than
+`engine_recovery_timeout_sec`, or when a kernel or CPU timeout is not shorter
+than `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`. Set
+`--cpu-distributed-timeout-seconds` explicitly; the gloo default is 1800 s.
+NCCL-based EPLB communicators (`torch_nccl`, `pynccl`) abort the process on a
+failed collective and cannot be used with fault tolerance.
 
 ### Coordinating recovery
 
