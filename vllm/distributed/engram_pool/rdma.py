@@ -89,21 +89,33 @@ def wait_landed(ready, table):
     landed_at = tl.load(ready + 7).to(tl.pointer_type(tl.int64)) + table
     failed = False
     waiting = 0
-    if tl.load(landed_at, volatile=True) != seq:
+    # Acquire: rows are read only after the word that says they landed.
+    mark = tl.inline_asm_elementwise(
+        "ld.acquire.gpu.global.b64 $0, [$1];",
+        "=l,l",
+        [landed_at.to(tl.int64)],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+    if mark != seq:
         done = tl.load(ready + 1).to(tl.pointer_type(tl.int64))
         used = tl.load(ready + 2).to(tl.pointer_type(tl.int32))
         flags = tl.load(ready + 3).to(tl.pointer_type(tl.int64))
         world, qps = tl.load(ready + 4), tl.load(ready + 5)
         deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 6)
-        q = tl.arange(0, 16)
-        for peer in range(world):
+        q = tl.arange(0, 16)[None, :]
+        # Eight gatherers' flags (QPs per peer <= 16) per load.
+        for first in range(0, world, 8):
+            peer = first + tl.arange(0, 8)
             group = table * world + peer
-            mask = q < tl.load(used + group)
+            count = tl.load(used + group, mask=peer < world, other=0)
+            mask = q < count[:, None]
+            at = flags + group[:, None] * qps + q
             waiting = 1
             while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
-                at = flags + group * qps + q
                 landed = tl.load(at, mask=mask, other=seq, volatile=True)
-                waiting = tl.sum((landed != seq).to(tl.int32))
+                waiting = tl.sum(tl.sum((landed != seq).to(tl.int32), 1))
                 # Only a fetch with rows still to come can have failed.
                 state = tl.load(done, mask=waiting > 0, other=0, volatile=True)
                 failed = (waiting > 0) & (state == -seq)
@@ -114,15 +126,6 @@ def wait_landed(ready, table):
         tl.inline_asm_elementwise(
             "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
-    # Rows are read only after the word that says they landed.
-    tl.inline_asm_elementwise(
-        "fence.acq_rel.gpu; mov.u32 $0, 0;",
-        "=r",
-        [],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
 
 
 @triton.jit(do_not_specialize=["num_items", "num_vg"])
