@@ -22,6 +22,7 @@ from pydantic import ConfigDict, Field, model_validator
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import CpuArchEnum
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
@@ -95,6 +96,19 @@ _QWEN3_5_ARCHITECTURES = frozenset(
         "Qwen3_5MoeMTP",
     }
 )
+
+
+def _should_disable_qwen35_cpu_compile(model_config: Any) -> bool:
+    return (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+        and model_config is not None
+        and any(
+            architecture in _QWEN3_5_ARCHITECTURES
+            for architecture in model_config.architectures
+        )
+        and not torch.cpu._is_avx512_supported()
+    )
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
@@ -1773,6 +1787,16 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         current_platform.apply_config_platform_defaults(self)
+
+        if (
+            self.compilation_config.mode is None
+            and _should_disable_qwen35_cpu_compile(self.model_config)
+        ):
+            logger.info_once(
+                "Disabling torch.compile for Qwen3.5 on CPUs without AVX-512. "
+                "Use an explicit compilation mode to override this default."
+            )
+            self.compilation_config.mode = CompilationMode.NONE
 
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:

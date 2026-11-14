@@ -1157,6 +1157,23 @@ def test_breakable_cudagraph_resolution_is_per_config(monkeypatch):
         default_breakable_cudagraph_architectures.cache_clear()
 
 
+def test_qwen35_disables_compile_on_avx2_cpu(monkeypatch):
+    from vllm.platforms import current_platform
+    from vllm.config.vllm import _should_disable_qwen35_cpu_compile
+    from vllm.platforms.interface import CpuArchEnum
+
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.X86
+    )
+    monkeypatch.setattr(torch.cpu, "_is_avx512_supported", lambda: False)
+    model_config = SimpleNamespace(
+        architectures=["Qwen3_5ForCausalLM"],
+    )
+
+    assert _should_disable_qwen35_cpu_compile(model_config)
+
+
 @pytest.mark.parametrize(
     ("architecture", "env_value", "expected"),
     [
