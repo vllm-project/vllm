@@ -81,7 +81,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
     min_scale = 1.0e-4
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -403,7 +403,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -588,7 +588,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 ):
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -898,7 +898,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -1097,7 +1097,7 @@ class SparseAttnCompressC128Block8Kernel(
     state_block_size = 8
     rcp_ln2 = 1.4426950408889634
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         state_width: int
@@ -1356,9 +1356,7 @@ class SparseAttnCompressC128Block8Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self, *, head_size: int, state_width: int
-    ) -> CompileKey:
+    def dispatch(self, *, head_size: int, state_width: int) -> CompileKey:
         return self.CompileKey(head_size=head_size, state_width=state_width)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1455,7 +1453,7 @@ class SparseAttnNormRopeStoreKernel(
 ):
     min_scale = 1.0e-4
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         rope_head_dim: int
@@ -1653,7 +1651,7 @@ class SparseAttnNormRopeStoreKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -1832,7 +1830,7 @@ class SparseAttnNormRopeStoreKernel(
 class SparseAttnNormRopeStoreFullKernel(
     VllmCuTeDSLJitKernel["SparseAttnNormRopeStoreFullKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         rope_head_dim: int
@@ -2007,7 +2005,7 @@ class SparseAttnNormRopeStoreFullKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         store_full_fp8: bool,

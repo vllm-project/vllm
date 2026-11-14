@@ -2,9 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Context-parallel decode index scorer for MiniMax-M3 (FlyDSL, gfx950, TP4).
 
-Rank ``me`` scores blocks b with (b // CP_CH) % 4 == me for all four index heads
-(bit for bit as ``kernel.py``) and stores head h's scores into rank h's buffer
-(``index_cp.IndexCP``); it returns once every rank's scores have arrived.
+Rank `me` scores blocks b with (b // ch) % 4 == me for all four index heads
+(bit for bit as `kernel.py`) and stores head h's scores into rank h's buffer
+(`index_cp.IndexCP`); it returns once every rank's scores have arrived.
+
+A request has 4 query rows (DSpark 3) or 8 (DSpark 7). Its 4 heads x 4 rows are
+one 16-column group of v_mfma_f32_16x16x128_f8f6f4; an 8-row request scores both
+groups against each dequantized key tile, so its pages are read and dequantized
+once (as two 4-row requests they were read twice).
+
+A run is `ch` consecutive blocks of one rank (the rank interleave); a
+workgroup's four waves take ch / 4 pages of each of its runs.
 """
 
 import flydsl.compiler as flyc
@@ -34,7 +42,7 @@ from vllm.models.minimax_m3.amd.ops.nvfp4_index_decode.kernel import block_senti
 WORLD = 4  # TP ranks = index heads, one per rank
 BLK = 128  # tokens per block
 D = 128
-CP_CH = 16  # blocks per run of one rank
+CP_CH = 16  # blocks per run of one rank (the 4-row requests' build)
 PAGE_CODES = BLK * D // 2  # e2m1 codes, then [128 x 8 B] e4m3 group scales
 PAGE_BYTES = PAGE_CODES + BLK * 8
 MT = BLK // 16  # token tiles per page
@@ -51,6 +59,7 @@ FLAG_BYTES = 12288
 # Device counters (int32); [CNT_SC] holds the call count.
 CNT_SC = 128
 CNT_WORDS = 512
+CHS = (4, 8, 16)  # supported blocks per run (ch)
 
 
 def _flag_read(addr):
@@ -77,7 +86,8 @@ NW = 4  # waves per workgroup: quarter w of every run
 QD = CP_CH // NW  # blocks per quarter
 WIN = 64  # pages per block-table window (one VGPR)
 MAX_REQS = 64 * NW  # one request per thread in the prefix sum
-QL = 4  # DSpark rows per request
+QL = 4  # rows per request of the smallest form (DSpark 3)
+QLS = (4, 8)  # supported rows per request; 4 rows x 4 heads = one column group
 HEADS = 4
 
 
@@ -101,20 +111,28 @@ def _wave_scan(x, lane):
     return x
 
 
-def compile_score_push():
-    name = "m3_nvfp4_index_score_push_cp"
+def compile_score_push(ql: int = QL, ch: int = CP_CH):
+    """`ql` rows a request (4 or 8), `ch` blocks a run (4, 8 or 16; a wave
+    takes ch / 4 pages of each run)."""
+    assert ql in QLS, ql
+    assert ch in CHS, ch
+    NG = ql // 4  # 16-column groups per request
+    qd = ch // NW  # blocks of a run per wave
+    name = "m3_nvfp4_index_score_push_cp" + ("" if ql == QL else f"_q{ql}")
+    name += "" if ch == CP_CH else f"_c{ch}"
 
     @fx.struct
     class Shared:
         lut: fx.Array[fx.Int32, 512, 16]
-        stage: fx.Array[fx.Int32, 2 * 16 * NW * QD, 16]  # [run % 2][col][quarter]
+        # [run % 2][group][col][block of the run]
+        stage: fx.Array[fx.Int32, 2 * NG * 16 * ch, 16]
         incl: fx.Array[fx.Int32, MAX_REQS]  # inclusive prefix of the run counts
         seq: fx.Array[fx.Int32, MAX_REQS]
         wsum: fx.Array[fx.Int32, NW]
 
     @flyc.kernel(name=name, known_block_size=[64 * NW, 1, 1])
     def kernel(
-        arg_iq: fx.Int64,  # this rank's head: [num_reqs * QL, 128] e4m3
+        arg_iq: fx.Int64,  # this rank's head: [num_reqs * ql, 128] e4m3
         arg_kv: fx.Int64,  # NVFP4 index pages [num_blocks, 128, 72] u8
         arg_lut: fx.Int64,  # nvfp4_e4m3_lut [256] i64
         arg_d0: fx.Int64,  # head h's scores [rows, S] fp32 (rank h's receive buffer)
@@ -192,16 +210,16 @@ def compile_score_push():
         # This rank's index-q rows of requests pid, pid + nwg, ... to slot me of
         # every rank; their flags follow below.
         ir = buffer_ops.create_buffer_resource_from_addr(
-            arg_iq, num_records_bytes=fx.Int64(i32_num_reqs) * (QL * D)
+            arg_iq, num_records_bytes=fx.Int64(i32_num_reqs) * (ql * D)
         )
         rs = pid
         while (wave == 0) & (rs < i32_num_reqs):
             v = buffer_ops.buffer_load(
                 ir,
-                (rs * QL * D + lane * 16) // 4,
+                (rs * ql * D + lane * 16) // 4,
                 vec_width=4,
                 dtype=fx.Int32,
-                mask=lane < QL * D // 16,
+                mask=lane < ql * D // 16,
             )
             for p in range_constexpr(WORLD):
                 buffer_ops.buffer_store(
@@ -209,15 +227,15 @@ def compile_score_push():
                     buffer_ops.create_buffer_resource_from_addr(
                         qs[p], num_records_bytes=qbytes
                     ),
-                    ((i32_me * i32_rmax + rs * QL) * D + lane * 16) // 4,
-                    mask=lane < QL * D // 16,
+                    ((i32_me * i32_rmax + rs * ql) * D + lane * 16) // 4,
+                    mask=lane < ql * D // 16,
                     cache_modifier=SYS,
                 )
             rs = rs + i32_nwg
         nb_t = (seq_t + (BLK - 1)) // BLK
-        runs_t = (nb_t // (WORLD * CP_CH)) + (
-            nb_t % (WORLD * CP_CH) > i32_me * CP_CH
-        ).select(fx.Int32(1), fx.Int32(0))
+        runs_t = (nb_t // (WORLD * ch)) + (nb_t % (WORLD * ch) > i32_me * ch).select(
+            fx.Int32(1), fx.Int32(0)
+        )
         x = _wave_scan(runs_t, lane)
         if lane == 63:
             smem.wsum.ptr[wave] = x
@@ -231,7 +249,7 @@ def compile_score_push():
         # Runs pid, pid + grid, ...: the busy workgroups stay one per CU.
         total = _uni(incl_l[MAX_REQS - 1])
         nruns = (pid < total).select((total - pid + i32_nwg - 1) // i32_nwg, 0)
-        nslots = nruns * QD  # pages of this wave
+        nslots = nruns * qd  # pages of this wave
 
         lut8 = fx.logical_divide(
             fx.make_view(
@@ -243,7 +261,7 @@ def compile_score_push():
         stage16 = fx.logical_divide(
             fx.make_view(
                 fx.recast_iter(fx.Int32, smem.stage.ptr),
-                fx.make_layout(2 * 16 * NW * QD, 1),
+                fx.make_layout(2 * NG * 16 * ch, 1),
             ),
             fx.make_layout(4, 1),
         )
@@ -303,9 +321,9 @@ def compile_score_push():
                 f += [lo, hi]
             return Vec.from_elements(f, fx.Int32)
 
-        def q_load(r, ok):
-            """This lane's 32 B of Q: row r * QL + st_qoff, head st_head."""
-            off = ((st_head * i32_rmax + r * QL + st_qoff) * D + kl * 32) // 4
+        def q_load(r, g, ok):
+            """This lane's 32 B of Q: row r * ql + 4 g + st_qoff, head st_head."""
+            off = ((st_head * i32_rmax + r * ql + g * 4 + st_qoff) * D + kl * 32) // 4
             a = Vec(
                 buffer_ops.buffer_load(qr, off, vec_width=4, dtype=fx.Int32, mask=ok)
             )
@@ -335,31 +353,39 @@ def compile_score_push():
                 run = maxf_nn(run, x)
             return run
 
-        def page_pass(tiles, qf, krn, okn, masked, lim):
-            """Max of this lane's column over the page; tile t of the next page
-            loads into tile t's registers (sched barriers stop LLVM hoisting)."""
-            accs = []
+        # Tiles a reduction covers: all 8 (4 rows) or each half of the page
+        # (8 rows: 4 tiles x 2 groups of accumulators live, as for 4 rows).
+        SPAN = MT // NG
+
+        def page_pass(tiles, qfs, krn, okn, masked, lims):
+            """Max of this lane's column of every group over the page; tile t of
+            the next page loads into tile t's registers (sched barriers stop LLVM
+            hoisting)."""
+            runs = [neg_inf] * NG
             nxt = []
-            for t in range_constexpr(MT):
-                f = dequant_tile(*tiles[t])
-                nxt.append(load_tile(krn, okn, t))
-                accs.append(mfma_fp8_16x16x128(f, qf, zero4))
-                fx.rocdl.sched_barrier(0)
-            mx = neg_inf
-            if masked:
-                run_m = neg_inf
-                for t in range_constexpr(MT):
-                    run_m = reduce(accs[t], t, run_m, True, lim)
-                mx = xlane4(run_m, maxf_nn)
-            else:
-                run_u = neg_inf
-                for t in range_constexpr(MT):
-                    run_u = reduce(accs[t], t, run_u, False, None)
-                mx = xlane4(run_u, maxf_nn)
-            return mx, nxt
+            for h in range_constexpr(MT // SPAN):
+                accs = []
+                for t in range_constexpr(h * SPAN, (h + 1) * SPAN):
+                    f = dequant_tile(*tiles[t])
+                    nxt.append(load_tile(krn, okn, t))
+                    accs.append([mfma_fp8_16x16x128(f, qf, zero4) for qf in qfs])
+                    fx.rocdl.sched_barrier(0)
+                if masked:
+                    for g in range_constexpr(NG):
+                        for i in range_constexpr(SPAN):
+                            runs[g] = reduce(
+                                accs[i][g], h * SPAN + i, runs[g], True, lims[g]
+                            )
+                else:
+                    for g in range_constexpr(NG):
+                        for i in range_constexpr(SPAN):
+                            runs[g] = reduce(
+                                accs[i][g], h * SPAN + i, runs[g], False, None
+                            )
+            return [xlane4(r, maxf_nn) for r in runs], nxt
 
         def row_value(mx, seq, q_off, b):
-            return block_sentinels(mx, seq - QL + q_off + 1, b, i32_init, i32_local)
+            return block_sentinels(mx, seq - ql + q_off + 1, b, i32_init, i32_local)
 
         fx.rocdl.s_waitcnt(vmcnt=0)
         rs = pid
@@ -378,10 +404,10 @@ def compile_score_push():
 
         w0 = fx.Int32(0)
         while w0 < nslots:
-            # One page per lane: page s is block 4 w + s % 4 of run pid + (s // 4)
-            # * grid, of request rj (binary search in the prefix).
+            # One page per lane: page s is block qd w + s % qd of run pid + (s //
+            # qd) * grid, of request rj (binary search in the prefix).
             s = w0 + lane
-            k = pid + (s // QD) * i32_nwg
+            k = pid + (s // qd) * i32_nwg
             rj = fx.Int32(0)
             for bs in range_constexpr(8):
                 step = MAX_REQS >> (bs + 1)
@@ -391,8 +417,8 @@ def compile_score_push():
             excl = (rj > 0).select(fx.Int32(incl_l[_max(rj - 1, 0)]), fx.Int32(0))
             seqj = fx.Int32(seq_l[rj])
             nblkj = (seqj + (BLK - 1)) // BLK
-            bj = ((k - excl) * WORLD + i32_me) * CP_CH + wave * QD + s % QD
-            frow = seqj - (QL - 1)
+            bj = ((k - excl) * WORLD + i32_me) * ch + wave * qd + s % qd
+            frow = seqj - (ql - 1)
             rbf = ((frow < 0).select(fx.Int32(0), frow) + (BLK - 1)) // BLK
             ll = nblkj - i32_local
             loc_last = (ll < 0).select(fx.Int32(0), ll)
@@ -419,29 +445,50 @@ def compile_score_push():
             for t in range_constexpr(MT):
                 tiles.append(load_tile(kr0, ok0, t))
                 fx.rocdl.sched_barrier(0)
-            # Wait for the index-q rows; lane i polls source i % 4 of its request.
-            word = mine + fx.Int64((SC_IQ + (lane % WORLD) * SC_MAX_REQS + rj) * 4)
+            # Wait for the index-q rows of every source rank for the requests of
+            # this window's pages (lane i holds page i).
             want = lane < n
+
+            def iq_flag(req):
+                if const_expr(qd >= WORLD):
+                    # A run's pages are qd >= 4 consecutive lanes: lane i polls
+                    # source i % 4 of its request, together all four.
+                    return _flag_read(
+                        mine
+                        + fx.Int64((SC_IQ + (lane % WORLD) * SC_MAX_REQS + req) * 4)
+                    )
+                # Fewer lanes a run would leave sources unpolled: each lane
+                # polls all four of its request.
+                lo = calls
+                for src in range_constexpr(WORLD):
+                    lo = _min(
+                        lo,
+                        _flag_read(
+                            mine + fx.Int64((SC_IQ + src * SC_MAX_REQS + req) * 4)
+                        ),
+                    )
+                return lo
+
             f = calls
             if want:
-                f = _flag_read(word)
+                f = iq_flag(rj)
             while fx.Int64(fx.rocdl.ballot(T.i64, want & (f < calls))) != 0:
                 if want & (f < calls):
-                    f = _flag_read(word)
-            qa, qb = q_load(r_0, n > 0)
+                    f = iq_flag(rj)
+            qab = [q_load(r_0, g, n > 0) for g in range_constexpr(NG)]
             # Nothing pending where the loop head merges with the back edge.
             fx.rocdl.s_waitcnt(vmcnt=0)
-            qf = q_frag(qa, qb)
-            qna, qnb = qa, qb
+            qfs = [q_frag(*qab[g]) for g in range_constexpr(NG)]
+            qnab = qab
             sw = n < 0  # false: Q of the next page already loaded
-            vq = [neg_inf] * QD
+            vq = [neg_inf] * (NG * qd)  # [group][block of this wave's part]
             j = fx.Int32(0)
             while j < n:
                 r = fx.Int32(fx.rocdl.readlane(T.i32, rj, j))
                 b = fx.Int32(fx.rocdl.readlane(T.i32, bj, j))
                 seq = fx.Int32(fx.rocdl.readlane(T.i32, seqj, j))
                 if sw:
-                    qf = q_frag(qna, qnb)
+                    qfs = [q_frag(*qnab[g]) for g in range_constexpr(NG)]
                 jn = j + 1
                 okj = jn < n
                 jc = okj.select(jn, fx.Int32(0))
@@ -450,48 +497,89 @@ def compile_score_push():
                 okn = okj & (pgn >= 0)
                 krn = page_rsrc(okn.select(pgn, fx.Int32(0)))
                 sw = okj & (rn != r)
-                qna, qnb = q_load(rn, sw)
+                qnab = [q_load(rn, g, sw) for g in range_constexpr(NG)]
                 fx.rocdl.sched_barrier(0)
-                mx, tiles = page_pass(
+                mxs, tiles = page_pass(
                     tiles,
-                    qf,
+                    qfs,
                     krn,
                     okn,
-                    b * BLK + (BLK - 1) > seq - QL,
-                    seq - QL + st_qoff - b * BLK - kl * 4,
+                    b * BLK + (BLK - 1) > seq - ql,
+                    [
+                        seq - ql + g * 4 + st_qoff - b * BLK - kl * 4
+                        for g in range_constexpr(NG)
+                    ],
                 )
-                ov = row_value(mx, seq, st_qoff, b)
-                e = (w0 + j) % QD
-                vq = [(e == i).select(ov, v) for i, v in enumerate(vq)]
-                if e == QD - 1:
-                    # The run's quarters meet in LDS; wave m % NW stores it.
-                    m = (w0 + j) // QD
+                e = (w0 + j) % qd
+                ovs = [
+                    row_value(mxs[g], seq, g * 4 + st_qoff, b)
+                    for g in range_constexpr(NG)
+                ]
+                vq = [(e == i % qd).select(ovs[i // qd], v) for i, v in enumerate(vq)]
+                if e == qd - 1:
+                    # The run's parts meet in LDS; wave m % NW stores it, 16 B
+                    # (4 blocks) a lane.
+                    m = (w0 + j) // qd
                     slot = m % 2
-                    val = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-                    val.store(Vec.from_elements([bits(v) for v in vq], fx.Int32))
                     if kl == 0:
-                        fx.copy(
-                            atom16,
-                            val,
-                            fx.slice(stage16, (None, (slot * 16 + col) * NW + wave)),
-                        )
+                        for g in range_constexpr(NG):
+                            if const_expr(qd == 4):
+                                val = fx.make_rmem_tensor(
+                                    fx.make_layout(4, 1), fx.Int32
+                                )
+                                val.store(
+                                    Vec.from_elements(
+                                        [bits(v) for v in vq[g * qd : (g + 1) * qd]],
+                                        fx.Int32,
+                                    )
+                                )
+                                fx.copy(
+                                    atom16,
+                                    val,
+                                    fx.slice(
+                                        stage16,
+                                        (
+                                            None,
+                                            ((slot * NG + g) * 16 + col) * (ch // 4)
+                                            + wave,
+                                        ),
+                                    ),
+                                )
+                            else:
+                                for i in range_constexpr(qd):
+                                    smem.stage.ptr[
+                                        ((slot * NG + g) * 16 + col) * ch
+                                        + wave * qd
+                                        + i
+                                    ] = bits(vq[g * qd + i])
                     fx.gpu.barrier()
-                    if wave == m % NW:
-                        got = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-                        fx.copy(
-                            atom16,
-                            fx.slice(stage16, (None, (slot * 16 + col) * NW + kl)),
-                            got,
-                        )
-                        off = (r * QL + st_qoff) * i32_s + (b - b % CP_CH) + kl * QD
-                        for h in range_constexpr(HEADS):
-                            buffer_ops.buffer_store(
-                                got.load(),
-                                drs[h],
-                                off,
-                                mask=st_head == h,
-                                cache_modifier=SYS,
+                    if (wave == m % NW) & (kl * 4 < ch):
+                        for g in range_constexpr(NG):
+                            got = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+                            fx.copy(
+                                atom16,
+                                fx.slice(
+                                    stage16,
+                                    (
+                                        None,
+                                        ((slot * NG + g) * 16 + col) * (ch // 4) + kl,
+                                    ),
+                                ),
+                                got,
                             )
+                            off = (
+                                (r * ql + g * 4 + st_qoff) * i32_s
+                                + (b - b % ch)
+                                + kl * 4
+                            )
+                            for h in range_constexpr(HEADS):
+                                buffer_ops.buffer_store(
+                                    got.load(),
+                                    drs[h],
+                                    off,
+                                    mask=st_head == h,
+                                    cache_modifier=SYS,
+                                )
                 j = jn
             w0 = w0 + WIN
 

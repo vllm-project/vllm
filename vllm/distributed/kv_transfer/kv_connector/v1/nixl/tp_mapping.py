@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 # ======================================================================
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadSpec:
     """Specification for a single remote block read operation."""
 
@@ -37,7 +37,7 @@ def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, MambaSpec)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TPMapping:
     """Complete local-to-remote TP mapping for one remote engine.
 
@@ -96,7 +96,7 @@ def compute_tp_mapping(
     DCP support is scoped to MLA only, with a side is either fully replicated or fully
     sharded. DCP-branch reuses the same rank set used at handshake selection.
 
-    ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
+    `head_sharded_kv_heads` maps head-sharded KV with that many total KV heads
     instead of the topology's, e.g. a GQA draft under an MLA target.
     """
     tp_rank = transfer_topology.tp_rank

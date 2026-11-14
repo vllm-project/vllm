@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
@@ -47,6 +47,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
@@ -74,15 +77,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Static,
     kMxfp8Static,
     kNvfp4Static,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
 
-class OnlineQuantizationSource(str, Enum):
+class OnlineQuantizationSource(StrEnum):
     """Supported online quantization configuration sources."""
 
     linear = "linear"  # LinearBase
@@ -110,6 +115,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
+    kLutBStatic: LutBOnlineMoEMethod,
 }
 
 # Quantizers for full-precision fused shared-expert weights, keyed by the routed
@@ -283,7 +289,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             layer_cls: Type of the layer that will use the resolved method.
 
         Returns:
-            The matching method class, or None when ``spec`` has no weight
+            The matching method class, or None when `spec` has no weight
             quantization.
 
         """
@@ -363,6 +369,16 @@ class OnlineQuantizationConfig(QuantizationConfig):
             return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+        if issubclass(layer_cls, ParallelLMHead) and not getattr(
+            quant_method_cls, "supports_lm_head", False
+        ):
+            # Per-tensor reduces its amax across TP ranks and per-block assumes
+            # 128-aligned shards, neither validated on a padded, sharded vocab.
+            raise NotImplementedError(
+                f"{prefix}: {quant_method_cls.__name__} does not support the "
+                "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
+                "with `activation: null`)."
+            )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
             weight=quant_spec.weight,
@@ -406,6 +422,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         matches = _find_matching_targets(
             prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
         )
+        if issubclass(layer_cls, ParallelLMHead):
+            # Broad patterns keep meaning linear and MoE layers: a target
+            # selects the lm_head only by naming it.
+            head_name = prefix.rsplit(".", 1)[-1]
+            matches = [pattern for pattern in matches if head_name in pattern]
         if ignored and matches:
             raise ValueError(
                 f"Layer {prefix} matches both quantization_config.ignore "
@@ -426,12 +447,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
             shorthand = _ONLINE_SHORTHANDS[target]
             quant_key_str = target
             quant_spec = (
-                shorthand.linear if issubclass(layer_cls, LinearBase) else shorthand.moe
+                shorthand.linear
+                if issubclass(layer_cls, (LinearBase, ParallelLMHead))
+                else shorthand.moe
             )
         else:
             quant_spec = target
             quant_key_str = str(quant_spec)
-        if issubclass(layer_cls, LinearBase):
+        if issubclass(layer_cls, (LinearBase, ParallelLMHead)):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
             table = _ONLINE_MOE_METHODS

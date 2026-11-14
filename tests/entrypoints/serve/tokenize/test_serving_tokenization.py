@@ -32,12 +32,12 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -179,8 +179,8 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
 class TestDetokenizeClientErrorResponses:
     """Client-caused errors from /detokenize are 4xx, not 500.
 
-    /detokenize used to wrap ``create_detokenize`` in a blanket
-    ``except Exception`` that reported every failure as 500, while its
+    /detokenize used to wrap `create_detokenize` in a blanket
+    `except Exception` that reported every failure as 500, while its
     sibling /tokenize let exceptions propagate to the global exception
     handlers, which map client-caused errors to 4xx and keep genuine
     server errors at 500. These tests pin the shared contract for both

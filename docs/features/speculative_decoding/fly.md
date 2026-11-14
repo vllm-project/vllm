@@ -24,15 +24,35 @@ llm = LLM(
 )
 ```
 
-FLy requires at least two speculative tokens. `fly_window_size` is the number of subsequent native acceptance decisions checked; it must be smaller than `num_speculative_tokens` and defaults to `min(6, num_speculative_tokens - 1)`. The entropy gate uses the three largest processed target probabilities by default. Set `fly_entropy_top_k` in `speculative_config` to change that number; it must be positive and is capped at the vocabulary size.
+FLy requires at least two speculative tokens. `fly_window_size` is the number of subsequent native acceptance decisions checked; it must be smaller than `num_speculative_tokens` and defaults to `min(6, num_speculative_tokens - 1)`.
+
+The entropy gate takes the `fly_entropy_top_k` largest processed target scores (three by default), renormalizes them into a distribution over those candidates, and divides its entropy by `log(fly_entropy_top_k)`. The gate value is therefore in `[0, 1]`, from 0 when the target is certain to 1 when the top-k candidates are equally likely, and `fly_entropy_threshold` keeps the same meaning for every `fly_entropy_top_k`. `fly_entropy_top_k` must be positive and is capped at the vocabulary size; with a top-k of 1 the gate value is always 0, so FLy defers nothing unless the threshold is 0.
 
 FLy supports greedy draft sampling with target-only acceptance and probabilistic draft sampling with standard p/q acceptance. Token-Level Intersection can be used for cross-vocabulary draft models with greedy draft sampling, but is incompatible with `use_local_argmax_reduction`.
 
-FLy is supported by both model runners. With ModelRunnerV2, use a supported proposer such as MTP, EAGLE, or DFlash; standalone `draft_model` proposing still requires ModelRunnerV1.
+FLy has been validated with the MTP, EAGLE, DFlash, and DSpark proposers.
+
+## Measuring FLy Cost with Synthetic Acceptance
+
+`rejection_sample_method="synthetic"` fixes the acceptance length, which is how benchmarks pin speculative decoding to a measured acceptance length. Setting `fly_window_size` together with `synthetic` also runs FLy's per-step entropy computation during verification but never defers a rejection, so the acceptance length stays exactly the synthetic one. A benchmark pinned to FLy's measured acceptance length then also pays FLy's verification cost:
+
+```python
+speculative_config={
+    "method": "dspark",
+    "num_speculative_tokens": 8,
+    "rejection_sample_method": "synthetic",
+    "synthetic_acceptance_length": 4.8,
+    "fly_window_size": 2,
+    "fly_entropy_threshold": 0.3,
+    "fly_entropy_top_k": 3,
+}
+```
+
+The same `fly_window_size < num_speculative_tokens` constraint applies. This mode is only supported by ModelRunner V2.
 
 ## Validated Configurations
 
-The following evaluation covers the V1 `draft_model` proposer; MRV2 validation is summarized below. Configurations not listed here are not necessarily unsupported, but have not yet been experimentally validated.
+The following evaluation was run with the `draft_model` proposer of the now-removed V1 model runner; current validation is summarized below. Configurations not listed here are not necessarily unsupported, but have not yet been experimentally validated.
 
 FLy was faster than Standard SD in all 40 primary configurations. Across all four target/draft pairs, the 29 configurations with ratio-based quality measurements had a minimum quality retention of 97.9%.
 

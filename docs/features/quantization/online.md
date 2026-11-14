@@ -1,9 +1,10 @@
 # Online Quantization
 
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
-and MoE weights to lower precision (such as FP8) at load time, without needing
-a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+and MoE weights, and optionally its lm_head, to lower precision (such as FP8)
+at load time, without needing a pre-quantized checkpoint or calibration data.
+Weights are converted during model loading and activations are dynamically
+scaled during each forward pass.
 
 ## Quick Start
 
@@ -42,6 +43,8 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
 
 vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
     --quantization-config '{"linear":{"activation":null,"weight":null}}'
+
+vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 ```
 
 ## Supported Schemes
@@ -52,6 +55,7 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
+| `lut_b_moe` | MoE only: 3-bit indices into an E4M3 codebook with an e8m0 scale per 8x64 tile | MoE only: fp8_e4m3 data, e8m0 per-1x32-block scale | Native on Rubin (SM 10.7) via the tensor core LUT decode. Other GPUs emulate the same numerics for accuracy checks with dequantized weights. Dense layers stay unquantized. |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
 
 ## Advanced Configuration
@@ -280,5 +284,19 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
+    - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
+      quantized only when the text of a `targets` pattern contains its module name
+      (`lm_head`), so `"re:.*"` and `"*"` do not select it, for example
+      weight-only FP8:
+      `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
+    - The lm_head supports per-channel FP8 only: `fp8_per_channel` (W8A8) or
+      `fp8_per_channel_static` with `"activation": None` (weight-only; CUDA and
+      XPU only, use `fp8_per_channel` on ROCm). Other schemes, a tied lm_head and
+      one the checkpoint already quantizes raise an error. It cannot be combined
+      with `draft_lm_head_quantization` or with models that read `lm_head.weight`
+      directly (Gemma4 MTP, DiffusionGemma, K2Horizon). Models converted to
+      sequence classification raise an error.
+    - `"activation": None` on `fp8_per_channel_static` is valid for any linear
+      layer; MoE experts reject it.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

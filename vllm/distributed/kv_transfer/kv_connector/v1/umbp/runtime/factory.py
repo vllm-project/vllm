@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from .base import IUMBPRuntime
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UMBPRuntimeConfig:
     """Shared connector options passed to the selected runtime adapter."""
 

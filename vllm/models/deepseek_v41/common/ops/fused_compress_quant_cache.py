@@ -39,14 +39,14 @@ def fused_save_compress_norm(
     attention layer schedules on separate streams.
 
     Ratio 2 keeps one ring block per request holding the open group's rows:
-    position ``p`` lives in row ``p % capacity`` and ``slot_mapping`` encodes
-    ``block * capacity + p % capacity``. The grid has one program per request
+    position `p` lives in row `p % capacity` and `slot_mapping` encodes
+    `block * capacity + p % capacity`. The grid has one program per request
     followed by one per pair of packed tokens. A request program handles the
     group that the chunk's first token closes with its predecessor's ring row,
-    then stores the chunk's last ``capacity`` rows to the ring; because the
+    then stores the chunk's last `capacity` rows to the ring; because the
     same program does both, ring reads and writes never race. A pair program
     handles the group that ends inside its pair, reading both rows from the
-    raw input. Ratio 1 has no ring and one program per token; ``slot_mapping``
+    raw input. Ratio 1 has no ring and one program per token; `slot_mapping`
     then only marks valid tokens.
 
     Args:
@@ -61,9 +61,9 @@ def fused_save_compress_norm(
         compress_ratio: Group size, either 1 or 2.
         latent_out: BF16 [tokens, 512], written only at valid group boundaries.
         prev_rows: FP32 [rows, 1024] rows gathered from all PCP ranks (CR2). A
-            chunk reads its predecessor here where ``prev_row_indices`` is set,
-            and the ring is left to ``save_ring_rows``.
-        prev_row_indices: [num_reqs] row in ``prev_rows`` holding the token
+            chunk reads its predecessor here where `prev_row_indices` is set,
+            and the ring is left to `save_ring_rows`.
+        prev_row_indices: [num_reqs] row in `prev_rows` holding the token
             before each chunk's first token, or -1 to read the ring.
 
     """
@@ -292,6 +292,89 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
 
 
+# Value bytes per packed row width. The 584-byte V4 main KV row and the FP8 and
+# MXFP4 indexer K rows keep their scales after the values of the whole page; the
+# 528-byte and 288-byte V4.1 rows keep each row's scales right after its values.
+_PIPELINE_CACHE_VALUE_BYTES = {584: 576, 528: 528, 288: 288, 132: 128, 68: 64}
+
+
+def copy_pipeline_cache_rows(
+    cache: torch.Tensor,
+    rows: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    *,
+    scatter: bool,
+) -> None:
+    assert cache.dtype == rows.dtype == torch.uint8
+    assert cache.ndim == 3 and cache.stride(-1) == 1
+    assert rows.shape == (positions.numel(), cache.shape[-1])
+    assert rows.is_contiguous() and positions.is_contiguous()
+    assert slot_mapping.is_contiguous() and slot_mapping.numel() <= rows.shape[0]
+    assert compress_ratio in (1, 2)
+    value_bytes = _PIPELINE_CACHE_VALUE_BYTES.get(cache.shape[-1])
+    assert value_bytes is not None, f"unsupported paged cache row {cache.shape[-1]} B"
+    if rows.shape[0] == 0:
+        return
+    _copy_pipeline_cache_rows[(rows.shape[0],)](
+        cache,
+        rows,
+        positions,
+        slot_mapping,
+        slot_mapping.numel(),
+        CACHE_STRIDE=cache.stride(0),
+        CACHE_BLOCK=cache.shape[1],
+        ROW_BYTES=cache.shape[-1],
+        VALUE_BYTES=value_bytes,
+        COMPRESS_RATIO=compress_ratio,
+        SCATTER=scatter,
+        BLOCK=triton.next_power_of_2(cache.shape[-1]),
+        num_warps=4,
+        launch_pdl=False,
+    )
+
+
+@triton.jit(do_not_specialize=["num_slots"])
+def _copy_pipeline_cache_rows(
+    cache,
+    rows,
+    positions,
+    slots,
+    num_slots,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    ROW_BYTES: tl.constexpr,
+    VALUE_BYTES: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SCATTER: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    slot = tl.load(slots + token, mask=token < num_slots, other=-1)
+    position = tl.load(positions + token)
+    valid = (slot >= 0) & ((position + 1) % COMPRESS_RATIO == 0)
+    byte = tl.arange(0, BLOCK)
+    row = slot % CACHE_BLOCK
+    # For split layouts, each page stores all values before all scales.
+    offset = tl.where(
+        byte < VALUE_BYTES,
+        row * VALUE_BYTES + byte,
+        CACHE_BLOCK * VALUE_BYTES
+        + row * (ROW_BYTES - VALUE_BYTES)
+        + byte
+        - VALUE_BYTES,
+    )
+    cache_ptr = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE + offset
+    row_ptr = rows + token.to(tl.int64) * ROW_BYTES + byte
+    if SCATTER:
+        value = tl.load(row_ptr, mask=byte < ROW_BYTES, other=0)
+        tl.store(cache_ptr, value, mask=valid & (byte < ROW_BYTES))
+    else:
+        value = tl.load(cache_ptr, mask=valid & (byte < ROW_BYTES), other=0)
+        tl.store(row_ptr, value, mask=byte < ROW_BYTES)
+
+
 def rope_quant_insert(
     latent: torch.Tensor,
     positions: torch.Tensor,
@@ -305,15 +388,15 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: ``uint8`` is a paged FlashMLA layout, whose record the per-token
+    layout: `uint8` is a paged FlashMLA layout, whose record the per-token
     byte width names -- 584 B for V4 (576 value bytes and eight segregated
     UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
     (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
     32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
     e4m3 scales of 16 dims each), which only the compressed cache uses. The
     two V4.1 records keep each token's scales right after its own values.
-    ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
-    read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
+    `bfloat16` and `float8_e4m3fn` are the plain [448 NoPE | 64 RoPE] rows
+    read by FlashInfer, the latter scaled by the per-tensor `fp8_scale`.
     """
     assert compress_ratio in (1, 2)
     assert latent.shape[1] == 512 and latent.dtype == torch.bfloat16
@@ -492,7 +575,7 @@ def _rope_quant_insert_nvfp4_kernel(
 ):
     """V4.1 NVFP4 record: RoPE, then e2m1 with one e4m3 scale per 16 dims.
 
-    The scale is ``amax / 6`` (6 is e2m1's largest magnitude) clamped to the
+    The scale is `amax / 6` (6 is e2m1's largest magnitude) clamped to the
     e4m3 range, with no per-tensor scale on top.
     """
     t = tl.program_id(0)

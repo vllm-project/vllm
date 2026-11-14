@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from ....utils import check_answers, prep_prompts
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     sliding_window: int
     ln_range: tuple[int, int]

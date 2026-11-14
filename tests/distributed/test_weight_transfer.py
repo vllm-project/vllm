@@ -181,6 +181,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
             dtype_names=["float32", "bfloat16"],
             shapes=[[10, 10], [10]],
             num_updates_list=[4, 2],
+            wire_batch_bytes=1024,
         )
         assert info.num_updates_list == [4, 2]
 
@@ -191,6 +192,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[4, 2],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_empty_num_updates_list(self):
@@ -200,6 +202,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=[],
                 shapes=[],
                 num_updates_list=[],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_mismatched_num_updates(self):
@@ -209,6 +212,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32", "float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[3],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_negative_num_updates(self):
@@ -218,6 +222,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10]],
                 num_updates_list=[-1],
+                wire_batch_bytes=1024,
             )
 
 
@@ -293,6 +298,238 @@ class TestNCCLEngineParsing:
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
         assert update_info.src == 1
+
+    def _planning_engine(self, monkeypatch, plan_loads):
+        """An engine initialised with `use_load_plan`, and the log of its
+        `start_reload` and `plan_loads` calls."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        import vllm.model_executor.model_loader.reload as reload_mod
+
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+        )
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            reload_mod, "start_reload", lambda model: calls.append(("start", model))
+        )
+
+        def logged_plan_loads(model, metas):
+            calls.append(("plan", model, list(metas)))
+            return plan_loads(model, metas)
+
+        monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
+        engine = self._make_engine()
+        engine.init_transfer_engine(
+            NCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12345,
+                rank_offset=1,
+                world_size=2,
+                use_load_plan=True,
+                metadata=[("w", "float32", [4])],
+            )
+        )
+        return engine, calls
+
+    def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
+        """Not at init: after `start_reload`, once, and not for a draft."""
+        engine, calls = self._planning_engine(monkeypatch, lambda m, metas: "plan")
+        assert calls == []
+        target, draft = engine.model, MagicMock(spec=torch.nn.Module)
+        engine.set_weight_update_target(draft, None)
+        engine.start_weight_update()
+        engine.reset_weight_update_target()
+        assert calls == [("start", draft)]
+        for _ in range(2):
+            engine.start_weight_update()
+        assert calls[1:] == [
+            ("start", target),
+            ("plan", target, [ParamMeta("w", torch.float32, (4,))]),
+            ("start", target),
+        ]
+        assert engine._plan == "plan"
+
+    def test_use_load_plan_failure_falls_back_to_load_weights(self, monkeypatch):
+        """A plan failure at the first update raises with a note; later
+        updates skip planning (load_weights repairs the model)."""
+
+        def plan_loads(model, metas):
+            raise RuntimeError("load plan: lonely names")
+
+        engine, calls = self._planning_engine(monkeypatch, plan_loads)
+        with pytest.raises(RuntimeError, match="lonely names") as exc:
+            engine.start_weight_update()
+        assert any("mid-reload" in note for note in exc.value.__notes__)
+        engine.start_weight_update()  # plans no more
+        assert [c[0] for c in calls] == ["start", "plan", "start"]
+        assert engine._plan is None
+
+    @pytest.mark.parametrize("refusal", ["layerwise", "eplb"])
+    def test_use_load_plan_refusal_at_init_leaves_the_model(self, monkeypatch, refusal):
+        """A configuration no plan supports is refused at init, after the
+        group forms (then destroyed) and before any `start_reload` changes the
+        model."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        from vllm.model_executor.model_loader.reload.direct import (
+            record_checkpoint_layout,
+        )
+
+        monkeypatch.setenv(
+            "VLLM_RELOAD_MODE", "layerwise" if refusal == "layerwise" else "direct"
+        )
+        group = MagicMock()
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
+        )
+        model = _module_with(("w", torch.arange(6.0).view(2, 3)))
+        record_checkpoint_layout(model)
+        model.w.data = model.w.data.t()  # post-load processing re-laid it out
+        if refusal == "eplb":
+            parallel = SimpleNamespace(enable_eplb=True)
+            model.moe_config = SimpleNamespace(moe_parallel_config=parallel)
+        engine = NCCLWeightTransferEngine(
+            WeightTransferConfig(backend="nccl"),
+            create_mock_vllm_config(),
+            torch.device("cpu"),
+            model,
+        )
+        match = "VLLM_RELOAD_MODE=direct" if refusal == "layerwise" else "EPLB"
+        with pytest.raises(RuntimeError, match=match):
+            engine.init_transfer_engine(
+                NCCLWeightTransferInitInfo(
+                    master_address="127.0.0.1",
+                    master_port=12345,
+                    rank_offset=1,
+                    world_size=2,
+                    use_load_plan=True,
+                    metadata=[("w", "float32", [2, 3])],
+                )
+            )
+        group.destroy.assert_called_once()
+        assert engine.model_update_group is None
+        assert model.w.device.type == "cpu"  # not moved to meta (layerwise)
+        assert model.w.shape == (3, 2)  # not viewed back (direct)
+        assert not hasattr(model, "_direct_reload_begun")
+
+    @pytest.mark.parametrize("draft", [False, True])
+    def test_use_load_plan_worker_backstop(self, monkeypatch, draft):
+        """`receive_weights` checks a target update against the init
+        metadata; a draft update is not checked (it uses load_weights)."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+        engine = self._make_engine()
+        engine.model_update_group = MagicMock()
+        engine._plan = MagicMock()
+        engine._plan_manifest = nccl_engine_mod._manifest(
+            [ParamMeta("w", torch.float32, (4,))]
+        )
+        consumed = []
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_consumer",
+            lambda **kw: consumed.append(list(kw["iterator"])),
+        )
+        engine.packed = True
+        if draft:
+            engine.set_weight_update_target(MagicMock(), None)
+        update = NCCLWeightTransferUpdateInfo(
+            names=["w"], dtype_names=["float32"], shapes=[[8]]
+        )
+        if draft:
+            engine.receive_weights(update)
+            assert consumed == [[("w", ([8], torch.float32))]]
+        else:
+            with pytest.raises(ValueError, match="declared at init as"):
+                engine.receive_weights(update)
+            assert consumed == []
+
+
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_use_load_plan_refused_after_the_group_forms(monkeypatch, backend):
+    """The dense backend without metadata, and the sparse backend, refuse
+    `use_load_plan` after the group forms, so the error reaches the trainer,
+    and destroy the group."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    sparse = backend == "sparse_nccl"
+    group = MagicMock()
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "worker_init_process_group",
+        lambda info, pc: group,
+    )
+    cls = SparseNCCLWeightTransferEngine if sparse else NCCLWeightTransferEngine
+    engine = cls(
+        WeightTransferConfig(backend=backend),
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
+    )
+    init_info = NCCLWeightTransferInitInfo(
+        master_address="127.0.0.1",
+        master_port=12345,
+        rank_offset=1,
+        world_size=2,
+        use_load_plan=True,
+    )
+    match = "dense NCCL backend" if sparse else "metadata"
+    with pytest.raises(ValueError, match=match):
+        engine.init_transfer_engine(init_info)
+    group.destroy.assert_called_once()
+    assert engine.model_update_group is None
+
+
+def test_nccl_update_must_match_the_load_plan_manifest():
+    from vllm.distributed.weight_transfer.nccl_engine import (
+        _check_manifest,
+        _manifest,
+    )
+
+    manifest = _manifest(
+        [ParamMeta("w", torch.float32, (4,)), ParamMeta("v", torch.float32, (4,))]
+    )
+    _check_manifest(manifest, [("w", torch.float32, [4])])  # a subset
+    for sent in (
+        ("x", torch.float32, [4]),
+        ("w", torch.bfloat16, [4]),
+        ("w", torch.float32, [8]),
+    ):
+        problem = "not declared" if sent[0] == "x" else "declared at init as"
+        with pytest.raises(ValueError, match=f"{sent[0]!r}.*{problem}.*re-init"):
+            _check_manifest(manifest, [sent])
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nccl_trainer_refuses_an_update_off_the_load_plan(monkeypatch, rank):
+    """With `use_load_plan` every trainer rank (the sender, and rank 1 that
+    is outside the transfer group) checks each update against the metadata
+    sent at init, before any RPC, broadcast or gather."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: object()
+    )
+    module = _module_with(("w", torch.zeros(4)), ("v", torch.zeros(2)))
+    source = ModuleSource(module)
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=rank,
+            use_load_plan=True,
+        ),
+        client=client,
+        source=source,
+    )
+    module.w = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    del source.metadata  # cached on first read
+    with pytest.raises(ValueError, match="'w'.*declared at init as"):
+        engine.send_weights()
+    assert client.order == (["init"] if rank == 0 else [])
 
 
 # --- Unit Tests: Engine Registry ---
@@ -427,6 +664,7 @@ def test_sparse_nccl_receive_weights_without_init_raises():
         dtype_names=["float32"],
         shapes=[[10]],
         num_updates_list=[2],
+        wire_batch_bytes=1024,
     )
 
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -960,6 +1198,116 @@ def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
         receiver.shutdown()
 
     sender.shutdown()
+
+
+def _sparse_test_patch(name, indices, values, dtype, full_shape=(4,)):
+    return SparseWeightPatch(
+        name=name,
+        indices=torch.tensor(indices, dtype=torch.int32),
+        values=torch.tensor(values, dtype=dtype),
+        full_shape=full_shape,
+    )
+
+
+def _replay_sparse_patches(monkeypatch, patches, batch_bytes):
+    """Send patches over a fake wire. Returns the receiving toy model, the wire, the
+    tensors received, the number received at each load, and the receive call."""
+    monkeypatch.setattr(
+        "vllm.distributed.weight_transfer.sparse_nccl_engine._WIRE_BATCH_BYTES",
+        batch_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_, **__: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.accelerator, "device_index", lambda *_: nullcontext())
+
+    client = RecordingClient()
+    sender = SparseNCCLTrainerWeightTransferEngine(client=client)
+    sender.model_update_group = MagicMock()
+    sender.model_update_group.device = torch.device("cpu")
+    wire = []
+    sender.model_update_group.broadcast.side_effect = lambda tensor, **_: wire.append(
+        tensor.clone()
+    )
+    sender.send_weights(patches)
+
+    model = torch.nn.Module()
+    model.a = torch.nn.Parameter(
+        torch.full((4,), -1.0, dtype=torch.bfloat16), requires_grad=False
+    )
+    model.b = torch.nn.Parameter(torch.full((2, 2), -1.0), requires_grad=False)
+
+    received: list[torch.Tensor] = []
+    loads: list[int] = []
+
+    def load_weights(weights):
+        loads.append(len(received))
+        for name, weight in weights:
+            getattr(model, name).data.copy_(weight)
+        return {name for name, _ in weights}
+
+    def receive_broadcast(tensor, **_):
+        tensor.copy_(wire[len(received)])
+        received.append(tensor)
+
+    model.load_weights = load_weights
+    receiver = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    receiver.model_update_group = MagicMock()
+    receiver.model_update_group.device = torch.device("cpu")
+    receiver.model_update_group.broadcast.side_effect = receive_broadcast
+    info = SparseNCCLWeightTransferUpdateInfo(**client.last_update_info)
+    return model, wire, received, loads, lambda: receiver.receive_weights(info)
+
+
+@pytest.mark.parametrize(
+    ("batch_bytes", "received_at_each_load"),
+    [(1, [2, 4, 6]), (18, [2, 4]), (1 << 20, [3, 3])],
+)
+def test_sparse_nccl_wire_batches_land_every_patch_cpu(
+    monkeypatch, batch_bytes, received_at_each_load
+):
+    """Each batch is applied before the next is received, and every patch lands in
+    input order, including one name sent in two dtypes."""
+    model, _, _, loads, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0, 1, 2], [1.0, 2.0, 3.0], torch.bfloat16),
+            _sparse_test_patch("b", [3], [4.0], torch.float32, (2, 2)),
+            _sparse_test_patch("a", [0], [5.0], torch.float32),
+        ],
+        batch_bytes,
+    )
+
+    receive()
+
+    assert loads == received_at_each_load
+    assert model.a.tolist() == [5.0, 2.0, 3.0, -1.0]
+    assert model.b.tolist() == [[-1.0, -1.0], [-1.0, 4.0]]
+
+
+def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
+    """A failed batch skips the rest of the update but raises only once every
+    broadcast has its receive, since an unmatched one would hang the trainer."""
+    model, wire, received, _, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0], [float("nan")], torch.bfloat16),
+            _sparse_test_patch("b", [2], [6.0], torch.float32, (2, 2)),
+            _sparse_test_patch("b", [3], [7.0], torch.float32, (2, 2)),
+        ],
+        1,
+    )
+
+    with pytest.raises(ValueError, match="NaN"):
+        receive()
+
+    assert len(received) == len(wire)
+    assert model.b.eq(-1).all()
 
 
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
@@ -1897,11 +2245,13 @@ def test_nccl_trainer_rendezvous_propagates_errors_after_worker_exits(failure_si
     assert worker_finished.is_set()
 
 
+@pytest.mark.parametrize("use_load_plan", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed, use_load_plan):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
-    and propagates the must-agree wire params to the worker."""
+    and propagates the must-agree wire params (and, with `use_load_plan`, the
+    metadata) to the worker."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
@@ -1920,6 +2270,7 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
             packed=packed,
             packed_buffer_size_bytes=1024,
             packed_num_buffers=3,
+            use_load_plan=use_load_plan,
         ),
         client=client,
         source=ModuleSource(_module_with(("w", torch.zeros(4)))),
@@ -1938,6 +2289,8 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
         "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
+        "use_load_plan": use_load_plan,
+        **({"metadata": [("w", "float32", [4])]} if use_load_plan else {}),
     }
 
 
@@ -2420,7 +2773,40 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
         "packed": False,
         "packed_buffer_size_bytes": DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         "packed_num_buffers": DEFAULT_PACKED_NUM_BUFFERS,
+        "use_load_plan": False,
     }
+
+
+class _RefusingClient(RecordingClient):
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        raise ValueError("the workers refused")
+
+
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_trainer_init_destroys_its_group_when_the_workers_refuse(monkeypatch, backend):
+    """A worker refusal reaches the trainer after it opened its endpoint; the
+    trainer destroys that group before raising, so a retry starts clean."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    group = MagicMock()
+    sparse = backend == "sparse_nccl"
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "open_trainer_endpoint",
+        (lambda info: group) if sparse else (lambda info, rank: group),
+    )
+    common = dict(master_address="127.0.0.1", master_port=29500, world_size=2, rank=0)
+    if sparse:
+        kwargs = dict(init_info=SparseNCCLTrainerInitInfo(**common))
+    else:
+        kwargs = dict(
+            init_info=NCCLTrainerInitInfo(**common, use_load_plan=True),
+            source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+        )
+    with pytest.raises(ValueError, match="the workers refused"):
+        WeightTransferTrainerFactory.trainer_init(client=_RefusingClient(), **kwargs)
+    group.destroy.assert_called_once()
 
 
 def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
@@ -2440,7 +2826,7 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     assert client.last_update_info["names"] == ["w"]
     assert client.last_update_info["shapes"] == [[4, 4]]
     assert client.last_update_info["num_updates_list"] == [2]
-    # One broadcast for indices + one for values per patch.
+    # One broadcast for indices + one for values per wire batch.
     assert engine.model_update_group.broadcast.call_count == 2
     engine.shutdown()
 

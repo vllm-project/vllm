@@ -66,7 +66,7 @@ from .csa_cache import Step5CSASummaryCacheLayer
 
 
 class Step5SparseIndexer(nn.Module):
-    """MQA indexer with ``heads_per_group`` query heads per KV group.
+    """MQA indexer with `heads_per_group` query heads per KV group.
 
     Q and W are sharded like the attention KV heads, so each rank computes only
     its own groups; the shared single-head K and Z stay replicated.
@@ -153,10 +153,10 @@ class Step5SparseIndexer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor, decode=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns ``(q [T, G, 8, P] fp8, k [T, 1, P], z [T, 1, P],
-        w [T, G, 8])`` for this rank's ``G`` local groups, heads padded to 8.
+        """Returns `(q [T, G, 8, P] fp8, k [T, 1, P], z [T, 1, P],
+        w [T, G, 8])` for this rank's `G` local groups, heads padded to 8.
 
-        With ``decode=(summary cache, ring, slots)`` it also stores each
+        With `decode=(summary cache, ring, slots)` it also stores each
         token's open-region row and summarizes the regions it closes.
         """
         q, _ = self.sparse_indexer_q(hidden_states)
@@ -203,7 +203,7 @@ def _num_attention_heads(config: Step5Config, layer_type: str) -> int:
 
 
 def _rope_parameters(config: Step5Config, layer_idx: int) -> dict:
-    rope_parameters = dict(_rope_scaling(config, layer_idx) or {})
+    rope_parameters = dict(_layer_rope_parameters(config, layer_idx) or {})
     rope_parameters.setdefault("rope_type", "default")
     theta = config.rope_theta
     rope_parameters["rope_theta"] = (
@@ -336,12 +336,12 @@ def _is_sparse_layer(config: Step5Config, layer_idx: int) -> bool:
     )
 
 
-def _rope_scaling(config: Step5Config, layer_idx: int) -> dict | None:
+def _layer_rope_parameters(config: Step5Config, layer_idx: int) -> dict | None:
     yarn_only = getattr(config, "yarn_only_types", None)
     layer_types = _layer_types(config)
     if yarn_only and layer_types and layer_types[layer_idx] not in yarn_only:
         return None
-    return getattr(config, "rope_scaling", None)
+    return getattr(config, "rope_parameters", None)
 
 
 class Step5Attention(nn.Module):
@@ -521,7 +521,7 @@ class Step5Attention(nn.Module):
 
 
 def use_fp32_norm_weights(module: nn.Module, config: Step5Config) -> None:
-    """The checkpoint keeps every RMSNorm weight in ``norm_dtype``."""
+    """The checkpoint keeps every RMSNorm weight in `norm_dtype`."""
     norm_dtype = (getattr(config, "norm_dtype", None) or "").lower()
     if norm_dtype not in ("fp32", "float32", "float"):
         return

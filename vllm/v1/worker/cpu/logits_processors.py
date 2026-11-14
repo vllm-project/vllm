@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ MAX_NUM_LOGIT_BIAS_TOKENS = 1024
 MAX_NUM_STOP_TOKEN_IDS = 128
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LogitsProcRequestState:
     device: torch.device
     max_num_reqs: int
@@ -50,7 +50,7 @@ class LogitsProcRequestState:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LogitsContext:
     expanded_idx_mapping: torch.Tensor
     idx_mapping: torch.Tensor

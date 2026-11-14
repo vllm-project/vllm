@@ -292,6 +292,10 @@ class GroupedTopKRouter(BaseRouter):
         self.skip_padding = skip_padding
 
     @property
+    def masks_padding(self) -> bool:
+        return self.skip_padding or not rocm_aiter_ops.is_fused_moe_enabled()
+
+    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,
@@ -342,7 +346,7 @@ class GroupedTopKRouter(BaseRouter):
             return topk_weights, topk_ids
 
         is_padding = (
-            get_moe_padding_mask(router_logits.shape[0]) if self.skip_padding else None
+            get_moe_padding_mask(router_logits.shape[0]) if self.masks_padding else None
         )
 
         # Select grouped_topk implementation

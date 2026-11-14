@@ -49,7 +49,7 @@ from vllm.platforms import current_platform  # noqa: E402
 from vllm.triton_utils import triton  # noqa: E402
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BenchConfig:
     use_cuda_graph: bool = True
     warmup: int = 25

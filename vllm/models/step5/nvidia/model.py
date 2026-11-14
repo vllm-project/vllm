@@ -58,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -69,7 +70,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
     skip_spec_layers,
@@ -857,7 +857,7 @@ class Step5Attention(nn.Module):
         rope_theta: float | list[float] | None = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         sliding_window: int | None = None,
@@ -880,7 +880,7 @@ class Step5Attention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
         sparse_indexer_base_rope_parameters = (
-            dict(rope_scaling) if rope_scaling is not None else {}
+            dict(rope_parameters) if rope_parameters is not None else {}
         )
         default_layer_type = (
             "sliding_attention" if self.layer_idx % 2 == 0 else "full_attention"
@@ -893,7 +893,7 @@ class Step5Attention(nn.Module):
         )
         enable_sliding_window = layer_type == "sliding_attention"
         if yarn_only_types and layer_type not in yarn_only_types:
-            rope_scaling = None
+            rope_parameters = None
 
         if sliding_window is not None and enable_sliding_window:
             if swa_num_attention_heads is not None:
@@ -1097,9 +1097,7 @@ class Step5Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        rope_parameters: dict[str, Any] = (
-            dict(rope_scaling) if rope_scaling is not None else {}
-        )
+        rope_parameters = dict(rope_parameters) if rope_parameters is not None else {}
         rope_parameters.setdefault("rope_type", "default")
         if rope_theta is not None:
             rope_parameters["rope_theta"] = rope_theta
@@ -1896,7 +1894,7 @@ class Step5DecoderLayer(nn.Module):
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                rope_scaling=getattr(config, "rope_scaling", None),
+                rope_parameters=getattr(config, "rope_parameters", None),
                 sliding_window=sliding_window,
                 use_head_wise_attn_gate=getattr(
                     config, "use_head_wise_attn_gate", False
@@ -2089,8 +2087,18 @@ class Step5Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        # The residual stream stays FP32 across pipeline stages.
+        if self.fp32_residual_connection:
+            dtype = torch.float32
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                )
+            }
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -2427,11 +2435,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.model_loader.mtp_validation import (
-            is_mtp_completeness_check_enabled,
-        )
-
-        validate_completeness = is_mtp_completeness_check_enabled()
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]

@@ -12,6 +12,7 @@ import traceback
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 import aiohttp
 import regex as re
@@ -62,7 +63,7 @@ class StreamedResponseHandler:
         return messages
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncInput:
     """The input for the request function."""
 
@@ -85,7 +86,7 @@ class RequestFuncInput:
     chat_messages: list[dict[str, Any]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestFuncOutput:
     """The output of the request function including metrics."""
 
@@ -142,7 +143,7 @@ def _validate_api_url(
     if isinstance(expected_suffixes, str):
         expected_suffixes = {expected_suffixes}
 
-    if not api_url.endswith(tuple(expected_suffixes)):
+    if not urlsplit(api_url).path.endswith(tuple(expected_suffixes)):
         raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
 
 
@@ -526,11 +527,11 @@ async def async_request_openai_chat_completions(
 
 
 def _extract_sse_data(message: str) -> str | None:
-    """Extract the ``data`` payload of a single SSE message.
+    """Extract the `data` payload of a single SSE message.
 
-    The Responses API stream labels every message with an ``event:`` line
-    before its ``data:`` line, so the payload cannot be recovered by
-    stripping a leading ``data: `` the way the Completions and Chat
+    The Responses API stream labels every message with an `event:` line
+    before its `data:` line, so the payload cannot be recovered by
+    stripping a leading `data: ` the way the Completions and Chat
     Completions streams allow.
 
     Args:
@@ -538,7 +539,7 @@ def _extract_sse_data(message: str) -> str | None:
 
     Returns:
         The payload, with multi-line payloads joined by newlines as required
-        by the SSE spec, or None if the message carries no ``data:`` line.
+        by the SSE spec, or None if the message carries no `data:` line.
 
     """
     # NOTE: split on "\n" rather than using splitlines(), which also breaks on
@@ -808,6 +809,10 @@ async def async_request_openai_audio(
                                     output.output_tokens = usage.get(
                                         "completion_tokens"
                                     )
+                                    # The dataset counts a text prompt that is
+                                    # never sent; the server counts the audio.
+                                    if (pt := usage.get("prompt_tokens")) is not None:
+                                        output.prompt_len = pt
 
                     output.generated_text = generated_text
                     if stream_error is not None:

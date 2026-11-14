@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryAllocation:
     """Describe a tensor view carved from the Consumer receive slab."""
 
@@ -37,7 +37,7 @@ class MemoryAllocation:
     tensor: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class _ResidentEntry(Generic[_T]):
     """Store one resident value and its ownership accounting."""
 
@@ -46,7 +46,7 @@ class _ResidentEntry(Generic[_T]):
     leases: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class ResidentLease(Generic[_T]):
     """Represent a borrow of one resident entry."""
 
@@ -218,7 +218,7 @@ class ResidentPool(Generic[_T]):
         self._evictable.clear()
 
 
-@dataclass
+@dataclass(slots=True)
 class StagedSources:
     """Own Producer tensor views and their staging-slab regions."""
 

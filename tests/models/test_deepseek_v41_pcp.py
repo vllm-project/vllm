@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -9,12 +9,50 @@ import torch
 
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
+from vllm.models.deepseek_v41.compressor import CompressorStateCache
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        attention_module.DeepseekV4Attention,
+        attention_module.DeepseekV4IndexerCache,
+        CompressorStateCache,
+    ],
+)
+def test_cache_specs_declare_tp_replication(cache_cls):
+    cache_config = SimpleNamespace(block_size=64, cache_dtype="fp8_ds_mla")
+    state = SimpleNamespace(
+        cache_config=cache_config,
+        is_kv_source=True,
+        kv_cache_dtype="fp8_ds_mla",
+        head_dim=512,
+        kv_cache_torch_dtype=torch.uint8,
+        dtype=torch.uint8,
+        compress_ratio=2,
+        kv_page_alignment=576,
+        compressed_bytes_per_token=584,
+        sparse_logits=True,
+        rocm_mxfp4=False,
+        block_size=8,
+        state_dim=1024,
+    )
+    if cache_cls is CompressorStateCache:
+        state.dtype = torch.float32
+    elif cache_cls is attention_module.DeepseekV4Attention:
+        state.get_compressed_kv_cache_spec = MethodType(
+            cache_cls.get_compressed_kv_cache_spec, state
+        )
+    spec = cache_cls.get_kv_cache_config(
+        state, SimpleNamespace(cache_config=cache_config)
+    ).spec
+    assert spec.max_tp_shards == 1
 
 
 @pytest.mark.distributed(num_gpus=8)
@@ -40,7 +78,7 @@ def test_pcp_generates_with_pipeline_or_data_parallelism(pp_size, dp_size):
         --enable-chunked-prefill --no-enable-prefix-caching --no-swa-bounded-replay
         --enforce-eager --no-async-scheduling
     """.split()
-    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    env: dict[str, str] = {}
     if pp_size > 1:
         env["VLLM_PP_LAYER_PARTITION"] = "14,26"
     with (

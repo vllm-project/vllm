@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import os
+import random
 import sys
 import tempfile
 import threading
@@ -39,6 +40,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
+    in_single_pp_stage,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -159,6 +161,16 @@ def _natural_sort_key(filepath: str) -> list:
         int(s) if s.isdigit() else s
         for s in re.split(r"(\d+)", os.path.basename(filepath))
     ]
+
+
+def _shuffle_files(files: list[str]) -> list[str]:
+    """Return *files* shuffled with a rank-dependent seed."""
+    rank = get_world_group().rank
+    # Sort first so the permutation does not depend on the input order
+    shuffled = sorted(files, key=_natural_sort_key)
+    random.Random(rank).shuffle(shuffled)
+    logger.info("Shuffled %d safetensors files with seed %d", len(shuffled), rank)
+    return shuffled
 
 
 def maybe_download_from_modelscope(
@@ -326,7 +338,9 @@ def get_quant_config(
     # 1. composed online quantization, before `maybe_compose_online_quantization`,
     # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
     # is not set yet.
-    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+    # `quant_cls` is the class registered for this method name, which an
+    # out-of-tree platform may have overridden with its own subclass.
+    if issubclass(quant_cls, OnlineQuantizationConfig) and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
         # Activation-only overrides apply to pre-quantized checkpoints; without
         # a weight key, standalone online quantization would silently no-op.
@@ -338,7 +352,7 @@ def get_quant_config(
                     f"quantization_config.{name} = {spec} does not set a weight "
                     "quantization key, which online quantization requires."
                 )
-        return OnlineQuantizationConfig(args=online_args)
+        return quant_cls(args=online_args)
 
     model_name_or_path = (
         maybe_download_from_modelscope(
@@ -375,12 +389,16 @@ def get_quant_config(
             )
             fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
             assert fp8_args is not None
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=fp8_args)
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             assert not isinstance(online_args, dict)
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -395,6 +413,8 @@ def get_quant_config(
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -417,39 +437,6 @@ def get_quant_config(
                 )
 
     return make_checkpoint_config(config)
-
-
-def get_sparse_attention_config(
-    model_config: ModelConfig,
-    load_config: LoadConfig,
-    sparse_attention_config_filename: str = "sparse_attention_config.json",
-) -> dict[str, Any]:
-    model_name_or_path = model_config.model
-    is_local = os.path.isdir(model_name_or_path)
-    if not is_local:
-        # Download the config files.
-        with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = hf_api().snapshot_download(
-                model_name_or_path,
-                revision=model_config.revision,
-                allow_patterns="*.json",
-                cache_dir=load_config.download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                tqdm_class=DisabledTqdm,
-            )
-    else:
-        hf_folder = model_name_or_path
-
-    config_file = os.path.join(hf_folder, sparse_attention_config_filename)
-    if not os.path.exists(config_file):
-        return {}
-
-    # Load the sparse attention config.
-    with open(config_file) as f:
-        config = json.load(f)
-    logger.info("Loaded sparse attention config from %s", config_file)
-
-    return config
 
 
 @instrument(span_name="Download weights - HF")
@@ -661,86 +648,26 @@ def _normalize_module_prefixes(
 
 
 def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str | None:
-    """Apply ``WeightsMapper.map_name`` when present; else identity."""
+    """Apply `WeightsMapper.map_name` when present; else identity."""
     if weights_mapper is None:
         return key
     return weights_mapper.map_name(key)
 
 
-def _hf_prefix_maps_to_lm(
-    new_name: str | None, lm_module_prefixes: tuple[str, ...]
-) -> bool:
-    if not new_name:
-        return False
-    new_p = new_name if new_name.endswith(".") else f"{new_name}."
-    return any(new_p.startswith(p) or p.startswith(new_p) for p in lm_module_prefixes)
-
-
-def _shared_hf_root_module_prefixes(
-    lm_module_prefixes: tuple[str, ...],
-    weights_mapper: "WeightsMapper | None",
-) -> tuple[str, ...]:
-    """Module prefixes that are also an HF root for non-LM weights.
-
-    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
-    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
-    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
-    """
-    if weights_mapper is None:
-        return ()
-    mapping = weights_mapper.orig_to_new_prefix
-    if not mapping:
-        return ()
-
-    non_lm_origs: list[str] = []
-    for orig, new in mapping.items():
-        orig_p = orig if orig.endswith(".") else f"{orig}."
-        if not _hf_prefix_maps_to_lm(new, lm_module_prefixes):
-            non_lm_origs.append(orig_p)
-
-    if not non_lm_origs:
-        return ()
-
-    shared = [
-        p
-        for p in lm_module_prefixes
-        if any(orig.startswith(p) for orig in non_lm_origs)
-    ]
-    return tuple(shared)
-
-
 def resolve_mm_encoder_only_lm_prefixes(
     language_model_names: Iterable[str] | None,
-    *,
-    weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
-    """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
+    """Resolve vLLM LM *module* prefixes for `--mm-encoder-only` shard skip.
 
-    Prefixes come from ``_language_model_names``. Classification of HF index
-    keys is done later via optional ``weights_mapper`` (see
-    ``filter_mm_encoder_only_safetensors_files``), so this helper does **not**
+    Prefixes come from `_language_model_names`. Classification of HF index
+    keys is done later via optional `weights_mapper` (see
+    `filter_mm_encoder_only_safetensors_files`), so this helper does **not**
     hard-code Qwen/HF nest lists.
 
-    Returns ``None`` (leave the safetensors file list unchanged) when
-    ``_language_model_names`` is empty/missing, or when a module prefix is a
-    shared HF checkpoint root for both LM and non-LM weights — fail-closed so
-    Molmo / Phi-4-MM / Muse cannot under-load the encoder.
+    Returns `None` (leave the safetensors file list unchanged) when
+    `_language_model_names` is empty/missing.
     """
-    prefixes = _normalize_module_prefixes(language_model_names)
-    if not prefixes:
-        return None
-    shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
-    if shared:
-        logger.warning_once(
-            "mm-encoder-only whole-shard filter not applied: LM module "
-            "prefix(es) %s share an HF checkpoint root with non-LM weights "
-            "(via WeightsMapper). Encoder-only load keeps the full "
-            "safetensors file list; finer HF prefixes or key-level "
-            "filtering can enable skip later.",
-            shared,
-        )
-        return None
-    return prefixes
+    return _normalize_module_prefixes(language_model_names) or None
 
 
 def filter_mm_encoder_only_safetensors_files(
@@ -753,16 +680,18 @@ def filter_mm_encoder_only_safetensors_files(
 ) -> list[str]:
     """Drop safetensors shards that only contain language-model weights.
 
-    Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
+    Used with `--mm-encoder-only` so Encoder-only EPD instances avoid reading
     pure LM shards from disk/DRAM.
 
-    Each HF index key is classified by mapping through ``weights_mapper`` (when
-    provided) and testing the *vLLM* name against ``language_model_prefixes``.
+    Each HF index key is classified by mapping through `weights_mapper` (when
+    provided) and testing the *vLLM* name against `language_model_prefixes`.
     Without a mapper, HF names are compared directly (identity checkpoint
-    layout, e.g. Kimi ``language_model.*``).
+    layout, e.g. Kimi `language_model.*`).
 
-    A shard is kept if it contains any non-LM key. Without an index file,
-    returns ``hf_weights_files`` unchanged.
+    A shard is kept if it contains any non-LM key. Without an index file, or when
+    an LM module prefix is also the HF root of non-LM keys, returns
+    `hf_weights_files` unchanged: this fails closed so Molmo / Phi-4-MM / Muse
+    cannot under-load the encoder.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:
@@ -788,6 +717,25 @@ def filter_mm_encoder_only_safetensors_files(
         if mapped is None:
             return False
         return any(mapped.startswith(p) for p in prefixes)
+
+    def _is_shared_root_key(key: str) -> bool:
+        mapped = _mapped_weight_name(weights_mapper, key)
+        if mapped is None or not key.startswith(prefixes):
+            return False
+        return not mapped.startswith(prefixes)
+
+    shared_root_keys = [key for key in weight_map if _is_shared_root_key(key)]
+    if shared_root_keys:
+        logger.warning_once(
+            "mm-encoder-only whole-shard filter not applied: LM module "
+            "prefix(es) %s share an HF checkpoint root with non-LM weights "
+            "(e.g. %s). Encoder-only load keeps the full safetensors file "
+            "list; finer HF prefixes or key-level filtering can enable skip "
+            "later.",
+            prefixes,
+            shared_root_keys[0],
+        )
+        return hf_weights_files
 
     def _is_lm_only(weight_file: str) -> bool:
         keys = keys_by_file.get(weight_file)
@@ -1118,6 +1066,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -1195,6 +1144,9 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    if shuffle_safetensors_files:
+        sorted_files = _shuffle_files(sorted_files)
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -1251,12 +1203,16 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
         result = load_file(st_file, device="cpu")
         return result
+
+    if shuffle_safetensors_files:
+        hf_weights_files = _shuffle_files(hf_weights_files)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
@@ -1330,7 +1286,10 @@ def fastsafetensors_weights_iterator(
     """
     from fastsafetensors.parallel_loader import ParallelLoader
 
-    if torch.distributed.is_initialized():
+    distributed = torch.distributed.is_initialized()
+    # Other pipeline stages do not load a model built as a single stage, so
+    # collectives that include their ranks would hang.
+    if distributed and not in_single_pp_stage():
         pg = torch.distributed.group.WORLD
     else:
         pg = SingleGroup()
@@ -1341,7 +1300,7 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = distributed and torch.distributed.get_world_size() > 1
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
@@ -1416,7 +1375,10 @@ def instanttensor_weights_iterator(
         # Entering here only in unit tests where the world group is not initialized.
         process_group = None
     else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
+        # Other pipeline stages do not load a model built as a single stage, so
+        # collectives that include their ranks would hang.
+        distributed = world_group.world_size > 1 and not in_single_pp_stage()
+        process_group = world_group.device_group if distributed else None
 
     gpu_weight_names: list[str] = []
     cpu_weights: dict[str, list[str]] = {}
@@ -1527,18 +1489,20 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run every module's own post-load hook after a full load or reload,
-    each module after all of its submodules.
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
-    Quantization methods, the submodules of quantized layers (their quant
-    method processes them) and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes, which later passes may read.
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
+    from vllm.model_executor.model_loader.utils import device_loading_context
 
     seen: set[torch.nn.Module] = set()
 
@@ -1554,26 +1518,14 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
-
-
-@torch.no_grad()
-def refresh_derived_weights(model: torch.nn.Module) -> None:
-    """Call ``refresh_derived_weights()`` on every module that defines it, to
-    rebuild tensors kept out of ``state_dict()`` after the weights were
-    overwritten in place. Hooks must be idempotent, write in place and run no
-    collectives.
-    """
-    for module in model.modules():
-        refresh = getattr(module, "refresh_derived_weights", None)
-        if callable(refresh):
-            refresh()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

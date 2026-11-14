@@ -29,6 +29,9 @@ def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
 
+    if "abort" in params and not isinstance(params["abort"], bool):
+        raise HTTPException(400, "'abort' must be a boolean.")
+
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not request_id:
         raise HTTPException(400, "'request_id' must be a non-empty string.")

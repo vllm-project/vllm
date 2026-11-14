@@ -31,8 +31,10 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
+    fp8_einsum,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
+    get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -43,13 +45,18 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MoE
     from vllm.models.kimi_k3.nvidia.model import KimiMoE
+    from vllm.models.minimax_m3.nvidia.model import MiniMaxM3MoE
+    from vllm.models.qwen4_exp.nvidia.mega_moe import Qwen4ExpMegaMoeBlock
 
 
 def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
     """Generate M values that cover all possible DeepGEMM kernel configurations.
-    Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
+
+    The block sizes must mirror the layout candidates of the vendored DeepGEMM
+    heuristic (csrc/jit_kernels/heuristics/sm100.hpp); a stale set here lets
+    serving-time M values select kernel configs the warmup never compiled.
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
@@ -58,7 +65,7 @@ def _generate_optimal_warmup_m_values(
 
     """
     # DeepGEMM's possible block sizes
-    block_ms = [64, 128, 256]
+    block_ms = list(range(16, 257, 16))
     block_ns = list(range(16, min(257, n + 1), 16))
     num_sms = num_compute_units(device.index)
 
@@ -121,7 +128,7 @@ def _deep_gemm_linear_data(
     module: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Return (weight, weight_scale) for a layer whose kernel stamped itself as
-    ``deep_gemm_warmup_provider`` in ``process_weights_after_loading``, else None.
+    `deep_gemm_warmup_provider` in `process_weights_after_loading`, else None.
     """
     provider = getattr(module, "deep_gemm_warmup_provider", None)
     if not isinstance(provider, DeepGemmFp8BlockScaledMMKernel):
@@ -158,18 +165,25 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 # Model construction already imports the model modules. Avoid importing them here.
 def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> "TypeGuard[DeepseekV4MoE]":
-    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 with its GateLinear.
+    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 and MiniMax M3 with GateLinear.
     dsv4 = sys.modules.get("vllm.models.deepseek_v4.nvidia.model")
     return dsv4 is not None and isinstance(module, dsv4.DeepseekV4MoE)
 
 
 def _mega_moe_may_use_deep_gemm(
     module: torch.nn.Module,
-) -> "TypeGuard[DeepseekV4MoE | KimiMoE]":
+) -> "TypeGuard[DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock]":
     if _mega_moe_uses_mega_gate(module):
         return module.use_native_mega_moe
+    qwen4_exp = sys.modules.get("vllm.models.qwen4_exp.nvidia.mega_moe")
+    if qwen4_exp is not None and isinstance(module, qwen4_exp.Qwen4ExpMegaMoeBlock):
+        return True
     kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
-    return kimi is not None and isinstance(module, kimi.KimiMoE) and module.use_mega_moe
+    minimax = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
+    return (
+        (kimi is not None and isinstance(module, kimi.KimiMoE))
+        or (minimax is not None and isinstance(module, minimax.MiniMaxM3MoE))
+    ) and module.use_mega_moe
 
 
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
@@ -223,6 +237,154 @@ def _deepgemm_fp8_gemm_nt_warmup(
             pbar.update(1)
 
     FP8_GEMM_NT_WARMUP_CACHE.add(w.size())
+
+
+FP8_EINSUM_WARMUP_CACHE: set[tuple] = set()
+
+# Smallest block M DeepGEMM's sm90/sm100 get_layout_candidates enumerates.
+FP8_EINSUM_BLOCK_M_GRANULARITY = 16
+
+
+def _fp8_einsum_warmup_data(
+    module: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int], bool, bool] | None:
+    """Return `(wo_a weight, wo_a scale, einsum recipe, tma_aligned_scales,
+    quantize_output)` for a DeepSeek-V4 or V4.1 attention layer whose o_proj
+    runs `fp8_einsum` (see `deep_gemm_fp8_o_proj` and V4.1 mega attention),
+    else None.
+
+    `wo_a` is an `is_bmm` linear: its DeepGEMM kernel skips the
+    `fp8_gemm_nt` warmup provider because the layer runs through
+    `fp8_einsum` instead, so it has to be warmed here.
+    """
+    wo_a = getattr(module, "wo_a", None)
+    recipe = getattr(module, "_einsum_recipe", None)
+    if wo_a is None or recipe is None or not getattr(wo_a, "is_bmm", False):
+        return None
+    weight = getattr(wo_a, "weight", None)
+    if weight is None or weight.dtype != torch.float8_e4m3fn or weight.dim() != 3:
+        return None
+    weight_scale = getattr(wo_a, "weight_scale", None)
+    if weight_scale is None:
+        weight_scale = getattr(wo_a, "weight_scale_inv", None)
+    if weight_scale is None:
+        return None
+    return (
+        weight,
+        weight_scale,
+        tuple(recipe),
+        bool(getattr(module, "_tma_aligned_scales", False)),
+        # A V4.1 mega-attention layer feeds wo_b MXFP8 directly, which is a
+        # different einsum kernel; the flag is fixed for the layer's lifetime.
+        bool(getattr(module, "_can_quantize_o_proj", False)),
+    )
+
+
+def _get_fp8_einsum_warmup_key(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    recipe: tuple[int, int, int],
+    tma_aligned_scales: bool,
+    quantize_output: bool,
+) -> tuple:
+    return (
+        weight.size(),
+        weight_scale.dtype,
+        recipe,
+        tma_aligned_scales,
+        quantize_output,
+    )
+
+
+def _get_fp8_einsum_m_values(weight: torch.Tensor, max_tokens: int) -> list[int]:
+    """M values (attention tokens per step) to warm `fp8_einsum` with.
+
+    DeepGEMM picks the einsum tile config from M at runtime, so every config a
+    prefill chunk can land on has to be compiled up front. `relax` reuses the
+    `fp8_gemm_nt` boundary heuristic with N = the einsum output width, plus
+    every M a tile boundary can fall on.
+    """
+    if envs.VLLM_DEEP_GEMM_WARMUP == "relax":
+        n = weight.size(1)
+        m_values = set(_generate_optimal_warmup_m_values(max_tokens, n, weight.device))
+        # Block-M candidates are 16-multiples, so configs change only at M % 16 == 1.
+        m_values.update(range(1, max_tokens + 1, FP8_EINSUM_BLOCK_M_GRANULARITY))
+        return sorted(m for m in m_values if 1 <= m <= max_tokens)
+    assert envs.VLLM_DEEP_GEMM_WARMUP == "full", (
+        "Expected "
+        'VLLM_DEEP_GEMM_WARMUP env to be set to "full" but got '
+        f"{envs.VLLM_DEEP_GEMM_WARMUP}"
+    )
+    return list(range(1, max_tokens + 1))
+
+
+def _deepgemm_fp8_einsum_warmup(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    recipe: tuple[int, int, int],
+    tma_aligned_scales: bool,
+    quantize_output: bool,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    key = _get_fp8_einsum_warmup_key(
+        weight, weight_scale, recipe, tma_aligned_scales, quantize_output
+    )
+    if key in FP8_EINSUM_WARMUP_CACHE:
+        return
+
+    n_groups, o_lora_rank, d = weight.size()
+    quant_group_size = recipe[2]
+    num_scale_blocks = d // quant_group_size
+    # Same scale layout fused_inv_rope_fp8_quant hands to fp8_einsum at runtime:
+    # FP32 block scales on SM90, INT32-packed UE8M0 on SM100, TMA-aligned in T.
+    scale_inner = cdiv(num_scale_blocks, 4) if tma_aligned_scales else num_scale_blocks
+    scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
+    device = weight.device
+
+    for num_tokens in _get_fp8_einsum_m_values(weight, max_tokens):
+        tma_aligned_t = get_tma_aligned_size(num_tokens, 4)
+        a = torch.empty(
+            (n_groups, num_tokens, d), device=device, dtype=torch.float8_e4m3fn
+        ).transpose(0, 1)
+        # Must be initialized (UE8M0 packing asserts zero sign/mantissa bits).
+        a_scale = (
+            torch.zeros(
+                n_groups * scale_inner * tma_aligned_t, device=device, dtype=scale_dtype
+            )
+            .as_strided(
+                (n_groups, num_tokens, scale_inner),
+                (scale_inner * tma_aligned_t, 1, tma_aligned_t),
+            )
+            .transpose(0, 1)
+        )
+        out: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = torch.empty(
+            (num_tokens, n_groups, o_lora_rank),
+            device=device,
+            dtype=torch.float8_e4m3fn if quantize_output else torch.bfloat16,
+        )
+        if quantize_output:
+            # The 128x4 SFD layout the FP8-output epilogue writes.
+            out = (
+                out,
+                torch.empty(
+                    (cdiv(num_tokens, 128), n_groups * o_lora_rank // 128, 128),
+                    device=device,
+                    dtype=torch.int32,
+                ),
+            )
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (a, a_scale),
+            (weight, weight_scale),
+            out,
+            recipe=recipe,
+            use_128x4_sfd_layout=quantize_output,
+        )
+        if pbar is not None:
+            pbar.update(1)
+
+    FP8_EINSUM_WARMUP_CACHE.add(key)
 
 
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
@@ -336,25 +498,31 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
 FP8_FP4_MEGA_MOE_WARMUP_CACHE: set[tuple] = set()
 
 
-def _get_fp8_fp4_mega_moe_warmup_key(module: "DeepseekV4MoE | KimiMoE") -> tuple:
+def _get_fp8_fp4_mega_moe_warmup_key(
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
+) -> tuple:
     gate = module.gate
     return (
         gate.output_size,
         getattr(gate, "tid2eid", None) is not None,
-        gate.e_score_correction_bias is not None,
+        # MiniMax M3 keeps its routing bias on the MoE, outside the gate.
+        getattr(gate, "e_score_correction_bias", None) is not None,
         getattr(module, "image_sentinel_lo", 0),
         module.experts.has_fused_shared_experts,
+        # quantization_config ignore/targets can mix MXFP8 and MXFP4 layers.
+        module.experts.weight_format.name,
     )
 
 
 def _get_fp8_fp4_mega_moe_m_values(
-    module: "DeepseekV4MoE | KimiMoE", max_tokens: int
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
+    max_tokens: int,
 ) -> list[int]:
-    """Get the largest M per distinct fp8_fp4_mega_moe config and, where used,
+    """Get the M values that reach every MegaMoE kernel and, where used,
     bf16_mega_gate config."""
     dg = _import_deep_gemm()
     gate, experts = module.gate, module.experts
-    uses_mega_gate = _mega_moe_uses_mega_gate(module)
+    uses_mega_gate = _mega_moe_uses_mega_gate(module) and module.use_mega_gate
     if module.use_sequence_parallel:
         max_tokens = cdiv(max_tokens, module.tp_size)
 
@@ -367,22 +535,22 @@ def _get_fp8_fp4_mega_moe_m_values(
             if uses_mega_gate and hasattr(dg, "get_bf16_mega_gate_config")
             else {}
         )
-        block_m = experts.get_block_m(num_tokens)
+        key = (tuple(gate_config.items()), experts.get_block_m(num_tokens))
         # Keep the largest M: DeepSeek-V4 only calls bf16_mega_gate above a
         # small token threshold, and a config's largest M is always above it.
-        m_values[(tuple(gate_config.items()), block_m)] = num_tokens
-    return sorted(m_values.values())
+        m_values[key] = num_tokens
+        # One NVFP4 BLOCK_M spans two kernels: decode-shaped launches at small
+        # M and bulk launches at large M. DeepGEMM does not expose the switch.
+        if experts.weight_format.uses_nvfp4_api:
+            m_values.setdefault(("smallest", *key), num_tokens)
+    return sorted(set(m_values.values()))
 
 
 def _deepgemm_fp8_fp4_mega_moe_warmup(
-    module: "DeepseekV4MoE | KimiMoE",
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE | Qwen4ExpMegaMoeBlock",
     max_tokens: int,
     pbar: tqdm | None = None,
 ):
-    from vllm.models.deepseek_v4.nvidia.model import (
-        prepare_mega_gate_routing_metadata,
-    )
-
     key = _get_fp8_fp4_mega_moe_warmup_key(module)
     if key in FP8_FP4_MEGA_MOE_WARMUP_CACHE:
         return
@@ -405,6 +573,10 @@ def _deepgemm_fp8_fp4_mega_moe_warmup(
     for num_tokens in m_values:
         inputs: tuple = (hidden_states[:num_tokens],)
         if _mega_moe_uses_mega_gate(module):
+            from vllm.models.deepseek_v4.nvidia.model import (
+                prepare_mega_gate_routing_metadata,
+            )
+
             ids = input_ids[:num_tokens]
             inputs += (
                 ids,
@@ -454,6 +626,14 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+def deepgemm_fp8_einsum_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    for m in model.modules():
+        if (data := _fp8_einsum_warmup_data(m)) is not None:
+            _deepgemm_fp8_einsum_warmup(*data, max_tokens=max_tokens, pbar=pbar)
+
+
 @torch.inference_mode()
 def deepgemm_fp8_fp4_mega_moe_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
@@ -469,9 +649,16 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
+    seen_einsum_keys: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
+        if (einsum_data := _fp8_einsum_warmup_data(m)) is not None:
+            einsum_key = _get_fp8_einsum_warmup_key(*einsum_data)
+            if einsum_key not in seen_einsum_keys:
+                total += len(_get_fp8_einsum_m_values(einsum_data[0], max_tokens))
+                seen_einsum_keys.add(einsum_key)
+            continue
         if (data := _deep_gemm_linear_data(m)) is not None:
             w, _ = data
             if w.size() not in seen_fp8_sizes:
@@ -507,9 +694,11 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     if is_global_first_rank():
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
+            deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
+        deepgemm_fp8_einsum_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)

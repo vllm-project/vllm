@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 POLL_BACKOFF_STEPS_S = (0.1, 0.2, 0.4, 0.8)
 
 
-class ExternalElasticEPScalePhase(str, enum.Enum):
+class ExternalElasticEPScalePhase(enum.StrEnum):
     """Lifecycle phases shared for an epoch-scoped external EEP operation.
 
     These values are stored in the control and reconfiguration stores and
@@ -47,7 +47,7 @@ class ExternalElasticEPScalePhase(str, enum.Enum):
     COMPLETED = "completed"
 
 
-@dataclass
+@dataclass(slots=True)
 class ExternalElasticEPScaleUpHandshakeMetadata:
     engine_metadata: EngineHandshakeMetadata
     num_redundant_experts: int
@@ -189,7 +189,7 @@ class ExternalElasticEPScaleUpHandshakeServer:
             self.started_event.set()
 
 
-@dataclass
+@dataclass(slots=True)
 class _PreparedExternalElasticEPScale:
     control_store: Any
     reconfig_store: Any

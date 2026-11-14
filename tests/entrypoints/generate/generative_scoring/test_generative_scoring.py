@@ -37,12 +37,12 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -207,7 +207,7 @@ class TestProbabilityComputation:
             max_lp = max(label_logprobs.values())
             exp_vals = {k: math.exp(v - max_lp) for k, v in label_logprobs.items()}
             sum_exp = sum(exp_vals.values())
-            for tid, lp in label_logprobs.items():
+            for tid in label_logprobs:
                 assert abs(probs[tid] - exp_vals[tid] / sum_exp) < 1e-9
         else:
             for tid, lp in label_logprobs.items():

@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.platforms import current_platform
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -58,9 +59,7 @@ class FakeEplbState:
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.model_config = SimpleNamespace(
-        model="test-model", logits_processors=None, enable_sleep_mode=False
-    )
+    runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
     runner.req_states = SimpleNamespace(
         device=runner.device,
         max_num_reqs=8,
@@ -191,7 +190,7 @@ def test_v2_setup_eplb_from_mapping_updates_state_in_place():
     assert state.update_mapping_calls == [(runner.model_config, mapping)]
 
 
-def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
+def test_v2_load_model_registers_dspark_speculator_when_supported(monkeypatch):
     FakeEplbState.instances.clear()
     target_model = SimpleNamespace(is_moe=True)
     draft_model = SimpleNamespace(is_moe=True)
@@ -211,6 +210,9 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
 
         def set_eplb_state(self, state) -> None:
             self.eplb_state = state
+
+        def free_unused_weights(self, target_model) -> None:
+            return None
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -237,17 +239,23 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
         speculative_config=SimpleNamespace(
             method="dspark",
             draft_model_config=draft_model_config,
+            prefill_context_kv_only=False,
         ),
         speculator=speculator,
     )
     mrv2.GPUModelRunner.load_model(runner)
 
-    assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == [
-        (draft_model, draft_model_config, "dspark-draft (draft)"),
-        (target_model, runner.model_config, None),
-    ]
-    assert speculator.eplb_state is runner.eplb_state
+    eplb_state = runner.eplb_state
+    assert eplb_state is not None
+    expected_calls = [(target_model, runner.model_config, None)]
+    if not current_platform.is_rocm():
+        expected_calls.insert(
+            0, (draft_model, draft_model_config, "dspark-draft (draft)")
+        )
+        assert speculator.eplb_state is eplb_state
+    else:
+        assert speculator.eplb_state is None
+    assert eplb_state.add_model_calls == expected_calls
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):

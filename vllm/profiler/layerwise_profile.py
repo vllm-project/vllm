@@ -28,7 +28,7 @@ except ImportError:
     pd = PlaceholderModule("pandas")
 
 
-@dataclass
+@dataclass(slots=True)
 class _ModuleTreeNode:
     event: _ProfilerEvent
     parent: "_ModuleTreeNode | None" = None
@@ -51,7 +51,7 @@ class _ModuleTreeNode:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SummaryStatsEntry:
     name: str
     cuda_time_us: float
@@ -59,7 +59,7 @@ class SummaryStatsEntry:
     invocations: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelStatsEntry:
     name: str
     cpu_time_us: float
@@ -72,7 +72,7 @@ StatsEntry: TypeAlias = ModelStatsEntry | SummaryStatsEntry
 StatsEntryT = TypeVar("StatsEntryT", bound=StatsEntry)
 
 
-@dataclass
+@dataclass(slots=True)
 class _StatsTreeNode(Generic[StatsEntryT]):
     entry: StatsEntryT
     children: list["_StatsTreeNode[StatsEntryT]"] = field(default_factory=list)

@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma (1 + w) add-RMSNorm fused with the consumer linear's input quant.
 
-Replaces ``gemma_fused_add_rmsnorm`` followed by a standalone static FP8
-(``scaled_fp8_quant``) or NVFP4 (``scaled_fp4_quant``) kernel. The quantized
+Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8
+(`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`) kernel. The quantized
 values are computed from the bf16-rounded normed activation with the same
 scale arithmetic as those kernels, so codes match the unfused chain.
+
+`gemma_add_rms_norm` is the same kernel without the quant epilogue, used
+as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
 """
 
 import torch
@@ -65,7 +68,7 @@ def _gemma_add_rms_norm_quant_kernel(
     eps,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
-    QUANT_NVFP4: tl.constexpr,
+    QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "nvfp4"
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
     TRIGGER_EARLY: tl.constexpr,
@@ -91,7 +94,8 @@ def _gemma_add_rms_norm_quant_kernel(
     if HAS_RESIDUAL:
         r = tl.load(res_ptr + row * H + cols, mask=mask, other=0.0)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0)
-    scale = tl.load(scale_ptr)
+    if QUANT != "none":
+        scale = tl.load(scale_ptr)
 
     h = x.to(tl.float32)
     if HAS_RESIDUAL:
@@ -102,20 +106,20 @@ def _gemma_add_rms_norm_quant_kernel(
     rstd = tl.rsqrt(var + eps)
     # Round to the activation dtype, like the unfused norm output.
     y = (h * rstd * (1.0 + w.to(tl.float32))).to(x_ptr.dtype.element_ty)
-    if WRITE_Y:
+    if QUANT == "none" or WRITE_Y:
         tl.store(y_ptr + row * H + cols, y, mask=mask)
-    y = y.to(tl.float32)
-
-    if QUANT_NVFP4:
-        # scaled_fp4_quant numerics; `scale` is the global scale (448 * 6 / amax).
-        vmax = tl.max(tl.max(tl.abs(y), axis=2), axis=1)
+    if QUANT == "nvfp4":
+        # scaled_fp4_quant numerics; `scale` is the global scale
+        # (448 * 6 / amax).
+        y32 = y.to(tl.float32)
+        vmax = tl.max(tl.max(tl.abs(y32), axis=2), axis=1)
         sf = scale * (vmax * _rcp_approx_ftz(tl.full((G,), 6.0, tl.float32)))
         sf_fp8 = tl.minimum(sf, FP8_MAX).to(tl.float8e4nv)
         sf32 = sf_fp8.to(tl.float32)
         out_scale = tl.where(
             sf32 != 0.0, _rcp_approx_ftz(sf32 * _rcp_approx_ftz(scale)), 0.0
         )
-        lo, hi = tl.split(y * out_scale[:, None, None])
+        lo, hi = tl.split(y32 * out_scale[:, None, None])
         pcols = g[:, None] * 8 + pair[None, :]
         tl.store(
             q_ptr + row * (H // 2) + pcols, _cvt_e2m1x2(lo, hi), mask=pcols < H // 2
@@ -130,9 +134,9 @@ def _gemma_add_rms_norm_quant_kernel(
             + (g & 3)
         )
         tl.store(sf_ptr + sf_off, sf_fp8, mask=g < H // 16)
-    else:
+    elif QUANT == "fp8":
         inv_scale = tl.math.div_rn(1.0, scale)
-        q = tl.clamp(y * inv_scale, -FP8_MAX, FP8_MAX)
+        q = tl.clamp(y.to(tl.float32) * inv_scale, -FP8_MAX, FP8_MAX)
         tl.store(q_ptr + row * H + cols, q, mask=mask)
 
     if launch_pdl and not TRIGGER_EARLY:
@@ -148,7 +152,7 @@ def gemma_add_rms_norm_quant(
     nvfp4: bool,
     write_y: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Gemma RMSNorm of ``x (+ residual)`` quantized for the next linear.
+    """Gemma RMSNorm of `x (+ residual)` quantized for the next linear.
 
     Args:
         x: (num_tokens, hidden) bf16/fp16 activation, contiguous. Read only.
@@ -156,15 +160,15 @@ def gemma_add_rms_norm_quant(
         weight: (hidden,) Gemma norm weight; the norm scales by (1 + weight).
         eps: RMS norm epsilon.
         scale: FP8: the static per-tensor input scale. NVFP4: the global
-            scale (``input_global_scale_inv``).
+            scale (`input_global_scale_inv`).
         nvfp4: quantize to NVFP4 with swizzled 128x4 block scales instead of
             static FP8.
         write_y: also return the bf16 normed activation.
 
     Returns:
-        ``(q, block_scale, y)``: quantized data (fp8, or packed fp4 uint8),
-        NVFP4 block scales (fp8, ``(round_up(M, 128), round_up(H // 16, 4))``;
-        rows >= M are left unwritten) or ``scale`` for FP8, and the normed
+        `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
+        NVFP4 block scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`;
+        rows >= M are left unwritten) or `scale` for FP8, and the normed
         activation (or None).
 
     """
@@ -204,7 +208,7 @@ def gemma_add_rms_norm_quant(
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
-        QUANT_NVFP4=nvfp4,
+        QUANT="nvfp4" if nvfp4 else "fp8",
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),
@@ -214,3 +218,44 @@ def gemma_add_rms_norm_quant(
         TRIGGER_EARLY=M <= 128,
     )
     return q, block_scale, y
+
+
+def gemma_add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor | None,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Gemma RMSNorm of `x (+ residual)` without quantization.
+
+    The pre-SM80 fallback for flashinfer's norm kernels, whose JIT build
+    fails there. `x` is read only; `residual` is updated in place.
+    Returns the normed activation in x's dtype.
+    """
+    assert x.dim() == 2 and x.is_contiguous()
+    assert x.dtype in (torch.bfloat16, torch.float16)
+    assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
+    assert weight.shape == (x.shape[1],) and weight.is_contiguous()
+    M, H = x.shape
+    y = torch.empty_like(x)
+    if M == 0:
+        return y
+
+    _gemma_add_rms_norm_quant_kernel[(M,)](
+        x,
+        residual if residual is not None else x,
+        weight,
+        x,  # scale, q, sf: unread when QUANT == "none"
+        x,
+        x,
+        y,
+        eps,
+        H=H,
+        HAS_RESIDUAL=residual is not None,
+        QUANT="none",
+        WRITE_Y=True,
+        num_warps=16 if M <= 384 else 4,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+        TRIGGER_EARLY=M <= 128,
+    )
+    return y

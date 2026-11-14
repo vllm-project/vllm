@@ -353,6 +353,7 @@ class Glm4vVisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -360,7 +361,9 @@ class Glm4vVisionAttention(nn.Module):
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
         q, k, v = self.split_qkv(x)
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
+        q, k = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k))
+        # Keep v a view into qkv, as FlashInfer's cu_seqlens expect.
+        v = rearrange(v, "s b ... -> b s ...")
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
@@ -377,6 +380,7 @@ class Glm4vVisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -421,6 +425,7 @@ class Glm4vVisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -428,6 +433,7 @@ class Glm4vVisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -951,6 +957,7 @@ class Glm4vVisionTransformer(nn.Module):
                 rotary_pos_emb_cos=encoder_metadata["rotary_pos_emb_cos"],
                 rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
                 max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata["sequence_lengths"],
             )
 
         # adapter
@@ -1204,10 +1211,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def _get_image_max_pixels(self) -> int:
         """Read max_pixels from the HF image processor config.
 
-        Despite the name, ``longest_edge`` is a pixel **area** (total pixel
+        Despite the name, `longest_edge` is a pixel **area** (total pixel
         count), not an edge length.  The HF processor passes it directly to
-        ``smart_resize`` as the ``max_pixels`` argument, which constrains
-        ``t_bar * h_bar * w_bar <= max_pixels``.
+        `smart_resize` as the `max_pixels` argument, which constrains
+        `t_bar * h_bar * w_bar <= max_pixels`.
         """
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
@@ -1304,12 +1311,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        return self._get_max_video_frames(seq_len - max_image_tokens)
+        return self._get_max_video_frames(seq_len)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int
@@ -1595,7 +1599,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {
@@ -1699,15 +1703,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     def _sampled_frame_metadata_overrides(mm_items, video_metadata):
         """Build timestamp-helper metadata from HF-sampled frame indices.
 
-        Input ``frames_indices`` can be the pre-sample range. The processor
-        returns a ``VideoMetadata`` with the sample it kept. GLM-5.3's direct
+        Input `frames_indices` can be the pre-sample range. The processor
+        returns a `VideoMetadata` with the sample it kept. GLM-5.3's direct
         path must feed those indices into the timestamp helper and clear
-        ``do_sample_frames`` so the helper keeps them instead of sampling again.
+        `do_sample_frames` so the helper keeps them instead of sampling again.
 
-        Overrides are returned and never written back onto ``mm_items``. The
-        same items are reused by ``test_processing_correctness`` (baseline then
-        cache); persisting ``do_sample_frames=False`` while the video tensor
-        stays full-length made pass-2 HF emit ``grid_t != len(timestamps)`` for
+        Overrides are returned and never written back onto `mm_items`. The
+        same items are reused by `test_processing_correctness` (baseline then
+        cache); persisting `do_sample_frames=False` while the video tensor
+        stays full-length made pass-2 HF emit `grid_t != len(timestamps)` for
         odd-length videos.
         """
         if not video_metadata:
@@ -1835,35 +1839,27 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     if hasattr(sampled_indices, "tolist"):
                         sampled_indices = sampled_indices.tolist()
                     metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
-                input_ids = video_outputs.pop("input_ids")
-
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id
-                )
-                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
-                prompt_text = prompt_text.replace(
-                    "<|begin_of_video|><|video|><|end_of_video|>",
-                    video_placeholder,
-                    1,
-                )
-
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
             )
+
+            # Videos were processed above, so drop their placeholders from the text.
+            mm_counts = {**mm_items.get_all_counts(), "video": 0}
+            prompt_text = self._get_hf_mm_text(mm_counts)
         else:
             video_outputs = dict()
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_kwargs),
-            dict(text=prompt_text, **hf_data),
-            hf_kwargs,
-        )
-        input_ids = processed_data["input_ids"]
-        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-        processed_data["input_ids"] = input_ids
+        if hf_data:
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_kwargs),
+                dict(text=prompt_text, **hf_data),
+                hf_kwargs,
+            )
+        else:
+            processed_data = BatchFeature()
 
         processed_data.update(video_outputs)
         return self._with_video_timestamps(
@@ -2168,6 +2164,9 @@ class Glm4vForConditionalGeneration(
 
         # Compute max_frames_per_video for budget sizing.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            self.visual.attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -2180,6 +2179,7 @@ class Glm4vForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=padding_logics,
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -2305,7 +2305,9 @@ class Glm4vForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Round up so a budget that is not a multiple of max_batch_size still
+        # captures room for its full token count.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:

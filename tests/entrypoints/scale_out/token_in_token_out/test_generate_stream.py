@@ -53,12 +53,12 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -89,17 +89,17 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockSchedulerConfig:
     max_num_seqs: int = 128
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -221,8 +221,8 @@ def test_placeholder_ranges_from_engine_input():
 
     assert placeholders is not None
     assert [item.model_dump() for item in placeholders["image"]] == [
-        {"offset": 1, "length": 5},
-        {"offset": 8, "length": 2},
+        {"offset": 1, "length": 5, "is_embed": None},
+        {"offset": 8, "length": 2, "is_embed": None},
     ]
 
     text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
@@ -457,7 +457,7 @@ async def test_stream_reports_engine_stop_reason_on_final_chunk():
 async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
@@ -504,7 +504,7 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output("req-1", token_ids=[10])
@@ -547,7 +547,7 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
     result = _make_request_output(
         "req-1",
         token_ids=[10],
@@ -662,7 +662,7 @@ MM_ENGINE_INPUT: Any = {
     "prompt_token_ids": [1, 2, 2, 2, 3],
     "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
 }
-MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3}]}
+MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3, "is_embed": None}]}
 
 
 def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
@@ -1590,10 +1590,10 @@ class _StubParser:
         self.history_tool_call_cnt = count
 
 
-def _derender_serving(engine, parser_cls=_StubParser):
+def _derender_serving(engine, parser_cls=_StubParser, **kwargs):
     """Serving whose derenderer builds real stream processors around
     `parser_cls`, or plain ones when it is None."""
-    serving = _build_serving_tokens(engine)
+    serving = _build_serving_tokens(engine, **kwargs)
     derenderer = serving.online_derenderer
     derenderer.parser = parser_cls
     derenderer.enable_auto_tools = False
@@ -1877,4 +1877,47 @@ async def test_stream_derender_chunk_has_no_null_delta_keys():
         .choices[0]
         .delta.content
         == "a"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_flag", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_stream_derender_logprob_request_override(server_flag, override):
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="é",
+            finish_reason="length",
+            finished=True,
+            logprobs=[
+                {
+                    10: Logprob(logprob=-0.5, decoded_token="é"),
+                    11: Logprob(logprob=-1.5, decoded_token="e"),
+                }
+            ],
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, return_tokens_as_token_ids=server_flag)
+    request = _derender_request(ParseContext(return_tokens_as_token_ids=override))
+    request.sampling_params.logprobs = 2
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+
+    chunk = parsed[0]
+    assert chunk["output_mode"] == "derender"
+    choice = chunk["choices"][0]
+    assert choice["delta"]["content"] == "é"
+    entry = choice["logprobs"]["content"][0]
+    placeholders = server_flag if override is None else override
+    assert (entry["token"], entry["bytes"]) == (
+        ("token_id:10", None) if placeholders else ("é", [195, 169])
+    )
+    assert [(top["token"], top["bytes"]) for top in entry["top_logprobs"]] == (
+        [("token_id:10", None), ("token_id:11", None)]
+        if placeholders
+        else [("é", [195, 169]), ("e", [101])]
     )

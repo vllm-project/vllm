@@ -83,7 +83,7 @@ def _scale(amax: Float32):
 
 
 class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         # T=1..96 uses at most 46 keys per (n_groups, heads_per_group, o_lora_rank).
         tokens_per_tile: int
@@ -516,7 +516,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         tokens: int,
@@ -603,7 +603,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         early_trigger: bool = False,
     ) -> CuTeDSLLaunchSpec["FusedWoAKernel.CompileKey"]:
         """Return FP8 WO-A output and FlashInfer F8_128x4 scale bytes.
-        ``early_trigger`` launches the PDL dependent right after the TMEM
+        `early_trigger` launches the PDL dependent right after the TMEM
         allocation, for a dependent that loads its weights before its wait."""
         tokens = x.shape[0]
         groups, rank = weight_scale.shape[:2]
