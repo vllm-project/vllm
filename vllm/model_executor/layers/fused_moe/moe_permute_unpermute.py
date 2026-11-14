@@ -198,6 +198,21 @@ def moe_permute(
         f" but got {permuted_hidden_states.size()}"
     )
 
+    # The permute kernel gathers 2D fp32 per-row scales along with the rows.
+    permuted_scale = None
+    if (
+        a1q_scale is not None
+        and a1q_scale.dim() == 2
+        and a1q_scale.dtype == torch.float32
+        and a1q_scale.is_contiguous()
+        and a1q_scale.size(0) == n_token
+    ):
+        permuted_scale = torch.empty(
+            (permuted_row_size, a1q_scale.size(1)),
+            dtype=torch.float32,
+            device=a1q_scale.device,
+        )
+
     if scratch is None:
         token_expert_indices = torch.arange(
             0, n_token * topk, dtype=torch.int32, device=hidden_states.device
@@ -206,11 +221,8 @@ def moe_permute(
         expert_first_token_offset = torch.empty(
             n_local_expert + 1, dtype=torch.int64, device=hidden_states.device
         )
-        permuted_idx = torch.full(
-            (permuted_row_size,),
-            n_token * topk,
-            dtype=torch.int32,
-            device=hidden_states.device,
+        permuted_idx = torch.empty(
+            (permuted_row_size,), dtype=torch.int32, device=hidden_states.device
         )
         inv_permuted_idx = torch.empty(
             (n_token, topk), dtype=torch.int32, device=hidden_states.device
@@ -228,6 +240,8 @@ def moe_permute(
             expert_first_token_offset,
             inv_permuted_idx,
             permuted_idx,
+            a1q_scale if permuted_scale is not None else None,
+            permuted_scale,
         )
     else:
         assert hidden_states.device == scratch.device
@@ -241,7 +255,6 @@ def moe_permute(
         )
         expert_first_token_offset = scratch.expert_first_token_offset
         permuted_idx = scratch.permuted_idx[:permuted_row_size]
-        permuted_idx.fill_(permuted_row_size)
         inv_permuted_idx = scratch.inv_permuted_idx[:permuted_row_size].view(
             n_token, topk
         )
@@ -269,9 +282,13 @@ def moe_permute(
             permuted_experts_id,
             sorted_row_idx,
             topk_ids_for_sort,
+            a1q_scale if permuted_scale is not None else None,
+            permuted_scale,
         )
 
-    if a1q_scale is not None and a1q_scale.dim() > 1:
+    if permuted_scale is not None:
+        a1q_scale = permuted_scale
+    elif a1q_scale is not None and a1q_scale.dim() > 1:
         a1q_scale = a1q_scale[permuted_idx.clamp(max=n_token * topk - 1) // topk]
     return (
         permuted_hidden_states,

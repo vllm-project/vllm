@@ -7,7 +7,8 @@ __global__ void expandInputRowsKernel(
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
     int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_dest_rows, int64_t const cols, int64_t k,
-    int num_local_experts) {
+    int num_local_experts, float const* unpermuted_scale, float* permuted_scale,
+    int64_t const scale_cols) {
   // Reverse permutation map.
   // I do this so that later, we can use the source -> dest map to do the k-way
   // reduction and unpermuting. I need the reverse map for that reduction to
@@ -22,8 +23,18 @@ __global__ void expandInputRowsKernel(
     expanded_source_row_to_expanded_dest_row[expanded_source_row] =
         static_cast<int>(expanded_dest_row);
     // skip non local expert token
-    if (!CHECK_SKIPPED || blockIdx.x < *num_dest_rows) {
-      permuted_idx[expanded_dest_row] = expanded_source_row;
+    permuted_idx[expanded_dest_row] =
+        (!CHECK_SKIPPED || blockIdx.x < *num_dest_rows) ? expanded_source_row
+                                                        : num_rows * k;
+  }
+
+  // Gather the per-row activation scales along with the rows. Skipped rows
+  // get a valid but unused scale.
+  if (permuted_scale != nullptr) {
+    int64_t const source_row = expanded_source_row / k;
+    for (int64_t i = threadIdx.x; i < scale_cols; i += blockDim.x) {
+      permuted_scale[expanded_dest_row * scale_cols + i] =
+          unpermuted_scale[source_row * scale_cols + i];
     }
   }
 
@@ -58,7 +69,8 @@ void expandInputRowsKernelLauncher(
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
     int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    int num_local_experts, cudaStream_t stream) {
+    int num_local_experts, float const* unpermuted_scale, float* permuted_scale,
+    int64_t const scale_cols, cudaStream_t stream) {
   int64_t const blocks = num_rows * k;
   int64_t const threads = 256;
   using FuncPtr = decltype(&expandInputRowsKernel<T, true>);
@@ -69,12 +81,12 @@ void expandInputRowsKernelLauncher(
   bool is_check_skip = num_valid_tokens_ptr != nullptr;
   auto func = func_map[is_check_skip];
 
-  func<<<blocks, threads, 0, stream>>>(unpermuted_input, permuted_output,
-                                       expanded_dest_row_to_expanded_source_row,
-                                       expanded_source_row_to_expanded_dest_row,
-                                       permuted_idx, expert_first_token_offset,
-                                       num_rows, num_valid_tokens_ptr, cols, k,
-                                       num_local_experts);
+  func<<<blocks, threads, 0, stream>>>(
+      unpermuted_input, permuted_output,
+      expanded_dest_row_to_expanded_source_row,
+      expanded_source_row_to_expanded_dest_row, permuted_idx,
+      expert_first_token_offset, num_rows, num_valid_tokens_ptr, cols, k,
+      num_local_experts, unpermuted_scale, permuted_scale, scale_cols);
 }
 
 template <class T, class U>

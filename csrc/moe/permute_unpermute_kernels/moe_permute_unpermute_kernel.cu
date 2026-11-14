@@ -138,8 +138,8 @@ void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
       expert_first_token_offset, permuted_rows, inverse, stream);
 }
 
-__global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
-                                       const int* expert_map_ptr,
+__global__ void preprocessTopkIdKernel(const int* topk_id_ptr, int* out_ptr,
+                                       int size, const int* expert_map_ptr,
                                        int num_experts) {
   auto tidx = threadIdx.x;
   auto bidx = blockIdx.x;
@@ -165,10 +165,10 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
       }
     }
     __syncwarp();
-    topk_id_ptr[offset + tidx] = topk_id;
+    out_ptr[offset + tidx] = topk_id;
   }
 }
-void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
+void preprocessTopkIdLauncher(const int* topk_id_ptr, int* out_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
                               cudaStream_t stream) {
   if (size == 0) {
@@ -178,7 +178,7 @@ void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
   int grid = (size + block - 1) / block;
   int smem_size = (num_experts) * sizeof(int);
   preprocessTopkIdKernel<<<grid, block, smem_size, stream>>>(
-      topk_id_ptr, size, expert_map_ptr, num_experts);
+      topk_id_ptr, out_ptr, size, expert_map_ptr, num_experts);
 }
 
 #endif
