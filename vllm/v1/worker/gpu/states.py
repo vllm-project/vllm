@@ -3,7 +3,11 @@
 import numpy as np
 import torch
 
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import (
+    FusedStagedWriter,
+    StagedWriteTensor,
+    UvaBackedTensor,
+)
 
 
 class RequestState:
@@ -64,6 +68,26 @@ class RequestState:
         # Optimistic CPU mirror of num_computed_tokens (upper bound on GPU value).
         self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
 
+        # total_len, all_token_ids, and num_computed_tokens are always staged
+        # together in add_request(), so apply their writes with one fused
+        # kernel instead of three separate ones.
+        self._admission_write_tensors = [
+            self.total_len,
+            self.all_token_ids,
+            self.num_computed_tokens,
+        ]
+        self._admission_write_ptrs = torch.tensor(
+            [t.gpu.data_ptr() for t in self._admission_write_tensors],
+            dtype=torch.uint64,
+            device=device,
+        )
+        self._admission_write_strides = torch.tensor(
+            [t.gpu.stride(0) for t in self._admission_write_tensors],
+            dtype=torch.int64,
+            device=device,
+        )
+        self._admission_fused_writer = FusedStagedWriter(device, 3 * max_num_reqs)
+
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
             self.max_num_reqs, 1, dtype=torch.int64, device=device
@@ -120,9 +144,11 @@ class RequestState:
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
-        self.total_len.apply_write()
-        self.all_token_ids.apply_write()
-        self.num_computed_tokens.apply_write()
+        self._admission_fused_writer.apply(
+            self._admission_write_tensors,
+            self._admission_write_ptrs,
+            self._admission_write_strides,
+        )
 
     def remove_request(self, req_id: str) -> int | None:
         """Return the freed slot index, or None if the request was not found."""

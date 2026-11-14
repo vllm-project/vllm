@@ -7,7 +7,11 @@ import torch
 import vllm.envs as envs
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import (
+    FusedStagedWriter,
+    StagedWriteTensor,
+    UvaBackedTensor,
+)
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
@@ -36,6 +40,21 @@ class BadWordsState(LogitsProcessor):
         )
         # number of bad words per request
         self.num_bad_words = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+
+        # bad_word_token_ids and bad_word_offsets are always staged together
+        # in add_request(); apply their writes with one fused kernel.
+        self._write_tensors = [self.bad_word_token_ids, self.bad_word_offsets]
+        self._write_ptrs = torch.tensor(
+            [t.gpu.data_ptr() for t in self._write_tensors],
+            dtype=torch.uint64,
+            device=device,
+        )
+        self._write_strides = torch.tensor(
+            [t.gpu.stride(0) for t in self._write_tensors],
+            dtype=torch.int64,
+            device=device,
+        )
+        self._fused_writer = FusedStagedWriter(device, 2 * max_num_reqs)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         bad_words_token_ids = sampling_params.bad_words_token_ids
@@ -73,8 +92,9 @@ class BadWordsState(LogitsProcessor):
 
     def apply_staged_writes(self) -> None:
         self.num_bad_words.copy_to_uva()
-        self.bad_word_token_ids.apply_write()
-        self.bad_word_offsets.apply_write()
+        self._fused_writer.apply(
+            self._write_tensors, self._write_ptrs, self._write_strides
+        )
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
         max_num_bad_words = int(self.num_bad_words.np[ctx.idx_mapping_np].max())
