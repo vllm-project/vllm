@@ -179,6 +179,7 @@ def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Calla
 
         state = _state(layer)
         bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()  # e.g. `loaded_shard_id=None`: a fused tensor
         first, loaded_weight = list(bound.arguments)[:2]
         if state is None:  # dropped: load as the layer was built
             return original(*args, **kwargs)

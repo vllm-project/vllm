@@ -167,10 +167,10 @@ def test_processes_when_last_shard_arrives():
     _assert_equal(layer, _reference(full))  # same bytes as a full load
 
 
-@pytest.mark.parametrize("shard", [None, ("q", "k", "v")])
+@pytest.mark.parametrize("shard", [(), (None,), (("q", "k", "v"),)])
 def test_fused_tensor_counts_as_every_shard(shard):
     layer, full = _QKV(), _rand(8, 4)
-    layer.weight.weight_loader(layer.weight, full, shard)
+    layer.weight.weight_loader(layer.weight, full, *shard)
     assert layer.quant_method.runs == 1
     _assert_equal(layer, _reference(full))
 

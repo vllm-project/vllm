@@ -573,7 +573,9 @@ class ShardedRDTWeightTransferEngine(
             has_online_buffers,
         )
 
-        if any(has_online_buffers(m) for m in self.model.modules()):
+        if self.model is not None and any(
+            has_online_buffers(m) for m in self.model.modules()
+        ):
             # its replay scatters into the layers, bypassing the loaders that
             # fill online quantization buffers
             raise NotImplementedError(
