@@ -10,8 +10,6 @@ recent) match inside the active context.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -22,6 +20,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -131,7 +130,14 @@ def _propose(
         last_sampled_t[slot, 0] = last
 
     idx_mapping = torch.tensor(slots, dtype=torch.int64, device=DEVICE)
-    input_batch = SimpleNamespace(num_reqs=B, idx_mapping=idx_mapping)
+    input_batch = InputBatch.make_dummy(
+        num_reqs=B,
+        num_tokens=B,
+        input_buffers=InputBuffers(max_num_reqs, B, DEVICE),
+        is_padding=False,
+    )
+    input_batch.idx_mapping.copy_(idx_mapping)
+    input_batch.idx_mapping_np[:] = slots
 
     drafts = spec.propose(
         input_batch=input_batch,
@@ -265,6 +271,32 @@ def test_noncontiguous_idx_mapping():
         slots=[3, 0],
     )
     assert drafts == [[9, 7], [3, 1]]
+
+
+@pytest.mark.parametrize("min_n", [1, 4, 16])
+@pytest.mark.parametrize("match_start", [0, 250, 255, 256])
+def test_wide_lookup_prefers_longest_match_across_blocks(min_n, match_start):
+    """A full match wins over a newer short match, including across CTAs."""
+    spec = _make_speculator(min_n=min_n, max_n=16, k=2, max_model_len=1025)
+    suffix = list(range(1, 17))
+    row = [0] * 768
+    row[match_start : match_start + 18] = suffix + [101, 102]
+    row[600:617] = suffix[1:] + [201, 202]
+    row += suffix
+
+    assert _propose(spec, [row]) == [[101, 102]]
+
+
+def test_wide_lookup_handles_short_context_and_overlapping_matches():
+    """Growing a match stops at the row start, not at the configured max n."""
+    spec = _make_speculator(min_n=1, max_n=16, k=3)
+    drafts = _propose(
+        spec,
+        [[7] * 5, [1, 2, 3, 4]],
+        slots=[3, 0],
+        last_sampled=[99, 88],
+    )
+    assert drafts == [[7, 99, 99], [88, 88, 88]]
 
 
 def test_construction_validates_speculative_config():

@@ -5,6 +5,7 @@ import math
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -89,6 +90,62 @@ def test_ngram_gpu_default_with_async_scheduling(
             == async_scheduling
         )
         evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
+
+
+@single_gpu_only
+def test_ngram_gpu_wide_lookup_matches_baseline(vllm_runner):
+    """A wide GPU lookup preserves greedy predictions while accepting drafts."""
+    model = "Qwen/Qwen3-0.6B"
+    prompts = [
+        (
+            "The capital of France is Paris. The capital of Italy is Rome. "
+            "The capital of Spain is Madrid. The capital of France is"
+        ),
+        "one two three four five one two three four five one two three four",
+    ]
+    runner_kwargs = dict(
+        max_model_len=512,
+        max_num_seqs=2,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        trust_remote_code=False,
+        kernel_config={
+            "enable_flashinfer_autotune": False,
+            "enable_jit_warmup": False,
+        },
+    )
+    with vllm_runner(model, **runner_kwargs) as runner:
+        expected = runner.generate_greedy_logprobs(prompts, 48, 5)
+    with vllm_runner(
+        model,
+        **runner_kwargs,
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_min": 1,
+            "prompt_lookup_max": 16,
+            "num_speculative_tokens": 3,
+        },
+        disable_log_stats=False,
+    ) as runner:
+        actual = runner.generate_greedy_logprobs(prompts, 48, 5)
+        metrics = runner.llm.get_metrics()
+        assert (
+            get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_draft_tokens")
+            > 0
+        )
+        assert (
+            get_spec_decode_metric_value(
+                metrics, "vllm:spec_decode_num_accepted_tokens"
+            )
+            > 0
+        )
+    check_logprobs_close(
+        outputs_0_lst=expected,
+        outputs_1_lst=actual,
+        name_0="baseline",
+        name_1="ngram_gpu",
+        always_check_logprobs=True,
+    )
 
 
 @single_gpu_only

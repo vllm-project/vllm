@@ -25,3 +25,18 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+## GPU Lookup
+
+Use `"method": "ngram_gpu"` to run n-gram lookup on the GPU. The lookup searches
+the active token history for a match to its suffix, trying lengths from
+`prompt_lookup_min` through `prompt_lookup_max`. It prefers the longest match
+and, for equal lengths, the most recent match. The current suffix itself is
+excluded, but an earlier match may overlap it.
+
+When multiple lookup lengths are configured, the GPU lookup compares candidates
+backwards, sharing comparisons between different n-gram lengths. Each candidate
+needs at most `prompt_lookup_max` token comparisons, rather than a separate
+comparison sequence for every length. Single-length lookups retain their forward
+comparison order. This does not change the proposal selection or the number of
+speculative tokens.
