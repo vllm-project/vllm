@@ -42,7 +42,6 @@ def test_transformers_image_deepstack(
         model_impl="transformers",
         dtype="float32",
         max_model_len=4096,
-        max_num_seqs=4,
         limit_mm_per_prompt={
             "image": {
                 "count": 1,
