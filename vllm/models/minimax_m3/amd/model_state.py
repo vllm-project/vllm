@@ -35,6 +35,10 @@ class MiniMaxM3ModelState(DefaultModelState):
         decode = self.backbone.specialized_decode
         if decode is not None:
             decode.executor.output_step()
+        # the decode glue: its periodic collective epoch reset (glue/runtime.py)
+        glue = getattr(self.backbone, "m3_glue", None)
+        if glue is not None:
+            glue.output_step()
 
     def close(self) -> None:
         if self._decode_finalizer is not None:
