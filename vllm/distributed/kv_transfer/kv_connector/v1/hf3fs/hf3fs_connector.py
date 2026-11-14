@@ -89,6 +89,16 @@ except Exception:
 # Constants
 DEFAULT_MAX_IO_ENTRIES = 8
 
+
+def _as_int64(ptr: int) -> int:
+    """Reinterpret an unsigned 64-bit device address as signed int64.
+
+    Some accelerators (e.g. Intel XPU) hand out addresses >= 2**63, which do
+    not fit in an int64 tensor as-is. Triton casts the bits back to the same
+    address, so storing the two's-complement value is lossless.
+    """
+    return ptr - (1 << 64) if ptr >= (1 << 63) else ptr
+
 logger = init_logger(__name__)
 
 
@@ -117,7 +127,7 @@ class AsyncOperationManager:
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
-        self._init_cuda_resources()
+        self._init_device_resources()
         self._init_worker_threads()
 
         # Metrics
@@ -125,12 +135,12 @@ class AsyncOperationManager:
 
         logger.info("AsyncOperationManager initialized for rank %d", self._rank)
 
-    def _init_cuda_resources(self) -> None:
-        """Initialize CUDA streams, events and buffer allocators."""
-        # CUDA streams for async operations
-        self._save_stream = torch.cuda.Stream()
-        self._load_stream = torch.cuda.Stream()
-        self._save_event = torch.cuda.Event()
+    def _init_device_resources(self) -> None:
+        """Initialize accelerator streams, events and buffer allocators."""
+        # Accelerator streams for async operations
+        self._save_stream = torch.Stream(device=self._device)
+        self._load_stream = torch.Stream(device=self._device)
+        self._save_event = torch.Event(device=self._device)
 
         # Buffer allocators for data copying
         self._save_buffer_allocator = CopyBufferAllocator(
@@ -168,7 +178,7 @@ class AsyncOperationManager:
     def submit_save_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a save operation for async execution."""
         future: Future[Any] = Future()
-        main_stream_event = torch.cuda.Event()
+        main_stream_event = torch.Event(device=self._device)
         main_stream_event.record()
         task = (request_id, block_ids, block_hashes, future, main_stream_event)
         self._save_queue.put(task)
@@ -295,13 +305,13 @@ class AsyncOperationManager:
                 )
 
             # Synchronize streams and gather data
-            with torch.cuda.stream(self._save_stream):
+            with self._save_stream:
                 self._save_stream.wait_event(main_stream_event)  # Wait for main stream
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "gather"
                 )
 
-                save_stream_event = torch.cuda.Event()
+                save_stream_event = torch.Event(device=self._device)
                 save_stream_event.record(self._save_stream)  # Record gather completion
 
             # Step3: Write data in batches
@@ -398,7 +408,7 @@ class AsyncOperationManager:
                 )
 
             # Step3: Scatter data back to KV cache
-            with torch.cuda.stream(self._load_stream):
+            with self._load_stream:
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "scatter"
                 )
@@ -566,7 +576,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         ]
 
         self._kvcache_ptrs = torch.tensor(
-            [cache.data_ptr() for cache in self._kv_caches.values()],
+            [_as_int64(cache.data_ptr()) for cache in self._kv_caches.values()],
             dtype=torch.int64,
             device=self._device,
         )
