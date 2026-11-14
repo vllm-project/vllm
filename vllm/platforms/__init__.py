@@ -57,6 +57,16 @@ def tpu_platform_plugin() -> str | None:
 def cuda_platform_plugin() -> str | None:
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
+
+    # Edge case: an XPU (Intel GPU) build running on a node that also exposes
+    # NVIDIA GPUs / a working NVML. The wheel is built for XPU, so CUDA must
+    # not activate here; otherwise both the CUDA and XPU plugins activate and
+    # platform resolution raises "Only one platform plugin can be activated".
+    # Defer to xpu_platform_plugin by declining, mirroring the cpu-build guard
+    # below.
+    if vllm_version_matches_substr("xpu"):
+        logger.debug("CUDA platform is not available because vLLM is built for XPU.")
+        return None
     try:
         from vllm.utils.import_utils import import_pynvml
 

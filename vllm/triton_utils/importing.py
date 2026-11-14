@@ -33,6 +33,17 @@ if HAS_TRITON:
             if name != "cpu" and x.driver and x.driver.is_active()
         ]
 
+        # Honor TRITON_DEFAULT_BACKEND (same env var Triton's own
+        # `triton.runtime.driver._create_driver()` uses) so that on machines
+        # with more than one active driver (e.g. a node with both NVIDIA and
+        # Intel GPUs), the user can pin the backend vLLM should treat as the
+        # single active one instead of disabling Triton entirely.
+        selected_backend = os.environ.get("TRITON_DEFAULT_BACKEND")
+        if selected_backend:
+            backend = backends.get(selected_backend)
+            if backend is not None and backend.driver and backend.driver.is_active():
+                active_drivers = [backend.driver]
+
         # Check Triton CPU
         if vllm_version_matches_substr("cpu"):
             if "cpu" in backends:
