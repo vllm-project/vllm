@@ -25,7 +25,6 @@ import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
-from datetime import timedelta
 from functools import cache
 
 import numpy as np
@@ -33,7 +32,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
@@ -45,6 +48,13 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators.shm_broadcast import (
     SHM_PATH,
     check_shm_free_space,
+)
+from vllm.distributed.engram_pool import (
+    ROW_ALIGN,
+    EngramPool,
+    EngramTable,
+    join_peer_group,
+    wait_landed,
 )
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -62,6 +72,7 @@ from vllm.models.deepseek_v41.common.ops.query_quant import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.cpu_resource_utils import get_available_memory
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -656,6 +667,53 @@ def _engram_lookup_kernel(
             )
 
 
+@triton.jit(do_not_specialize=["num_rows"])
+def _engram_dequant_rows_kernel(
+    packed,
+    out,
+    num_rows,
+    ROW_STRIDE: tl.constexpr,
+    DIM: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    PACKED_FP4: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Dequantize pool rows (FP8 or MXFP4 values, then E8M0 scales) into BF16
+    rows."""
+    rows = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    valid = rows < num_rows
+    ROW_BYTES: tl.constexpr = DIM // 2 if PACKED_FP4 else DIM
+    src = packed + rows * ROW_STRIDE
+    cols = tl.arange(0, DIM)
+    if PACKED_FP4:
+        byte = tl.load(
+            src[:, None] + (cols // 2)[None, :], mask=valid[:, None], other=0
+        ).to(tl.int32)
+        nib = tl.where(cols[None, :] % 2 == 0, byte & 0xF, (byte >> 4) & 0xF)
+        e = (nib & 0x7) >> 1
+        m = (nib & 0x1).to(tl.float32)
+        pow2 = ((e - 2 + 127) << 23).to(tl.float32, bitcast=True)
+        mag = tl.where(e == 0, m * 0.5, (2.0 + m) * pow2)
+        values = tl.where((nib & 0x8) != 0, -mag, mag)
+    else:
+        values = tl.load(
+            src.to(tl.pointer_type(tl.float8e4nv))[:, None] + cols[None, :],
+            mask=valid[:, None],
+            other=0.0,
+        ).to(tl.float32)
+    scale = tl.load(
+        src[:, None] + ROW_BYTES + (cols // QUANT_BLOCK)[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+    tl.store(
+        out + rows[:, None] * DIM + cols[None, :],
+        (values * scale).to(tl.bfloat16),
+        mask=valid[:, None],
+    )
+
+
 def engram_head_shard_rank() -> int:
     """This rank's slot among the hash-head shards of one engram table.
 
@@ -717,60 +775,30 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
-class EngramPeerGroup:
-    """GPUs of several engines that split each Engram table over their HBM.
-
-    They meet only at startup, through a file store; lookups then read peers'
-    rows directly, so no engine's step ever waits on another's. Every GPU
-    builds and loads the same tables in the same order, so its n-th exchange
-    is every peer's n-th.
-    """
-
-    # Engines load their weights at their own pace before the group can serve.
-    TIMEOUT = timedelta(minutes=30)
-
-    def __init__(self, size: int, path: str) -> None:
-        self.world_size = size
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self.store = torch.distributed.FileStore(path, size)
-        self.store.set_timeout(self.TIMEOUT)
-        # Any assignment works: a rank only decides which rows a GPU holds.
-        self.rank_in_group = self.store.add("next_rank", 1) - 1
-        if self.rank_in_group >= size:
-            raise RuntimeError(
-                f"More than {size} GPUs joined the Engram peer group at {path}; "
-                "check peer_group_size and use a fresh store path per launch"
-            )
-        self._step = 0
-
-    def all_gather(self, value: bytes) -> list[bytes]:
-        """Every GPU's value for the next exchange in rank order, once all have
-        set theirs."""
-        self._step += 1
-        key = f"step{self._step}"
-        self.store.set(f"{key}/{self.rank_in_group}", value)
-        keys = [f"{key}/{rank}" for rank in range(self.world_size)]
-        try:
-            self.store.wait(keys)
-        except RuntimeError as exc:
-            missing = [
-                rank for rank, name in enumerate(keys) if not self.store.check([name])
-            ]
-            raise TimeoutError(
-                f"Engram peer GPUs {missing} did not reach startup step "
-                f"{self._step} within {self.TIMEOUT}; every engine of the group "
-                "must start, and none may restart alone"
-            ) from exc
-        return [self.store.get(name) for name in keys]
-
-    def barrier(self) -> None:
-        self.all_gather(b"")
+def pool_row_bytes(row_bytes: int, dim: int, block_size: int) -> int:
+    """A pool row: values, then scales, padded to the pool's alignment."""
+    return round_up(row_bytes + dim // block_size, ROW_ALIGN)
 
 
 @cache
-def join_engram_peer_group(size: int, path: str) -> EngramPeerGroup:
-    """This GPU's membership, shared by all of its process's tables."""
-    return EngramPeerGroup(size, path)
+def get_engram_pool(
+    size: int,
+    store: str,
+    transport: str,
+    host_shards: bool,
+    max_items: int,
+    row_bytes: int,
+    max_tables: int,
+) -> EngramPool:
+    """This GPU's pool of Engram tables split over a peer group of engines."""
+    return EngramPool(
+        join_peer_group(size, store),
+        transport,
+        host_shards,
+        max_items,
+        row_bytes,
+        max_tables,
+    )
 
 
 def _shm_shortfall(num_bytes: int) -> str | None:
@@ -1015,7 +1043,8 @@ class ParallelEngramEmbedding(nn.Module):
 
     Heads are TP-sharded, and additionally DP-sharded across a node-local
     group unless the table lives in (DP-shared) pinned host memory or its rows
-    are split over a peer group's HBM. MXFP4 rows are E2M1 values, two per
+    are split over a node-local DP group's HBM or an Engram pool. Pool rows
+    interleave each row's values and scales. MXFP4 rows are E2M1 values, two per
     byte (even column in the low nibble), stored as uint8 since torch has no
     4-bit dtype.
     """
@@ -1036,7 +1065,8 @@ class ParallelEngramEmbedding(nn.Module):
         dp_shared_memory: bool = False,
         use_thp: bool = False,
         packed_fp4: bool = False,
-        peer_group: EngramPeerGroup | None = None,
+        pool: EngramPool | None = None,
+        name: str = "",
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -1059,11 +1089,12 @@ class ParallelEngramEmbedding(nn.Module):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
-        # GPU tables split rows over a peer group (the given GPUs of several
-        # engines, else the DP group) and every rank reads its own tokens' rows
-        # from the owning peer's HBM, so lookups need no collective.
-        self._peer_group: EngramPeerGroup | GroupCoordinator | None = peer_group
-        if peer_group is not None:
+        # Pool tables split rows over engines, node-local GPU tables over the DP
+        # group; each rank reads its own tokens' rows, with no collective.
+        self._pool = pool
+        self._table: EngramTable | None = None
+        self._peer_group: GroupCoordinator | None = None
+        if pool is not None:
             self.dp_size = 1
         elif (
             not cpu_offload
@@ -1109,7 +1140,15 @@ class ParallelEngramEmbedding(nn.Module):
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         # Peer tables keep the full lookup range but store one row slice.
         self.peer_rows, row_start = 0, self.vocab_start_idx
-        if (peers := self._peer_group) is not None:
+        if pool is not None and torch.get_default_device().type != "meta":
+            self._table = pool.table(
+                self.vocab_end_idx,
+                pool_row_bytes(self.row_bytes, dim, block_size),
+                name,
+            )
+            row_start = self._table.row_start
+            self.part_num_embeddings = self._table.shard.shape[0]
+        elif (peers := self._peer_group) is not None:
             self.peer_rows = triton.cdiv(self.vocab_end_idx, peers.world_size)
             row_start = min(peers.rank_in_group * self.peer_rows, self.vocab_end_idx)
             self.part_num_embeddings = min(
@@ -1129,11 +1168,12 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": row_start,
                 },
             )
-        if cpu_offload and not self.weight.is_meta:
+        if (cpu_offload or self._table is not None) and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
             set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
+        if cpu_offload and self._table is None and not self.weight.is_meta:
             logger.info(
                 "Engram table offloaded to pinned host memory: %d rows x %d, "
                 "%.2f GiB %s",
@@ -1156,6 +1196,13 @@ class ParallelEngramEmbedding(nn.Module):
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         scale_dim = self.dim // self.block_size
         weight_dtype = torch.uint8 if self.packed_fp4 else torch.float8_e4m3fn
+        if self._table is not None:
+            # Strided views of the interleaved rows, so loaders fill them as is.
+            shard = self._table.shard
+            return (
+                shard[:, : self.row_bytes].view(weight_dtype),
+                shard[:, self.row_bytes : self.row_bytes + scale_dim],
+            )
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
@@ -1170,24 +1217,12 @@ class ParallelEngramEmbedding(nn.Module):
             values = self.peer_rows * self.row_bytes
             num_bytes = values + self.peer_rows * scale_dim
             device = torch.device("cuda", torch.accelerator.current_device_index())
-            if isinstance(peers, EngramPeerGroup):
-                # Symmetric memory cannot span engines: its rendezvous rejects
-                # equal device ordinals on one node, and each engine's start at 0.
-                from vllm.models.deepseek_v41.nvidia.ops.engram_fabric_table import (
-                    share_peer_table,
-                )
+            import torch.distributed._symmetric_memory as symm_mem
 
-                # Held here like the symmetric handle, so lookups keep every
-                # slice mapped even if a loader replaces the parameters' data.
-                buffer, self._peer_mappings = share_peer_table(num_bytes, peers)
-                pointers = self._peer_mappings.addresses
-            else:
-                import torch.distributed._symmetric_memory as symm_mem
-
-                assert peers is not None
-                buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
-                self._symm_handle = symm_mem.rendezvous(buffer, peers.device_group)
-                pointers = self._symm_handle.buffer_ptrs
+            assert peers is not None
+            buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
+            self._symm_handle = symm_mem.rendezvous(buffer, peers.device_group)
+            pointers = self._symm_handle.buffer_ptrs
             self.register_buffer(
                 "peer_ptrs",
                 torch.tensor(pointers, dtype=torch.int64, device=device),
@@ -1245,15 +1280,26 @@ class ParallelEngramEmbedding(nn.Module):
     def process_weights_after_loading(self) -> None:
         """Peers read this table's rows directly, so serve only once every GPU
         of the group has finished loading its own."""
+        if self._table is not None:
+            assert self._pool is not None
+            shard = self._table.shard.data_ptr()
+            if (self.weight.data_ptr(), self.weight_scale_inv.data_ptr()) != (
+                shard,
+                shard + self.row_bytes,
+            ):
+                raise RuntimeError("Engram pool table parameters must not be replaced")
+            if self._loaded:
+                # Other engines read these rows at any time, also while they reload.
+                raise RuntimeError(
+                    "Engram tables split across engines (peer_group_size) cannot "
+                    "reload weights; restart the peer group instead"
+                )
+            self._pool.ready()
+            self._loaded = True
+            return
         if not self.peer_rows:
             return
         assert self._peer_group is not None
-        if self._loaded and isinstance(self._peer_group, EngramPeerGroup):
-            # Other engines read these rows at any time, also while they reload.
-            raise RuntimeError(
-                "Engram tables split across engines (peer_group_size) cannot "
-                "reload weights; restart the peer group instead"
-            )
         torch.accelerator.synchronize()
         self._peer_group.barrier()
         self._loaded = True
@@ -1304,6 +1350,20 @@ class ParallelEngramEmbedding(nn.Module):
             raise ValueError("MXFP4 Engram tables do not support packed FP8 output")
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
+            return
+        if self._table is not None:
+            assert self._pool is not None and out.dtype == torch.bfloat16
+            packed = self._pool.lookup([self._table], indices[:, None])
+            _engram_dequant_rows_kernel[(triton.cdiv(rows, 16),)](
+                packed,
+                out,
+                rows,
+                ROW_STRIDE=self._table.row_bytes,
+                DIM=self.dim,
+                QUANT_BLOCK=self.block_size,
+                PACKED_FP4=self.packed_fp4,
+                BLOCK=16,
+            )
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()
@@ -1546,11 +1606,14 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
 @triton.jit(do_not_specialize=["num_tokens"])
 def _engram_unpack_fp8_kernel(
     packed,
+    slots,
+    ready,
     values,
     scales,
     num_tokens,
     values_stride,
     scales_stride,
+    table,
     HEADS: tl.constexpr,
     LOCAL_HEADS: tl.constexpr,
     LAYERS: tl.constexpr,
@@ -1558,10 +1621,13 @@ def _engram_unpack_fp8_kernel(
     DIM: tl.constexpr,
     BLOCK: tl.constexpr,
     PEER: tl.constexpr,
+    SLOTS: tl.constexpr,
 ):
     """Split `[rank][token][layer][local head]` packed rows into MXFP8 values and
     F8_128x4 scales, one layer per grid column; `packed` holds per-rank
-    pointers if PEER. Scales past `num_tokens` zero-pad the 128-row tile.
+    pointers if PEER. If SLOTS, rows are pool table `table`'s unplaced ones:
+    row i is row `slots[i]` of `packed` (zeros if -1), read once they landed.
+    Scales past `num_tokens` zero-pad the 128-row tile.
     """
     row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     layer = tl.program_id(1).to(tl.int64)
@@ -1574,16 +1640,21 @@ def _engram_unpack_fp8_kernel(
         src = packed
         source = head // LOCAL_HEADS * num_tokens + token
     source = (source * LAYERS + layer) * LOCAL_HEADS + head % LOCAL_HEADS
+    valid = token < num_tokens
+    live = valid
+    if SLOTS:
+        wait_landed(ready, table)
+        source = tl.load(slots + source, mask=valid, other=-1).to(tl.int64)
+        live = valid & (source >= 0)
     # Packed rows are only scale-width aligned.
     src += tl.multiple_of(source * (DIM + DIM // 32), DIM // 32)
-    valid = token < num_tokens
     cols = tl.arange(0, DIM)
-    data = tl.load(src[:, None] + cols[None, :], mask=valid[:, None], other=0)
+    data = tl.load(src[:, None] + cols[None, :], mask=live[:, None], other=0)
     values += layer * values_stride + row * DIM
     tl.store(values[:, None] + cols[None, :], data, mask=valid[:, None])
     scale_cols = tl.arange(0, DIM // 32)
     scale = tl.load(
-        src[:, None] + DIM + scale_cols[None, :], mask=valid[:, None], other=0
+        src[:, None] + DIM + scale_cols[None, :], mask=live[:, None], other=0
     )
     group = head[:, None] * (DIM // 32) + scale_cols[None, :]
     offset = mxfp8_scale_offset(token[:, None], group, HEADS * DIM // 32)
@@ -1591,7 +1662,8 @@ def _engram_unpack_fp8_kernel(
 
 
 class EngramBatch:
-    """Stage every Engram layer's WKV input as MXFP8 with one exchange."""
+    """Stage every Engram layer's WKV input as MXFP8 with one exchange, or
+    with one fetch from an Engram pool."""
 
     def __init__(self, layers: list["Engram"], max_tokens: int) -> None:
         first = layers[0].layer_hash_index
@@ -1600,17 +1672,36 @@ class EngramBatch:
         self.layers = layers
         table = layers[0].embed_tokens
         device = layers[0].staged_rows.device
-        self.packed_rows = torch.empty(
-            max_tokens * table.dp_size,
-            len(layers),
-            table.part_n_hash_cols,
-            table.dim + table.dim // 32,
-            dtype=torch.uint8,
-            device=device,
-        )
-        # Same allocator as the send buffer: NCCL hangs this all-to-all when its
-        # buffers mix the cumem pool and the caching allocator.
-        self.exchanged_rows = torch.empty_like(self.packed_rows)
+        self.pool = table._pool
+        self.tables = [
+            pool_table
+            for layer in layers
+            if (pool_table := layer.embed_tokens._table) is not None
+        ]
+        if self.pool is not None:
+            logger.info_once(
+                "Engram pool fetches stage the MXFP8 WKV input of %d layers.",
+                len(layers),
+            )
+        vllm_config = get_current_vllm_config_or_none()
+        config = vllm_config.engram_config if vllm_config is not None else None
+        self._async = config is not None and config.peer_group_fetch == "async"
+        if self._async:
+            # The pool fetches and unpacks on this stream while layers run.
+            self._stream = torch.cuda.Stream(priority=-1)
+            self._pool_done = [torch.cuda.Event() for _ in layers]
+        if self.pool is None:
+            self.packed_rows = torch.empty(
+                max_tokens * table.dp_size,
+                len(layers),
+                table.part_n_hash_cols,
+                table.dim + table.dim // 32,
+                dtype=torch.uint8,
+                device=device,
+            )
+            # Same allocator as the send buffer: NCCL hangs this all-to-all when
+            # its buffers mix the cumem pool and the caching allocator.
+            self.exchanged_rows = torch.empty_like(self.packed_rows)
         width = table.n_hash_cols * table.dim
         self.fp8_values = torch.empty(
             len(layers), max_tokens, width, dtype=torch.uint8, device=device
@@ -1623,7 +1714,7 @@ class EngramBatch:
         )
         max_peer_slot = min(max_tokens, ENGRAM_A2A_MIN_SLOT - 1)
         self.peer_exchange = None
-        if table.cpu_offload:
+        if table.cpu_offload and self.pool is None:
             from vllm.models.deepseek_v41.nvidia.ops.engram_peer import (
                 EngramPeerExchange,
             )
@@ -1643,7 +1734,7 @@ class EngramBatch:
             return None
         table = layers[0].embed_tokens
         if (
-            table.dp_size == 1
+            (table.dp_size == 1 and table._table is None)
             or any(layer.embed_tokens.packed_fp4 for layer in layers)
             or table.tp_size > 1
             or table.dim % 128
@@ -1653,14 +1744,52 @@ class EngramBatch:
             return None
         return cls(layers, max_tokens)
 
+    def wake(self) -> None:
+        """Ready the pool for this step's fetch, ahead of its hashes."""
+        if self.pool is not None and not self._async:
+            self.pool.wake()
+
     def prepare_embeddings(self, hashes: torch.Tensor) -> None:
         """Stage every layer's WKV input before the decoder layers.
 
         DP-sharded tables decide on the group's slot, so every rank agrees.
         """
+        if self.pool is not None:
+            first, count = self.layers[0].layer_hash_index, len(self.tables)
+            if self._async:
+                # Its stream joins in a later CUDA graph segment.
+                self._fetch(hashes)
+            else:
+                self._started = self.pool.start(
+                    self.tables, hashes[:, first : first + count]
+                )
+                self._num_tokens = hashes.shape[0]
+            return
         slot = engram_gathered_num_tokens()
         peer = self.peer_exchange is not None and slot < ENGRAM_A2A_MIN_SLOT
         self._stage(hashes if peer else gather_engram_hashes(hashes), slot, peer)
+
+    @eager_break_during_capture
+    def _fetch(self, hashes: torch.Tensor) -> None:
+        """Fetch and unpack every layer's rows on the side stream; a layer
+        waits only for its own."""
+        assert self.pool is not None
+        stream = self._stream
+        stream.wait_stream(torch.cuda.current_stream())
+        hashes.record_stream(stream)
+        first, num_tokens = self.layers[0].layer_hash_index, hashes.shape[0]
+        with torch.cuda.stream(stream):
+            fetch = self.pool.start(
+                self.tables, hashes[:, first : first + len(self.tables)]
+            )
+            for index in range(len(self.tables)):
+                rows = fetch.unplaced(index)
+                self._unpack(rows[0], num_tokens, 0, False, index, index + 1, rows)
+                self._pool_done[index].record(stream)
+
+    @eager_break_during_capture
+    def _wait_fetch(self, index: int) -> None:
+        torch.cuda.current_stream().wait_event(self._pool_done[index])
 
     @eager_break_during_capture
     def _stage(self, hashes: torch.Tensor, slot: int, peer: bool) -> None:
@@ -1680,27 +1809,57 @@ class EngramBatch:
             assert group is not None
             sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
             torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
+        self._unpack(rows, slot, rank, peer)
+
+    def _unpack(
+        self,
+        rows: torch.Tensor,
+        slot: int,
+        rank: int,
+        peer: bool,
+        start: int = 0,
+        end: int | None = None,
+        unplaced: tuple | None = None,
+    ) -> None:
+        """Unpack layers [start, end) of `rows` into the MXFP8 WKV inputs; or,
+        given `unplaced` (a pool fetch's `(rows, slots, ready)` for table
+        `start`), rows where they land."""
+        slots = ready = None
+        if unplaced is not None:
+            rows, slots, ready = unplaced
+        if slot == 0:
+            return
+        end = len(self.layers) if end is None else end
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
-        grid = (triton.cdiv(slot, 128) * 128 * heads // 16, len(self.layers))
+        grid = (triton.cdiv(slot, 128) * 128 * heads // 16, end - start)
         _engram_unpack_fp8_kernel[grid](
             rows,
-            self.fp8_values,
-            self.fp8_scales,
+            rows if slots is None else slots,
+            rows if ready is None else ready,
+            self.fp8_values[start:end],
+            self.fp8_scales[start:end],
             slot,
             self.fp8_values.stride(0),
             self.fp8_scales.stride(0),
+            start,
             HEADS=heads,
             LOCAL_HEADS=table.part_n_hash_cols,
-            LAYERS=len(self.layers),
+            LAYERS=end - start,
             RANK=rank,
             DIM=table.dim,
             BLOCK=16,
             PEER=peer,
+            SLOTS=slots is not None,
         )
 
     def wkv_input(self, layer: "Engram", num_tokens: int) -> QuantizedActivation:
         index = layer.layer_hash_index - self.layers[0].layer_hash_index
+        if self.pool is not None and self._async:
+            self._wait_fetch(index)
+        elif self.pool is not None:
+            rows = self._started.unplaced(index)
+            self._unpack(rows[0], self._num_tokens, 0, False, index, index + 1, rows)
         values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
         return QuantizedActivation(
             values,
@@ -1785,12 +1944,21 @@ class Engram(nn.Module):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
-        engram_config = get_current_vllm_config().engram_config
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
         assert engram_config is not None
-        peer_group = None
+        pool = None
         if engram_config.peer_group_store is not None:
-            peer_group = join_engram_peer_group(
-                engram_config.peer_group_size, engram_config.peer_group_store
+            n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+            pool = get_engram_pool(
+                engram_config.peer_group_size,
+                engram_config.peer_group_store,
+                engram_config.peer_group_transport,
+                engram_config.cpu_offload,
+                vllm_config.scheduler_config.max_num_batched_tokens * n_hash_cols,
+                pool_row_bytes(layout.row_bytes, layout.head_dim, 32),
+                # One fetch reads every Engram layer's table.
+                len(layout.num_embeddings),
             )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
@@ -1800,7 +1968,8 @@ class Engram(nn.Module):
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
             packed_fp4=layout.packed_fp4,
-            peer_group=peer_group,
+            pool=pool,
+            name=f"layer{layout.layer_ids[layer_hash_index]}",
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
@@ -1811,7 +1980,8 @@ class Engram(nn.Module):
             head_dim,
             dtype=torch.bfloat16,
         )
-        if not self.embed_tokens.cpu_offload:
+        # Pool tables need no prefetch stream.
+        if self.embed_tokens._pool is not None or not self.embed_tokens.cpu_offload:
             self._prefetch_stream = None
             return
         if self._prefetch_stream is None:

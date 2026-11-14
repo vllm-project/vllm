@@ -4,25 +4,20 @@
 
 Host tables: one copy in host-NUMA memory per node-local DP group, which GPUs map
 with 2M pages instead of /dev/shm's 64K pages, so row lookups miss the TLB less.
-Peer tables: rows split over the HBM of several engines' GPUs.
 """
 
 import ctypes
 import weakref
 from functools import cache
-from types import SimpleNamespace
 from typing import NamedTuple
 
 import torch
 from cuda.bindings import driver as cu
 
+from vllm.distributed.engram_pool.memory import device_view
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.common.engram import (
-    EngramPeerGroup,
-    describe_error,
-    gather_errors,
-)
+from vllm.models.deepseek_v41.common.engram import describe_error, gather_errors
 from vllm.utils.cpu_resource_utils import get_memory_node_info
 from vllm.utils.math_utils import round_up
 
@@ -196,78 +191,8 @@ def _map_table(
         host_buffer, _unmap, address, table.padded_bytes, mapped
     )
     finalizer.atexit = False  # type: ignore[misc]
-    gpu_view = _gpu_view(address, num_bytes, owner=host_buffer)
+    gpu_view = device_view(address, num_bytes, owner=host_buffer)
     return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
-
-
-def _gpu_view(address: int, num_bytes: int, owner: object = None) -> torch.Tensor:
-    """A uint8 tensor over mapped memory; torch retains `owner` with it."""
-    # Name the device: an index-less "cuda" makes torch copy the memory.
-    return torch.as_tensor(
-        SimpleNamespace(
-            __cuda_array_interface__={
-                "shape": (num_bytes,),
-                "typestr": "|u1",
-                "data": (address, False),
-                "version": 3,
-            },
-            owner=owner,
-        ),
-        device=torch.device("cuda", torch.accelerator.current_device_index()),
-    )
-
-
-def _unmap_slices(addresses: list[int], size: int) -> None:
-    for address in addresses:
-        _unmap(address, size, [(0, size)])
-
-
-class PeerTableMappings:
-    """This process's mappings of every slice of a peer table, unmapped once
-    neither the table nor any tensor over its slice holds them. A slice's
-    memory is freed when every GPU has unmapped it."""
-
-    def __init__(self, size: int) -> None:
-        self.addresses: list[int] = []
-        finalizer = weakref.finalize(self, _unmap_slices, self.addresses, size)
-        finalizer.atexit = False  # type: ignore[misc]
-
-
-def share_peer_table(
-    num_bytes: int, group: EngramPeerGroup
-) -> tuple[torch.Tensor, PeerTableMappings]:
-    """Allocate this GPU's slice of a table in its HBM and map every GPU's slice.
-
-    Every slice holds `num_bytes`. Returns this GPU's slice and the mappings,
-    whose addresses are in rank order.
-    """
-    device = torch.accelerator.current_device_index()
-    prop = cu.CUmemAllocationProp()
-    prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
-    prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-    prop.location.id = device
-    prop.requestedHandleTypes = FABRIC_HANDLE
-    size = round_up(num_bytes, _allocation_granularity(prop))
-    own = _call_driver(cu.cuMemCreate, size, prop, 0)
-    exported = group.all_gather(_export_fabric_handle(own))
-    access = _read_write_access(
-        cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
-    )
-    mappings = PeerTableMappings(size)
-    for rank, peer in enumerate(exported):
-        handle = (
-            own
-            if rank == group.rank_in_group
-            else _call_driver(cu.cuMemImportFromShareableHandle, peer, FABRIC_HANDLE)
-        )
-        address = int(_call_driver(cu.cuMemAddressReserve, size, 0, 0, 0))
-        mappings.addresses.append(address)
-        _call_driver(cu.cuMemMap, address, size, 0, handle, 0)
-        _call_driver(cu.cuMemSetAccess, address, size, [access], 1)
-        # The mapping keeps the slice alive.
-        _release([handle])
-    address = mappings.addresses[group.rank_in_group]
-    return _gpu_view(address, num_bytes, owner=mappings), mappings
 
 
 def share_host_table(
