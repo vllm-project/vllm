@@ -47,10 +47,13 @@ DEFAULT_MODES: dict[int, tuple[str, int]] = {
 
 
 def parse_mode(choice: str) -> tuple[str, int]:
-    """`"lamport2"` -> `("lamport", 2)`: a policy table choice as a mode."""
+    """`"lamport2"` -> `("lamport", 2)`: a choice of the runtime policy's
+    `boundary` entry as a `modes` value."""
     for name in ("lamport", "reduced"):
         if choice.startswith(name):
-            return name, int(choice[len(name) :] or 1)
+            tokens = int(choice[len(name) :] or 1)
+            if tokens >= 1:
+                return name, tokens
     raise ValueError(f"Unknown boundary mode {choice!r}")
 
 

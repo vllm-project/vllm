@@ -124,7 +124,9 @@ def _mixes_feed_boundary_kernel(graph) -> bool:
     """Whether a captured graph has an edge from the side-stream mixes kernel
     straight into a boundary kernel. Such an edge is programmatic (the boundary
     kernel launches with PDL), so the boundary kernel could read `post` and
-    `comb` before its PDL wait and before the mixes kernel's writes land."""
+    `comb` before its PDL wait and before the mixes kernel's writes land.
+    Asserts that the graph has both kernels, so a renamed kernel cannot make
+    the answer False by matching nothing."""
     from cuda.bindings import driver
 
     def name(node):
@@ -135,13 +137,19 @@ def _mixes_feed_boundary_kernel(graph) -> bool:
         _, func = driver.cuFuncGetName(params.func)
         return func.decode() if isinstance(func, bytes) else str(func)
 
+    def is_mixes(node):
+        return "MixesDevice" in name(node)
+
+    def is_boundary(node):
+        return "_boundary_kernels" in name(node)
+
     raw = driver.CUgraph(graph.raw_cuda_graph())
+    count = driver.cuGraphGetNodes(raw, 0)[-1]
+    _, nodes, _ = driver.cuGraphGetNodes(raw, count)
+    assert any(map(is_mixes, nodes)) and any(map(is_boundary, nodes))
     count = driver.cuGraphGetEdges(raw, 0)[-1]
     _, sources, targets, *_ = driver.cuGraphGetEdges(raw, count)
-    return any(
-        "MixesDevice" in name(a) and "_boundary_kernels" in name(b)
-        for a, b in zip(sources, targets)
-    )
+    return any(is_mixes(a) and is_boundary(b) for a, b in zip(sources, targets))
 
 
 def _error(out, ref):
@@ -318,3 +326,19 @@ def test_boundary_matches_reference(tp):
 @requires_sm90
 def test_draft_all_reduce_norm_matches_reference(tp):
     run_tp(tp, _draft)
+
+
+@requires_sm90
+def test_parse_mode_rejects_empty_clusters():
+    """Policy choices parse to modes; zero tokens per cluster fails at parse
+    time instead of in the kernel's grid computation."""
+    from vllm.models.glm5next.nvidia.specialized_decode.hopper.boundary import (
+        parse_mode,
+    )
+
+    assert parse_mode("lamport") == ("lamport", 1)
+    assert parse_mode("lamport2") == ("lamport", 2)
+    assert parse_mode("reduced3") == ("reduced", 3)
+    for choice in ("lamport0", "reduced-1", "mailbox1"):
+        with pytest.raises(ValueError):
+            parse_mode(choice)
