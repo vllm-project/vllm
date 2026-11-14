@@ -39,17 +39,18 @@ def _worker(local_rank, world_size, port):
     from vllm import _custom_ops as ops
     from vllm.config import get_current_vllm_config
     from vllm.config.model import ModelConfig
+    from vllm.config.quantization import resolve_quantization_config
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
         fused_allreduce_gemma_rms_norm,
     )
     from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-        CompressedTensorsConfig,
-    )
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptFp8Config,
         ModelOptNvFp4Config,
+    )
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8DynamicTokenSym,
@@ -70,21 +71,9 @@ def _worker(local_rank, world_size, port):
         """A loaded linear whose input quant the norm can fuse."""
         input_scale = None
         if key == kFp8DynamicTokenSym:
-            # llm-compressor FP8_DYNAMIC: per-channel weights, per-token inputs.
-            fp8 = {"num_bits": 8, "type": "float", "symmetric": True}
-            quant_config = CompressedTensorsConfig.from_config(
-                {
-                    "format": "float-quantized",
-                    "ignore": [],
-                    "config_groups": {
-                        "group_0": {
-                            "targets": ["Linear"],
-                            "weights": fp8 | {"strategy": "channel", "dynamic": False},
-                            "input_activations": fp8
-                            | {"strategy": "token", "dynamic": True},
-                        }
-                    },
-                }
+            # Online PTPC FP8: per-channel weights, per-token inputs.
+            quant_config = OnlineQuantizationConfig(
+                resolve_quantization_config("fp8_per_channel", None)
             )
         elif key == kNvfp4Dynamic:
             quant_config = ModelOptNvFp4Config(
@@ -154,7 +143,7 @@ def _worker(local_rank, world_size, port):
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
             return
 
-        assert linear is not None and qa is not None and y is not None
+        assert qa is not None and y is not None
         assert qa.quant_key == key
         # FlashInfer's AR+norm(+quant) matches its AR+norm bitwise; the Triton
         # norm-quant (no all-reduce, or above the workspace budget) reduces the

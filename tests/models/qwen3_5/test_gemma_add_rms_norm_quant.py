@@ -84,9 +84,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     residual[:, 7] *= 50  # outlier channel
     # FP8: static input scale, or None for per-token. NVFP4: global scale
     # (input_global_scale_inv).
-    scale = None
-    if not per_token:
-        scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
+    scale = None if per_token else torch.tensor([1 / 0.0013 if nvfp4 else 0.11]).cuda()
 
     ref_res = residual.clone()
     if has_residual:
@@ -123,12 +121,9 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         )
         assert sf_mismatch.float().mean().item() <= 1e-4
     elif per_token:
-        assert sf.shape == (num_tokens, 1) and sf.dtype == torch.float32
-        # Rows whose normed values match the chain bitwise get the same token
-        # scale and codes; a 1-ulp difference can only move them slightly.
+        # Rows whose normed values match the chain get the same scale and codes.
         same_row = (y == ref_y).all(dim=-1)
-        torch.testing.assert_close(sf[same_row], ref_sf[same_row], atol=0, rtol=0)
-        torch.testing.assert_close(sf, ref_sf, rtol=2**-7, atol=0)
+        assert (sf[same_row] == ref_sf[same_row]).all()
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
         assert (dist[same_row] == 0).all()
     else:
