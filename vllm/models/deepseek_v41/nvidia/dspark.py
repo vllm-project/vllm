@@ -351,7 +351,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 or (isinstance(extra, dict) and extra.get("dspark_fused_markov", False))
             )
             and spec_config.draft_sample_method == "probabilistic"
-            and not spec_config.enable_adaptive_verification
+            and (
+                not spec_config.enable_adaptive_verification
+                or (
+                    not specialized_decode_requested
+                    and self.model.confidence_head is not None
+                )
+            )
             and not vllm_config.model_config.use_fp64_gumbel
             and getattr(vllm_config, "watermark_config", None) is None
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
@@ -362,6 +368,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 self.config.vocab_size,
                 self.config.dspark_markov_rank,
                 self.draft_model_config.dtype,
+                confidence_steps=(
+                    spec_config.num_speculative_tokens
+                    if spec_config.enable_adaptive_verification
+                    else 0
+                ),
             )
             # The sharded chain's settings, for build_specialized_decode.
             self.markov_cache_dtype = vllm_config.model_config.head_dtype
