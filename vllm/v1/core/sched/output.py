@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.utils.gc_utils import untrack_long_lists
 
 if TYPE_CHECKING:
     import numpy as np
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -47,11 +47,10 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: LoRARequest | None
+    # All the tokens to prefill: the prompt, plus any generated tokens on resume.
+    prefill_token_ids: list[int]
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
-
-    # Only used for v2 model runner.
-    prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -60,7 +59,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
+        prefill_token_ids: list[int],
         uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
@@ -81,6 +80,11 @@ class NewRequestData:
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
         )
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Workers receive these by pickle and keep them only for this step.
+        untrack_long_lists((self.prompt_is_token_ids, *self.block_ids))
 
     @property
     def prompt_len(self) -> int:
@@ -116,14 +120,11 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
-        prefill_token_ids_len = (
-            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
-        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
-            f"prefill_token_ids_len={prefill_token_ids_len},"
+            f"prefill_token_ids_len={len(self.prefill_token_ids)},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -137,16 +138,10 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
-    # For request ids not in resumed_req_ids, new_block_ids will be appended to
-    # the request's block IDs. For those in the set, new_block_ids will be used as the
-    # request's block IDs instead of appending to the existing block IDs.
-    resumed_req_ids: set[str]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # MRV1-only: For requests not scheduled in the last step, propagate the token ids
-    # to the connector. Won't contain requests scheduled in the prior step.
-    all_token_ids: dict[str, list[int]]
+    # Blocks to append to the request's existing block IDs.
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -154,15 +149,10 @@ class CachedRequestData:
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
         new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
-        all_token_ids_lens = {
-            req_id: len(toks) for req_id, toks in self.all_token_ids.items()
-        }
         return (
             f"CachedRequestData("
             f"req_ids={self.req_ids},"
-            f"resumed_req_ids={self.resumed_req_ids},"
             f"new_token_ids_lens={new_token_ids_lens},"
-            f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"num_output_tokens={self.num_output_tokens}"
@@ -194,9 +184,7 @@ class CachedRequestData:
     def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
-            resumed_req_ids=set(),
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -204,11 +192,32 @@ class CachedRequestData:
 
 
 @dataclass
-class ScheduledEncoderInputStats:
-    """Stats for encoder inputs scheduled in one iteration."""
+class IterationDetails:
+    """Scheduled prefill/decode request and input counts."""
 
-    num_inputs: int = 0
-    output_tokens: int = 0
+    num_prefill_requests: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_requests: int = 0
+    num_decode_tokens: int = 0
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
+
+    # Temporary aliases for existing EngineCore and worker profiler consumers.
+    @property
+    def num_ctx_requests(self) -> int:
+        return self.num_prefill_requests
+
+    @property
+    def num_ctx_tokens(self) -> int:
+        return self.num_prefill_tokens
+
+    @property
+    def num_generation_requests(self) -> int:
+        return self.num_decode_requests
+
+    @property
+    def num_generation_tokens(self) -> int:
+        return self.num_decode_tokens
 
 
 @dataclass
@@ -262,7 +271,15 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    # Request-local CPU payload updates: None releases a consumed input; a
+    # payload restores it for re-encoding after KV-load rollback. GPU embeddings
+    # and the feature's identifier/placeholder metadata are unaffected.
+    encoder_input_updates: dict[str, dict[int, "MultiModalKwargsItem | None"]] = field(
+        default_factory=dict
+    )
+
+    # Optional scheduling-time snapshot, before worker-side token adjustments.
+    iteration_details: IterationDetails | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
@@ -272,12 +289,13 @@ class SchedulerOutput:
     # Set only in async scheduling case.
     has_structured_output_requests: bool = False
 
+    # Whether any scheduled request uses structured output with speculative
+    # decoding. Set only in async scheduling case.
+    has_structured_output_spec_decode: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
-
-    # Used for adjusting acceptance rate calculation.
-    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
@@ -291,8 +309,6 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-    # EC Cache Manager metadata
-    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
@@ -308,9 +324,10 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
-    # Deprecated: cascade attention has been removed, so this is always empty.
-    # Kept for out-of-tree schedulers and workers.
-    num_common_prefix_blocks: list[int] = field(default_factory=list)
+    # Whether no scheduled request can use the drafts proposed after this step
+    # (non-final prefill chunks, or requests sure to reach max_tokens), so the
+    # drafter can skip proposing them.
+    skip_drafts: bool = False
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
@@ -332,8 +349,3 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
-    # Per request, ordered as structured_output_request_ids: how many leading
-    # drafts the bitmask constrained. `grammar_bitmask` fills every row after
-    # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
-    # from this index on must not be accepted. None invalidates every draft.
-    num_acceptable_drafts: list[int] | None = None

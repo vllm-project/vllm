@@ -19,7 +19,7 @@ use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::tensor::WireNdArray;
-use crate::protocol::{OpaqueValue, decode_msgpack};
+use crate::protocol::{OpaqueValue, decode_msgpack, encode_msgpack};
 
 /// The stop reason associated with a finished output.
 ///
@@ -149,6 +149,11 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Whether the sampler watermarks this request, after EngineCore applied
+    /// `watermark_config.enforce`. Set on the first output, and only when the
+    /// engine has a `watermark_config`.
+    #[serde(default)]
+    pub watermarking: Option<bool>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -163,6 +168,19 @@ pub struct RequestError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+}
+
+impl RequestError {
+    /// `code` of an error caused by the request itself, e.g. a structured-output
+    /// constraint the engine's backend cannot compile. Python raises
+    /// `VLLMValidationError` for it.
+    pub const VALIDATION_ERROR: &str = "validation_error";
+
+    /// Whether the request itself is invalid, so frontends report a client
+    /// error.
+    pub fn is_validation_error(&self) -> bool {
+        self.code == Self::VALIDATION_ERROR
+    }
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -190,12 +208,38 @@ pub struct RequestSpecDecodeMetrics {
     /// Proposed draft count per verify step; empty unless `detailed`.
     #[serde(default)]
     pub per_step_drafted: Vec<u64>,
+    /// Total draft tokens the target model ran a forward pass on.
+    #[serde(default)]
+    pub num_verified_tokens: u64,
+    /// Verified draft count per verify step; empty unless `detailed`.
+    #[serde(default)]
+    pub per_step_verified: Vec<u64>,
 }
 
 impl EngineCoreOutput {
     /// Returns whether this output is terminal for the request.
     pub fn finished(&self) -> bool {
         self.finish_reason.is_some()
+    }
+
+    /// Move the large arrays of wire-format fields into the ordered
+    /// auxiliary-frame list, the inverse of [`Self::resolve_in_place`].
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(value) = &mut self.new_logprobs {
+            value.extract_aux_frames(aux_frames, threshold);
+        }
+        if let Some(value) = &mut self.new_prompt_logprobs_tensors {
+            value.extract_aux_frames(aux_frames, threshold);
+        }
+        if let Some(value) = &mut self.new_sampling_mask {
+            value.extract_aux_frames(aux_frames, threshold);
+        }
+        if let Some(value) = &mut self.prompt_token_id_logprobs {
+            value.extract_aux_frame(aux_frames, threshold);
+        }
+        if let Some(value) = &mut self.routed_experts {
+            value.extract_aux_frame(aux_frames, threshold);
+        }
     }
 
     /// Resolve all wire-format fields in-place by looking up aux frames and
@@ -324,6 +368,18 @@ impl From<DpControlOutput> for EngineCoreOutputs {
 }
 
 impl EngineCoreOutputs {
+    /// Move the large arrays of wire-format fields into the ordered
+    /// auxiliary-frame list, the inverse of [`Self::resolve_in_place`].
+    fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
+        let mut aux_frames = Vec::new();
+        if let Self::RequestBatch(batch) = self {
+            for output in &mut batch.outputs {
+                output.extract_aux_frames(&mut aux_frames, threshold);
+            }
+        }
+        aux_frames
+    }
+
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
     fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
@@ -427,6 +483,8 @@ impl Serialize for EngineCoreOutputs {
     where
         S: Serializer,
     {
+        // Clones the batch; an engine encodes by value with `into_frames`
+        // instead.
         WireEngineCoreOutputs::from(self.clone()).serialize(serializer)
     }
 }
@@ -442,14 +500,31 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
     }
 }
 
-/// Decode one ordinary or multipart engine-core output message into the strong
-/// typed public protocol shape.
-pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
-    let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
+impl EngineCoreOutputs {
+    /// Decode one ordinary or multipart engine-core output message into the strong
+    /// typed public protocol shape.
+    pub fn from_frames(frames: &[Bytes]) -> Result<Self> {
+        let first_frame =
+            frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
-    outputs.resolve_in_place(frames)?;
-    Ok(outputs)
+        let mut outputs: Self = decode_msgpack(first_frame.as_ref())?;
+        outputs.resolve_in_place(frames)?;
+        Ok(outputs)
+    }
+
+    /// Encode into one ordinary or multipart message: the msgpack frame, then
+    /// an auxiliary frame for each array of at least `aux_frame_threshold`
+    /// bytes, as Python's `MsgpackEncoder` does. The inverse of
+    /// [`Self::from_frames`].
+    pub fn into_frames(mut self, aux_frame_threshold: usize) -> Result<Vec<Bytes>> {
+        let aux_frames = self.extract_aux_frames(aux_frame_threshold);
+        let mut frames = Vec::with_capacity(1 + aux_frames.len());
+        frames.push(Bytes::from(encode_msgpack(&WireEngineCoreOutputs::from(
+            self,
+        ))?));
+        frames.extend(aux_frames);
+        Ok(frames)
+    }
 }
 
 #[cfg(test)]
@@ -513,7 +588,7 @@ mod tests {
         ]);
         let wire = (0, vec![OpaqueValue::Array(fields); 2]);
         let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
         // A second output also checks that the first output's tail was consumed.
         assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
     }
@@ -528,11 +603,11 @@ mod tests {
         ] {
             let wire = (0, vec![OpaqueValue::Array(fields)]);
             let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-            assert!(decode_engine_core_outputs(&frames).is_err());
+            assert!(EngineCoreOutputs::from_frames(&frames).is_err());
         }
         let wire = (0, vec![("req-1", vec![42_u32])]);
         let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
-        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
         assert_eq!(
             decoded.as_request_batch().unwrap().outputs,
             vec![EngineCoreOutput {
@@ -582,6 +657,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            watermarking: None,
                         },
                     ],
                     scheduler_stats: None,
@@ -644,6 +720,86 @@ mod tests {
             )
         "#]]
         .assert_debug_eq(&EngineCoreOutputs::try_from(outputs).unwrap());
+    }
+
+    #[test]
+    fn engine_core_outputs_encode_large_arrays_in_aux_frames() {
+        use crate::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob, WireLogprobs};
+        use crate::protocol::tensor::WireNdArray;
+
+        const THRESHOLD: usize = 64;
+        // One position with 16 candidates: 16 * 8 bytes of token ids go in an
+        // auxiliary frame, 16 * 4 bytes of logprobs too, the rank stays inline.
+        let entries: Vec<TokenLogprob> = (0..16)
+            .map(|i| TokenLogprob {
+                token_id: 100 + i,
+                logprob: -(i as f32),
+                rank: if i == 0 { 3 } else { i },
+            })
+            .collect();
+        let wire = WireLogprobs {
+            logprob_token_ids: WireNdArray::from_i64(
+                vec![1, 16],
+                entries.iter().map(|e| i64::from(e.token_id)).collect(),
+            )
+            .unwrap(),
+            logprobs: WireNdArray::from_f32(
+                vec![1, 16],
+                entries.iter().map(|e| e.logprob).collect(),
+            )
+            .unwrap(),
+            token_ranks: WireNdArray::from_i64(vec![1], vec![3]).unwrap(),
+            cu_num_generated_tokens: None,
+            cu_num_generated_tokens_tensor: None,
+        };
+        let outputs = EngineCoreOutputs::RequestBatch(RequestBatchOutputs {
+            engine_index: 1,
+            outputs: vec![EngineCoreOutput {
+                request_id: "req-1".into(),
+                new_token_ids: vec![100],
+                new_logprobs: Some(MaybeWireLogprobs::Wire(Box::new(wire))),
+                ..Default::default()
+            }],
+            timestamp: 2.5,
+            weight_version: Some("v1".into()),
+            ..Default::default()
+        });
+
+        let frames = outputs.into_frames(THRESHOLD).unwrap();
+        assert_eq!(frames.len(), 3);
+        let decoded = EngineCoreOutputs::from_frames(&frames).unwrap();
+        let batch = decoded.as_request_batch().unwrap();
+        assert_eq!((batch.engine_index, batch.timestamp), (1, 2.5));
+        assert_eq!(batch.weight_version.as_deref(), Some("v1"));
+        assert_eq!(
+            *batch.outputs[0].new_logprobs.as_ref().unwrap().as_direct().unwrap(),
+            Logprobs {
+                positions: vec![PositionLogprobs { entries }]
+            }
+        );
+    }
+
+    #[test]
+    fn engine_core_outputs_encode_utility_and_control() {
+        for outputs in [
+            EngineCoreOutputs::Utility(UtilityCallOutput {
+                engine_index: 2,
+                timestamp: 1.0,
+                output: UtilityOutput {
+                    call_id: 7_u64.into(),
+                    failure_message: Some("boom".into()),
+                    result: None,
+                },
+            }),
+            EngineCoreOutputs::DpControl(DpControlOutput {
+                engine_index: 0,
+                timestamp: 1.0,
+                control: DpControlMessage::WaveComplete(4),
+            }),
+        ] {
+            let frames = outputs.clone().into_frames(0).unwrap();
+            assert_eq!(EngineCoreOutputs::from_frames(&frames).unwrap(), outputs);
+        }
     }
 
     #[test]

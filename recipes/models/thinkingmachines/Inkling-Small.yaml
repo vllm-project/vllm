@@ -79,7 +79,7 @@ variants:
       h200: 2
     description: "NVFP4 checkpoint requiring at least 180 GB aggregated VRAM: W4A4 with TP1 on B300/GB300 or TP2 on B200/GB200, and W4A16 with TP4 on H100 or TP2 on H200."
     extra_args:
-      - "--kernel-config.enable_flashinfer_autotune=False"
+      - "--disable-flashinfer-autotune"
     extra_env:
       FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
   mxfp4:
@@ -105,8 +105,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.85"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -118,8 +116,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.85"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -131,8 +127,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"
@@ -163,7 +157,7 @@ variants:
     hardware_overrides:
       nvidia:
         extra_args:
-          - "--kernel-config.enable_flashinfer_autotune=False"
+          - "--disable-flashinfer-autotune"
         extra_env:
           FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
       mi300x:
@@ -173,8 +167,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -186,8 +178,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -199,8 +189,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -309,7 +297,7 @@ guide: |
     --tool-call-parser inkling \
     --enable-auto-tool-choice \
     --tensor-parallel-size 1 \
-    --kernel-config.enable_flashinfer_autotune=False \
+    --disable-flashinfer-autotune \
     --trust-remote-code
   ```
 

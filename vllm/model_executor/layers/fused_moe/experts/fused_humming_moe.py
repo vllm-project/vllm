@@ -69,7 +69,6 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.humming import (
@@ -84,6 +83,17 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def _is_humming_quant_method() -> bool:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    return (
+        vllm_config is not None
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.quantization == "humming"
+    )
 
 
 def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
@@ -301,7 +311,25 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @classmethod
     def is_batched(cls) -> bool:
-        return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+        return cls.activation_format().is_batched
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        # Humming runs the input schema its weights are converted with. The
+        # Humming quant method, VLLM_HUMMING_INPUT_QUANT_CONFIG and the W4A8
+        # (INT4) and MXFP4 oracles supply one; the FP8/NVFP4/MXFP8/INT8 oracles
+        # convert checkpoint weights for unquantized activations.
+        if (
+            envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
+            or weight_key in (kInt4Static, kMxfp4Static)
+            or _is_supported_wna16_weight_key(weight_key)
+            or _is_humming_quant_method()
+        ):
+            return activation_key
+        return None
 
     @staticmethod
     def _supports_quant_scheme(
@@ -596,17 +624,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         return self._workspace_shapes(M, topk, activation)
 
-    def make_workspaces(self, M: int, topk: int, activation: MoEActivation):
-        shapes = self._workspace_shapes(M, topk, activation)
-        workspace1_shape, workspace2_shape, output_shape = shapes
-        torch_dtype = self.moe_config.in_dtype
-        workspace1, workspace2 = current_workspace_manager().get_simultaneous(
-            (workspace1_shape, torch_dtype),
-            (workspace2_shape, torch_dtype),
-        )
-        output = _resize_cache(workspace1, output_shape)
-        return workspace1, workspace2, output
-
     def prepare_buffers(
         self,
         workspace1: torch.Tensor,
@@ -636,26 +653,24 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+        # Check the gemm type first: the base check warns about activation
+        # quantization fallbacks of kernels it accepts.
+        if cls._supports_current_device():
+            assert hasattr(cls, "humming_gemm_type")
+            gemm_type = cls.humming_gemm_type().value.lower()
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
+            if preferred_gemm_type.lower() != gemm_type:
+                return False, (
+                    f"preferred gemm type {preferred_gemm_type} != "
+                    f"supported gemm type {gemm_type}"
+                )
+        return mk.FusedMoEExpertsModular.is_supported_config(
             cls,
             moe_config,
             weight_key,
             activation_key,
             activation_format,
         )
-
-        if supported:
-            assert hasattr(cls, "humming_gemm_type")
-            gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
-            supported = preferred_gemm_type.lower() == gemm_type
-            if not supported:
-                reason = (
-                    f"preferred gemm type {preferred_gemm_type} != "
-                    f"supported gemm type {gemm_type}"
-                )
-
-        return supported, reason
 
     def apply_activation(
         self,
@@ -680,7 +695,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -892,7 +907,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -947,7 +962,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
-            num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
+            # Bound the dynamic input quantization to the valid routes. Rows
+            # past expert_offsets[-1] belong to non-local experts or to invalid
+            # routes (e.g. -1 for padding tokens), with or without expert_map.
+            num_valid_tokens = expert_offsets[-1:]
         else:
             # Prequantized inputs skip w13 quantization, so its buffer is free
             # to hold the permuted hidden states.

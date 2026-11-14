@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
 
 
 @pytest.mark.asyncio
@@ -154,3 +154,23 @@ def test_llm_delete_inprocess(
                 else SHUTDOWN_TEST_TIMEOUT_SEC
             ),
         )
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+def test_llm_delete_inprocess_removes_bytecode_hooks(monkeypatch) -> None:
+    """Compiled modules register global bytecode hooks, which keep the model
+    and its weights alive unless removed at shutdown. Qwen3's model class
+    subclasses Qwen2's and both are @support_torch_compile, so its compiled
+    module is initialized twice."""
+    from torch._dynamo.convert_frame import _bytecode_hooks
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        with VllmRunner(
+            "Qwen/Qwen3-0.6B",
+            max_model_len=256,
+            kernel_config=KernelConfig(enable_jit_warmup=False),
+        ):
+            assert len(_bytecode_hooks) == 1
+        assert not _bytecode_hooks

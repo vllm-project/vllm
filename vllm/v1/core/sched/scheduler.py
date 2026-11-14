@@ -29,7 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -42,9 +44,9 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
+    IterationDetails,
     KVConnectorBlockState,
     NewRequestData,
-    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -53,10 +55,10 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -75,7 +77,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -122,8 +124,6 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None
         )
-        # Track requests scheduled in prior step (MRV1-only).
-        self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -165,6 +165,7 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
+        self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
         # KVConnectorBase_V1.requires_kv_delivery.
         self.requires_kv_delivery = False
@@ -190,6 +191,12 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
+            # HiSparse keeps reading a released page until the pool reuses it,
+            # so a load into a reused page must also wait for in-flight steps.
+            self.defer_async_loads = (
+                self.defer_block_free
+                and kv_cache_config.hisparse_host_num_blocks is not None
+            )
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
 
@@ -225,6 +232,9 @@ class Scheduler(SchedulerInterface):
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
         self.kv_holding_waiting = create_request_queue(self.policy)
+        # With either async-load limit, keep requests that may load KV async
+        # separate so throttling their loads doesn't block local requests.
+        self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -249,7 +259,7 @@ class Scheduler(SchedulerInterface):
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
-        self.grammar_compile_error_reqs: set[str] = set()
+        self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
 
         # Encoder-related.
@@ -285,7 +295,7 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
-        self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_spec_tokens = vllm_config.num_scheduled_spec_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
@@ -293,10 +303,10 @@ class Scheduler(SchedulerInterface):
         self.prefix_replay_group_ids = tuple(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_replay_tokens > 0
+            if group.prefix_replay_tokens > 0
         )
         replay_windows = {
-            kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
+            kv_cache_config.kv_cache_groups[group_id].prefix_replay_tokens
             for group_id in self.prefix_replay_group_ids
         }
         assert len(replay_windows) <= 1, (
@@ -304,6 +314,10 @@ class Scheduler(SchedulerInterface):
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
+        # The model runner skips drafting in steps where no scheduled request
+        # can use the drafts. Only drafters with their own forward pass reserve
+        # lookahead slots.
+        self.can_skip_drafts = self.num_lookahead_tokens > 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -312,14 +326,22 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
-            self.use_eagle = speculative_config.use_eagle()
+            self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
-            if self.use_eagle and not self.use_eagle_block_drop:
+            if (
+                speculative_config.needs_eagle_block_drop()
+                and speculative_config.disable_eagle_block_drop
+            ):
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "
                     "This is experimental and may affect speculative-token "
                     "acceptance rates."
                 )
+
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        if self.num_hash_lookahead_tokens:
+            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
+            self.use_eagle_block_drop = False
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -331,6 +353,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -353,53 +376,34 @@ class Scheduler(SchedulerInterface):
         self._spec_decode_step_blocks = sum(
             cdiv(num_spec_decode_tokens, manager.block_size)
             for manager in self.kv_cache_manager.coordinator.single_type_managers
-            if not isinstance(manager.kv_cache_spec, MambaSpec)
+            if not isinstance(manager, MambaManager)
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
+        self._pending_encoder_input_ids: dict[str, set[int]] = {}
+        # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
         # DP prefill balancing: Flag to track whether the last cadence-aligned
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
-        # The DP engine core drives this cadence from a counter shared across
-        # ranks; an engine without one never throttles, so apply the interval
-        # locally, timed from the last prefill-carrying step. Three regimes:
-        #   1. no DP -- local cadence applies;
-        #   2. dense DP rank -- `reconfigure_for_independent_dp_rank` already
-        #      set data_parallel_size=1, so each rank gets its own cadence.
-        #      Intended, but a behaviour change: this used to be a no-op;
-        #   3. MoE DP rank (size > 1) -- the engine core drives it, no-op here.
-        self.local_prefill_interval = (
-            self.scheduler_config.prefill_schedule_interval
-            if self.parallel_config.data_parallel_size == 1
-            else 1
-        )
-        if self.local_prefill_interval > 1:
-            # Neither the hold nor its release is otherwise visible in logs or
-            # stats, which makes a misapplied cadence hard to diagnose.
-            logger.info_once(
-                "Prefill cadence: applying prefill_schedule_interval=%d "
-                "locally (this engine is not DP-coordinated); prefill is held "
-                "until %d executed steps have passed since the last "
-                "prefill-carrying step.",
-                self.local_prefill_interval,
-                self.local_prefill_interval,
-            )
-        # A full interval back, so the first step is never gated.
-        self.last_prefill_step = -self.local_prefill_interval
-        # Steps that actually scheduled tokens. `current_step` counts every
-        # schedule() call including empty ones, so it would expire the hold
-        # early; it keeps its own meaning (next_decode_eligible_step).
-        self.num_executed_steps = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
+        )
+        # Cache-aware admission needs a prefix cache to consult, and reorders by
+        # position, which only a FCFS queue has.
+        self.cache_aware_window = (
+            self.scheduler_config.cache_aware_admission_window
+            if self.policy == SchedulingPolicy.FCFS
+            and self.cache_config.enable_prefix_caching
+            else 0
+        )
+        self.cache_aware_threshold = (
+            self.scheduler_config.cache_aware_admission_threshold
         )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
@@ -411,15 +415,15 @@ class Scheduler(SchedulerInterface):
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
             (
-                group.kv_cache_spec.prefill_checkpoint_alignment
+                group.manager_config.params.prefill_checkpoint_alignment
                 for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.kv_cache_spec, MambaSpec)
+                if isinstance(group.manager_config.params, MambaManager.Params)
             ),
             None,
         )
         self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.kv_cache_spec, MambaSpec)
-            or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            not isinstance(group.manager_config.params, MambaManager.Params)
+            or group.manager_config.params.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
@@ -445,13 +449,17 @@ class Scheduler(SchedulerInterface):
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        # Request id -> (fence_seq, num_external_tokens, connector prefix cache
+        # queries, hits): async KV loads started once processed_step_seq >=
+        # fence_seq.
+        self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.hash_block_size)
+            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -459,16 +467,67 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
-        # In-flight requests still prefilling (prefill chunks + in-progress
-        # async KV loads). Their remaining-block reservation gates async loads.
+        # Remaining-block reservations of in-flight prefills gate async loads.
+        # Parked async KV loads can number thousands, so theirs are cached until
+        # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
+        self._parked_reservations: dict[Request, int] = {}
+        self._parked_reserved_blocks = 0
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
-        # None when not tracked (stats disabled or no KV connector).
+        # None when not tracked (no KV connector, or no stats or load cap).
         self._kv_fetch_stages: dict[Request, str] | None = (
-            {} if self.log_stats and self.connector is not None else None
+            {}
+            if self.connector is not None
+            and (self.log_stats or self.scheduler_config.max_num_inflight_kv_loads)
+            else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        self._aborted_kv_loads: set[str] = set()
+
+    def _drafts_unused(
+        self, request: Request, num_computed_tokens: int, num_new_tokens: int
+    ) -> bool:
+        """Whether the drafts proposed for `request` after this step are sure to
+        go unused.
+
+        Drafts proposed after a step are verified in the request's next decode
+        step. They go unused when no such step follows, in two cases:
+
+        1. This step is a non-final prefill chunk. It samples no token, and the
+           scheduler drops drafts proposed after a prefill chunk.
+        2. This step samples the request's last output token: even if every
+           draft is rejected, the request reaches `max_tokens` and finishes.
+
+        Stop tokens and stop strings also end requests, but they cannot be known
+        in advance. This returns True only when it is sure.
+
+        The model runner proposes no drafts (K=0) in a step where this is True
+        for every scheduled request on every DP rank.
+
+        Args:
+            request: A request scheduled in this step.
+            num_computed_tokens: Tokens computed before this step, including
+                prefix-cache and KV-connector hits for a newly admitted request.
+            num_new_tokens: Tokens scheduled for this step.
+
+        """
+        # Case 1: a non-final prefill chunk stops before the request's last
+        # known token, so this step samples nothing.
+        if num_computed_tokens + num_new_tokens < request.num_tokens:
+            return True
+
+        # Case 2: this step samples the request's last output token. Drafts may
+        # all be rejected, so count only the output tokens the request is sure
+        # to have once this step finishes: the verified ones, plus one from each
+        # step that samples. This step samples one.
+        min_num_output_tokens = request.num_output_tokens + 1
+        if request.num_output_placeholders > 0:
+            # Async scheduling: a step that samples is still in flight, and it
+            # adds one more.
+            min_num_output_tokens += 1
+        # Reaching max_tokens finishes the request, so no step verifies the drafts.
+        return min_num_output_tokens >= request.max_tokens
 
     def _mamba_block_aligned_split(
         self,
@@ -507,6 +566,7 @@ class Scheduler(SchedulerInterface):
             request.num_tokens,
             block_size,
             self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
 
         end = start + num_new_tokens
@@ -514,6 +574,7 @@ class Scheduler(SchedulerInterface):
             prefill_end,
             ckpt_block_size,
             drop_eagle_block=self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -549,6 +610,7 @@ class Scheduler(SchedulerInterface):
                 request.num_prompt_tokens,
                 self.hash_block_size,
                 self.use_eagle_block_drop,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
@@ -586,14 +648,16 @@ class Scheduler(SchedulerInterface):
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
-        self, request: Request
+        self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+            return self.kv_cache_manager.get_computed_blocks_for_connector(
+                request, max_cache_hit_length
+            )
 
         blocks, num_local, shared_prefix_boundary = (
-            self.kv_cache_manager.get_computed_blocks(request)
+            self.kv_cache_manager.get_computed_blocks(request, max_cache_hit_length)
         )
         return blocks, num_local, shared_prefix_boundary, False
 
@@ -632,9 +696,15 @@ class Scheduler(SchedulerInterface):
         # and the "jump decoding" optimization in the future.
 
         scheduled_new_reqs: list[Request] = []
-        scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+
+        iteration_details = None
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ) or self.vllm_config.profiler_config.profiler is not None:
+            iteration_details = IterationDetails()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -648,14 +718,15 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether a request scheduled this step can use the drafts proposed after
+        # it. Stays set if that request is preempted later in the step.
+        drafts_needed = not self.can_skip_drafts
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
-        # Whether a waiting request was admitted with prompt left to compute.
-        # Separate from `prefill_scheduled`, which covers only the running loop.
-        prefill_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -677,7 +748,7 @@ class Scheduler(SchedulerInterface):
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if num_eligible_reqs > 1
+            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
             else 0
         )
         if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
@@ -686,28 +757,6 @@ class Scheduler(SchedulerInterface):
             long_prefill_token_threshold = max(
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
-
-        # Local prefill cadence: hold prefill until the interval since the last
-        # prefill-carrying step has elapsed, so decode runs in longer
-        # uninterrupted stretches. Mirrors the DP gate above, including its
-        # capacity escape: once a release step cannot drain the waiting queue,
-        # throttling stops (#44558, test_throttle_capacity_bound_guard_admits).
-        # Without that escape a backed-up engine holds both admissions and
-        # in-flight chunks for interval-1 of every interval steps, capping
-        # prefill at roughly one budget per interval and growing the waiting
-        # queue without bound.
-        if (
-            not defer_prefills
-            and self.local_prefill_interval > 1
-            and not self.prefill_capacity_bound
-            # This call becomes executed step num_executed_steps + 1 if it
-            # schedules anything, and last_prefill_step is stamped on the same
-            # convention below.
-            and (self.num_executed_steps + 1) - self.last_prefill_step
-            < self.local_prefill_interval
-            and any(not r.is_prefill_chunk for r in self.running)
-        ):
-            defer_prefills = True
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -733,7 +782,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             if self.current_step < request.next_decode_eligible_step:
-                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # PP+async: enforce `pp_size` steps between same-req decodes
                 # to match worker-side sampled-tokens broadcast slot ring cadence.
                 req_index += 1
                 continue
@@ -885,6 +934,10 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(
+                                        preempted_encoder_inputs
+                                    )
                     else:
                         preempted_req = self.running.pop()
 
@@ -899,6 +952,16 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
+                if (
+                    self.policy == SchedulingPolicy.PRIORITY
+                    and request.status == RequestStatus.PREEMPTED
+                ):
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit (it just freed its blocks);
+                    # it was removed from `self.running`, so `req_index`
+                    # already points at the next one.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -911,6 +974,9 @@ class Scheduler(SchedulerInterface):
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
+            drafts_needed = drafts_needed or not self._drafts_unused(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -933,6 +999,8 @@ class Scheduler(SchedulerInterface):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -941,41 +1009,73 @@ class Scheduler(SchedulerInterface):
                     duplicate_encoder_inputs,
                 )
 
-        # Record the LoRAs in scheduled_running_reqs
+        # Record the LoRAs of all running requests, including those not
+        # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
                 req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
+                for req in self.running
                 if req.lora_request and req.lora_request.lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+            if self.cache_aware_window and not defer_prefills:
+                self._reorder_waiting_by_cached_prefix()
+
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
+            step_skipped_async_kv: deque[Request] = deque()
+            # Async loads started this step: newer than any block-holder.
+            step_started_kv_loads: list[Request] = []
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
                 self.deferred_waiting.add(request_to_skip)
-                if self._holds_kv_blocks(request_to_skip):
+                holds_blocks = self._holds_kv_blocks(request_to_skip)
+                if holds_blocks and from_queue is not self.kv_holding_waiting:
+                    step_started_kv_loads.append(request_to_skip)
+                elif holds_blocks:
                     step_skipped_kv_holding.appendleft(request_to_skip)
+                elif from_queue is self.async_kv_waiting:
+                    step_skipped_async_kv.appendleft(request_to_skip)
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
-            while token_budget > 0:
-                # Requests holding KV blocks are always drained first, and are
-                # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
-                request_queue = self.kv_holding_waiting
-                if not request_queue and self._pause_state == PauseState.UNPAUSED:
-                    request_queue = self.waiting
-                if not request_queue or input_budget <= draft_slots:
-                    break
+            num_async_kv_loads = 0
+            max_async_kv_loads = (
+                self.scheduler_config.max_async_kv_loads_per_step or float("inf")
+            )
+            # Cleared once self.async_kv_waiting's head can't start a load.
+            take_async_kv = True
+            while True:
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_active_reqs:
+                loads_only = (
+                    num_running >= self.max_num_active_reqs or token_budget <= 0
+                )
+                if not loads_only:
+                    # Requests holding KV blocks are always drained first, and are
+                    # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
+                    request_queue = self.kv_holding_waiting
+                    if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                        request_queue = self._next_waiting_queue(take_async_kv)
+                elif (
+                    take_async_kv
+                    and self.scheduler_config.max_num_inflight_kv_loads
+                    and self._pause_state == PauseState.UNPAUSED
+                ):
+                    # No running slot or token budget left: start async KV loads
+                    # only, which take neither until their KV has arrived.
+                    request_queue = self.async_kv_waiting
+                else:
+                    break
+                if not request_queue or (
+                    not loads_only and input_budget <= draft_slots
+                ):
                     break
 
                 request = request_queue.peek_request()
@@ -1013,13 +1113,23 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    if request.resumable and self.num_hash_lookahead_tokens:
+                        # Resident KV can retain a discarded streaming token's
+                        # hash. Recomputing KV must use the current token sequence.
+                        request.block_hashes.clear()
+                        request.update_block_hashes()
                     did_prefix_cache_lookup = True
+                    max_cache_hit_length = (
+                        self.aux_output_connector.max_cache_hit(request)
+                        if self.aux_output_connector is not None
+                        else None
+                    )
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    ) = self._get_local_prefix_cache_hit(request, max_cache_hit_length)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -1035,7 +1145,7 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
-                        if request.skip_reading_prefix_cache:
+                        if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1081,6 +1191,16 @@ class Scheduler(SchedulerInterface):
                         else:
                             num_external_computed_tokens = ext_tokens
 
+                        if self.aux_output_connector is not None:
+                            num_external_computed_tokens = (
+                                self.aux_output_connector.cap_external_hit(
+                                    request,
+                                    num_new_local_computed_tokens,
+                                    num_external_computed_tokens,
+                                )
+                            )
+                            load_kv_async &= num_external_computed_tokens > 0
+
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
                             # resume boundary would have no valid Mamba state.
@@ -1089,7 +1209,9 @@ class Scheduler(SchedulerInterface):
                                 new_computed_blocks,
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
-                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            ) = self.kv_cache_manager.get_computed_blocks(
+                                request, max_cache_hit_length
+                            )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1121,8 +1243,13 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Skip request with pending mm encoding prefetches
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    # Include encoder inputs needed to replay the prefix tail.
+                    ec_computed_tokens = num_computed_tokens
+                    if not window_loaded:
+                        ec_computed_tokens = max(
+                            0, num_computed_tokens - self.prefix_replay_tokens
+                        )
+                    if self._ec_transfer_pending(request, ec_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1160,6 +1287,20 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if (
+                    load_kv_async
+                    and (
+                        num_async_kv_loads >= max_async_kv_loads
+                        or not self._admits_inflight_kv_load()
+                    )
+                ) or (loads_only and not load_kv_async):
+                    # Past an async KV load limit, or needs a running slot while none
+                    # is free. It waits at the head of its queue; others may admit.
+                    if request_queue is not self.async_kv_waiting:
+                        break
+                    take_async_kv = False
+                    continue
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -1269,6 +1410,18 @@ class Scheduler(SchedulerInterface):
                         request, num_computed_tokens, num_new_tokens
                     )
 
+                    if (
+                        request.has_encoder_inputs
+                        and not self.scheduler_config.enable_chunked_prefill
+                        and not self.is_mm_encoder_only
+                        and num_new_tokens > 0
+                        and num_new_tokens < request.num_tokens - num_computed_tokens
+                    ):
+                        # Encoder cache pressure must not split a prompt that
+                        # requires full prefill. Release references acquired by hits.
+                        self.encoder_cache_manager.free(request)
+                        num_new_tokens = 0
+
                     if num_new_tokens == 0:
                         # The request cannot be scheduled. Requeue it so it does
                         # not stall the requests behind it.
@@ -1343,14 +1496,29 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    self.connector.update_state_after_alloc(
-                        request,
-                        self.kv_cache_manager.get_blocks(request_id),
-                        num_external_computed_tokens,
+                    defer_load = (
+                        load_kv_async
+                        and self.defer_async_loads
+                        and self.sched_step_seq > self.processed_step_seq
                     )
+                    if defer_load:
+                        request.last_sched_seq = self.sched_step_seq
+                        self.deferred_loads[request_id] = (
+                            self.sched_step_seq,
+                            num_external_computed_tokens,
+                            connector_prefix_cache_queries,
+                            connector_prefix_cache_hits,
+                        )
+                    else:
+                        self.connector.update_state_after_alloc(
+                            request,
+                            self.kv_cache_manager.get_blocks(request_id),
+                            num_external_computed_tokens,
+                        )
                     if (
                         self.connector_prefix_cache_stats is not None
                         and connector_prefix_cache_queries != 0
+                        and not defer_load
                     ):
                         preempted = request.num_preemptions > 0
                         self.connector_prefix_cache_stats.record(
@@ -1375,15 +1543,10 @@ class Scheduler(SchedulerInterface):
                     )
 
                 if load_kv_async:
-                    # This path deliberately does not reach `prefill_admitted`
-                    # below, so it does not restart the prefill cadence:
-                    # `num_new_tokens` was set to 0 above, so the step carries
-                    # no prefill compute for this request. The interval is
-                    # timed from steps that actually prefilled; refreshing it
-                    # here would start the cadence from a step that did none.
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    num_async_kv_loads += 1
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1398,7 +1561,11 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
-                    self._inflight_prefills.add(request)
+                    if self.aux_output_connector is not None:
+                        self.aux_output_connector.request_loading(
+                            request, num_computed_tokens
+                        )
+                    self._reserve_parked(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
                     continue
@@ -1413,12 +1580,14 @@ class Scheduler(SchedulerInterface):
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
-                if request.status == RequestStatus.WAITING:
-                    scheduled_new_reqs.append(request)
-                elif request.status == RequestStatus.PREEMPTED:
-                    scheduled_resumed_reqs.append(request)
-                else:
+                # A resumed request is re-sent in full, like a new one: its
+                # blocks were freed and its worker state dropped at preemption.
+                if request.status not in (
+                    RequestStatus.WAITING,
+                    RequestStatus.PREEMPTED,
+                ):
                     raise RuntimeError(f"Invalid request status: {request.status}")
+                scheduled_new_reqs.append(request)
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -1431,25 +1600,27 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
+                drafts_needed = drafts_needed or not self._drafts_unused(
+                    request, num_computed_tokens, num_new_tokens
+                )
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
-                # Must use the SAME predicate as the deferral gate in the
-                # waiting loop (`num_computed_tokens < num_tokens - 1`).
-                # Stamping on `< num_prompt_tokens` instead let a request with
-                # exactly one token left pass the gate on a held step and still
-                # restart the interval -- which is every full prefix-cache hit,
-                # and every remote-KV resume, since those set
-                # num_computed_tokens = num_tokens - 1.
-                prefill_admitted |= num_computed_tokens < request.num_tokens - 1
-                # Only track requests that will still be prefilling after this chunk.
-                if num_computed_tokens + num_new_tokens < request.num_tokens:
+                # Track requests still prefilling after this chunk. A promoted load
+                # also stays tracked until _update_after_schedule drops it.
+                if (
+                    num_computed_tokens + num_new_tokens < request.num_tokens
+                    or request in self._parked_reservations
+                ):
                     self._inflight_prefills.add(request)
+                self._unreserve_parked(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -1462,8 +1633,12 @@ class Scheduler(SchedulerInterface):
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_kv_holding:
                 self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
+            for request in step_started_kv_loads:
+                self.kv_holding_waiting.add_request(request)
             if step_skipped_waiting:
                 self.waiting.prepend_requests(step_skipped_waiting)
+            if step_skipped_async_kv:
+                self.async_kv_waiting.prepend_requests(step_skipped_async_kv)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
@@ -1474,15 +1649,6 @@ class Scheduler(SchedulerInterface):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
-        # Count this step before stamping the cadence below, so that
-        # last_prefill_step includes the step that carried the prefill.
-        if total_num_scheduled_tokens > 0:
-            self.num_executed_steps += 1
-
-        # Restart the cadence interval from any step that carried prefill,
-        # whether a new admission or a running chunk.
-        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
-            self.last_prefill_step = self.num_executed_steps
 
         assert token_budget >= 0
         assert input_budget >= 0
@@ -1490,46 +1656,43 @@ class Scheduler(SchedulerInterface):
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
-            scheduled_running_reqs
-        ) <= len(self.running)
+        assert len(scheduled_new_reqs) + len(scheduled_running_reqs) <= len(
+            self.running
+        )
 
         # Construct the scheduler output.
-        if self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req.prefill_token_ids,
+                uses_mrope=self.model_uses_mrope,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs,
-                scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                iteration_details=iteration_details,
             )
 
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        if iteration_details is not None:
+            # Decode requests are counted in _make_cached_request_data()
+            # Other scheduled requests - including new requests - are prefill
+            iteration_details.num_prefill_requests = (
+                len(num_scheduled_tokens) - iteration_details.num_decode_requests
+            )
+            iteration_details.num_prefill_tokens = (
+                total_num_scheduled_tokens - iteration_details.num_decode_tokens
+            )
+            iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
+            iteration_details.num_encoder_output_tokens = (
+                self.max_num_encoder_input_tokens - encoder_compute_budget
+            )
 
         # Mamba "align" boundary states must be handed off with exact block ids;
         # they cannot be reconstructed from a connector's append-only block
@@ -1569,15 +1732,6 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
-        scheduled_encoder_input_stats = None
-        if (
-            self.log_stats
-            and self.observability_config.enable_logging_iteration_details
-        ):
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
-                scheduled_encoder_inputs
-            )
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1585,7 +1739,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+            iteration_details=iteration_details,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1593,12 +1747,15 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_input_updates=self._get_encoder_input_updates(
+                num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+            ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            skip_drafts=not drafts_needed,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1668,6 +1825,7 @@ class Scheduler(SchedulerInterface):
             self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
+        self._pending_encoder_input_ids.pop(request.request_id, None)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1737,15 +1895,17 @@ class Scheduler(SchedulerInterface):
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
-        kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : keep_end
-        ]
         del session._all_token_ids[keep_end:]
         del session.block_hashes[keep_end // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
-        session.prompt_token_ids.extend(kept_output_tokens)
+        extend_from_slice(
+            session.prompt_token_ids,
+            session._all_token_ids,
+            session.num_prompt_tokens,
+            keep_end,
+        )
 
         if update.mm_features:
             base = session.num_tokens
@@ -1762,6 +1922,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
@@ -1773,23 +1934,21 @@ class Scheduler(SchedulerInterface):
     def _make_cached_request_data(
         self,
         running_reqs: list[Request],
-        resumed_reqs: list[Request],
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
+        iteration_details: IterationDetails | None = None,
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
-        all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
-        resumed_req_ids = set()
 
-        num_running_reqs = len(running_reqs)
-        for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
+        for req in running_reqs:
             req_id = req.request_id
             req_ids.append(req_id)
+            is_prefill = req.is_prefill_chunk
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1806,11 +1965,6 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
-            if idx >= num_running_reqs:
-                resumed_req_ids.add(req_id)
-            if not self.use_v2_model_runner:  # noqa: SIM102
-                if req_id not in self.prev_step_scheduled_req_ids:
-                    all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -1818,12 +1972,14 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if iteration_details is not None and not is_prefill:
+                # Count decode requests here; all other scheduled reqs are prefills
+                iteration_details.num_decode_requests += 1
+                iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
 
         return CachedRequestData(
             req_ids=req_ids,
-            resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
-            all_token_ids=all_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
@@ -1949,18 +2105,21 @@ class Scheduler(SchedulerInterface):
             if (
                 self.scheduler_config.disable_chunked_mm_input
                 and not self.is_encoder_decoder
-                # `<=`, not `<`: a chunk that starts exactly at the item still
-                # splits it when it cannot cover the whole item.
-                and num_computed_tokens <= start_pos
                 and (num_computed_tokens + num_new_tokens)
                 < (start_pos + num_encoder_tokens)
             ):
-                # Account for EAGLE shift when rolling back to avoid
-                # encoder cache miss. This ensures the scheduled range
-                # stops before start_pos even with the shift.
-                num_new_tokens = max(
-                    0, start_pos - (num_computed_tokens + shift_computed_tokens)
-                )
+                if num_computed_tokens < start_pos:
+                    # Account for EAGLE shift when rolling back to avoid
+                    # encoder cache miss. This ensures the scheduled range
+                    # stops before start_pos even with the shift.
+                    num_new_tokens = max(
+                        0, start_pos - (num_computed_tokens + shift_computed_tokens)
+                    )
+                else:
+                    # The chunk starts on or inside the item (a prefix cache hit
+                    # can end inside it), so there is nothing to roll back to.
+                    # Schedule nothing until the rest of the item fits.
+                    num_new_tokens = 0
                 break
 
             if not self.is_encoder_decoder:
@@ -2059,23 +2218,6 @@ class Scheduler(SchedulerInterface):
             duplicate_encoder_inputs,
         )
 
-    def _make_scheduled_encoder_input_stats(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
-    ) -> ScheduledEncoderInputStats | None:
-        stats = ScheduledEncoderInputStats()
-
-        for req_id, input_ids in scheduled_encoder_inputs.items():
-            request = self.requests.get(req_id)
-            if request is None:
-                continue
-
-            for input_id in input_ids:
-                mm_feature = request.mm_features[input_id]
-                stats.num_inputs += 1
-                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
-
-        return stats if stats.num_inputs else None
-
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
@@ -2098,14 +2240,7 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_acceptable_drafts = [
-            len(strip_speculative_padding(spec_tokens.get(req_id, [])))
-            for req_id in structured_output_request_ids
-        ]
-        return GrammarOutput(
-            structured_output_request_ids, bitmask, num_acceptable_drafts
-        )
+        return GrammarOutput(structured_output_request_ids, bitmask)
 
     def update_from_output(
         self,
@@ -2119,6 +2254,8 @@ class Scheduler(SchedulerInterface):
             model_runner_output.prompt_token_id_logprobs_dict
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        num_drafted_tokens_per_req = model_runner_output.num_drafted_tokens_per_req
+        num_verified_tokens_per_req = model_runner_output.num_verified_tokens_per_req
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
@@ -2130,6 +2267,7 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
             self._drain_deferred_frees()
+            self._drain_deferred_loads()
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -2160,6 +2298,10 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
+        # The worker's output order follows its batch, not num_scheduled_tokens.
+        req_indices = {
+            req_id: i for i, req_id in enumerate(model_runner_output.req_ids)
+        }
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2188,7 +2330,7 @@ class Scheduler(SchedulerInterface):
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = req_indices[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
@@ -2199,10 +2341,16 @@ class Scheduler(SchedulerInterface):
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
-                num_draft_tokens = len(scheduled_spec_token_ids)
+                if num_drafted_tokens_per_req is not None:
+                    assert num_verified_tokens_per_req is not None
+                    num_draft_tokens = num_drafted_tokens_per_req[req_index]
+                    num_verified = num_verified_tokens_per_req[req_index]
+                else:
+                    # The (out-of-tree) model runner does not report the counts.
+                    num_draft_tokens = num_verified = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                num_rejected = num_draft_tokens - num_accepted
+                num_rejected = len(scheduled_spec_token_ids) - num_accepted
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
                 # tokens). A stale rejection count predates the preemption
@@ -2212,26 +2360,19 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
+
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
+                    num_verified_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
-                    # Exclude grammar-invalidated drafts from the proposed
-                    # count, mirroring make_spec_decoding_stats; the accepted
-                    # bucket (j) is unaffected.
-                    adj_draft_tokens = num_draft_tokens
-                    if scheduler_output.num_invalid_spec_tokens:
-                        adj_draft_tokens -= (
-                            scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
-                        )
                     request.spec_decode_metrics.observe(
-                        num_draft_tokens=adj_draft_tokens,
+                        num_draft_tokens=num_draft_tokens,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
+                        num_verified_tokens=num_verified,
                     )
 
             # Free encoder inputs only after the step has actually executed.
@@ -2246,13 +2387,33 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             ec_transfer_params = None
             prefill_stats = None
+            watermarking = None
             status_before_stop = request.status
 
             # Check for stop and update request status.
             if new_token_ids:
+                has_output_placeholders = request.num_output_placeholders > 0
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+                if (
+                    not output_is_stale
+                    and status_before_stop == RequestStatus.RUNNING
+                    and (
+                        has_output_placeholders
+                        or self.num_spec_tokens > 0
+                        or (
+                            self.has_mamba_layers
+                            and not self.scheduler_config.async_scheduling
+                            and self.cache_config.enable_prefix_caching
+                        )
+                    )
+                ):
+                    # Publish finalized states before retirement or completion.
+                    self.kv_cache_manager.cache_blocks(
+                        request,
+                        request.num_computed_tokens - request.num_in_flight_tokens,
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -2296,6 +2457,15 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
+                    params = request.sampling_params
+                    if params is not None and self.vllm_config.watermark_config:
+                        # Report the flag after enforcement; the sampler skips
+                        # greedy and trace replay rows.
+                        watermarking = bool(
+                            params.watermarking
+                            and params.temperature != 0
+                            and params.trace_decode_token_ids is None
+                        )
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2371,6 +2541,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        watermarking=watermarking,
                     )
                 )
             else:
@@ -2385,12 +2556,14 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
+            self.async_kv_waiting.remove_requests(stopped_preempted_reqs)
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        error_req_ids = set(self.grammar_compile_error_reqs)
-        self.grammar_compile_error_reqs.clear()
+        request_errors = self.grammar_compile_error_reqs
+        self.grammar_compile_error_reqs = {}
+        error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
@@ -2412,6 +2585,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        error=request_errors.get(request.request_id),
                     )
                 )
 
@@ -2549,8 +2723,79 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.add(request)
         if self._holds_kv_blocks(request):
             self.kv_holding_waiting.add_request(request)
+        elif (
+            self.connector is not None
+            and (
+                self.scheduler_config.max_num_inflight_kv_loads
+                or self.scheduler_config.max_async_kv_loads_per_step
+            )
+            and self.connector.may_load_async(request)
+        ):
+            self.async_kv_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+
+    def _reorder_waiting_by_cached_prefix(self) -> None:
+        """Move waiting requests with a cached prefix to the front of the window.
+
+        Reordering is confined to the slots held by plain waiting requests, so a
+        request in a blocked status or one already partially computed keeps its
+        exact position and nothing is moved past it. That keeps this a
+        reordering among peers rather than a change in priority, and leaves the
+        queue beyond the window untouched.
+        """
+        if len(self.waiting) < 2:
+            return
+        if self.kv_cache_manager.usage < self.cache_aware_threshold:
+            return
+
+        head = list(itertools.islice(self.waiting, self.cache_aware_window))
+        slots = [
+            i
+            for i, request in enumerate(head)
+            if request.status == RequestStatus.WAITING
+            and not request.num_computed_tokens
+        ]
+        if len(slots) < 2:
+            return
+
+        # Deepest cached prefix first, arrival order breaking ties.
+        get_num_cached = self.kv_cache_manager.get_num_cached_tokens
+        cached = {i: get_num_cached(head[i]) for i in slots}
+        order = sorted(slots, key=lambda i: (-cached[i], i))
+        if order == slots:
+            return
+
+        reordered = list(head)
+        for slot, source in zip(slots, order):
+            reordered[slot] = head[source]
+        # One pass to drop the whole window, then re-insert in the new order;
+        # removing each request individually would be quadratic.
+        self.waiting.remove_requests(head)
+        for request in reversed(reordered):
+            self.waiting.prepend_request(request)
+
+    def _next_waiting_queue(self, take_async_kv: bool) -> RequestQueue:
+        """self.waiting or self.async_kv_waiting, whichever head goes first."""
+        async_kv = self.async_kv_waiting
+        if not take_async_kv or not async_kv:
+            return self.waiting
+        if not self.waiting:
+            return async_kv
+        async_head, head = async_kv.peek_request(), self.waiting.peek_request()
+        if self.policy == SchedulingPolicy.PRIORITY:
+            return async_kv if async_head < head else self.waiting
+        return async_kv if async_head.arrival_time < head.arrival_time else self.waiting
+
+    def _admits_inflight_kv_load(self) -> bool:
+        """Whether a new async KV load stays within --max-num-inflight-kv-loads."""
+        limit = self.scheduler_config.max_num_inflight_kv_loads
+        return limit is None or (
+            self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
+            + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+            + len(self._aborted_kv_loads)
+            < limit
+        )
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -2582,6 +2827,7 @@ class Scheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
+        num_new_tokens = len(new_token_ids)
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2599,7 +2845,66 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+
+        if not is_stale and request.num_output_placeholders > 0:
+            # Resolve all returned tokens, including those trimmed at a stop.
+            request.num_output_placeholders -= num_new_tokens
+            assert request.num_output_placeholders >= 0
         return new_token_ids, stopped
+
+    def _get_encoder_input_updates(
+        self,
+        scheduled: dict[str, int],
+        new_requests: list[NewRequestData],
+        scheduled_encoder_inputs: dict[str, list[int]],
+    ) -> dict[str, dict[int, MultiModalKwargsItem | None]]:
+        # Installations (including resume/streaming) replace worker features.
+        # SHM descriptors follow the processor cache's separate ACK protocol;
+        # EngineCore cannot replay their resolved tensors.
+        for new_request in new_requests:
+            if not new_request.mm_features:
+                continue
+            self._pending_encoder_input_ids[new_request.req_id] = {
+                i
+                for i, feature in enumerate(new_request.mm_features)
+                if feature.data is not None and "address" not in feature.data
+            }
+
+        updates: dict[str, dict[int, MultiModalKwargsItem | None]] = {}
+        for req_id in scheduled:
+            request = self.requests[req_id]
+            pending = self._pending_encoder_input_ids.get(req_id)
+            if pending is None:
+                continue
+            encoding = scheduled_encoder_inputs.get(req_id, ())
+            if not pending and not encoding:
+                continue
+            for input_id in encoding:
+                data = request.mm_features[input_id].data
+                if (
+                    input_id not in pending
+                    and data is not None
+                    and "address" not in data
+                ):
+                    # A running request may rewind without being reinstalled.
+                    updates.setdefault(req_id, {})[input_id] = data
+                    pending.add(input_id)
+
+            # schedule() advances progress before execution. Exclude in-flight
+            # prefill and speculative placeholders to obtain confirmed progress.
+            computed = request.num_computed_tokens - max(
+                request.num_output_placeholders, request.num_in_flight_tokens
+            )
+            for input_id in list(pending):
+                if input_id in encoding:
+                    continue
+                position = request.mm_features[input_id].mm_position
+                if position.offset + position.length <= computed or (
+                    self.is_encoder_decoder and computed > 0
+                ):
+                    updates.setdefault(req_id, {})[input_id] = None
+                    pending.remove(input_id)
+        return updates
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
@@ -2652,15 +2957,13 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+            request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
             )
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_invalid_spec_tokens: dict[str, int] = {}
-
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -2679,23 +2982,19 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
-            # Filter out spec tokens which do not adhere to the grammar.
-            spec_token_ids = self.structured_output_manager.validate_tokens(
-                request, spec_token_ids
-            )
+            # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
-            num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
-            if num_invalid_tokens:
-                spec_token_ids.extend([-1] * num_invalid_tokens)
-                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+            spec_token_ids.extend([-1] * (orig_num_spec_tokens - len(spec_token_ids)))
 
             sched_spec_tokens[req_id] = spec_token_ids
 
-        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
-
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+        return len(self.running), (
+            len(self.waiting)
+            + len(self.kv_holding_waiting)
+            + len(self.async_kv_waiting)
+        )
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
@@ -2721,6 +3020,9 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+            if self.connector is not None:
+                # Before enqueueing: may_load_async can use what this records.
+                self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -2728,7 +3030,6 @@ class Scheduler(SchedulerInterface):
                     self.num_spec_tokens
                 )
             if self.connector is not None:
-                self.connector.on_new_request(request)
                 kv_transfer_params = request.kv_transfer_params
                 if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
                     # Count P/D requests on arrival: connector matching is
@@ -2785,20 +3086,25 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
             self.kv_holding_waiting.remove_requests(waiting_requests_to_remove)
+            self.async_kv_waiting.remove_requests(waiting_requests_to_remove)
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                # A deferred load never started, so it will not report done.
                 delay_free_blocks = (
-                    request.request_id not in self.finished_recving_kv_req_ids
+                    self.deferred_loads.pop(request.request_id, None) is None
+                    and request.request_id not in self.finished_recving_kv_req_ids
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if delay_free_blocks:
+                self._aborted_kv_loads.add(request.request_id)
 
         return valid_requests
 
@@ -2810,6 +3116,7 @@ class Scheduler(SchedulerInterface):
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
+        self._unreserve_parked(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -2823,6 +3130,7 @@ class Scheduler(SchedulerInterface):
             connector_delay_free_blocks |= ec_delay_free
 
         self.encoder_cache_manager.free(request)
+        self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
@@ -2891,6 +3199,32 @@ class Scheduler(SchedulerInterface):
             # Free in reverse order so that the tail blocks are evicted first.
             self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
 
+    def _drain_deferred_loads(self) -> None:
+        """Start deferred async loads whose fence step has completed."""
+        for request_id, (fence, num_tokens, queries, hits) in list(
+            self.deferred_loads.items()
+        ):
+            if fence > self.processed_step_seq:
+                break
+            del self.deferred_loads[request_id]
+            assert self.connector is not None
+            request = self.requests[request_id]
+            self.connector.update_state_after_alloc(
+                request, self.kv_cache_manager.get_blocks(request_id), num_tokens
+            )
+            if self.connector_prefix_cache_stats is not None and queries != 0:
+                preempted = request.num_preemptions > 0
+                self.connector_prefix_cache_stats.record(
+                    num_tokens=queries,
+                    num_hits=hits,
+                    preempted=preempted,
+                    hits_by_source=(
+                        self.connector.get_external_cache_hit_sources(request, hits)
+                        if hits and not preempted
+                        else None
+                    ),
+                )
+
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
@@ -2949,12 +3283,6 @@ class Scheduler(SchedulerInterface):
             while self.running:
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
-
-            # Clear scheduled request ids cache. Since we are forcing preemption
-            # + resumption in the same step, we must act as if these requests were
-            # not scheduled in the prior step. They will be flushed from the
-            # persistent batch in the model runner.
-            self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:
@@ -3054,17 +3382,16 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_invalid_spec_tokens: dict[str, int] | None,
-        request_id: str,
+        num_verified_tokens: int,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats or not num_draft_tokens:
+        if not self.log_stats:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        if num_invalid_spec_tokens:
-            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        spec_decoding_stats.observe_draft(
-            num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
+        spec_decoding_stats.observe_draft_stats_per_req(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens,
+            num_verified_tokens=num_verified_tokens,
         )
         return spec_decoding_stats
 
@@ -3178,12 +3505,27 @@ class Scheduler(SchedulerInterface):
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-        return sum(
+        return self._parked_reserved_blocks + sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
+    def _reserve_parked(self, request: Request) -> None:
+        """Cache a parked async KV load's reservation. Set when parked and refreshed
+        at promotion, the only points where the load's held blocks change."""
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            # HiSparse's depends on free host blocks, so it is summed on demand.
+            self._inflight_prefills.add(request)
+            return
+        blocks = self._request_remaining_blocks(request)
+        cached = self._parked_reservations.get(request, 0)
+        self._parked_reserved_blocks += blocks - cached
+        self._parked_reservations[request] = blocks
+
+    def _unreserve_parked(self, request: Request) -> None:
+        self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)
+
     def _load_restores_replay_window(self, request: Request) -> bool:
-        """Whether the KV connector's load for ``request`` restores every DSV41
+        """Whether the KV connector's load for `request` restores every DSV41
         SWA bounded-replay group, as a P/D transfer of the request's own blocks
         does; a prefix-cache store holds no window."""
         assert self.connector is not None
@@ -3198,7 +3540,7 @@ class Scheduler(SchedulerInterface):
         hit tokens to recompute; the caller rewinds the computed count by it.
 
         The replayed tokens are the hit's last window (see
-        ``Request.replay_start``): the worker rebuilds their sliding-window KV
+        `Request.replay_start`): the worker rebuilds their sliding-window KV
         and leaves their cached KV alone. A hit whose KV load carries the
         window replays nothing.
         """
@@ -3274,6 +3616,7 @@ class Scheduler(SchedulerInterface):
                 return False
             # Promote request to waiting or preempted.
             self._update_waiting_for_remote_kv(request)
+            self._reserve_parked(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:
@@ -3285,7 +3628,10 @@ class Scheduler(SchedulerInterface):
             if not struct_output_req or struct_output_req.grammar is None:
                 return False
             if isinstance(struct_output_req.grammar, Exception):
-                self.grammar_compile_error_reqs.add(request.request_id)
+                self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                    code="validation_error",
+                    message=f"Invalid structured outputs: {struct_output_req.grammar}",
+                )
                 return False
             # Grammar is ready, promote to waiting state.
             request.status = RequestStatus.WAITING
@@ -3319,6 +3665,7 @@ class Scheduler(SchedulerInterface):
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
+                self._aborted_kv_loads.discard(req_id)
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)

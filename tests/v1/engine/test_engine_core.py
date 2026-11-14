@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import gc
 import time
 import uuid
 from collections import deque
@@ -9,9 +10,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+import vllm.envs as envs
+from vllm import LLM, SamplingParams
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -25,7 +28,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType, FinishReason
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    EngineCoreRequestType,
+    FinishReason,
+)
 from vllm.v1.engine.core import (
     DPEngineCoreProc,
     EngineCore,
@@ -39,10 +47,12 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA and ROCm.", allow_module_level=True
+    )
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
@@ -196,6 +206,31 @@ def test_engine_core():
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+def test_failed_inprocess_startup_releases_model(monkeypatch):
+    """An in-process engine that fails to start must release its model."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    # About 1.6 GiB of weights, more than the requested memory
+    with pytest.raises(ValueError, match="No available memory for the cache blocks"):
+        LLM(
+            model="TitanML/tiny-mixtral",
+            load_format="dummy",
+            hf_overrides={
+                "num_hidden_layers": 8,
+                "hidden_size": 1024,
+                "intermediate_size": 4096,
+            },
+            enforce_eager=True,
+            gpu_memory_utilization=0.001,
+            max_model_len=128,
+        )
+
+    gc.collect()
+    assert torch.accelerator.memory_allocated() < 256 * 1024**2
 
 
 @create_new_process_for_each_test()
@@ -421,6 +456,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     sampled.set_result(None if encoder_only else output)
     core.model_executor.execute_model.return_value = executed
     core.model_executor.sample_tokens.return_value = sampled
+    core._wait_for_output.side_effect = lambda future: future.result()
 
     EngineCore.step_with_batch_queue(core)
     if core.batch_queue:
@@ -431,6 +467,32 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
         core.model_executor.sample_tokens.assert_not_called()
     else:
         core.model_executor.sample_tokens.assert_called_once()
+
+
+@pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
+def test_prefill_interval_counts_only_executed_steps(step_fn):
+    """Prefills run every Nth executed step; empty schedules don't advance it."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.prefill_schedule_interval = 3
+    core.num_executed_steps = 0
+    core.scheduler.has_requests.return_value = True
+    core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
+
+    scheduled_tokens = [16, 0, 0, 16, 16, 16]
+    core.scheduler.schedule.side_effect = [
+        MagicMock(total_num_scheduled_tokens=n, pending_structured_output_tokens=False)
+        for n in scheduled_tokens
+    ]
+    for _ in scheduled_tokens:
+        core.batch_queue.clear()
+        step_fn(core)
+
+    throttled = [call.args[0] for call in core.scheduler.schedule.call_args_list]
+    assert throttled == [False, True, True, True, True, False]
 
 
 @multi_gpu_test(num_gpus=2)
@@ -534,6 +596,7 @@ def test_encoder_instance_zero_kv_cache(
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+        max_model_len=512,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -648,7 +711,9 @@ def _cadenced_dp_engine_core(
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
+    core.enable_fault_tolerance = False
     core.dp_group = object()
+    core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
     core.step_counter = 0
     core.pending_pause = False
@@ -745,7 +810,11 @@ def test_paused_dp_rank_ignores_start_wave(paused):
 def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._checkpoint_error = None
+    core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
     core.batch_queue = None
@@ -844,11 +913,119 @@ def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
     kv_connector = core.scheduler.get_kv_connector.return_value
-    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = (
-        lambda metadata: calls.append("publish")
+    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = lambda metadata: (
+        calls.append("publish")
     )
     EngineCore.wake_up(core, tags)
     assert calls == (["wake_up", "publish"] if republished else ["wake_up"])
+
+
+def _executor_calls(core: EngineCoreProc) -> list[str]:
+    """Executor calls in order, naming collective RPCs by their method."""
+    return [
+        args[0] if name == "collective_rpc" else name
+        for name, args, _ in core.model_executor.mock_calls
+    ]
+
+
+def test_checkpoint_prepare_then_restore_run_in_order():
+    """Preparing drains, then discards the KV cache and releases external
+    state. Restoring brings external state back before the KV cache wakes and
+    scheduling resumes. Repeating either is a no-op."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    core._reset_caches = MagicMock()
+    core.reject_new_requests = False
+    core.scheduler.get_kv_connector.return_value = None
+
+    assert core.checkpoint_prepare("wait") is None
+    assert core.checkpoint_prepare("wait") is None
+    assert core.checkpoint_state() == (CheckpointState.PREPARED, None)
+    assert core.reject_new_requests
+    assert _executor_calls(core) == [
+        "synchronize_device",
+        "discard",
+        "checkpoint_prepare",
+        "synchronize_device",
+    ]
+
+    core.model_executor.reset_mock()
+    core.checkpoint_restore()
+    core.checkpoint_restore()
+    assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
+    assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
+    core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
+    assert not core.reject_new_requests
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
+    """A failing barrier at the end of the drain leaves the engine FAILED and
+    still rejecting, whether the drain completes at once or later."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    core.model_executor.collective_rpc.side_effect = RuntimeError("device lost")
+    core.reject_new_requests = False
+    core.engines_running = deferred
+
+    assert core.checkpoint_prepare("wait") is None
+    if deferred:
+        assert core.checkpoint_state() == (CheckpointState.PREPARING, None)
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+    assert core.checkpoint_state() == (CheckpointState.FAILED, "device lost")
+    assert core.reject_new_requests
+
+
+@pytest.mark.parametrize("entry", ["sleep", "release_kv_cache_memory"])
+@pytest.mark.parametrize(
+    "kwargs,expected", [({}, True), (dict(reset_connector=False), False)]
+)
+def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
+    """Discarding the KV cache resets the connector unless the caller keeps it."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    reset_calls: list[bool] = []
+    core._reset_caches = lambda reset_connector: reset_calls.append(reset_connector)
+
+    if entry == "sleep":
+        core.sleep(level=1, mode="keep", **kwargs)
+    else:
+        core.scheduler.pause_state = PauseState.PAUSED_ALL
+        core.release_kv_cache_memory(**kwargs)
+
+    assert reset_calls == [expected]
+
+
+@pytest.mark.parametrize("reset_connector", [True, False])
+def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
+    """Keeping the connector's cache steps the in-process engine until its
+    pending work, such as connector stores, is done; a reset does not step."""
+    core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
+    core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.side_effect = [True, True, False]
+    core.batch_queue = None
+    core.check_for_draft_tokens = False
+    order: list[str] = []
+
+    def step():
+        order.append("step")
+        return {}, True
+
+    core.step_fn = step
+    core._reset_caches = lambda reset_connector: order.append("reset_caches")
+
+    core.sleep(level=1, reset_connector=reset_connector)
+
+    steps = [] if reset_connector else ["step", "step"]
+    assert order == steps + ["reset_caches"]
+    core.model_executor.sleep.assert_called_once_with(1)
 
 
 @pytest.mark.parametrize("deferred", [False, True])
@@ -859,7 +1036,7 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     core.engines_running = deferred
     order: list[str] = []
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
-    core._reset_caches = lambda: order.append("reset_caches")
+    core._reset_caches = lambda **kwargs: order.append("reset_caches")
 
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
     if deferred:

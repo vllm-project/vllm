@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adapters that expose :class:`ParserEngine` through the legacy
-:class:`ReasoningParser` and :class:`ToolParser` interfaces.
+"""Adapters that expose `ParserEngine` through the legacy
+`ReasoningParser` and `ToolParser` interfaces.
 
 This lets parser engines flow through the existing serving-layer code
 paths that expect separate reasoning and tool parser instances, without
@@ -10,7 +10,7 @@ any changes to the serving layer itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -33,12 +33,12 @@ if TYPE_CHECKING:
 
 
 class ParserEngineReasoningAdapter(ReasoningParser):
-    """Adapts a :class:`ParserEngine` to the :class:`ReasoningParser`
+    """Adapts a `ParserEngine` to the `ReasoningParser`
     interface so parser engines can be used as reasoning parsers in the
     existing serving code.
 
-    Subclasses set :attr:`_parser_engine_cls` to the concrete
-    :class:`ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete
+    `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]
@@ -54,7 +54,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self._streaming_count_valid = False
 
     @contextmanager
-    def _skip_tool_parsing(self) -> Iterator[None]:
+    def _skip_tool_parsing(self) -> Generator[None]:
         saved = self._parser_engine.skip_tool_parsing
         self._parser_engine.skip_tool_parsing = True
         try:
@@ -63,7 +63,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             self._parser_engine.skip_tool_parsing = saved
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self._parser_engine.is_reasoning_end(list(input_ids))
+        return self._parser_engine.is_reasoning_end(input_ids)
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         return self._parser_engine.find_reasoning_end(token_ids)
@@ -133,6 +133,14 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
 
+    @property
+    def opens_reasoning_in_content(self) -> bool:
+        """Whether the grammar can open reasoning after content has started."""
+        start = self._parser_engine.parser_engine_config.transitions.get(
+            (ParserState.CONTENT, "THINK_START")
+        )
+        return start is not None and start.next_state is ParserState.REASONING
+
     def finish_streaming(self) -> DeltaMessage | None:
         with self._skip_tool_parsing():
             return self._parser_engine.finish_streaming()
@@ -163,23 +171,23 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
 
 class ParserEngineToolAdapter(ToolParser):
-    """Adapts a :class:`ParserEngine` to the :class:`ToolParser` interface.
+    """Adapts a `ParserEngine` to the `ToolParser` interface.
 
-    :meth:`extract_tool_calls` starts the parser engine in ``CONTENT``
+    `extract_tool_calls` starts the parser engine in `CONTENT`
     state so it can parse reasoning-stripped content (i.e. the output of
-    :meth:`ReasoningParser.extract_reasoning`).
+    `ReasoningParser.extract_reasoning`).
 
     When no reasoning parser is configured at the serving layer, the
-    owning :class:`~vllm.parser.abstract_parser.Parser` sets
-    :attr:`skip_reasoning_parsing` so reasoning markup — plain content
+    owning `Parser` sets
+    `skip_reasoning_parsing` so reasoning markup — plain content
     in that configuration — passes through verbatim instead of being
     consumed or reclassified by the engine. The engine honors the flag
     only for markers that are reasoning-exclusive in its config; a
     grammar like Inkling, whose block closer is shared with text and
     tool blocks, keeps parsing unchanged.
 
-    Subclasses set :attr:`_parser_engine_cls` to the concrete
-    :class:`ParserEngine` class.
+    Subclasses set `_parser_engine_cls` to the concrete
+    `ParserEngine` class.
     """
 
     _parser_engine_cls: type[ParserEngine]

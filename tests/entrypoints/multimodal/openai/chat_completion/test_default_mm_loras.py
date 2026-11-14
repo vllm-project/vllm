@@ -61,6 +61,7 @@ async def multi_modal_client(multimodal_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize(
     # base model with default lora should give the same response as lora model
     "model_name",
@@ -68,6 +69,7 @@ async def multi_modal_client(multimodal_server):
 )
 async def test_default_mm_lora_chat_completions(
     model_name: str,
+    batched: bool,
     multi_modal_client: openai.AsyncOpenAI,
     audio_assets: AudioTestAssets,
 ):
@@ -87,12 +89,16 @@ async def test_default_mm_lora_chat_completions(
         }
     ]
 
-    chat_completion = await multi_modal_client.chat.completions.create(
-        model=model_name, messages=messages, max_completion_tokens=128, temperature=0.0
+    chat_completion = await multi_modal_client.post(
+        "chat/completions/batch" if batched else "chat/completions",
+        cast_to=openai.types.chat.ChatCompletion,
+        body={
+            "model": model_name,
+            "messages": [messages] if batched else messages,
+            "max_completion_tokens": 128,
+            "temperature": 0.0,
+        },
     )
 
-    assert len(chat_completion.choices) > 0
-
-    message = chat_completion.choices[0].message
-    assert message.content is not None and len(message.content) >= 0
-    assert message.content == ACTIVE_MM_LORA_RESPONSE
+    assert len(chat_completion.choices) == 1
+    assert chat_completion.choices[0].message.content == ACTIVE_MM_LORA_RESPONSE

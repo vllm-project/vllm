@@ -1,20 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU byte-copy runtime for UMBP connector contract tests."""
+"""Shared fixtures for UMBP connector tests.
 
+Configs, request and scheduler-output builders, fake runtime handles, a CPU
+byte-copy runtime, and a `umbp_standalone_server` launcher.
+"""
+
+import contextlib
 import ctypes
+import multiprocessing as mp
+import os
+import signal
+import subprocess
 import threading
-from collections.abc import Sequence
+import traceback
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
+    StoreEventResult,
     TransferJobState,
     TransferJobStatus,
+    UMBPConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
     IUMBPRuntime,
@@ -24,12 +39,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 
 class _EmbeddedStore:
@@ -178,6 +195,7 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -186,6 +204,14 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete embedded job")
         self._store.publish(id(job))
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        if job.status.value not in ("completed", "failed"):
+            job.cancel("preempted")
+        return job
+
+    def take_evicted_keys(self) -> Sequence[str]:
+        return ()
 
     def close(self) -> None:
         return
@@ -215,6 +241,86 @@ class MemoryRuntime(IUMBPRuntime):
         del namespace
         return _MemoryWorkerHandle(self._store, topology, layout)
 
+    def evict_all(self) -> None:
+        self._store.clear()
+
+
+def mori_has_umbp() -> bool:
+    try:
+        from mori.cpp import UMBPClient  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@dataclass
+class StandaloneServer:
+    address: str
+    process: subprocess.Popen
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.wait(10)
+
+
+@contextlib.contextmanager
+def standalone_server(
+    log_dir: Path, socket_dir: str, capacity_bytes: int
+) -> Iterator[StandaloneServer]:
+    """Run a `umbp_standalone_server` with a DRAM pool of `capacity_bytes`."""
+    import mori
+
+    binary = Path(mori.__file__).with_name("umbp_standalone_server")
+    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
+    address = f"unix://{socket_dir}/umbp.grpc.sock"
+    env = dict(
+        os.environ,
+        UMBP_STANDALONE_ADDRESS=address,
+        UMBP_DRAM_CAPACITY=str(capacity_bytes),
+    )
+    with open(log_dir / "server.log", "w") as log:
+        process = subprocess.Popen(
+            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
+        )
+        try:
+            yield StandaloneServer(address, process)
+        finally:
+            process.send_signal(signal.SIGCONT)
+            process.terminate()
+            try:
+                process.wait(10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(10)
+
+
+def _report(errors, target: Callable, *args) -> None:
+    try:
+        target(*args)
+    except BaseException:
+        errors.put(traceback.format_exc())
+        raise
+    errors.put(None)
+
+
+def run_in_new_process(target: Callable, *args, timeout: float = 120) -> None:
+    """Run target in a fresh interpreter that must finish and exit cleanly."""
+    context = mp.get_context("spawn")
+    errors = context.Queue()
+    process = context.Process(target=_report, args=(errors, target, *args))
+    process.start()
+    try:
+        error = errors.get(timeout=timeout)
+        assert error is None, error
+        process.join(30)
+        assert process.exitcode == 0, "process did not exit after its work"
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(10)
+        errors.close()
+        errors.join_thread()
+
 
 def install_memory_runtime(monkeypatch):
     """Share one isolated store across the connectors created by a test."""
@@ -237,7 +343,7 @@ def handshake(scheduler_connector, worker_connector) -> None:
 
 
 def _kv_cache_config() -> KVCacheConfig:
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
     return KVCacheConfig(
@@ -250,11 +356,31 @@ def _kv_cache_config() -> KVCacheConfig:
                 block_stride=1024,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer1", "layer2"], spec)],
     )
 
 
-def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
+def _hybrid_kv_cache_config() -> KVCacheConfig:
+    full = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    mamba = MambaManager.layer_config(
+        MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,)),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(["attention"], full),
+            new_kv_cache_group(["mamba"], mamba),
+        ],
+    )
+
+
+def _vllm_config(
+    extra: dict, prefix_match_unit: int | None = None, **parallel_overrides
+) -> SimpleNamespace:
     parallel = {
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -264,12 +390,14 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
     parallel.update(parallel_overrides)
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
+            kv_connector="UMBPStoreConnector",
+            kv_connector_module_path=None,
             kv_connector_extra_config=extra,
         ),
         cache_config=SimpleNamespace(
             block_size=16,
             enable_prefix_caching=True,
-            prefix_match_unit=None,
+            prefix_match_unit=prefix_match_unit,
         ),
         model_config=SimpleNamespace(
             model="test-model",
@@ -281,8 +409,96 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
         kv_events_config=None,
         max_in_flight_tokens=64,
         num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
         parallel_config=SimpleNamespace(**parallel),
     )
+
+
+def make_request(request_id: str = "req", **overrides) -> SimpleNamespace:
+    """Build the common scheduler-side request shape used by UMBP tests."""
+    num_tokens = overrides.pop("num_tokens", 32)
+    num_prompt_tokens = overrides.pop("num_prompt_tokens", num_tokens)
+    values = {
+        "request_id": request_id,
+        "req_id": request_id,
+        "num_tokens": num_tokens,
+        "num_prompt_tokens": num_prompt_tokens,
+        "num_computed_tokens": 0,
+        "num_in_flight_tokens": 0,
+        "block_hashes": [b"a", b"b"],
+        "block_ids": ([1, 2],),
+        "prompt_token_ids": list(range(num_prompt_tokens)),
+        "all_token_ids": list(range(num_tokens)),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_scheduler_output(
+    *,
+    new_reqs=(),
+    cached_reqs=None,
+    scheduled_tokens=None,
+    finished=(),
+    preempted=(),
+    block_state=None,
+) -> SimpleNamespace:
+    """Build a scheduler output with empty defaults for unrelated fields."""
+    return SimpleNamespace(
+        finished_req_ids=set(finished),
+        preempted_req_ids=set(preempted),
+        scheduled_new_reqs=list(new_reqs),
+        scheduled_cached_reqs=(
+            SimpleNamespace(req_ids=[]) if cached_reqs is None else cached_reqs
+        ),
+        num_scheduled_tokens=dict(scheduled_tokens or {}),
+        kv_connector_block_state=block_state,
+    )
+
+
+def complete_store(
+    scheduler,
+    event_id: int,
+    workers: int = 1,
+    failed: Iterable[tuple[int, bytes]] = (),
+) -> None:
+    """Report store event `event_id` done by `workers` workers.
+
+    Args:
+        scheduler: The `UMBPStoreConnectorScheduler` that planned the store.
+        event_id: The `store_event` of the step's connector metadata.
+        workers: How many workers report the event in this output.
+        failed: `(group_id, block_hash)` objects that failed to store.
+
+    """
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                store_events={event_id: StoreEventResult(workers, set(failed))}
+            )
+        )
+    )
+
+
+def make_kv_caches(*, fill: bool = False) -> dict[str, torch.Tensor]:
+    """Build the standard two-layer CPU KV cache used by connector tests."""
+    caches = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in ("layer1", "layer2")
+    }
+    for index, cache in enumerate(caches.values()):
+        if fill:
+            cache.copy_(
+                torch.arange(cache.numel(), dtype=torch.float16).reshape(cache.shape)
+                + index
+            )
+        else:
+            cache.zero_()
+    return caches
 
 
 class _SchedulerHandle:
@@ -329,6 +545,7 @@ class _WorkerHandle:
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -392,8 +609,19 @@ class _WaitRecordingDelayedLoadHandle(_DelayedLoadWorkerHandle):
         return job
 
 
-class _DelayedStoreWorkerHandle(_WorkerHandle):
+class _CancellableWorkerHandle(_WorkerHandle):
     def __init__(self):
+        self.cancelled = []
+
+    def cancel(self, job):
+        self.cancelled.append(job)
+        job.cancel("preempted")
+        return job
+
+
+class _DelayedStoreWorkerHandle(_CancellableWorkerHandle):
+    def __init__(self):
+        super().__init__()
         self.jobs = []
         self.waited = []
         self.publications = []

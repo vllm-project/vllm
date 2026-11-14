@@ -43,7 +43,7 @@ The three supported scoring functions are as illustrated in the figure below.
 
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
-| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
+| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | ✅︎ | |
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
 | `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
 | `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
@@ -490,6 +490,22 @@ vLLM does not apply a checkpoint's chat template by default, since many reranker
 - Models with a built-in score template keep using it.
 
 The template in use is logged at startup.
+
+### Activation function
+
+For a Sentence Transformers `CrossEncoder` whose pipeline is a single Transformer module, vLLM applies the `activation_fn` saved in `config_sentence_transformers.json`, as `CrossEncoder.predict` does. See [Resolution precedence](README.md#resolution-precedence) for the full order.
+
+!!! note
+    Earlier versions of vLLM ignored this setting. Checkpoints that save an `Identity` activation there, such as `nvidia/llama-nemotron-rerank-vl-1b-v2`, now return raw logits instead of sigmoid scores. The ranking does not change. To keep the previous scores, set the activation explicitly:
+
+    ```bash
+    vllm serve nvidia/llama-nemotron-rerank-vl-1b-v2 \
+        --runner pooling \
+        --trust-remote-code \
+        --hf-overrides '{"sbert_ce_default_activation_function": "torch.nn.modules.activation.Sigmoid"}'
+    ```
+
+    For offline inference, pass the same dict as `hf_overrides` to `LLM`.
 
 ### Enable/disable activation
 

@@ -125,6 +125,11 @@ class KimiK3Config(PreTrainedConfig):
         self.media_placeholder_token_id = media_placeholder_token_id
         self.image_placeholder = image_placeholder
 
+        # Sparse MLA reads index_topk from the composite config.
+        dsa_config = getattr(self.text_config, "dsa_config", None)
+        if dsa_config is not None:
+            self.index_topk = dsa_config.index_topk
+
         if getattr(self.text_config, "quantization_config", None) is not None:
             self.quantization_config = self.text_config.quantization_config
 

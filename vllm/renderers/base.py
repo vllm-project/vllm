@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 import weakref
 from abc import ABC, abstractmethod
@@ -48,6 +49,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -81,8 +83,8 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
 
-    ``make_async`` captures the executor object at wrap time. Replacing
-    ``self._executor`` with a new ``ThreadPoolExecutor`` would leave those
+    `make_async` captures the executor object at wrap time. Replacing
+    `self._executor` with a new `ThreadPoolExecutor` would leave those
     wrappers (tokenize, decode, pooling, derender) bound to a shutdown pool.
     """
 
@@ -115,6 +117,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
         self._finalizer = weakref.finalize(self, self._resources.close)
 
+        # Work on a copy so the cached tokenizer passed in is never modified.
+        if isinstance(tokenizer, HfTokenizer):
+            tokenizer = copy.copy(tokenizer)
+            self._prepare_tokenizer(tokenizer)
         self.tokenizer = tokenizer
 
         # Background multimodal warmup task (a future returned by
@@ -213,6 +219,24 @@ class BaseRenderer(ABC, Generic[_T]):
             self._resources.callback(self._mm_processor_cache.close)
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
+
+        # HF fast tokenizers apply per-call truncation and padding by
+        # mutating their shared Rust backend, so concurrent calls on the
+        # render pool can silently use another request's `max_length`.
+        # Pool last: multimodal processors may add tokens while they are
+        # created, and the pooled copies only see tokens added before this.
+        if isinstance(self.tokenizer, HfTokenizer):
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
+
+    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
+        """Modify the renderer's copy of an HF tokenizer before it is pooled.
+
+        Changes made after `BaseRenderer.__init__` do not reach the pooled
+        copies.
+        """
+        return
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -455,10 +479,10 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> None:
         """Raise VLLMValidationError if a token id is out of vocabulary.
 
-        Skipped when the tokenizer is not initialized.
+        Without a tokenizer, the model vocab size is the only bound.
         """
         tokenizer = self.tokenizer
-        if not token_ids or tokenizer is None:
+        if not token_ids:
             return
 
         max_input_id = max(token_ids)
@@ -469,12 +493,14 @@ class BaseRenderer(ABC, Generic[_T]):
         # For Qwen3 models, the language model has extra tokens that do
         # not exist in the tokenizer, and vice versa for multimodal
         # placeholder tokens in some multimodal models.
-        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
-        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399
+        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421
 
         # Here we take the max of the two to determine if a token id is
         # truly out-of-vocabulary.
-        model_vocab_size = self.model_config.get_vocab_size()
+        max_token_id = self.model_config.get_vocab_size() - 1
+        if tokenizer is not None:
+            max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here
         # so it is not used as an embedding index downstream.
@@ -482,7 +508,7 @@ class BaseRenderer(ABC, Generic[_T]):
             raise VLLMValidationError(
                 f"Token id {min_input_id} is out of vocabulary", parameter=parameter
             )
-        if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+        if max_input_id > max_token_id:
             raise VLLMValidationError(
                 f"Token id {max_input_id} is out of vocabulary", parameter=parameter
             )
@@ -553,7 +579,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
@@ -574,7 +602,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return await asyncio.gather(
             *(self._render_prompt_async(prompt) for prompt in prompts)
@@ -600,7 +630,7 @@ class BaseRenderer(ABC, Generic[_T]):
         """Whether this renderer's tokenizer can emit char-level offsets.
 
         Defaults to False; only renderers backed by an HF fast tokenizer
-        (see ``HfRenderer``) can produce ``offset_mapping``.
+        (see `HfRenderer`) can produce `offset_mapping`.
         """
         return False
 
@@ -625,9 +655,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> "TokensPrompt":
         """Build a TokensPrompt from already-extracted token ids.
 
-        ``offset_mapping`` is the per-token ``(start, end)`` sequence from
+        `offset_mapping` is the per-token `(start, end)` sequence from
         a BatchEncoding; pass it only when offsets were requested, and it
-        is attached as ``prompt_token_offsets``.
+        is attached as `prompt_token_offsets`.
         """
         if offset_mapping is not None:
             return TokensPrompt(
@@ -882,24 +912,27 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if data_items is None:
                 if uuid_items is None:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
+                        f"multi_modal_uuids[{modality!r}] is missing.",
+                        parameter="multi_modal_uuids",
                     )
 
             elif uuid_items is not None:
                 if len(data_items) != len(uuid_items):
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
-                        f"got {len(uuid_items)} vs {len(data_items)}."
+                        f"got {len(uuid_items)} vs {len(data_items)}.",
+                        parameter="multi_modal_uuids",
                     )
 
                 for i, item in enumerate(data_items):
                     if item is None and uuid_items[i] is None:
-                        raise ValueError(
+                        raise VLLMValidationError(
                             f"multi_modal_data[{modality!r}][{i}] is empty but "
-                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                            f"multi_modal_uuids[{modality!r}][{i}] is missing.",
+                            parameter="multi_modal_uuids",
                         )
 
     def _process_mm_uuids(
@@ -1013,8 +1046,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            raise VLLMValidationError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
+                parameter="prompt_embeds",
             )
 
         prompt_embeds = prompt["prompt_embeds"]
@@ -1027,7 +1061,10 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt_embeds = prompt_embeds.squeeze(dim=0)
 
         if prompt_embeds.ndim != 2:
-            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
+            raise VLLMValidationError(
+                "prompt_embeds must be of shape (seq_len, hidden_size).",
+                parameter="prompt_embeds",
+            )
 
         # Tensors must be on CPU for serialization between processes
         # in the MsgpackEncoder. Casting to CPU here ensures that there is no
