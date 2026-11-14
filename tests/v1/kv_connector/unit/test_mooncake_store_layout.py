@@ -5,6 +5,8 @@
 import ctypes
 import os
 import random
+from collections.abc import Iterable
+from dataclasses import replace
 
 import pytest
 import torch
@@ -16,9 +18,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     AttentionStoreLayout,
     HeadMajorStoreLayout,
     KeyMetadata,
+    LayerRangeObjects,
     MambaStoreLayout,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
+    split_layer_range,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.utils.math_utils import cdiv
@@ -370,6 +374,126 @@ def test_rank_local_layout_skips_block_padding():
     assert sizes == [[state] * num_layers]
 
 
+def test_split_layer_range_cuts_only_inside_the_range():
+    assert split_layer_range((0, 28), {14}) == ((0, 14), (14, 28))
+    assert split_layer_range((0, 14), {0, 14, 20}) == ((0, 14),)
+    assert split_layer_range((10, 20), {5, 14, 25}) == ((10, 14), (14, 20))
+
+
+def _layer_names(layers: Iterable[int]) -> list[str]:
+    return [f"model.layers.{layer}.self_attn.attn" for layer in layers]
+
+
+def _range_objects(
+    metadata: KeyMetadata,
+    layer_ranges: tuple[tuple[int, int], ...],
+    layer_range_of: dict[str, int],
+) -> LayerRangeObjects:
+    """Objects keyed by `layer_ranges`, holding their layers in the order of
+    `layer_range_of`."""
+    return LayerRangeObjects(
+        tuple(replace(metadata, layer_range=r) for r in layer_ranges),
+        {
+            name: (range_index, position)
+            for position, (name, range_index) in enumerate(layer_range_of.items())
+        },
+    )
+
+
+def test_rank_local_layer_ranges_store_one_object_per_range():
+    """A block is one object per layer range, holding only that range's
+    layers under a key naming the range."""
+    num_blocks = 3
+    caches = [
+        torch.zeros(num_blocks, 1, BLOCK_SIZE, 8, dtype=torch.uint8) for _ in range(5)
+    ]
+    metadata = KeyMetadata("test-model", 0, 0, 0, 0)
+    names = [*_layer_names(range(4)), "draft_model.model.layers.0.self_attn.attn"]
+    layout = RankLocalStoreLayout(
+        metadata,
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        _range_objects(metadata, ((0, 2), (2, 4)), dict(zip(names, [0, 0, 1, 1, 1]))),
+    )
+    layout.register_kv_caches(caches, num_blocks, layer_names=names)
+
+    assert layout.local_shard_ids == (0, 1)
+    assert "@layers:0-2@group:0@" in layout.key_for(0, BlockHash(b"h"))
+    assert "@layers:2-4@group:0@" in layout.key_for(1, BlockHash(b"h"))
+    addrs, sizes, _ = layout.prepare_values(
+        [(0, BLOCK_SIZE), (0, BLOCK_SIZE)], [1], [1, 0]
+    )
+    block_bytes = BLOCK_SIZE * 8
+    assert addrs == [
+        [cache.data_ptr() + block_bytes for cache in caches[2:]],
+        [cache.data_ptr() + block_bytes for cache in caches[:2]],
+    ]
+    assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
+
+
+@pytest.mark.parametrize(
+    ("slot_bytes", "slots", "segments"),
+    [
+        (40, (0, 1, 2, 3), 1),  # adjacent layers share one segment
+        (64, (0, 1, 2, 3), 2),  # padding between layers is not stored
+        (40, (0, 2, 1, 3), 2),  # layers out of order in the buffer
+    ],
+)
+def test_rank_local_layer_ranges_split_a_block_outermost_buffer(
+    slot_bytes: int, slots: tuple[int, ...], segments: int
+):
+    """A block-outermost buffer holds every layer in each block. Each layer
+    range stores its layers' bytes in layer order, merging only adjacent
+    layers, so its object has the bytes a layer-first buffer stores."""
+    num_blocks, num_layers, state_bytes = 3, len(slots), 40
+    block_outermost = torch.full(
+        (num_blocks * num_layers * slot_bytes,), 255, dtype=torch.uint8
+    )
+    layer_first = torch.empty(num_layers * num_blocks * state_bytes, dtype=torch.uint8)
+    views = []
+    for layer, slot in enumerate(slots):
+        state = (
+            ((torch.arange(num_blocks * state_bytes) + 61 * layer) % 251)
+            .to(torch.uint8)
+            .view(num_blocks, 1, 1, state_bytes)
+        )
+        outer = block_outermost.as_strided(
+            state.shape,
+            (num_layers * slot_bytes, state_bytes, state_bytes, 1),
+            slot * slot_bytes,
+        )
+        inner = layer_first.as_strided(
+            state.shape,
+            (state_bytes, state_bytes, state_bytes, 1),
+            layer * num_blocks * state_bytes,
+        )
+        outer.copy_(state)
+        inner.copy_(state)
+        views.append((outer, inner))
+
+    def objects(caches: list[torch.Tensor]) -> list[list[bytes]]:
+        metadata = KeyMetadata("test-model", 0, 0, 0, 0)
+        names = _layer_names(range(num_layers))
+        layout = RankLocalStoreLayout(
+            metadata,
+            16,
+            16,
+            _range_objects(metadata, ((0, 2), (2, 4)), dict(zip(names, [0, 0, 1, 1]))),
+        )
+        layout.register_kv_caches(caches, num_blocks, layer_names=names)
+        addrs, sizes, _ = layout.prepare_values([(0, 16), (0, 16)], [1], [0, 1])
+        return [
+            [ctypes.string_at(a, s) for a, s in zip(row_addrs, row_sizes)]
+            for row_addrs, row_sizes in zip(addrs, sizes)
+        ]
+
+    split = objects([outer for outer, _ in views])
+    expected = objects([inner for _, inner in views])
+
+    assert [len(segs) for segs in split] == [segments, segments]
+    assert [b"".join(segs) for segs in split] == [b"".join(s) for s in expected]
+
+
 def test_rank_local_database_api_rejects_tp_shared_layout():
     metadata = KeyMetadata("test-model", 0, 0, 0, 0)
     layout = HeadMajorStoreLayout(
@@ -514,6 +638,97 @@ def test_tp_shared_layout_round_trip_across_tp_sizes(
                 dim=1,
             )
             torch.testing.assert_close(layer, expected)
+
+
+def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
+    """PP=2 x TP=1 stages store one object per layer range and head shard, and
+    a PP=1 x TP=2 instance with the same ranges loads them into its layers.
+    The ranges hold one and two layers, so its slots differ in length."""
+    block_size = 16
+    layer_ranges = ((0, 1), (1, 3))
+    block_hash = BlockHash(b"h")
+    stored: dict[str, bytes] = {}
+    written: dict[int, torch.Tensor] = {}
+
+    for pp_rank, layer_range in enumerate(layer_ranges):
+        num_layers = layer_range[1] - layer_range[0]
+        _, layers = _physical_layer_views(
+            KVCacheLayout.LBHNC, num_layers, 1, 4, block_size, 4
+        )
+        for layer_index, layer in enumerate(layers, start=layer_range[0]):
+            layer.copy_(
+                torch.arange(layer.numel(), dtype=torch.float16).view_as(layer)
+                + layer_index * 300
+            )
+            written[layer_index] = layer
+        metadata = KeyMetadata("test-model", 0, 0, 0, pp_rank)
+        names = _layer_names(range(*layer_range))
+        layout = HeadMajorStoreLayout(
+            metadata,
+            block_size,
+            block_size,
+            local_tp_size=1,
+            store_tp_size=2,
+            tp_rank=0,
+            layer_specs=_attention_specs(num_layers, block_size, 4),
+            range_objects=_range_objects(
+                metadata, (layer_range,), dict.fromkeys(names, 0)
+            ),
+        )
+        layout.register_kv_caches(layers, 1, layer_names=names)
+        shard_ids = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, block_size)] * len(shard_ids), [0], shard_ids
+        )
+        for shard_id, shard_addrs, shard_sizes in zip(
+            shard_ids, addrs, sizes, strict=True
+        ):
+            stored[layout.key_for(shard_id, block_hash)] = b"".join(
+                ctypes.string_at(addr, size)
+                for addr, size in zip(shard_addrs, shard_sizes, strict=True)
+            )
+
+    for tp_rank in range(2):
+        physical, layers = _physical_layer_views(
+            KVCacheLayout.LBHNC, 3, 1, 2, block_size, 4
+        )
+        physical.zero_()
+        metadata = KeyMetadata("test-model", tp_rank, 0, 0, 0)
+        names = _layer_names(range(3))
+        layout = HeadMajorStoreLayout(
+            metadata,
+            block_size,
+            block_size,
+            local_tp_size=2,
+            store_tp_size=2,
+            tp_rank=tp_rank,
+            layer_specs=_attention_specs(3, block_size, 2),
+            range_objects=_range_objects(
+                metadata, layer_ranges, dict(zip(names, [0, 1, 1]))
+            ),
+        )
+        layout.register_kv_caches(layers, 1, layer_names=names)
+        shard_ids = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, block_size)] * len(shard_ids), [0], shard_ids
+        )
+        # Batches above 16 chunks take the vectorized path.
+        assert layout.prepare_values(
+            [(0, block_size)] * len(shard_ids) * 9, [0], shard_ids * 9
+        ) == (addrs * 9, sizes * 9, [0] * len(shard_ids) * 9)
+        for shard_id, shard_addrs, shard_sizes in zip(
+            shard_ids, addrs, sizes, strict=True
+        ):
+            payload = stored[layout.key_for(shard_id, block_hash)]
+            offset = 0
+            for addr, size in zip(shard_addrs, shard_sizes, strict=True):
+                ctypes.memmove(addr, payload[offset : offset + size], size)
+                offset += size
+            assert offset == len(payload)
+
+        for layer_index, layer in enumerate(layers):
+            heads = slice(tp_rank * 2, tp_rank * 2 + 2)
+            torch.testing.assert_close(layer, written[layer_index][:, heads])
 
 
 @pytest.mark.parametrize(

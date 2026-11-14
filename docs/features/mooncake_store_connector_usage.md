@@ -248,6 +248,50 @@ groups use the rank-local fallback.
 
 When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
 
+#### Sharing one Store across PP sizes
+
+An instance with PP > 1 stores each block as one object per PP stage, keyed by
+the global layer range the stage holds (`@layers:<start>-<end>`). A PP = 1
+instance stores one object holding every layer. Instances with different PP
+sizes therefore do not read each other's objects. To share entries across PP
+sizes, list them on every instance that uses the Store:
+
+```json
+{
+    "kv_connector_extra_config": {
+        "pp_sizes": [1, 2]
+    }
+}
+```
+
+Each stage then splits its layers at every stage boundary of the listed PP sizes
+and stores one object per layer range. In the example, a PP = 1 instance stores
+two objects per block, one for each PP = 2 stage, and the PP = 2 stages store one
+object each, so both instances read the same objects.
+
+A listed PP size uses the default layer partition. For a PP size whose stages are
+set with `VLLM_PP_LAYER_PARTITION`, list the layer count of each stage instead,
+for example `"pp_sizes": [1, [38, 42]]` for an 80-layer model whose PP = 2
+instances run `VLLM_PP_LAYER_PARTITION=38,42`. Every instance that shares the
+entries must use the same list, and an instance whose own partition is not in
+the list fails to start.
+
+Every layer range is a separate object, so each one adds a Store operation per
+block to saves, loads and lookups. List only the PP partitions you deploy, and
+prefer partitions whose boundaries nest (for example PP = 2 boundaries that are
+also PP = 4 boundaries), which keeps the number of ranges low. The connector logs
+the number of objects it writes per block at startup.
+
+With the rank-local
+layout, `pp_sizes` also applies to hybrid models: each KV cache group stores one
+object per range that holds some of its layers. With Store TP sharing, it applies
+to one KV cache group of attention layers that all have the same KV cache spec,
+and instances that differ in both TP and PP size share entries too, for example a
+PP = 2, TP = 1 instance and a PP = 1, TP = 2 instance with `"store_tp_size": 2`.
+With HiSparse, Store TP sharing of several KV cache groups or of attention layers
+with different specs, or a KV cache group with no layers on a stage, the
+connector logs a warning and ignores `pp_sizes`.
+
 **Proxy:**
 
 A disaggregation proxy routes requests between prefiller and decoder nodes.
@@ -367,6 +411,9 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `pp_sizes` (list[int | list[int]]): PP sizes, or per-stage layer counts, of the
+  instances that share the Store. See
+  [Sharing one Store across PP sizes](#sharing-one-store-across-pp-sizes). Unset by default.
 
 #### Automatic cache prefix
 
