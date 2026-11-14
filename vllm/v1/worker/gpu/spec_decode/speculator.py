@@ -43,7 +43,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -411,6 +411,11 @@ class DraftModelSpeculator(BaseSpeculator):
             self.device,
             active_layer_names=self.draft_attn_layer_names,
             kernel_block_sizes=kernel_block_sizes,
+            no_attn_metadata_layer_names=(
+                self.draft_attn_layer_names
+                if self.speculative_config.prefill_context_kv_only
+                else ()
+            ),
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -461,7 +466,7 @@ class DraftModelSpeculator(BaseSpeculator):
             {
                 attn_group.backend.get_name()
                 for attn_groups in self.attn_groups
-                for attn_group in attn_groups
+                for attn_group in groups_with_metadata_builders(attn_groups)
                 if not attn_group.supports_draft_decode_metadata_update
             }
         )

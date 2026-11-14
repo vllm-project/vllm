@@ -336,6 +336,111 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     )
 
 
+def test_no_attn_metadata_layers_keep_their_layout_without_builders(monkeypatch):
+    """A context-K/V-only drafter's layers keep their kernel blocks, so the cache
+    layout is unchanged, but get no builders: no workspace, no CUDA graph limit
+    and no metadata."""
+    workspaces: list[str] = []
+
+    def backend(name, kernel_block_sizes, cg_support, owns_workspace):
+        class Builder:
+            requires_block_table_width = False
+            supports_update_block_table = False
+
+            def __init__(self, *_args):
+                pass
+
+            def get_cudagraph_support(self, *_args):
+                return cg_support
+
+            def build(self, *_args, **_kwargs):
+                return name
+
+            if owns_workspace:
+
+                def _get_workspace_buffer(self):
+                    workspaces.append(name)
+                    return torch.empty(0)
+
+        return SimpleNamespace(
+            __name__=name,
+            full_cls_name=lambda: name,
+            get_supported_kernel_block_sizes=lambda _spec=None: kernel_block_sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_: kernel_block_sizes,
+            get_builder_cls=lambda: Builder,
+        )
+
+    target = backend("Target", [MultipleOf(16)], AttentionCGSupport.ALWAYS, False)
+    draft = backend("Draft", [16, 32, 64], AttentionCGSupport.UNIFORM_BATCH, True)
+    layers = {
+        "target": SimpleNamespace(get_attn_backend=lambda: target),
+        "draft": SimpleNamespace(get_attn_backend=lambda: draft),
+    }
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names: {name: layers[name] for name in names},
+    )
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    spec = new_kv_cache_spec(
+        block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["target", "draft"], spec)],
+    )
+    vllm_config: Any = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        parallel_config=SimpleNamespace(
+            use_ubatching=False, decode_context_parallel_size=1
+        ),
+    )
+
+    def init(**kwargs):
+        workspaces.clear()
+        return attn_utils.init_attn_backend(
+            kv_cache_config, vllm_config, torch.device("cpu"), **kwargs
+        )
+
+    _, cg_support, _ = init()
+    assert workspaces == ["Draft"]
+    assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+
+    attn_groups, cg_support, kernel_block_sizes = init(
+        no_attn_metadata_layer_names={"draft"}
+    )
+    assert workspaces == []
+    assert cg_support.min_cg_support == AttentionCGSupport.ALWAYS
+    assert (
+        attn_utils.get_varlen_cudagraph_unsupported_backend(attn_groups, vllm_config, 4)
+        is None
+    )
+    # The draft backend still limits the kernel block size.
+    assert kernel_block_sizes == [64]
+    draft_group = attn_groups[0][1]
+    assert draft_group.kernel_block_size == 64
+    assert not draft_group.metadata_builders
+
+    query_start_loc = torch.tensor([0, 4], dtype=torch.int32)
+    attn_metadata = attn_utils.build_attn_metadata(
+        attn_groups,
+        num_reqs=1,
+        num_tokens=4,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        max_query_len=4,
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        max_seq_len=4,
+        block_tables=[torch.zeros(1, 4, dtype=torch.int32)],
+        slot_mappings=torch.zeros(1, 4, dtype=torch.int64),
+        kv_cache_config=kv_cache_config,
+    )
+    assert attn_metadata == {"target": "Target"}
+
+
 def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     """ALWAYS passes without a bound, other builders need one at least as wide as
     the requested length, and NEVER fails whatever bound a builder reports."""
@@ -1328,6 +1433,7 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         attn_vllm_config=vllm_config,
         device="cpu",
         draft_attn_layer_names={"draft"},
+        speculative_config=SimpleNamespace(prefill_context_kv_only=False),
         _configure_decode_metadata_update=lambda: None,
     )
     DraftModelSpeculator.set_attn(
