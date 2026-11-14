@@ -164,8 +164,10 @@ def _update_committed_marker_cache_kernel(
     cached_scan_pos_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -215,8 +217,19 @@ def _update_committed_marker_cache_kernel(
                 )
                 end_match = end_match & (actual == expected)
 
+            # A completed forced end sequence also ends reasoning.
+            forced_end_match = (offs < block_hi) & (offs + END_LEN <= total_len)
+            for j in tl.static_range(0, END_LEN):
+                expected = tl.load(reasoning_end_token_ids_ptr + j)
+                actual = tl.load(
+                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + offs + j,
+                    mask=offs + j < total_len,
+                    other=-1,
+                )
+                forced_end_match = forced_end_match & (actual == expected)
+
             last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
-            last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
+            last_end = tl.max(tl.where(end_match | forced_end_match, offs, -1), axis=0)
             block_hi = block_lo
     else:
         for i in tl.range(scan_pos, total_len):
@@ -240,6 +253,17 @@ def _update_committed_marker_cache_kernel(
                     )
                     end_match = end_match & (actual == expected)
                 if end_match:
+                    last_end = i
+
+            if i + END_LEN <= total_len:
+                forced_end_match = True
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j
+                    )
+                    forced_end_match = forced_end_match & (actual == expected)
+                if forced_end_match:
                     last_end = i
 
     tl.store(cached_last_start_ptr + req_state_idx, last_start)
@@ -324,6 +348,28 @@ def _thinking_budget_kernel(
         if end_match:
             last_end = i
 
+    # A completed forced end sequence ends reasoning just like the natural
+    # marker; otherwise the budget stays exhausted and forcing restarts.
+    forced_lo = total_len - END_LEN + 1
+    if forced_lo < 0:
+        forced_lo = 0
+    for i in tl.range(forced_lo, effective_len - END_LEN + 1):
+        forced_end_match = True
+        for j in tl.static_range(0, END_LEN):
+            expected = tl.load(reasoning_end_token_ids_ptr + j)
+            actual = _load_effective_token(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                i + j,
+            )
+            forced_end_match = forced_end_match & (actual == expected)
+        if forced_end_match:
+            last_end = i
+
     if last_start < 0 or last_start <= last_end:
         return
 
@@ -397,9 +443,11 @@ def apply_thinking_budget(
         cached_scan_pos,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
+        reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
-        MAX_LEN=max(start_len, natural_end_len),
+        END_LEN=end_len,
+        MAX_LEN=max(start_len, natural_end_len, end_len),
         BLOCK=_COLD_SCAN_BLOCK,
     )
 
