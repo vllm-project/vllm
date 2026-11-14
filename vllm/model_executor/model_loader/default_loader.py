@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+    check_local_safetensors_layout,
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
     fastsafetensors_weights_iterator,
@@ -251,6 +252,15 @@ class DefaultModelLoader(BaseModelLoader):
                 )
             # only filter the weights from index without explicit allow patterns
             if allow_patterns_overrides is None:
+                # Local directories only: a Hub snapshot should not warn about
+                # leftover files that the download filter did not request.
+                if is_local:
+                    check_local_safetensors_layout(
+                        hf_folder,
+                        hf_weights_files,
+                        index_file,
+                        strict=self.load_config.strict_safetensors_layout,
+                    )
                 hf_weights_files = filter_duplicate_safetensors_files(
                     hf_weights_files, hf_folder, index_file
                 )
