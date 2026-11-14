@@ -38,6 +38,12 @@ python examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py --p
 
 Now you can send requests to the proxy server through port 8000.
 
+For `/v1/completions` and `/v1/chat/completions`, the example proxy forwards the Decode server's HTTP status, response body, and `Content-Type` for both streaming and non-streaming requests. For example, a Decode HTTP 500 response reaches the client as HTTP 500 rather than HTTP 200 followed by a broken stream.
+
+Response bodies are forwarded incrementally without buffering the complete response. The proxy closes the upstream Decode response when downstream header sending fails, as well as when streaming completes or the client disconnects.
+
+Connection failures before Decode returns an HTTP response remain proxy-side errors; there is no Decode HTTP response to forward in that case.
+
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
