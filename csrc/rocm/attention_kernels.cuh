@@ -99,6 +99,12 @@ __device__ __forceinline__ Vec mask_v_cache_padding(Vec values,
   return values;
 }
 
+// gfx1170 and gfx1171 predefine __GFX11__ but their WMMA hardware is
+// RDNA4-class, so they take the __GFX12__ path below instead of the RDNA3 one.
+#if defined(__gfx1170__) || defined(__gfx1171__)
+  #define __HIP__GFX117X__
+#endif
+
 #if defined(__HIP__GFX9__)
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
@@ -1804,7 +1810,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   }
 }
 
-#elif defined(__GFX11__)
+#elif defined(__GFX11__) && !defined(__HIP__GFX117X__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
@@ -2582,7 +2588,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
-#elif defined(__GFX12__)
+#elif defined(__GFX12__) || defined(__HIP__GFX117X__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
