@@ -111,14 +111,15 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         draft_config.model_config = vllm_config.speculative_config.draft_model_config
         draft_config.quant_config = self.quant_config
 
-        if (
-            isinstance(vllm_config.additional_config, dict)
-            and vllm_config.additional_config.get("decode_backend")
-            == "latency_specialized"
+        extra = vllm_config.additional_config
+        if vllm_config.kernel_config.monokernel or (
+            isinstance(extra, dict)
+            and extra.get("decode_backend") == "latency_specialized"
         ):
             logger.warning_once(
-                "The Muse Spark specialized decode is not supported on ROCm; the "
-                "DSpark draft keeps its stock layers and Markov loop."
+                "The Muse Spark specialized decode (monokernel) is not supported "
+                "on ROCm for the DSpark draft; the draft keeps its stock layers "
+                "and Markov loop."
             )
 
         self.embed_tokens = VocabParallelEmbedding(
