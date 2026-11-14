@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from functools import partial
-from inspect import isclass, signature
+from inspect import getattr_static, isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast, get_args
@@ -1269,6 +1269,8 @@ class EngineCore:
                 request.mm_features
             )
 
+        _validate_request_on_platform(request)
+
         watermark_config = self.vllm_config.watermark_config
         params = request.sampling_params
         # Greedy decoding and trace replay cannot be watermarked; leave their
@@ -1304,6 +1306,70 @@ class EngineCore:
         self, notification_type: EEPNotificationType
     ):
         raise NotImplementedError
+
+
+def _validate_request_on_platform(request: EngineCoreRequest) -> None:
+    """Run the platform's `validate_request` on a request at the engine.
+
+    The Python `InputProcessor` calls it before sending a request, but other
+    frontends (e.g. the Rust frontend) send `EngineCoreRequest`s directly, so
+    the platform's checks would be skipped. Rejections raise
+    `VLLMValidationError`, which is returned to the client as a
+    `validation_error` request error. Platforms that keep the default no-op
+    implementation skip this entirely.
+    """
+    from vllm.inputs.engine import EngineInput
+    from vllm.platforms import current_platform
+    from vllm.platforms.interface import Platform
+
+    platform_cls = (
+        current_platform if isclass(current_platform) else type(current_platform)
+    )
+    if getattr_static(platform_cls, "validate_request") is getattr_static(
+        Platform, "validate_request"
+    ):
+        return
+
+    params = request.sampling_params or request.pooling_params
+    assert params is not None
+    prompt_token_ids = request.prompt_token_ids
+    if prompt_token_ids is not None and not isinstance(prompt_token_ids, list):
+        prompt_token_ids = prompt_token_ids.tolist()
+    engine_input: dict[str, Any]
+    if request.prompt_embeds is not None:
+        engine_input = {"type": "embeds", "prompt_embeds": request.prompt_embeds}
+        if prompt_token_ids is not None:
+            engine_input["prompt_token_ids"] = prompt_token_ids
+        if request.prompt_is_token_ids is not None:
+            engine_input["is_token_ids"] = request.prompt_is_token_ids
+    elif request.mm_features:
+        mm_kwargs: dict[str, list] = defaultdict(list)
+        mm_hashes: dict[str, list[str]] = defaultdict(list)
+        mm_placeholders: dict[str, list] = defaultdict(list)
+        for feature in request.mm_features:
+            mm_kwargs[feature.modality].append(feature.data)
+            mm_hashes[feature.modality].append(feature.identifier)
+            mm_placeholders[feature.modality].append(feature.mm_position)
+        engine_input = {
+            "type": "multimodal",
+            "prompt_token_ids": prompt_token_ids,
+            "mm_kwargs": dict(mm_kwargs),
+            "mm_hashes": dict(mm_hashes),
+            "mm_placeholders": dict(mm_placeholders),
+        }
+    else:
+        engine_input = {"type": "token", "prompt_token_ids": prompt_token_ids}
+    if request.cache_salt is not None:
+        engine_input["cache_salt"] = request.cache_salt
+
+    try:
+        current_platform.validate_request(cast(EngineInput, engine_input), params)
+    except VLLMValidationError:
+        raise
+    except ValueError as e:
+        # The OpenAI frontend also reports a ValueError from InputProcessor as
+        # a client error.
+        raise VLLMValidationError(str(e)) from e
 
 
 class EngineShutdownState(IntEnum):
