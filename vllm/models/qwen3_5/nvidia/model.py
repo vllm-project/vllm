@@ -46,7 +46,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-    flashinfer_allreduce_gemma_rms_norm_applies,
     flashinfer_trtllm_fused_allreduce_norm,
     fused_allreduce_gemma_rms_norm,
 )
@@ -246,14 +245,6 @@ class Qwen3_5RMSNorm(nn.Module):
         """
         allreduce = self.reduce_inputs and residual is not None
         key = None if linear is None else _norm_quant_key(linear)
-        # FlashInfer has no per-token FP8 AR+norm+quant pattern, so keep its
-        # AR+norm (and the linear's own quant) where it applies.
-        if (
-            key == kFp8DynamicTokenSym
-            and allreduce
-            and flashinfer_allreduce_gemma_rms_norm_applies(x)
-        ):
-            key = None
         if key is None:
             if allreduce:
                 assert residual is not None

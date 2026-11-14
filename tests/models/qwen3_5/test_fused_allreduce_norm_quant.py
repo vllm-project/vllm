@@ -41,7 +41,6 @@ def _worker(local_rank, world_size, port):
     from vllm.config.model import ModelConfig
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-        flashinfer_allreduce_gemma_rms_norm_applies,
         fused_allreduce_gemma_rms_norm,
     )
     from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -150,25 +149,18 @@ def _worker(local_rank, world_size, port):
         torch.accelerator.synchronize()
 
         torch.testing.assert_close(res, ref_res, atol=0, rtol=0)
-        # FlashInfer has no per-token AR+norm+quant: its AR+norm stays, and
-        # the linear quantizes its own input.
-        unfused = linear is None or (
-            quant == "fp8_token"
-            and allreduce
-            and flashinfer_allreduce_gemma_rms_norm_applies(x)
-        )
-        if unfused:
+        if linear is None:
             assert qa is None
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
             return
 
         assert linear is not None and qa is not None and y is not None
         # FlashInfer's AR+norm+quant kernel matches its AR+norm bitwise; the
-        # Triton norm-quant (no all-reduce, above the workspace budget, or no
-        # FlashInfer AR+norm on this GPU) reduces the sum of squares in a
-        # different order than FlashInfer's norm, so off-by-one codes appear
-        # where the normed values differ.
-        exact = allreduce and flashinfer_allreduce_gemma_rms_norm_applies(x)
+        # Triton norm-quant (no all-reduce, above the workspace budget, or
+        # per-token FP8) reduces the sum of squares in a different order than
+        # FlashInfer's norm, so off-by-one codes appear where the normed
+        # values differ.
+        exact = allreduce and num_tokens < FALLBACK_TOKENS and quant != "fp8_token"
         if exact:
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
         else:
