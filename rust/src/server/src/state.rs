@@ -15,7 +15,9 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 use vllm_llm::{EngineCoreLlm, Llm};
 
-use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_FORWARDED_ALLOW_IPS, LoraModulePath,
+};
 use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
@@ -47,6 +49,8 @@ pub struct AppState {
     pub cors: CorsConfig,
     /// HTTP access log settings.
     pub access_log: AccessLogConfig,
+    /// Peers trusted to supply forwarded client addresses.
+    pub(crate) trusted_proxies: crate::middleware::TrustedProxies,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
@@ -85,6 +89,7 @@ impl AppState {
             system_fingerprint: None,
             cors: CorsConfig::default(),
             access_log: AccessLogConfig::default(),
+            trusted_proxies: crate::middleware::TrustedProxies::new(DEFAULT_FORWARDED_ALLOW_IPS),
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
@@ -116,6 +121,12 @@ impl AppState {
     /// Set the HTTP access log settings.
     pub fn with_access_log(mut self, access_log: AccessLogConfig) -> Self {
         self.access_log = access_log;
+        self
+    }
+
+    /// Set the peers whose forwarded client addresses are trusted.
+    pub fn with_forwarded_allow_ips(mut self, value: &str) -> Self {
+        self.trusted_proxies = crate::middleware::TrustedProxies::new(value);
         self
     }
 

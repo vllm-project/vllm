@@ -30,7 +30,7 @@ pub async fn log_access(
         return next.run(request).await;
     }
 
-    // Absent for Unix-domain sockets.
+    // Unix sockets have no peer IP, but a trusted header can supply a client.
     let client = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()

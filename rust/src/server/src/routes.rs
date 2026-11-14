@@ -317,6 +317,11 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         router = router.layer(from_fn_with_state(state.clone(), middleware::log_access));
     }
 
+    router = router.layer(from_fn_with_state(
+        state,
+        middleware::apply_forwarded_client,
+    ));
+
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));
     }
