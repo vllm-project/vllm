@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -17,6 +18,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     xpu_sample,
     xpu_sampler_supported,
 )
+from vllm.v1.sample.ops.topk_topp_triton import top_k_top_p_kept_tokens_triton
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -37,6 +39,8 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
+
+_MAX_KEPT_TOKENS = 256
 
 
 class Sampler:
@@ -95,6 +99,8 @@ class Sampler:
         self.use_xpu_sampler = (
             not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
         )
+        # Sample top-k rows from their kept tokens instead of the masked logits.
+        self.use_kept_tokens = current_platform.is_cuda()
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
@@ -310,6 +316,9 @@ class Sampler:
         use_fused_sampler = (
             self.use_flashinfer or self.use_xpu_sampler
         ) and fused_sampler_eligible
+        max_kept = None
+        if not use_fused_sampler:
+            max_kept = self._max_kept_tokens(idx_mapping_np, return_logprobs)
 
         return self._sample_random(
             processed_logits,
@@ -320,7 +329,23 @@ class Sampler:
             top_p,
             has_topp_only_rows,
             use_fused_sampler,
+            max_kept,
         )
+
+    def _max_kept_tokens(
+        self, idx_mapping_np: np.ndarray, return_logprobs: bool
+    ) -> int | None:
+        """Width of the compact kept-token output, if the batch can sample from
+        it: every request has a top-k <= _MAX_KEPT_TOKENS, and nothing reads the
+        masked logits."""
+        if (
+            not self.use_kept_tokens
+            or self.return_sampling_mask
+            or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
+        ):
+            return None
+        max_top_k = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+        return max_top_k if max_top_k <= _MAX_KEPT_TOKENS else None
 
     def _sample_random(
         self,
@@ -332,6 +357,7 @@ class Sampler:
         top_p: torch.Tensor | None,
         has_topp_only_rows: bool,
         use_fused_sampler: bool,
+        max_kept: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_fused_sampler:
             if self.use_flashinfer:
@@ -341,9 +367,20 @@ class Sampler:
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
-            processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-            )
+            kept = None
+            if max_kept is not None:
+                assert top_k is not None
+                # The returned logits stay unmasked, which no caller reads here.
+                kept = top_k_top_p_kept_tokens_triton(
+                    processed_logits, top_k, top_p, max_kept
+                )
+            else:
+                processed_logits = apply_top_k_top_p(
+                    processed_logits,
+                    top_k,
+                    top_p,
+                    has_topp_only_rows=has_topp_only_rows,
+                )
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
@@ -353,5 +390,6 @@ class Sampler:
                 apply_temperature=False,
                 is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
+                kept=kept,
             )
         return sampled, processed_logits
