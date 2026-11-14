@@ -30,6 +30,9 @@ class EncoderOnlyModelState(DefaultModelState):
     the normal KV-backed path untouched.
     """
 
+    # The V2 pooling path is not wired for prompt embeds.
+    supports_prompt_embeds = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
