@@ -191,6 +191,21 @@ def test_moe_expects_each_local_expert_and_shard(gated):
     _assert_equal(layer, _reference(full, "w13_weight"))
 
 
+def test_moe_other_rank_expert_after_completion_keeps_processed_layer():
+    # Checkpoints list experts lexicographically (..., 63, 7, 8, 9), so another
+    # rank's experts can arrive after this rank's last one (expert parallel).
+    layer, full = _MoE(), _rand(2, 4, 4)
+    loader = layer.w13_weight.weight_loader
+    for global_id, local in layer._local.items():
+        loader(layer.w13_weight, full[local, :2], "w", "w1", global_id)
+        loader(layer.w13_weight, full[local, 2:], "w", "w3", global_id)
+    assert layer.quant_method.runs == 1
+    param = layer.w13_weight
+    assert loader(param, full[0, :2], "w", "w1", 2, True) is False
+    assert layer.quant_method.runs == 1
+    _assert_equal(layer, _reference(full, "w13_weight"))
+
+
 def test_moe_full_expert_tensor_covers_every_expert():
     layer, full = _MoE(), _rand(2, 4, 4)
     param = layer.w13_weight

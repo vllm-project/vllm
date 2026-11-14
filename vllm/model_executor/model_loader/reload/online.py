@@ -152,11 +152,11 @@ def _load_keys(
         shard, expert = arguments.get("shard_id"), arguments.get("expert_id")
         if shard is None or expert is None or len(values) < 2:
             return None
+        if values[1].ndim == 3:  # all experts in one tensor
+            return {(name, e, shard) for e in range(layer.local_num_experts)}
         local = layer._map_global_expert_id_to_local_expert_id(expert)
         if local < 0:
             return set()  # not on this rank; the loader skips it too
-        if values[1].ndim == 3:  # all experts in one tensor
-            return {(name, e, shard) for e in range(layer.local_num_experts)}
         return {(name, local, shard)}
     shard_ids = getattr(layer, "shard_ids", None)
     if shard_ids is not None:
@@ -192,6 +192,12 @@ def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Calla
             trace._sink.wrote.add(trace._name)
             return True if bound.arguments.get("return_success") else None
 
+        keys = _load_keys(layer, name, bound)
+        if keys is not None and not keys:
+            # Another rank's expert: the loader skips it. Don't allocate a
+            # buffer, which would also hide a layer already processed.
+            bound.arguments[first] = state.ckpt[name]
+            return original(*bound.args, **bound.kwargs)
         if name not in state.loaded:
             target = _materialize(state.ckpt[name], state.device)
             layer.register_parameter(name, target)  # type: ignore[arg-type]
@@ -206,7 +212,6 @@ def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Calla
         bound.arguments[first] = getattr(layer, name)
         ret = original(*bound.args, **bound.kwargs)
 
-        keys = _load_keys(layer, name, bound)
         if keys is None:
             if not state.unknown_key:
                 logger.debug(
