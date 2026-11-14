@@ -358,8 +358,9 @@ class CudaGraphManager:
             prefill_sizes, self.lora_capture_cases
         ):
             # recoverSSM cannot capture a dummy query wider than its workspace.
+            cc = self.vllm_config.cache_config
             if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
+                not (cc.use_kda_recoverssm or cc.use_gdn_recoverssm)
                 or num_tokens <= max_decode_tokens
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -1138,6 +1139,11 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
+    # A PIECEWISE profiling capture records its RecoverSSM step (only FULL
+    # captures skip it), and that step's commit contexts reference the
+    # profiling KV cache.
+    if (recoverssm := getattr(runner.model_state, "recoverssm", None)) is not None:
+        recoverssm.reset()
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

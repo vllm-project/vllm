@@ -33,6 +33,8 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+    # RecoverSSM record of this step, committed with the slot (non-last ranks).
+    recoverssm_step: tuple | None = None
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -168,6 +170,12 @@ class PPHandler:
             )
         return hidden_states, aux_hidden_states
 
+    def attach_recoverssm_step(self, step: tuple | None) -> None:
+        """Attach this step's RecoverSSM record to the slot `receive` just
+        filled. Without a slot nothing is sampled, so nothing needs a commit."""
+        if step is not None and self.queue and self.queue[-1] is not None:
+            self.queue[-1].recoverssm_step = step
+
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor | None] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
@@ -200,6 +208,7 @@ class PPHandler:
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
             draft_tokens=slot.draft_tokens,
+            recoverssm_step=slot.recoverssm_step,
         )
 
     def broadcast_drafts(self, draft_tokens: torch.Tensor) -> None:

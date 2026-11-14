@@ -26,6 +26,7 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
 from vllm.model_executor.models.qwen3_next import QwenNextMixtureOfExperts
@@ -170,7 +171,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+class Qwen3_5MTP(
+    LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP, SupportsReplaySSM
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

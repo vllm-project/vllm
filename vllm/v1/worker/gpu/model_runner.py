@@ -1788,6 +1788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc: torch.Tensor | None = None,
         # Drafts received from the last PP rank (non-last ranks only).
         draft_tokens: torch.Tensor | None = None,
+        recoverssm_step: tuple | None = None,
     ) -> None:
         # Update the number of computed tokens.
         output_bin_counts = None
@@ -1809,9 +1810,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens,
         )
 
-        self.model_state.postprocess_state(
-            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
-        )
+        if recoverssm_step is not None:
+            self.model_state.postprocess_state(
+                idx_mapping,
+                num_sampled,
+                self.req_states.num_computed_tokens.gpu,
+                recoverssm_step=recoverssm_step,
+            )
+        else:
+            self.model_state.postprocess_state(
+                idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+            )
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
@@ -2259,6 +2268,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_decode_next = self.pp_handler.receive(
                 input_batch, recv_drafts=num_spec_tokens > 0
             )
+            # Defer this step's RecoverSSM commit with its PP slot.
+            if (
+                recoverssm := getattr(self.model_state, "recoverssm", None)
+            ) is not None:
+                self.pp_handler.attach_recoverssm_step(recoverssm.detach_step())
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)

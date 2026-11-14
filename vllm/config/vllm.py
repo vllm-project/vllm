@@ -85,6 +85,24 @@ else:
 
 logger = init_logger(__name__)
 
+# Architectures whose GDN (and PLE) layers run RecoverSSM under --use-replayssm.
+_QWEN4EXP_RECOVERSSM_ARCHS = (
+    "Qwen4ExpForCausalLM",
+    "Qwen4ExpForConditionalGeneration",
+    "Qwen4ExpMTP",
+)
+# Qwen3-Next / Qwen3.5 share the Qwen GDN layer (and its RecoverSSM path) with Qwen4Exp.
+_QWEN_GDN_RECOVERSSM_ARCHS = (
+    *_QWEN4EXP_RECOVERSSM_ARCHS,
+    "Qwen3NextForCausalLM",
+    "Qwen3NextMTP",
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5MTP",
+    "Qwen3_5MoeMTP",
+)
 _QWEN3_5_ARCHITECTURES = frozenset(
     {
         "Qwen3_5ForCausalLM",
@@ -589,6 +607,7 @@ class VllmConfig:
         return (
             self.cache_config.use_replayssm
             and not self.cache_config.use_kda_recoverssm
+            and not self.cache_config.use_gdn_recoverssm
             and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
         )
 
@@ -3625,6 +3644,7 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
+            self.cache_config.use_gdn_recoverssm = False
             return self
 
         kda_architectures = (
@@ -3639,14 +3659,32 @@ class VllmConfig:
         self.cache_config.use_kda_recoverssm = (
             self.num_speculative_tokens > 0 and is_kda_model
         )
-        use_mamba_replayssm_spec = (
-            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
+        # Qwen GDN (and Qwen4Exp PLE) RecoverSSM: the same verify-then-commit
+        # scheme as KDA, with its own kernels and flag.
+        is_gdn_model = (
+            self.model_config is not None
+            and self.model_config.architecture in _QWEN_GDN_RECOVERSSM_ARCHS
         )
+        self.cache_config.use_gdn_recoverssm = (
+            self.num_speculative_tokens > 0 and is_gdn_model
+        )
+        recoverssm_on = (
+            self.cache_config.use_kda_recoverssm or self.cache_config.use_gdn_recoverssm
+        )
+        use_mamba_replayssm_spec = self.num_speculative_tokens > 0 and not recoverssm_on
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
+            )
+        if is_gdn_model and not self.cache_config.use_gdn_recoverssm:
+            # The Qwen GDN (and Qwen4Exp PLE) layers have no plain ReplaySSM path;
+            # with them the flag selects RecoverSSM, which needs speculative decoding.
+            raise ValueError(
+                f"--use-replayssm on {self.model_config.architecture} selects GDN "
+                "RecoverSSM and requires speculative decoding "
+                "(num_speculative_tokens > 0)"
             )
         if (
             self.mamba_config.backend == MambaBackendEnum.FLASHINFER
@@ -3655,16 +3693,30 @@ class VllmConfig:
             raise ValueError(
                 "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
             )
-        if self.cache_config.use_kda_recoverssm:
+        if recoverssm_on:
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.cache_config.use_kda_recoverssm
+            ):
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
+                )
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.cache_config.mamba_cache_mode == "align"
+            ):
+                # GDN RecoverSSM on non-last PP ranks commits in the deferred PP
+                # postprocess (see RecoverSSMState.detach_step); the align-mode
+                # boundary postprocess is not wired through that path yet.
+                raise ValueError(
+                    "RecoverSSM with pipeline_parallel_size > 1 does not support "
+                    "--mamba-cache-mode align yet"
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
@@ -3717,7 +3769,8 @@ class VllmConfig:
             and self.kv_transfer_config.is_kv_transfer_instance
             # A KDA RecoverSSM request's state is its conv and SSM state in the
             # stock Mamba page (the verify records are kept outside the KV
-            # cache), so KV connectors transfer it as usual.
+            # cache), so KV connectors transfer it as usual. Qwen GDN RecoverSSM
+            # can keep its records in the Mamba page, so it stays incompatible.
             and not self.cache_config.use_kda_recoverssm
         ):
             raise ValueError(

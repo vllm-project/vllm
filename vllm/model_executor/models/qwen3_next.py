@@ -72,10 +72,12 @@ from .interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsReplaySSM,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -825,6 +827,37 @@ class QwenNextMixtureOfExperts(MixtureOfExperts):
         self.num_redundant_experts = example_moe.n_redundant_experts
 
 
+def gdn_mamba_state_dtype_from_config(
+    vllm_config: VllmConfig,
+) -> tuple[torch.dtype, ...]:
+    """GDN state dtypes for Qwen3-Next / Qwen3.5."""
+    return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+        vllm_config.model_config.dtype,
+        vllm_config.cache_config.mamba_cache_dtype,
+        vllm_config.cache_config.mamba_ssm_cache_dtype,
+    )
+
+
+def gdn_mamba_state_shape_from_config(vllm_config: VllmConfig) -> MambaStateShapes:
+    """GDN state shapes for Qwen3-Next / Qwen3.5."""
+    hf_config = vllm_config.model_config.hf_text_config
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    num_spec = (
+        vllm_config.speculative_config.num_speculative_tokens
+        if vllm_config.speculative_config
+        else 0
+    )
+    return MambaStateShapeCalculator.gated_delta_net_state_shape(
+        tp_size,
+        hf_config.linear_num_key_heads,
+        hf_config.linear_num_value_heads,
+        hf_config.linear_key_head_dim,
+        hf_config.linear_value_head_dim,
+        hf_config.linear_conv_kernel_dim,
+        num_spec,
+    )
+
+
 class Qwen3NextForCausalLM(
     nn.Module,
     HasInnerState,
@@ -833,6 +866,7 @@ class Qwen3NextForCausalLM(
     QwenNextMixtureOfExperts,
     IsHybrid,
     SupportsEagle3,
+    SupportsReplaySSM,
 ):
     # MTP weights are loaded by the draft model, not this one.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
@@ -897,34 +931,14 @@ class Qwen3NextForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
-        )
+    ) -> tuple[torch.dtype, ...]:
+        return gdn_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
-            hf_config.linear_key_head_dim,
-            hf_config.linear_value_head_dim,
-            hf_config.linear_conv_kernel_dim,
-            num_spec,
-        )
+    ) -> MambaStateShapes:
+        return gdn_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
