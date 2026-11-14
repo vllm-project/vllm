@@ -13,7 +13,9 @@ from nvfp4_utils import (
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    SM120_CUTEDSL_MAX_TOKENS,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
+    _sm120_cutedsl_nvfp4_mm,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
@@ -22,6 +24,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer_b12x_gemm,
+    has_flashinfer_sm12x_cutedsl_fp4_gemm,
 )
 from vllm.utils.torch_utils import set_random_seed
 
@@ -96,8 +99,20 @@ def test_flashinfer_nvfp4_gemm(
 ) -> None:
     if "trtllm" in backend and dtype == torch.float16:
         pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
-    if backend == "cute-dsl" and not current_platform.is_device_capability_family(100):
-        pytest.skip("FlashInfer cutedsl backend is only supported on SM10x")
+    if backend == "cute-dsl" and not (
+        current_platform.is_device_capability_family(100)
+        or (
+            current_platform.is_device_capability(120)
+            and has_flashinfer_sm12x_cutedsl_fp4_gemm()
+        )
+    ):
+        pytest.skip("FlashInfer cutedsl backend requires SM10x or SM120")
+    if (
+        backend == "cute-dsl"
+        and current_platform.is_device_capability(120)
+        and dtype != torch.bfloat16
+    ):
+        pytest.skip("FlashInfer cutedsl on SM120 only supports BF16 output")
     if backend == "b12x" and not current_platform.has_device_capability(120):
         pytest.skip("b12x FP4 GEMM requires SM120+ (CC 12.0+)")
     if backend == "b12x" and not has_flashinfer_b12x_gemm():
@@ -174,6 +189,34 @@ def test_flashinfer_nvfp4_gemm(
         )
 
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
+
+
+@pytest.mark.parametrize(
+    "m", [1, SM120_CUTEDSL_MAX_TOKENS, SM120_CUTEDSL_MAX_TOKENS + 1, 256]
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_sm120_cutedsl_nvfp4_mm_matches_cutlass(m: int, dtype: torch.dtype) -> None:
+    if not (
+        current_platform.is_device_capability(120)
+        and has_flashinfer_sm12x_cutedsl_fp4_gemm()
+    ):
+        pytest.skip("Requires SM120 and FlashInfer's SM12x cute-dsl runner")
+    set_random_seed(42)
+    n, k = 512, 1024
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = torch.randn((n, k), dtype=dtype, device="cuda")
+    a_gs = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a.abs().max()).to(torch.float32)
+    b_gs = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b.abs().max()).to(torch.float32)
+    alpha = 1.0 / (a_gs * b_gs)
+    a_fp4, a_sf = ops.scaled_fp4_quant(a, a_gs, is_sf_swizzled_layout=True)
+    b_fp4, b_sf = ops.scaled_fp4_quant(b, b_gs, is_sf_swizzled_layout=True)
+
+    out = _sm120_cutedsl_nvfp4_mm(a_fp4, b_fp4, a_sf, b_sf, alpha, dtype)
+    ref = flashinfer_scaled_fp4_mm(
+        a_fp4, b_fp4, a_sf, b_sf, alpha, dtype, backend="cutlass"
+    )
+    torch.testing.assert_close(out, ref, atol=1e-1, rtol=1e-1)
 
 
 @pytest.mark.parametrize("shape", SHAPES)
