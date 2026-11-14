@@ -364,7 +364,7 @@ def build_c128a_topk_metadata(
 class BuildC128ATopkMetadataKernel(
     VllmTritonJitKernel["BuildC128ATopkMetadataKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         compress_ratio: int
         max_compressed_tokens: int
