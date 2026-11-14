@@ -54,6 +54,7 @@ All2AllBackend = Literal[
     "deepep_high_throughput",
     "deepep_low_latency",
     "deepep_v2",
+    "mooncake",
     "mori_high_throughput",
     "mori_low_latency",
     "moonep",
@@ -251,6 +252,8 @@ class ParallelConfig:
       token only to the ranks owning its experts, in batched activation format
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
+    - "mooncake": Mooncake EP `ElasticBuffer`, which follows the DeepEP v2 API;
+      runs on CUDA and XPU
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
       (deprecated; use "mori")
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
@@ -883,6 +886,7 @@ class ParallelConfig:
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "deepep_v2",
+                "mooncake",
                 "flashinfer_nvlink_one_sided",
                 "passthrough",
                 "mori_high_throughput",
