@@ -387,7 +387,8 @@ def test_poisoning_is_block_size_independent(
 
 
 @pytest.mark.parametrize("partial_hit", [False, True])
-@pytest.mark.parametrize("resume_at", [331, 1599, 1601, 2531, 3011])
+# 32 and 1584 are hash-aligned partial hits, where an internal checkpoint is valid.
+@pytest.mark.parametrize("resume_at", [32, 331, 1584, 1599, 1601, 2531, 3011])
 @pytest.mark.parametrize(
     ("num_prefill_checkpoint_blocks", "use_eagle"),
     [(0, True), (1, False)],
