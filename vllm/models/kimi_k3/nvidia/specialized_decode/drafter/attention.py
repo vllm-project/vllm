@@ -638,28 +638,35 @@ def folded_decode(
         )
     else:
         tiers = ()
-    if tiers:
-        common["backend"] = planned
-        o, lse = balanced_decode(common, table_cache, kv_lora_rank, tiers, move_num)
-        o = o.reshape(rows, heads, o.shape[-1])
-        return o, None if lse is None else lse.reshape(rows, heads)
     out = None
     if planned == "cake":
+        # CAKE carves its split-KV partials (rows x splits x ~1 KiB) out of the
+        # fixed workspace and validates the size on the host before it launches
+        # anything. Large batches (e.g. 128 requests x 5 tokens x 64 heads) can
+        # need more than the buffer holds; growing it would free memory that
+        # earlier captured graphs still point at, so such shapes run the
+        # trtllm-gen fold instead. A causal block can also hit CAKE's generic-tail
+        # limit (64 heads x 4 tokens at long contexts), likewise checked first.
+        # The balanced launches' main launch plans as the one launch, so it is
+        # rejected alike.
         try:
+            if tiers:
+                o, _ = balanced_decode(
+                    dict(common, backend="cake"), table_cache, kv_lora_rank,
+                    tiers, move_num,
+                )  # fmt: skip
+                return o.reshape(rows, heads, o.shape[-1]), None
             out = trtllm_batch_decode_with_kv_cache_mla(backend="cake", **common)
         except ValueError as e:
-            # CAKE carves its split-KV partials (rows x splits x ~1 KiB) out of
-            # the fixed workspace and validates the size on the host before it
-            # launches anything. Large batches (e.g. 128 requests x 5 tokens x 64
-            # heads) can need more than the buffer holds; growing it would free
-            # memory that earlier captured graphs still point at, so such shapes
-            # run the trtllm-gen fold instead.
-            # A causal block can also hit CAKE's generic-tail limit (64 heads x
-            # 4 tokens at long contexts), likewise checked before any launch.
             if "workspace_buffer needs" not in str(e) and q_len == 1:
                 raise
             _CAKE_WORKSPACE_TOO_SMALL.add(cake_key)
             planned = "auto"
+    elif tiers:
+        common["backend"] = planned
+        o, lse = balanced_decode(common, table_cache, kv_lora_rank, tiers, move_num)
+        o = o.reshape(rows, heads, o.shape[-1])
+        return o, None if lse is None else lse.reshape(rows, heads)
     if out is None:
         extra: dict[str, Any] = {}
         if planned == "auto":

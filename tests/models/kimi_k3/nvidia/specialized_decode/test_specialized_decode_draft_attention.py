@@ -492,9 +492,11 @@ def test_causal_block_matches_stock_and_reference(heads, k, ctxs):
 def test_causal_cake_balanced_matches_one_launch(ctxs):
     """24 causal requests (96 heads x k=4, no LSE: CAKE) at the 1M plan length,
     where CAKE's own plan runs every request unsplit: the length-balanced
-    launches against the one CAKE launch. Both match the FP32 causal reference;
-    they differ only by CAKE's split-KV merge of the moved rows (BF16 rounding).
-    CUDA-graph replay equals eager."""
+    launches against one direct CAKE launch. Both match the FP32 causal
+    reference; they differ only by CAKE's split-KV merge of the moved rows (BF16
+    rounding). CUDA-graph replay equals eager."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
     from vllm.models.kimi_k3.nvidia.specialized_decode.drafter import attention as A
 
     heads, k, reqs, plan_len = 96, 4, 24, 1 << 20
@@ -523,12 +525,20 @@ def test_causal_cake_balanced_matches_one_launch(ctxs):
         max_reqs=reqs,
         causal=True,
     )
-    policy = A.cake_balance
-    try:
-        A.cake_balance = lambda *a, **kw: ((), 1)
-        o0, _ = A.folded_decode(*args, **kwargs, table_cache={})
-    finally:
-        A.cake_balance = policy
+    o0 = trtllm_batch_decode_with_kv_cache_mla(
+        query=q.view(reqs, k, heads, D),
+        kv_cache=kv.unsqueeze(1),
+        workspace_buffer=A._cake_workspace(q.device),
+        qk_nope_head_dim=NOPE,
+        kv_lora_rank=KV_LORA,
+        qk_rope_head_dim=ROPE,
+        block_tables=bt,
+        seq_lens=seq,
+        max_seq_len=plan_len,
+        bmm1_scale=SCALE,
+        bmm2_scale=1.0,
+        backend="cake",
+    ).reshape(reqs * k, heads, KV_LORA)
     o1, l1 = A.folded_decode(*args, **kwargs, table_cache={})
     torch.accelerator.synchronize()
     assert l1 is None
@@ -555,3 +565,30 @@ def test_causal_cake_balanced_matches_one_launch(ctxs):
     graph.replay()
     torch.accelerator.synchronize()
     assert torch.equal(go, o1)
+
+
+def test_causal_cake_balanced_rejection_falls_back():
+    """A balanced causal CAKE batch whose plan CAKE rejects (here: a workspace
+    smaller than the plan needs) takes the same stock fallback as one launch,
+    and still matches the FP32 causal reference."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.drafter import attention as A
+
+    # 44 requests: balanced (tiers (4, 8)), and the main launch's plan needs
+    # ~70 MiB of split workspace.
+    heads, k, reqs, plan_len = 96, 4, 44, 1 << 20
+    g = torch.Generator().manual_seed(23)
+    lens = torch.randint(64, 3000, (reqs,), generator=g).tolist()
+    lens[3], lens[11] = 50000, 33000
+    q, kv, bt, seq = _case(reqs, lens, heads, k, seed=29)
+    if not A.cake_supported(q, kv, KV_LORA, ROPE):
+        pytest.skip("CAKE needs SM100 FP8 page-64")
+    A.reserve_cake_workspace(q.device, reqs, k, heads, plan_len)
+    assert A.cake_balance(q.device, reqs, k, heads, plan_len)[0]
+    o, _ = A.folded_decode(
+        q, kv, bt, seq, plan_len, k, kv_lora_rank=KV_LORA, qk_nope_head_dim=NOPE,
+        qk_rope_head_dim=ROPE, bmm1_scale=SCALE, bmm2_scale=1.0,
+        workspace=torch.zeros(1 << 20, dtype=torch.int8, device="cuda"),
+        max_reqs=reqs, table_cache={}, causal=True,
+    )  # fmt: skip
+    ref = _causal_reference(q, kv, bt, seq, k)
+    assert ((o.float() - ref).norm() / ref.norm()).item() < 0.03
