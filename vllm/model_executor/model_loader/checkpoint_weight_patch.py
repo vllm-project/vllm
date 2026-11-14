@@ -5,24 +5,46 @@
 The model's `load_weights` method still handles checkpoint-name mapping,
 TP slicing, and packed parameters. Sparse patches use NaN to mark unchanged
 checkpoint elements. The supported sparse-loader contract permits only final
-same-shaped floating-point `Tensor.copy_` writes. Composed, multi-stage, and
-custom-write loaders are unsupported.
+same-shaped floating-point `Tensor.copy_` writes, plus `composed_weight_loader`.
+Other multi-stage and custom-write loaders are unsupported; one that stores a NaN
+marker makes the update raise.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import NamedTuple
 
 import torch
 
 _DEFAULT_PATCH_CHUNK_BYTES = 512 << 20
 
+_sparse_patch_load: ContextVar[bool] = ContextVar("sparse_patch_load", default=False)
+
 __all__ = [
     "CheckpointWeightPatch",
+    "is_sparse_patch_load",
     "load_checkpoint_weight_patches",
 ]
+
+
+@contextmanager
+def _sparse_patch_load_scope() -> Iterator[None]:
+    """Mark weight loaders called in this scope as loading NaN-masked sparse
+    patches, where NaN means "keep the current value".
+    """
+    token = _sparse_patch_load.set(True)
+    try:
+        yield
+    finally:
+        _sparse_patch_load.reset(token)
+
+
+def is_sparse_patch_load() -> bool:
+    return _sparse_patch_load.get()
 
 
 class CheckpointWeightPatch(NamedTuple):
@@ -80,7 +102,8 @@ def _load_nan_masked_weights(
 
     torch.Tensor.copy_ = copy_non_nan_
     try:
-        return model.load_weights(weights)
+        with _sparse_patch_load_scope():
+            return model.load_weights(weights)
     finally:
         torch.Tensor.copy_ = original_copy
 
@@ -121,19 +144,56 @@ def _validate_patch_structure(patch: CheckpointWeightPatch) -> int:
     return numel
 
 
+def _raise_on_leaked_nan_markers(
+    model: torch.nn.Module,
+    loaded_names: set[str] | None,
+) -> None:
+    """Raise if a loader stored NaN markers without going through `copy_`.
+
+    `loaded_names` is None when a model's `load_weights` did not report what it
+    loaded; then every parameter is checked.
+    """
+    params = dict(model.named_parameters())
+    if loaded_names is None:
+        names = sorted(params)
+    else:
+        names = sorted(loaded_names & params.keys())
+        if not names and loaded_names:
+            # Reported names that match no parameter: check everything.
+            names = sorted(params)
+    if not names:
+        return
+    candidates = [(n, params[n]) for n in names if params[n].is_floating_point()]
+
+    by_device: dict[torch.device, list[tuple[str, torch.Tensor]]] = {}
+    for name, param in candidates:
+        by_device.setdefault(param.device, []).append((name, param))
+    bad: list[str] = []
+    for group in by_device.values():
+        flags = torch.stack([torch.isnan(p).any() for _, p in group]).tolist()
+        bad.extend(name for (name, _), flag in zip(group, flags) if flag)
+    if bad:
+        raise RuntimeError(
+            f"Sparse checkpoint patch wrote NaN markers into {len(bad)} "
+            f"parameter(s), e.g. {bad[:4]}; their loader does not write through "
+            "a same-shaped Tensor.copy_. Reload the model before serving."
+        )
+
+
 def _load_weight_chunk(
     model: torch.nn.Module,
     weights: list[tuple[str, torch.Tensor]],
     *,
     sparse: bool,
-) -> set[str]:
+) -> set[str] | None:
+    """Load one chunk; return the reported names, or None if none were reported."""
     if not weights:
         return set()
     if sparse:
         loaded_names = _load_nan_masked_weights(model, weights)
     else:
         loaded_names = model.load_weights(weights)
-    return set() if loaded_names is None else set(loaded_names)
+    return None if loaded_names is None else set(loaded_names)
 
 
 def _sparse_batch_is_invalid(
@@ -221,9 +281,9 @@ def load_checkpoint_weight_patches(
     order. A later patch may update positions changed by an earlier patch. Each
     sparse patch creates a full checkpoint-shaped tensor whose NaNs mark unchanged
     elements. Each locally applied sparse patch must use one final same-shaped
-    floating-point `Tensor.copy_`. Intermediate or unrelated `copy_` calls,
-    composed loaders, and custom write paths are unsupported. `max_chunk_bytes`
-    is a batching target; one tensor may exceed it.
+    floating-point `Tensor.copy_`. Intermediate or unrelated `copy_` calls and
+    custom write paths are unsupported. `max_chunk_bytes` is a batching target;
+    one tensor may exceed it.
 
     Online checkpoint-format dense updates require the caller to manage vLLM's
     layerwise reload lifecycle. Sparse online updates modify initialized model
@@ -265,6 +325,16 @@ def load_checkpoint_weight_patches(
         _validate_sparse_patches(patch_list, max_chunk_bytes, validate_unique_indices)
 
     loaded_names: set[str] = set()
+    names_reported = True
+
+    def load_chunk(chunk: list[tuple[str, torch.Tensor]]) -> None:
+        nonlocal names_reported
+        chunk_loaded = _load_weight_chunk(model, chunk, sparse=sparse)
+        if chunk_loaded is None:
+            names_reported = False
+        else:
+            loaded_names.update(chunk_loaded)
+
     # Collect checkpoint tensors for one model.load_weights() call.
     weight_chunk: list[tuple[str, torch.Tensor]] = []
     chunk_names: set[str] = set()
@@ -281,7 +351,7 @@ def load_checkpoint_weight_patches(
             chunk_bytes + checkpoint_tensor_bytes > max_chunk_bytes
             or patch.name in chunk_names
         ):
-            loaded_names.update(_load_weight_chunk(model, weight_chunk, sparse=sparse))
+            load_chunk(weight_chunk)
             weight_chunk = []
             chunk_names = set()
             chunk_bytes = 0
@@ -310,5 +380,7 @@ def load_checkpoint_weight_patches(
         chunk_bytes += checkpoint_tensor_bytes
 
     # Load the final partial chunk; the helper also accepts an empty chunk.
-    loaded_names.update(_load_weight_chunk(model, weight_chunk, sparse=sparse))
+    load_chunk(weight_chunk)
+    if sparse:
+        _raise_on_leaked_nan_markers(model, loaded_names if names_reported else None)
     return loaded_names
