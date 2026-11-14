@@ -18,11 +18,14 @@ from tests.v1.core.utils import (
     full_layer,
     get_kv_cache_configs,
     mamba_layer,
+    mentions_number,
     new_kv_cache_group,
     new_kv_cache_spec,
     new_mamba_layer,
+    new_mamba_spec,
     new_mla_spec,
     sliding_window_layer,
+    state_layer,
 )
 from vllm.config import (
     CacheConfig,
@@ -2261,3 +2264,327 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+# Persistent state: layout, capacity and planning. See
+# docs/design/persistent_state.md for the design.
+
+
+def _state_config(max_num_seqs=2, override=None):
+    from tests.v1.core.utils import create_scheduler
+
+    config = create_scheduler(max_num_seqs=max_num_seqs, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.cache_config.num_gpu_blocks_override = override
+    return config
+
+
+def _state_slot_manager(num_pages=3):
+    """The state manager of a real KV cache manager over a planned pool."""
+    from tests.v1.core.utils import create_state_spec
+
+    spec = create_state_spec()
+    planned = get_kv_cache_configs(
+        _state_config(num_pages - 1),
+        [{"state": state_layer(spec)}],
+        [num_pages * spec.page_size_bytes],
+    )[0]
+    return KVCacheManager(
+        kv_cache_config=planned,
+        max_model_len=32,
+        enable_caching=False,
+        scheduler_block_size=1,
+        hash_block_size=1,
+    ).coordinator.state_managers["state"]
+
+
+def test_persistent_state_pool_allocates_one_page_per_block():
+    """A planned pool of max_num_seqs slots plus the null page is one raw
+    buffer of that many pages."""
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = _state_config()
+    spec = create_state_spec()
+    planned = get_kv_cache_configs(
+        config, [{"state": state_layer(spec)}], [3 * spec.page_size_bytes]
+    )[0]
+    assert planned.num_blocks == 3
+    raw = allocate_kv_cache(
+        planned, torch.device("cpu"), config.cache_config.get_resolved_kv_cache_layout()
+    )["state"]
+    assert raw.numel() == 3 * spec.page_size_bytes
+
+
+def _allocate_state_slot(manager, request_id):
+    manager.allocate_new_blocks(request_id, 0, 0)
+    return manager.get(request_id)
+
+
+def test_persistent_state_manager_holds_one_slot_per_request():
+    """Each request holds one slot whatever its token count, and allocation
+    fails once every slot is held."""
+    manager = _state_slot_manager()
+    a = _allocate_state_slot(manager, "a")
+    b = _allocate_state_slot(manager, "b")
+    assert a is not None and b is not None and a.slot != b.slot
+    assert manager.num_free_slots == 0
+    with pytest.raises(ValueError, match="Cannot get 1 free blocks"):
+        manager.allocate_new_blocks("c", 0, 0)
+    assert manager.get("c") is None
+    assert manager.get("a") == a and manager.get("b") == b
+    assert manager.allocate_new_blocks("a", 1_000_000, 1_000_000) == []
+    assert manager.get("a") == a
+
+
+def test_persistent_state_manager_releases_only_after_the_fence():
+    """A retired slot is released only once a completion covers its fence; its
+    reuse bumps the generation and the old handle is stale."""
+    manager = _state_slot_manager()
+    a = _allocate_state_slot(manager, "a")
+    _allocate_state_slot(manager, "b")
+    manager.retire("a", 1)
+    assert not manager.release(a, 1)
+    assert manager.num_free_slots == 0
+    manager.complete(a, 1)
+    assert manager.release(a, 1)
+    c = _allocate_state_slot(manager, "c")
+    assert c is not None
+    assert c.slot == a.slot and c.generation == a.generation + 1
+    with pytest.raises(ValueError, match="Stale"):
+        manager.complete(a, 2)
+
+
+def test_persistent_state_partial_initializer_groups():
+    """Planning keeps the spec object, whose initializers would not compare
+    equal after a copy."""
+    from functools import partial
+
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    base = create_state_spec()
+    zeros = partial(torch.full, fill_value=0)
+    spec = PersistentStateSpec(
+        descriptors=[replace(d, initializer=zeros) for d in base.descriptors],
+        page_size_bytes=base.page_size_bytes,
+    )
+    planned = get_kv_cache_configs(
+        _state_config(), [{"state": state_layer(spec)}], [3 * spec.page_size_bytes]
+    )[0]
+    assert planned.kv_cache_groups[0].kv_cache_specs["state"] is spec
+    assert planned.kv_cache_groups[0].layer_names == ["state"]
+
+
+@pytest.mark.parametrize(
+    ("num_specs", "budgets"), [(2, [4096, 4096]), (1, [4096, 0]), (1, [])]
+)
+def test_persistent_state_requires_one_worker(num_specs, budgets):
+
+    config = _state_config()
+    specs = [{"state": state_layer()}] * num_specs
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, specs)
+    with pytest.raises(ValueError, match="one engine worker"):
+        kv_cache_planning.get_kv_cache_configs(config, specs, budgets, groups)
+
+
+@pytest.mark.parametrize("kind", ["attention", "mamba"])
+def test_persistent_state_mixed_layout_refused(kind):
+
+    other = (
+        full_layer(new_kv_cache_spec(num_kv_heads=1, head_size=8))
+        if kind == "attention"
+        else mamba_layer(new_mamba_spec(shapes=((4,),), dtypes=(torch.float32,)))
+    )
+    with pytest.raises(ValueError, match="state-only cache layout"):
+        get_kv_cache_configs(
+            _state_config(), [{"state": state_layer(), "other": other}], [4096]
+        )
+
+
+def test_persistent_state_more_than_one_state_layer_refused():
+    """Two persistent-state layers are refused even when their specs match."""
+    from tests.v1.core.utils import create_state_spec
+
+    spec = create_state_spec()
+    with pytest.raises(ValueError, match="one aggregate state spec"):
+        get_kv_cache_configs(
+            _state_config(),
+            [{"first": state_layer(spec), "second": state_layer(spec)}],
+            [4096],
+        )
+
+
+@pytest.mark.parametrize(
+    "owner,option,value,label",
+    [
+        ("parallel_config", "tensor_parallel_size", 2, "tensor_parallel_size"),
+        ("parallel_config", "pipeline_parallel_size", 2, "pipeline_parallel_size"),
+        ("parallel_config", "data_parallel_size", 2, "data_parallel_size"),
+        (
+            "parallel_config",
+            "decode_context_parallel_size",
+            2,
+            "decode_context_parallel_size",
+        ),
+        (
+            "parallel_config",
+            "prefill_context_parallel_size",
+            2,
+            "prefill_context_parallel_size",
+        ),
+        ("parallel_config", "enable_dbo", True, "dual batch overlap"),
+        (
+            None,
+            "speculative_config",
+            SpeculativeConfig(model="ngram", num_speculative_tokens=1),
+            "speculative decoding",
+        ),
+        (
+            None,
+            "kv_transfer_config",
+            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both"),
+            "KV transfer",
+        ),
+        ("cache_config", "enable_prefix_caching", True, "prefix caching"),
+        ("model_config", "enable_sleep_mode", True, "sleep mode"),
+        ("model_config", "enable_cumem_allocator", True, "CuMem"),
+        ("attention_config", "hisparse_config", HiSparseConfig(), "HiSparse"),
+    ],
+)
+def test_persistent_state_unsupported_config_refused(owner, option, value, label):
+    """Each unsupported configuration is refused with a ValueError naming it."""
+    config = _state_config()
+    setattr(getattr(config, owner) if owner else config, option, value)
+    with pytest.raises(ValueError, match="Persistent state does not support") as e:
+        get_kv_cache_configs(config, [{"state": state_layer()}], [4096])
+    assert label in str(e.value), str(e.value)
+
+
+@pytest.mark.parametrize(
+    "change", ["overlap", "extent", "page_alignment", "dtype_alignment", "block_size"]
+)
+def test_persistent_state_layout_rejects_invalid_components(change):
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.kv_cache_interface import (
+        PersistentStateDescriptor,
+        PersistentStateSpec,
+    )
+
+    spec = create_state_spec()
+    descriptors = spec.descriptors
+    size = spec.page_size_bytes
+    kwargs = {}
+    if change == "overlap":
+        descriptors = (
+            descriptors[0],
+            PersistentStateDescriptor("other", (4,), torch.float32, 0, 16, torch.zeros),
+        )
+    elif change == "extent":
+        size = 16
+    elif change == "page_alignment":
+        size = 33
+    elif change == "block_size":
+        kwargs["block_size"] = 2
+    else:
+        with pytest.raises(ValueError, match="dtype-misaligned"):
+            PersistentStateDescriptor("bad", (1,), torch.int64, 4, 4, torch.zeros)
+        return
+    with pytest.raises(ValueError):
+        PersistentStateSpec(descriptors=descriptors, page_size_bytes=size, **kwargs)
+
+
+# State capacity: planning plans max_num_seqs + 1 pages, or the override,
+# and fails before any other capacity rule when they do not fit. The message
+# states the planned pages, the pages that fit and the page size; without the
+# override, also the largest max_num_seqs that fits or that no slot fits. The
+# tests check that each figure is present, not the wording around it.
+
+
+def _state_planning_error(
+    budget_pages, *, max_num_seqs=2, override=None, auto_fit=False
+):
+    from tests.v1.core.utils import create_state_spec
+
+    config = _state_config(max_num_seqs, override)
+    if auto_fit:
+        config.model_config.original_max_model_len = -1
+    spec = create_state_spec()
+    with pytest.raises(ValueError) as rejected:
+        get_kv_cache_configs(
+            config,
+            [{"state": state_layer(spec)}],
+            [int(budget_pages * spec.page_size_bytes)],
+        )
+    return str(rejected.value), config
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "override", "budget_pages", "planned"),
+    [(2, None, 3, 3), (2, None, 100, 3), (4, None, 1000, 5), (2, 2, 100, 2)],
+    ids=["exact-fit", "surplus", "surplus-larger", "override"],
+)
+def test_persistent_state_plans_exactly_the_configured_pages(
+    max_num_seqs, override, budget_pages, planned
+):
+    """Whatever the budget's surplus, the pool has exactly max_num_seqs + 1
+    pages, or the override; planning never grows or shrinks it."""
+    from tests.v1.core.utils import create_state_spec
+
+    spec = create_state_spec()
+    config = _state_config(max_num_seqs, override)
+    result = get_kv_cache_configs(
+        config, [{"state": state_layer(spec)}], [budget_pages * spec.page_size_bytes]
+    )[0]
+    assert result.num_blocks == planned
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "budget_pages", "fit"),
+    [(6, 5, 5), (4, 4, 4), (4, 4.5, 4)],
+    ids=["two-short", "one-short", "fractional"],
+)
+def test_persistent_state_non_fit_names_the_largest_max_num_seqs(
+    max_num_seqs, budget_pages, fit
+):
+    """Fewer fitting pages than planned fail planning; the message states the
+    planned and fitting page counts, the page size (32 bytes) and the largest
+    max_num_seqs that fits (one less than the fitting pages). The figures are
+    distinct and greater than one, so none is matched incidentally."""
+    message, _ = _state_planning_error(budget_pages, max_num_seqs=max_num_seqs)
+    for figure in (max_num_seqs + 1, fit, 32, fit - 1):
+        assert mentions_number(message, figure), (figure, message)
+    assert "max_num_seqs" in message, message
+
+
+@pytest.mark.parametrize("budget_pages", [0, 1, 1.5])
+def test_persistent_state_non_fit_without_a_slot(budget_pages):
+    """When fewer than two pages fit, the message says, in any wording, that no
+    slot fits."""
+    import re
+
+    message, _ = _state_planning_error(budget_pages, max_num_seqs=4)
+    for figure in (5, int(budget_pages), 32):
+        assert mentions_number(message, figure), (figure, message)
+    lower = message.lower()
+    assert "slot" in lower and re.search(r"\b(no|zero|0|none)\b", lower), message
+
+
+def test_persistent_state_non_fit_precedes_auto_fit_of_max_model_len():
+    """The capacity check runs before max_model_len is fitted automatically,
+    which leaves it unchanged."""
+    message, config = _state_planning_error(4, max_num_seqs=4, auto_fit=True)
+    for figure in (5, 4, 3, 32):
+        assert mentions_number(message, figure), (figure, message)
+    assert "max_num_seqs" in message, message
+    assert "Cannot auto-fit" not in message
+    assert config.model_config.max_model_len == 32
+
+
+@pytest.mark.parametrize(("budget_pages", "fit"), [(3, 3), (1, 1)])
+def test_persistent_state_override_non_fit_states_the_pages(budget_pages, fit):
+    """An override larger than the budget fails planning; the message states
+    the override's pages, the fitting pages and the page size."""
+    message, _ = _state_planning_error(budget_pages, override=4)
+    for figure in (4, fit, 32):
+        assert mentions_number(message, figure), (figure, message)

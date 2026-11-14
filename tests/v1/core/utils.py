@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
+
 import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConfig
@@ -97,6 +99,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    stream_admission_timeouts: dict[str, float] | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -148,6 +151,11 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        **(
+            {}
+            if stream_admission_timeouts is None
+            else {"stream_admission_timeouts": stream_admission_timeouts}
+        ),
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -489,4 +497,41 @@ def get_kv_cache_configs(
         layer_configs,
         available_memory,
         kv_cache_planning.get_global_kv_cache_groups(vllm_config, layer_configs),
+    )
+
+
+def state_layer(spec: KVCacheSpec | None = None) -> KVCacheLayerConfig:
+    """A persistent-state layer, with the generic test state spec by default."""
+    from vllm.v1.core.state_slot_manager import PersistentStateManager
+
+    return PersistentStateManager.layer_config(spec or create_state_spec())
+
+
+def mentions_number(message: str, number: int) -> bool:
+    """Whether `number` appears in `message` as a whole number."""
+    return re.search(rf"(?<![\d.]){number}(?![\d.])", message) is not None
+
+
+def create_state_spec(page_size_bytes: int = 32, **spec_kwargs):
+    """The generic test state spec: a 32-byte page, or a larger one padded by
+    a filler component."""
+    from vllm.v1.kv_cache_interface import (
+        PersistentStateDescriptor,
+        PersistentStateSpec,
+    )
+
+    descriptors = [
+        PersistentStateDescriptor("hidden", (4,), torch.float32, 0, 16, torch.ones),
+        PersistentStateDescriptor("count", (2,), torch.int64, 16, 16, torch.zeros),
+    ]
+    if page_size_bytes > 32:
+        descriptors.append(
+            PersistentStateDescriptor(
+                "filler", (page_size_bytes - 32,), torch.uint8, 32, 16, torch.zeros
+            )
+        )
+    return PersistentStateSpec(
+        descriptors=tuple(descriptors),
+        page_size_bytes=page_size_bytes,
+        **spec_kwargs,
     )

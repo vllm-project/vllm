@@ -19,6 +19,7 @@ from vllm.outputs import (
     RequestError,
     RequestOutput,
     SamplingMask,
+    StreamRejection,
     WeightVersionSpan,
 )
 from vllm.sampling_params import RequestOutputKind
@@ -114,32 +115,70 @@ class RequestOutputCollector:
             self._input_stream_task = None
 
 
+def _is_rejection(
+    output: RequestOutput | PoolingRequestOutput | Exception | None,
+) -> bool:
+    return isinstance(output, RequestOutput) and output.stream_rejection is not None
+
+
 def _is_chunk_boundary(
     output: RequestOutput | PoolingRequestOutput | Exception | None,
 ) -> bool:
-    """Whether the output marks the end of a streaming-input chunk: a
-    finish_reason on a request that has not finished."""
+    """Whether the output must not absorb later ones: the end of a
+    streaming-input chunk (a finish_reason on a request that has not finished)
+    or a rejected input of an admitted stream."""
     return (
         isinstance(output, RequestOutput)
         and not output.finished
-        and any(completion.finished() for completion in output.outputs)
+        and (
+            output.stream_rejection is not None
+            or any(completion.finished() for completion in output.outputs)
+        )
     )
 
 
 class StreamingInputOutputCollector(RequestOutputCollector):
     """Collector for streaming-input requests. Doesn't merge across input
-    chunk boundaries (a finish_reason on a non-finished output)."""
+    chunk boundaries (a finish_reason on a non-finished output), and never
+    merges an input rejection with another output.
 
-    def __init__(self, output_kind: RequestOutputKind, request_id: str):
+    With `first_end_wins`, the first finished output or exception ends the
+    stream and everything put after it is ignored.
+    """
+
+    def __init__(
+        self,
+        output_kind: RequestOutputKind,
+        request_id: str,
+        *,
+        first_end_wins: bool = False,
+    ):
         super().__init__(output_kind, request_id)
         self._backlog: deque[RequestOutput] = deque()
+        self._first_end_wins = first_end_wins
+        self._ended = False
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+        if self._ended:
+            return
+        if self._first_end_wins and (
+            isinstance(output, Exception)
+            or (isinstance(output, RequestOutput) and output.finished)
+        ):
+            self._ended = True
         if isinstance(output, Exception):
             self._backlog.clear()
-        elif self._backlog or _is_chunk_boundary(self.output):
+        elif (
+            self._backlog
+            or _is_chunk_boundary(self.output)
+            or (isinstance(self.output, RequestOutput) and _is_rejection(output))
+        ):
             assert isinstance(output, RequestOutput)
-            if self._backlog and not _is_chunk_boundary(self._backlog[-1]):
+            if (
+                self._backlog
+                and not _is_chunk_boundary(self._backlog[-1])
+                and not _is_rejection(output)
+            ):
                 self._backlog[-1].add(output, aggregate=self.aggregate)
             else:
                 self._backlog.append(output)
@@ -253,6 +292,11 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        # Admitted streams: the inputs not yet run, by update_seq, the input
+        # the latest output ran on, and the close's update_seq once sent.
+        self.stream_inputs: dict[int, StreamingUpdate] | None = None
+        self.stream_seq = 0
+        self.stream_close_seq: int | None = None
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -267,11 +311,35 @@ class RequestState:
             self.prompt_token_ids.extend(update.prompt_token_ids or ())
         else:
             self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
+        self._restart_prefill(update.arrival_time)
+
+    def _restart_prefill(self, arrival_time: float) -> None:
+        """Account for a prompt that has just been set."""
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:
-            self.stats.arrival_time = update.arrival_time
+            self.stats.arrival_time = arrival_time
         self.is_prefilling = True
+
+    def select_stream_input(self, update_seq: int) -> None:
+        """Report the prompt of the admitted-stream input an output ran on.
+
+        Each input replaces the prompt, and outputs are matched to inputs by
+        update_seq rather than arrival order, since a rejection can arrive
+        after later inputs were accepted. An output that names no input
+        changes nothing.
+        """
+        if update_seq == self.stream_seq or not self.stream_inputs:
+            return
+        update = self.stream_inputs.pop(update_seq, None)
+        if update is None:
+            return
+        for seq in [seq for seq in self.stream_inputs if seq < update_seq]:
+            del self.stream_inputs[seq]
+        self.stream_seq = update_seq
+        self.prompt = update.prompt
+        self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
+        self._restart_prefill(update.arrival_time)
 
     @classmethod
     def from_new_request(
@@ -699,6 +767,19 @@ class OutputProcessor:
         self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
     ) -> None:
         """Queue a streaming update instead of immediately applying it."""
+        if (context := request.stream_admission) is not None:
+            # An admitted stream's inputs are kept until an output selects one.
+            if req_state.stream_inputs is None:
+                req_state.stream_inputs = {}
+            if request.resumable:
+                req_state.stream_inputs[context.update_seq] = StreamingUpdate(
+                    prompt=prompt,
+                    prompt_token_ids=request.prompt_token_ids,
+                    arrival_time=request.arrival_time,
+                )
+            else:
+                req_state.stream_close_seq = context.update_seq
+            return
         if not request.resumable:
             # Final request - just mark completion, don't add its dummy tokens.
             if req_state.input_chunk_queue is None:
@@ -763,6 +844,30 @@ class OutputProcessor:
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
+
+            stream_output = engine_core_output.stream_output
+            if (
+                stream_output is not None
+                and stream_output.rejection is not None
+                and stream_output.context is None
+            ):
+                # A rejection never ends the stream; one without a context
+                # refused a request that is no input of this stream.
+                continue
+            admitted = stream_output is not None and stream_output.context is not None
+            if admitted:
+                assert stream_output is not None and stream_output.context is not None
+                update_seq = stream_output.context.update_seq
+                if stream_output.rejection is not None:
+                    self._process_stream_rejection(
+                        req_state,
+                        update_seq,
+                        stream_output.rejection,
+                        engine_core_output.error,
+                        reqs_to_abort,
+                    )
+                    continue
+                req_state.select_stream_input(update_seq)
 
             error = engine_core_output.error
             if error is not None and req_state.queue is not None:
@@ -844,8 +949,10 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            streaming_chunk_boundary = req_state.streaming_input and (
-                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+            streaming_chunk_boundary = (
+                req_state.streaming_input
+                and not engine_core_output.ends_stream
+                and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
             )
 
             # 4) Create and handle RequestOutput objects.
@@ -871,14 +978,22 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 if streaming_chunk_boundary:
-                    if req_state.input_chunk_queue:
+                    # An admitted stream selects its next input by update_seq.
+                    if admitted:
+                        pass
+                    elif req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
                     else:
                         req_state.input_chunk_queue = None
                 else:
                     self._finish_request(req_state)
-                    if req_state.streaming_input or not engine_core_output.finished:
+                    # The engine has already ended an admitted session whose
+                    # output it marked.
+                    session_ended = admitted and engine_core_output.ends_stream
+                    if (
+                        req_state.streaming_input and not session_ended
+                    ) or not engine_core_output.finished:
                         # EngineCore may still have the request: a stop string
                         # was detected here, or an in-flight streaming-input
                         # chunk may re-create the session.
@@ -895,6 +1010,34 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def _process_stream_rejection(
+        self,
+        req_state: RequestState,
+        update_seq: int,
+        reason: str,
+        error: RequestError | None,
+        reqs_to_abort: list[str],
+    ) -> None:
+        """A refused input leaves its admitted session running, except a
+        refused close: no input can follow it, so the session is aborted."""
+        if update_seq == req_state.stream_close_seq:
+            reqs_to_abort.extend(
+                self.abort_requests([req_state.request_id], internal=True)
+            )
+            return
+        if req_state.stream_inputs:
+            req_state.stream_inputs.pop(update_seq, None)
+        if req_state.queue is not None:
+            # A refused input is reported as a step with no new tokens.
+            output = req_state._new_request_output(
+                req_state.external_req_id,
+                [req_state._new_completion_output([], None, None)],
+                False,
+            )
+            assert isinstance(output, RequestOutput)
+            output.stream_rejection = StreamRejection(update_seq - 1, reason, error)
+            req_state.queue.put(output)
 
     @staticmethod
     def _trim_surplus_tokens(

@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit import utils as connector_utils
-from vllm.config import ModelConfig
+from vllm.config import CUDAGraphMode, ModelConfig
 from vllm.config.kv_transfer import KVCacheAccess, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.engine.arg_utils import EngineArgs
@@ -827,3 +827,295 @@ def test_extensible_kv_cache_connector_needs_block_compact_layout():
     assert layout.name == "LBNHC"
     with pytest.raises(ValueError, match="block-compact"):
         resolve_kv_cache_layout(make_config(), [["LHBNC"]])
+
+
+# Persistent state: the configuration defaults a model that declares persistent
+# state gets, through EngineArgs and the dummy-model plugin's stub classes. See
+# docs/design/persistent_state.md for the design.
+
+
+def _state_config(path, **overrides):
+    return EngineArgs(
+        model=path,
+        load_format="dummy",
+        max_model_len=64,
+        max_num_seqs=2,
+        **{"enable_prefix_caching": False, **overrides},
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def _persistent_state_warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and "persistent state" in record.getMessage().lower()
+    ]
+
+
+def test_model_config_reports_declared_persistent_state(
+    state_stub_models,
+    dummy_state_model_path,
+    dummy_undeclared_state_model_path,
+):
+    """`ModelConfig.has_persistent_state` is True exactly for a class that sets
+    `supports_persistent_state = True`."""
+    assert _state_config(dummy_state_model_path).model_config.has_persistent_state
+    undeclared = _state_config(dummy_undeclared_state_model_path)
+    assert undeclared.model_config.has_persistent_state is False
+    plain = EngineArgs(model="facebook/opt-125m").create_engine_config()
+    assert plain.model_config.has_persistent_state is False
+
+
+# Each case leaves one option unset and sets the others explicitly, so that
+# only the unset one can log.
+_NO_CUDAGRAPH = {"compilation_config": {"cudagraph_mode": "NONE"}}
+
+
+@pytest.mark.parametrize(
+    ("explicit", "resolved", "num_warnings"),
+    [
+        pytest.param(
+            _NO_CUDAGRAPH,
+            lambda config: config.scheduler_config.async_scheduling is False,
+            1,
+            id="async_scheduling",
+        ),
+        pytest.param(
+            {"async_scheduling": False, **_NO_CUDAGRAPH},
+            lambda config: config.cache_config.enable_extensible_kv_cache is False,
+            0,
+            id="extensible_kv_cache",
+        ),
+        *(
+            pytest.param(
+                {"async_scheduling": False, "optimization_level": level},
+                lambda config: (
+                    config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+                ),
+                1,
+                id=f"cudagraph_mode_at_level_{level}",
+            )
+            for level in (0, 1, 2, 3)
+        ),
+    ],
+)
+def test_persistent_state_unset_option_resolves_off(
+    state_stub_models,
+    dummy_state_model_path,
+    caplog_vllm,
+    explicit,
+    resolved,
+    num_warnings,
+):
+    """Unset, async scheduling and the runner's CUDA graphs (at every
+    optimization level) resolve off with one warning naming persistent state,
+    and the extensible KV cache resolves off without one."""
+    caplog_vllm.clear()
+    config = _state_config(dummy_state_model_path, **explicit)
+    assert resolved(config)
+    warnings = _persistent_state_warnings(caplog_vllm)
+    assert len(warnings) == num_warnings, caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("requested", "message"),
+    [
+        pytest.param(
+            {"async_scheduling": True},
+            "Async scheduling is not yet validated with persistent state. "
+            "Use --no-async-scheduling.",
+            id="async_scheduling",
+        ),
+        pytest.param(
+            {"enable_extensible_kv_cache": True},
+            "persistent state",
+            id="extensible_kv_cache",
+        ),
+        *(
+            pytest.param(
+                {
+                    "async_scheduling": False,
+                    "compilation_config": {"cudagraph_mode": mode},
+                },
+                f"CUDA graph mode {mode} is not yet validated with persistent "
+                "state. Use cudagraph_mode NONE; the model can capture its own "
+                "graphs.",
+                id=f"cudagraph_mode_{mode}",
+            )
+            for mode in ("FULL", "PIECEWISE", "FULL_AND_PIECEWISE", "FULL_DECODE_ONLY")
+        ),
+    ],
+)
+def test_persistent_state_requested_option_fails(
+    state_stub_models, dummy_state_model_path, requested, message
+):
+    """An explicit request for an option that persistent state does not
+    support fails configuration with a message naming it."""
+    with pytest.raises(ValueError) as refused:
+        _state_config(dummy_state_model_path, **requested)
+    assert message in str(refused.value)
+
+
+def test_persistent_state_explicit_off_options_log_nothing(
+    state_stub_models, dummy_state_model_path, caplog_vllm
+):
+    """Explicitly disabled async scheduling and extensible KV cache, and an
+    explicit cudagraph_mode NONE, are accepted without a warning."""
+    caplog_vllm.clear()
+    config = _state_config(
+        dummy_state_model_path,
+        async_scheduling=False,
+        enable_extensible_kv_cache=False,
+        compilation_config={"cudagraph_mode": "NONE"},
+    )
+    assert config.scheduler_config.async_scheduling is False
+    assert config.cache_config.enable_extensible_kv_cache is False
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert _persistent_state_warnings(caplog_vllm) == []
+
+
+def test_persistent_state_prefix_caching_unset_resolves_off(
+    state_stub_models, dummy_state_model_path, caplog_vllm
+):
+    """Unset, prefix caching resolves off without a warning; the other
+    defaults are explicit so that they log nothing here."""
+    caplog_vllm.clear()
+    config = _state_config(
+        dummy_state_model_path,
+        enable_prefix_caching=None,
+        async_scheduling=False,
+        compilation_config={"cudagraph_mode": "NONE"},
+    )
+    assert config.cache_config.enable_prefix_caching is False
+    # Only warnings about these options count; the environment may log others.
+    assert [
+        record.getMessage()
+        for record in caplog_vllm.records
+        if record.levelname == "WARNING"
+        and any(
+            topic in record.getMessage().lower()
+            for topic in ("persistent state", "prefix caching")
+        )
+    ] == []
+
+
+def test_persistent_state_prefix_caching_requested_fails_at_startup(
+    state_stub_models, dummy_state_model_path
+):
+    """An explicit request is kept, and KV cache planning refuses it as an
+    unsupported configuration."""
+    from tests.v1.core.utils import get_kv_cache_configs, state_layer
+
+    config = _state_config(dummy_state_model_path, enable_prefix_caching=True)
+    assert config.cache_config.enable_prefix_caching is True
+    with pytest.raises(ValueError, match="does not support prefix caching"):
+        get_kv_cache_configs(config, [{"state": state_layer()}], [4096])
+
+
+def test_persistent_state_enforce_eager_takes_precedence_over_cudagraph_mode(
+    state_stub_models, dummy_state_model_path, caplog_vllm
+):
+    """enforce_eager gives NONE without a warning or an error, even with an
+    explicit mode."""
+    caplog_vllm.clear()
+    config = _state_config(
+        dummy_state_model_path,
+        async_scheduling=False,
+        enforce_eager=True,
+        compilation_config={"cudagraph_mode": "FULL"},
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert _persistent_state_warnings(caplog_vllm) == []
+
+
+def test_persistent_state_defaults_leave_other_models_alone(caplog_vllm):
+    """A model without the declaration keeps its own defaults and no
+    persistent-state warning is logged."""
+    caplog_vllm.clear()
+    EngineArgs(model="facebook/opt-125m").create_engine_config()
+    assert _persistent_state_warnings(caplog_vllm) == []
+
+
+# Stream admission deadlines: SchedulerConfig.stream_admission_timeouts.
+
+
+def _scheduler_config(**engine_args):
+    """The scheduler config of an engine whose model has no persistent state."""
+    args = EngineArgs(model="facebook/opt-125m", **engine_args)
+    return args.create_engine_config().scheduler_config
+
+
+def test_stream_admission_timeouts_from_cli():
+    """--stream-admission-timeouts takes a JSON object whose keys set those
+    timeouts."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--stream-admission-timeouts",
+            '{"never_fed_timeout": 5, "parked_idle_timeout": 7.5}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert config.scheduler_config.stream_admission_timeouts == {
+        "never_fed_timeout": 5,
+        "parked_idle_timeout": 7.5,
+    }
+
+
+def test_stream_admission_timeouts_cli_value_must_be_json():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser.exit_on_error = False
+    with pytest.raises(ArgumentError, match="argument --stream-admission-timeouts"):
+        parser.parse_args(["--stream-admission-timeouts", "never_fed_timeout=5"])
+
+
+@pytest.mark.parametrize(
+    ("timeouts", "named"),
+    [
+        *(
+            pytest.param({"parked_idle_timeout": value}, "parked_idle_timeout", id=id_)
+            for id_, value in {
+                "inf": float("inf"),
+                "nan": float("nan"),
+                "zero": 0,
+                "negative": -1.5,
+                "bool": True,
+                "string": "5",
+                "none": None,
+            }.items()
+        ),
+        pytest.param({"idle_timeout": 5.0}, "idle_timeout", id="unknown_key"),
+        pytest.param([5.0], "stream_admission_timeouts", id="list"),
+        pytest.param("never_fed_timeout", "stream_admission_timeouts", id="str"),
+        pytest.param(5.0, "stream_admission_timeouts", id="number"),
+    ],
+)
+def test_stream_admission_timeouts_reject_an_invalid_value(timeouts, named):
+    """Each timeout is a finite, positive int or float under a known key, in
+    a mapping; anything else fails startup naming the key or the option,
+    also on an engine without persistent state."""
+    with pytest.raises(ValueError, match=named):
+        _scheduler_config(stream_admission_timeouts=timeouts)
+
+
+def test_stream_admission_timeouts_accepted_with_persistent_state(
+    state_stub_models, dummy_state_model_path
+):
+    config = _state_config(
+        dummy_state_model_path,
+        async_scheduling=False,
+        enforce_eager=True,
+        stream_admission_timeouts={"draining_timeout": 3},
+    )
+    assert config.scheduler_config.stream_admission_timeouts == {"draining_timeout": 3}
+
+
+def test_stream_admission_timeouts_do_not_change_the_compile_cache_key():
+    from vllm.config.utils import hash_config
+
+    assert _scheduler_config().stream_admission_timeouts == {}
+    short = _scheduler_config(stream_admission_timeouts={"never_fed_timeout": 1.0})
+    long = _scheduler_config(stream_admission_timeouts={"never_fed_timeout": 99.0})
+    assert short.stream_admission_timeouts != long.stream_admission_timeouts
+    assert hash_config(short) == hash_config(long)

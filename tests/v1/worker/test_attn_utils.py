@@ -32,6 +32,7 @@ from tests.v1.core.utils import (
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
+from vllm.model_executor.layers.state import PersistentStateLayerBase
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
@@ -118,7 +119,13 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             is_draft_layer=False,
             kv_sharing_target_layer_name=None,
         )
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda config, layer_type: (
+            {} if layer_type is PersistentStateLayerBase else layers
+        ),
+    )
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_page_layer_configs", lambda *_: {}
     )
@@ -240,7 +247,13 @@ def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
         )
         for name in ("target", "draft")
     }
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda config, layer_type: (
+            {} if layer_type is PersistentStateLayerBase else layers
+        ),
+    )
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
 
     layer_configs = attn_utils.get_kv_cache_layer_configs(config)

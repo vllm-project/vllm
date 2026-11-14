@@ -1563,6 +1563,39 @@ def dummy_opt_path():
     return _dummy_opt_path
 
 
+def _dummy_state_path(architecture: str) -> str:
+    """The facebook/opt-125m config and tokenizer (no weights) under one of the
+    persistent-state architectures of the dummy-model plugin."""
+    path = os.path.join(temp_dir, f"dummy_{architecture}")
+    json_path = os.path.join(path, "config.json")
+    if not os.path.exists(path):
+        hf_api().snapshot_download(
+            repo_id="facebook/opt-125m",
+            local_dir=path,
+            ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
+        )
+        assert os.path.exists(json_path)
+        with open(json_path) as f:
+            config = json.load(f)
+        config["architectures"] = [architecture]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return path
+
+
+@pytest.fixture
+def dummy_state_model_path():
+    """`StubPersistentStateForCausalLM`, which declares persistent state."""
+    return _dummy_state_path("StubPersistentStateForCausalLM")
+
+
+@pytest.fixture
+def dummy_undeclared_state_model_path():
+    """`StubUndeclaredPersistentStateForCausalLM`: the same state layer
+    without the `supports_persistent_state` declaration."""
+    return _dummy_state_path("StubUndeclaredPersistentStateForCausalLM")
+
+
 @pytest.fixture
 def dummy_llava_path():
     json_path = os.path.join(_dummy_llava_path, "config.json")

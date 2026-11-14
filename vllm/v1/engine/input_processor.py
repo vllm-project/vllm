@@ -36,6 +36,9 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 
 logger = init_logger(__name__)
 
+# Random characters that follow the "-" in an internal request ID.
+REQUEST_ID_SUFFIX_LEN = 8
+
 
 class InputProcessor:
     def __init__(
@@ -356,7 +359,9 @@ class InputProcessor:
                 "request IDs may cause failures and/or subtle correctness errors."
             )
         else:
-            request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+            request.request_id = (
+                f"{request.external_req_id}-{random_uuid():.{REQUEST_ID_SUFFIX_LEN}}"
+            )
 
     def process_inputs(
         self,

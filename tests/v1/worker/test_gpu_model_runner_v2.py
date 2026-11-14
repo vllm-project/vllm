@@ -28,6 +28,7 @@ from vllm.config import (
 )
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -708,3 +709,250 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
     torch.testing.assert_close(inputs_embeds[:5], expected)
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
+
+
+# Persistent-state bindings on the worker. See docs/design/persistent_state.md
+# for the design. Where a test stops before `finish_step`, the pool is a CPU
+# tensor and the main stream a CPU stream: no writing stream is registered, so
+# no device synchronization is involved. The tests that finish a step record
+# its completion event on a device.
+
+
+def _state_bindings():
+    from tests.v1.core.utils import create_state_spec, state_layer
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+    from vllm.v1.worker.gpu.state_slots import StateSlotBindings
+
+    spec = create_state_spec()
+    pool = torch.zeros(3 * spec.page_size_bytes, dtype=torch.uint8)
+    return StateSlotBindings(
+        [KVCacheGroup.from_layers({"state": state_layer(spec)})], {"state": pool}
+    )
+
+
+def _begin_state_step(bindings, step_seq, handles):
+    """Begin a scheduled step that binds `handles` ({request_id: handle})."""
+    step = SchedulerOutput.make_empty()
+    step.state_step_seq = step_seq
+    step.state_slot_handles = {rid: {"state": h} for rid, h in handles.items()}
+    step.state_cleanup_handles = {}
+    bindings.begin_step(step, torch.Stream(device="cpu"))
+    bindings.activate_requests()
+
+
+def _handle(epoch="epoch", slot=1, generation=1):
+    from vllm.v1.kv_cache_interface import StateSlotHandle
+
+    return StateSlotHandle(epoch, slot, generation)
+
+
+def test_state_first_bind_initializes_and_rebind_keeps_the_page():
+    """The first bind of a generation writes the descriptors' initial values;
+    binding the same handle again leaves what the model wrote."""
+    bindings = _state_bindings()
+    handle = _handle()
+    _begin_state_step(bindings, 1, {"r": handle})
+    rows = bindings.bind_rows("state", ("r",), (handle,))
+    hidden = rows.component_pools["hidden"]
+    assert hidden[1].tolist() == [1.0] * 4
+    hidden[1].fill_(5.0)
+    _begin_state_step(bindings, 2, {"r": handle})
+    assert hidden[1].tolist() == [5.0] * 4
+    _begin_state_step(bindings, 3, {"s": _handle(generation=2)})
+    assert hidden[1].tolist() == [1.0] * 4
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "match"),
+    [
+        (_handle(epoch="a"), _handle(epoch="b"), "epoch"),
+        (_handle(generation=2), _handle(generation=1), "generation"),
+    ],
+    ids=["other-epoch", "older-generation"],
+)
+def test_state_bind_rejects_a_stale_handle(first, second, match):
+    """A handle from another engine epoch, or an older generation of a bound
+    slot, is rejected."""
+    bindings = _state_bindings()
+    _begin_state_step(bindings, 1, {"r": first})
+    with pytest.raises(ValueError, match=match):
+        _begin_state_step(bindings, 2, {"s": second})
+
+
+def test_state_rows_only_for_the_current_steps_handles():
+    """Rows are exposed only for handles bound in the current step: not for a
+    request outside it, not under a wrong handle, and not through rows taken
+    in an earlier step."""
+    bindings = _state_bindings()
+    first, second = _handle(slot=1), _handle(slot=2)
+    _begin_state_step(bindings, 1, {"a": first, "b": second})
+    earlier = bindings.bind_rows("state", ("a",), (first,))
+    _begin_state_step(bindings, 2, {"b": second})
+    with pytest.raises(ValueError):
+        bindings.bind_rows("state", ("a",), (first,))
+    with pytest.raises(ValueError):
+        bindings.bind_rows("state", ("b",), (_handle(slot=2, generation=7),))
+    with pytest.raises(ValueError, match="Stale state step access"):
+        earlier.component_pools  # noqa: B018
+    assert bindings.bind_rows("state", ("b",), (second,)).slot_indices_cpu == (2,)
+
+
+_NEEDS_CUDA = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="records a completion event on a device"
+)
+
+
+def _device_state_step(handle):
+    """Bindings over a device pool, with one live step that binds `handle`
+    to request "r" on the current stream."""
+    from tests.v1.core.utils import create_state_spec, state_layer
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+    from vllm.v1.worker.gpu.state_slots import StateSlotBindings
+
+    spec = create_state_spec()
+    pool = torch.zeros(3 * spec.page_size_bytes, dtype=torch.uint8, device="cuda")
+    bindings = StateSlotBindings(
+        [KVCacheGroup.from_layers({"state": state_layer(spec)})], {"state": pool}
+    )
+    step = SchedulerOutput.make_empty()
+    step.state_step_seq = 1
+    step.state_slot_handles = {"r": {"state": handle}}
+    step.state_cleanup_handles = {}
+    return bindings, step
+
+
+@_NEEDS_CUDA
+def test_state_model_failure_reaches_the_steps_completion():
+    """A failure the model reports during a live step is carried by that
+    step's completion; outside a live step (before it, during its cleanup
+    phase or after it) or for a request outside it, the report is refused."""
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    handle = _handle()
+    bindings, step = _device_state_step(handle)
+    stream = torch.cuda.current_stream()
+    with pytest.raises(ValueError, match="No live state step"):
+        bindings.fail_requests({"r"})
+    bindings.begin_step(step, stream)
+    with pytest.raises(ValueError, match="No live state step"):
+        bindings.fail_requests({"r"})
+    bindings.activate_requests()
+    with pytest.raises(ValueError, match="outside the active state step"):
+        bindings.fail_requests({"other"})
+    bindings.fail_requests({"r"})
+    completion = bindings.finish_step(ModelRunnerOutput(req_ids=["r"]), stream)
+    output = completion.get_output()
+    assert output.state_completion is not None
+    assert output.state_completion.step_seq == 1
+    assert output.state_completion.handles == {"r": {"state": handle}}
+    assert output.state_completion.failed_req_ids == {"r"}
+    with pytest.raises(ValueError, match="No live state step"):
+        bindings.fail_requests({"r"})
+
+
+@_NEEDS_CUDA
+@pytest.mark.parametrize(
+    "held", [0, 1], ids=["first_stream_held", "second_stream_held"]
+)
+def test_state_completion_waits_for_every_registered_writing_stream(held):
+    """A write pending on either of two registered auxiliary streams holds
+    back the step's completion: one stream is held by a host function until
+    the test lets it go, so its write is pending when the step is fenced, and
+    the completion event is reached only after that write completes. The
+    worker joins every registered stream into the main stream before
+    recording the event. Only one stream is held at a time, because the driver
+    may serialize host functions of different streams.
+
+    Two detectors observe the device. The completion event must not have
+    fired while the auxiliary stream is held. And right after `finish_step`,
+    the main stream copies the written elements into a witness tensor; stream
+    order fixes the values the copy reads when it runs, so releasing the
+    auxiliary stream later cannot change them."""
+    import ctypes
+    import threading
+    import time
+
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    timeout = 60
+
+    def done(work: torch.cuda.Stream | torch.cuda.Event, seconds: float) -> bool:
+        """Wait up to `seconds` for a stream's work, or an event, to complete."""
+        deadline = time.monotonic() + seconds
+        while not work.query():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.001)
+        return True
+
+    handle = _handle()
+    bindings, step = _device_state_step(handle)
+    main = torch.cuda.current_stream()
+    writers = [torch.cuda.Stream(), torch.cuda.Stream()]
+    for writer in writers:
+        bindings.register_writing_stream(writer)
+    bindings.begin_step(step, main)
+    bindings.activate_requests()
+    rows = bindings.bind_rows("state", ("r",), (handle,))
+    count = rows.component_pools["count"]
+    before = count[1].tolist()
+    written_value, sentinel = [7, 8], -1
+    assert all(b not in written_value + [sentinel] for b in before)
+    # The witness starts at a sentinel, so a copy that never ran is visible.
+    witness = torch.full_like(count[1], sentinel)
+
+    # A host function holds one auxiliary stream until the test releases it
+    # (bounded, so a failure cannot hang the device).
+    release = threading.Event()
+
+    def hold(_):
+        release.wait(timeout)
+
+    host_fn = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(hold)
+    libcuda = ctypes.CDLL("libcuda.so.1")
+    written = [torch.cuda.Event(), torch.cuda.Event()]
+    idle = False
+    try:
+        # The main stream does not yet depend on the auxiliary streams, so
+        # this cannot wait on the held stream.
+        assert done(main, timeout), "the main stream did not start idle"
+        for index, writer in enumerate(writers):
+            with torch.cuda.stream(writer):
+                if index == held:
+                    assert (
+                        libcuda.cuLaunchHostFunc(
+                            ctypes.c_void_p(writer.cuda_stream), host_fn, None
+                        )
+                        == 0
+                    )
+                # Each stream writes its own element of the slot's row.
+                count[1, index].fill_(written_value[index])
+                written[index].record(writer)
+        completion = bindings.finish_step(ModelRunnerOutput(req_ids=["r"]), main)
+        # Ordered on the main stream after whatever `finish_step` enqueued.
+        witness.copy_(count[1])
+        assert not written[held].query()
+        # The main stream waits behind the held auxiliary stream. This can
+        # only pass by waiting the whole second: a main stream that did not
+        # wait would finish one copy long before it ends.
+        assert not done(main, 1), "the main stream did not wait"
+        # The event is recorded behind the joins, so it has not fired.
+        assert not completion.event.query(), "completion preceded the write"
+        release.set()
+        assert done(main, timeout), "the main stream did not drain"
+        assert done(completion.event, timeout), "the completion did not fire"
+    finally:
+        release.set()
+        # Bounded: the host function returns within the timeout of its start.
+        idle = all([done(writer, timeout) for writer in writers]) and done(
+            main, timeout
+        )
+    assert idle, "the streams did not drain"
+    # The witness copy read both elements after their writes, because the
+    # main stream waited for both auxiliary streams.
+    assert witness.tolist() == written_value
+    output = completion.get_output()
+    assert written[0].query() and written[1].query()
+    assert output.state_completion is not None
+    assert output.state_completion.handles == {"r": {"state": handle}}
+    assert count[1].tolist() == written_value

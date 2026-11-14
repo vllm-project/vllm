@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import json
 import warnings
 
 import pytest
@@ -19,9 +21,11 @@ from vllm.model_executor.models.registry import (
     _MULTIMODAL_MODELS,
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
+    _VLLM_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
     _ModelRegistry,
+    _resolve_module_name,
 )
 from vllm.platforms import current_platform
 
@@ -277,3 +281,101 @@ def test_hf_registry_coverage():
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
     )
+
+
+# Persistent state: the registry reports `has_persistent_state` from a
+# model class's `supports_persistent_state` declaration.
+
+_STATE_MODEL_SOURCE = """\
+from torch import nn
+
+
+class OutOfTreeStateModel(nn.Module):
+    supports_persistent_state = True
+"""
+
+
+def test_registry_in_tree_models_have_no_persistent_state(monkeypatch, tmp_path):
+    """Every in-tree architecture reports `has_persistent_state` False. An
+    architecture that cannot be inspected here is accounted for only when its
+    class cannot be imported in this environment either."""
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    # The canonical in-tree table, not the process-wide registry plugins extend.
+    registry = _ModelRegistry(
+        {
+            arch: _LazyRegisteredModel(
+                module_name=_resolve_module_name(module), class_name=class_name
+            )
+            for arch, (module, class_name) in _VLLM_MODELS.items()
+        }
+    )
+    registry.fill_model_info_cache()
+    results = {
+        arch: registry._try_inspect_model_cls(arch) for arch in sorted(_VLLM_MODELS)
+    }
+    uninspectable = sorted(arch for arch, info in results.items() if info is None)
+    assert [
+        arch for arch in uninspectable if registry._try_load_model_cls(arch) is not None
+    ] == []
+    declared = {
+        arch: info.has_persistent_state
+        for arch, info in results.items()
+        if info is not None and info.has_persistent_state is not False
+    }
+    assert declared == {}
+
+
+def _out_of_tree_state_model(monkeypatch, tmp_path):
+    package = tmp_path / "oot_state_models"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "model.py").write_text(_STATE_MODEL_SOURCE)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "cache"))
+    registry = _ModelRegistry({})
+    registry.register_model(
+        "OutOfTreeStateModel", "oot_state_models.model:OutOfTreeStateModel"
+    )
+    return registry, package / "model.py"
+
+
+def test_registry_lazy_out_of_tree_model_reports_persistent_state(
+    monkeypatch, tmp_path
+):
+    """A lazily registered out-of-tree class that declares persistent state is
+    reported with `has_persistent_state` True."""
+    registry, _ = _out_of_tree_state_model(monkeypatch, tmp_path)
+    model_info = registry._try_inspect_model_cls("OutOfTreeStateModel")
+    assert model_info is not None
+    assert model_info.has_persistent_state is True
+
+
+def test_registry_stale_model_info_cache_cannot_hide_persistent_state(
+    monkeypatch, tmp_path
+):
+    """A model-info cache entry written before the field existed is not read
+    as False for an unchanged out-of-tree module: it is inspected again."""
+    from dataclasses import asdict
+
+    from vllm.model_executor.models.registry import _ModelInfo
+
+    registry, module_path = _out_of_tree_state_model(monkeypatch, tmp_path)
+    lazy = registry.models["OutOfTreeStateModel"]
+    module = importlib.import_module("oot_state_models.model")
+
+    stale = asdict(_ModelInfo.from_model_cls(module.OutOfTreeStateModel))
+    stale.pop("has_persistent_state", None)
+    cache_dir = lazy._get_cache_dir()
+    cache_dir.mkdir(parents=True)
+    (cache_dir / lazy._get_cache_filename()).write_text(
+        json.dumps(
+            {
+                "hash": _LazyRegisteredModel._get_modelinfo_module_hash(module_path),
+                "modelinfo": stale,
+            }
+        )
+    )
+    model_info = registry._try_inspect_model_cls("OutOfTreeStateModel")
+    assert model_info is not None
+    assert model_info.has_persistent_state is True
