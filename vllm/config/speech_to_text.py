@@ -52,6 +52,9 @@ class SpeechToTextParams:
 
     extra_args: dict[str, str | int | float | list[str | int | float]] | None = None
     """Request extensions supplied through vllm_xargs."""
+    word_timestamps: bool = False
+    """Whether the request asks for word timestamps, so that the model can
+    produce what its word timestamp aligner needs."""
 
 
 @config

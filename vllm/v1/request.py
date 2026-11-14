@@ -109,6 +109,8 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
+        # MM item index -> outputs of its encoder pass, sent with the final output.
+        self.encoder_outputs: dict[int, dict[str, torch.Tensor]] | None = None
 
         if pooling_params is not None:
             # Pooling models.

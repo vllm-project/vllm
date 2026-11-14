@@ -209,6 +209,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             to_language=self.to_language,
             hotwords=self.hotwords,
             extra_args=self.vllm_xargs,
+            word_timestamps="word" in self.timestamp_granularities,
         )
 
     def to_beam_search_params(

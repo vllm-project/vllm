@@ -163,6 +163,11 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        encoder_outputs: Outputs of the encoder pass for each multi-modal item
+            of the prompt, by the item's position among all the prompt's
+            multi-modal items, from models that return them. Only on the final
+            output. Items whose tokens come from the prefix cache are not
+            encoded and have none; a unique `cache_salt` avoids that.
 
     """
 
@@ -184,6 +189,7 @@ class RequestOutput:
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        encoder_outputs: dict[int, dict[str, torch.Tensor]] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -207,12 +213,15 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.encoder_outputs = encoder_outputs
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if next_output.encoder_outputs is not None:
+            self.encoder_outputs = next_output.encoder_outputs
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

@@ -4,10 +4,12 @@ import asyncio
 import io
 import math
 import time
+import uuid
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
+from http import HTTPStatus
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
@@ -31,6 +33,11 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
+from vllm.model_executor.models.interfaces import (
+    TranscriptionChunk,
+    WordTimestampAligner,
+    supports_encoder_outputs,
+)
 from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
@@ -47,6 +54,7 @@ from ..transcription.protocol import (
     TranscriptionResponseVerbose,
     TranscriptionSegment,
     TranscriptionStreamResponse,
+    TranscriptionWord,
 )
 from ..translation.protocol import (
     TranslationResponse,
@@ -120,6 +128,17 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self.streaming_post_processor_cls = (
             self.model_cls.get_streaming_post_processor_cls()
         )
+        self.word_timestamp_aligner: WordTimestampAligner | None = None
+        if task_type == "transcribe" and getattr(
+            self.model_cls, "supports_word_timestamps", False
+        ):
+            try:
+                self.word_timestamp_aligner = (
+                    self.model_cls.get_word_timestamp_aligner_cls()(self.model_config)
+                )
+            except ValueError as error:
+                # The model offers no word timestamps in this configuration.
+                logger.info("Word timestamps are unavailable: %s", error)
 
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -308,7 +327,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if (
+                request.response_format == "verbose_json"
+                and self.model_cls.supports_segment_timestamp
+            ):
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -316,7 +338,22 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
+        word_timestamps = "word" in getattr(request, "timestamp_granularities", ())
+        if word_timestamps and supports_encoder_outputs(self.model_cls):
+            # A chunk returns its encoder outputs only if its prefill encodes its
+            # audio. A salt that no other prompt shares keeps it out of the prefix
+            # cache; the request ID cannot be the salt, as clients may reuse it.
+            rendered = await asyncio.gather(
+                *(
+                    self.renderer.render_cmpl_async(
+                        [prompt], prompt_extras={"cache_salt": uuid.uuid4().hex}
+                    )
+                    for prompt in parsed_prompts
+                )
+            )
+            engine_inputs = [engine_input for (engine_input,) in rendered]
+        else:
+            engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
         return engine_inputs, duration, chunk_start_offsets
 
@@ -459,9 +496,33 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 "`text`, `json`, `verbose_json` or `diarized_json`"
             )
 
+        word_timestamps = "word" in getattr(request, "timestamp_granularities", ())
+        if word_timestamps and request.response_format != "verbose_json":
+            return self.create_error_response(
+                "Word timestamps require response_format `verbose_json`"
+            )
+        if word_timestamps and self.word_timestamp_aligner is None:
+            return self.create_error_response(
+                f"Currently do not support word timestamps for {request.model}"
+            )
+        if (
+            word_timestamps
+            and request.use_beam_search
+            and supports_encoder_outputs(self.model_cls)
+        ):
+            # Beam search builds its final output without the encoder outputs.
+            return self.create_error_response(
+                "Currently do not support word timestamps with beam search "
+                f"for {request.model}"
+            )
+        segment_timestamps = (
+            request.response_format == "verbose_json"
+            and self.model_cls.supports_segment_timestamp
+        )
         if (
             request.response_format == "verbose_json"
-            and not self.model_cls.supports_segment_timestamp
+            and not segment_timestamps
+            and not word_timestamps
         ):
             return self.create_error_response(
                 f"Currently do not support verbose_json for {request.model}"
@@ -533,7 +594,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if segment_timestamps:
             sampling_params.logprobs = 1
 
         engine_request_ids = [
@@ -606,6 +667,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 [] for _ in list_result_generator
             ]
             chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
+            chunk_word_parts: list[list[TranscriptionWord]] = [
+                [] for _ in list_result_generator
+            ]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -620,7 +684,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
                 start_time = chunk_start_offsets[idx]
-                if request.response_format == "verbose_json":
+                if segment_timestamps:
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
@@ -638,6 +702,40 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     raw_text = op.outputs[0].text
                     chunk_text_parts[idx].append(
                         self.model_cls.post_process_output(raw_text, self.model_config)
+                    )
+                if word_timestamps:
+                    assert self.word_timestamp_aligner is not None
+                    job = self._preprocess_executor.submit(
+                        self.word_timestamp_aligner.align,
+                        TranscriptionChunk(
+                            output=op,
+                            text=separator.join(chunk_text_parts[idx]),
+                            language=request.language,
+                        ),
+                    )
+                    try:
+                        words = await asyncio.wrap_future(job)
+                    except Exception as error:
+                        logger.exception(
+                            "Word timestamps failed for request %s", request_id
+                        )
+                        # The request's other chunks may still be generating.
+                        await asyncio.gather(
+                            self.engine_client.abort(engine_request_ids),
+                            return_exceptions=True,
+                        )
+                        return self.create_error_response(
+                            f"Word timestamps failed: {error}",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                    chunk_word_parts[idx].extend(
+                        TranscriptionWord(
+                            word=word.word,
+                            start=start_time + word.start,
+                            end=start_time + word.end,
+                        )
+                        for word in words
                     )
             total_segments = [
                 segment
@@ -691,9 +789,15 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         V,
                         TranscriptionResponseVerbose(
                             text=text,
-                            language=request.language,
+                            # Models without language detection may not know it.
+                            language=request.language or "",
                             duration=duration_s,
                             segments=total_segments,
+                            words=(
+                                [word for part in chunk_word_parts for word in part]
+                                if word_timestamps
+                                else None
+                            ),
                         ),
                     )
             else:
