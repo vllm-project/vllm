@@ -27,6 +27,37 @@ ROCM_ATTN_BACKENDS = [
 
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
+
+# Explicit string format supports character loops that confuse detection.
+_STRING_CONTENT = """
+{%- set ns = namespace(messages=[]) -%}
+{%- for message in messages -%}
+  {%- set text -%}
+    {%- for char in message.content -%}{{- char -}}{%- endfor -%}
+  {%- endset -%}
+  {%- set ns.messages = ns.messages + [dict(role=message.role, content=text)] -%}
+{%- endfor -%}
+{%- set messages = ns.messages -%}
+"""
+
+
+# Match the legacy string parser: image placeholders first, then text.
+_STRUCTURED_CONTENT = """
+{%- macro render_content(parts) -%}
+  {%- for part in parts if part.type == 'image' -%}
+    {{- '<|vision_start|><|image_pad|><|vision_end|>' -}}
+  {%- endfor -%}
+  {{- parts | selectattr('type', 'eq', 'text') | map(attribute='text') | join('\\n') -}}
+{%- endmacro -%}
+{%- set ns = namespace(messages=[]) -%}
+{%- for message in messages -%}
+  {%- set ns.messages = ns.messages + [
+    dict(role=message.role, content=render_content(message.content))
+  ] -%}
+{%- endfor -%}
+{%- set messages = ns.messages -%}
+"""
+
 # The absolute floor matters only for the low ~0.10 text-vs-text score, where a
 # few thousandths of drift would otherwise exceed the relative bound.
 REL_TOL = 0.05
@@ -87,22 +118,38 @@ else:
     TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
 
 
-@pytest.fixture(scope="module", params=ATTN_BACKENDS)
-def server(request):
-    backend = request.param
+_SERVER_PARAMS = [
+    pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS
+]
+_STRUCTURED_SERVER_PARAM = pytest.param(("auto", "openai"), id="structured")
+_DEFAULT_SERVER_PARAM = pytest.param(("auto", None), id="structured-default")
+
+
+@pytest.fixture(scope="module", params=_SERVER_PARAMS)
+def server(request, tmp_path_factory):
+    backend, content_format = request.param
+    source_template = (
+        VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+    )
+    template = tmp_path_factory.mktemp("scoring") / "score.jinja"
+    wrapper = _STRING_CONTENT if content_format == "string" else _STRUCTURED_CONTENT
+    template.write_text(wrapper + source_template.read_text())
     print(f"\n=== Starting server with attention backend: {backend} ===")
     args = [
         "--enforce-eager",
         "--max-model-len",
         "8192",
         "--chat-template",
-        str(VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"),
+        str(template),
+        *ROCM_EXTRA_ARGS,
     ]
+
+    if content_format is not None:
+        args += ["--chat-template-content-format", content_format]
 
     env = dict()
     if backend != "auto":
         args += ["--attention-config", json.dumps({"backend": backend})]
-        args += ROCM_EXTRA_ARGS
 
         if backend != "ROCM_AITER_FA":
             env["VLLM_ROCM_USE_AITER"] = "0"
@@ -206,6 +253,9 @@ async def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
+@pytest.mark.parametrize(
+    "server", _SERVER_PARAMS + [_DEFAULT_SERVER_PARAM], indirect=True
+)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -486,3 +536,30 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
     assert field_scores == pytest.approx(kwargs_scores, rel=REL_TOL, abs=ABS_TOL)
+
+
+@pytest.mark.parametrize("server", [_STRUCTURED_SERVER_PARAM], indirect=True)
+@pytest.mark.asyncio
+async def test_rerank_preserves_structured_text_and_image(server):
+    remote_server, backend = server
+    response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": [{"content": [documents[0], documents[1]]}],
+        },
+    )
+    response.raise_for_status()
+    rerank = RerankResponse.model_validate(response.json())
+
+    assert len(rerank.results) == 1
+    assert rerank.results[0].index == 0
+    assert rerank.usage is not None
+    assert rerank.usage.prompt_tokens == 107
+    assert_score(
+        rerank.results[0].relevance_score,
+        TEXT_VS_TEXT_PLUS_IMAGE,
+        backend,
+        "structured_text_and_image",
+    )
