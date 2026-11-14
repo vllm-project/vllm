@@ -336,11 +336,32 @@ class CpuPlatform(Platform):
                     mamba_backend,
                 )
 
-        # Legacy setting
+        # Legacy setting. A positive value is the KV cache size in GiB. 0
+        # (the documented default) and an unset variable mean vLLM does not
+        # override the KV cache size through this variable, and an explicit
+        # --kv-cache-memory-bytes always takes precedence over it.
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
             kv_cache_space = int(os.environ[env_key])
-            cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
+            if kv_cache_space > 0 and cache_config.kv_cache_memory_bytes is not None:
+                logger.warning(
+                    "VLLM_CPU_KVCACHE_SPACE=%d is ignored because "
+                    "kv_cache_memory_bytes is explicitly set; the legacy "
+                    "environment variable no longer takes precedence. "
+                    "VLLM_CPU_KVCACHE_SPACE is deprecated; use "
+                    "--kv-cache-memory-bytes instead.",
+                    kv_cache_space,
+                )
+            elif kv_cache_space < 0:
+                logger.warning(
+                    "VLLM_CPU_KVCACHE_SPACE=%d is ignored because it is not "
+                    "a positive size. This legacy variable is deprecated; "
+                    "use --kv-cache-memory-bytes instead.",
+                    kv_cache_space,
+                )
+            elif kv_cache_space > 0:
+                cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
+            # 0 is the documented default: no override, no warning.
 
         scheduler_config = vllm_config.scheduler_config
         # async scheduling is not required on CPU
