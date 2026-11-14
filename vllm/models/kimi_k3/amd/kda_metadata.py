@@ -134,6 +134,10 @@ def _stage_spec_decode_fused_kernel(
       token_indx[t]    = t                                   (t < spec_token_size)
       qsl_out[r]       = qsl[min(r, ns)]                     (r <= bs)
       num_accepted[r]  = num_accepted_in[r] (r < ns), 1      (ns <= r < bs)
+
+    The state / query_start_loc / num_accepted staging mirrors
+    ``nvidia/kda_metadata.py:_stage_spec_decode_metadata_kernel``; keep the
+    two in sync.
     """
     pid = tl.program_id(0)
     rows = pid * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
@@ -300,6 +304,8 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if num_spec_decodes == 0:
             return None
         batch_size = m.num_reqs
+        if batch_size > self.decode_cudagraph_max_bs:
+            return None
         query_start_loc_cpu = m.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         if spec_masks_cpu.shape[0] != batch_size or query_lens_cpu.shape[0] != (
@@ -342,7 +348,8 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         block_table = m.block_table_tensor
         state_out = self.spec_state_indices_tensor
         block_rows = 32
-        block_tok = block_rows * num_slots
+        # tl.arange needs a power of 2; 32 * num_slots is not for nst 2/4/5/6.
+        block_tok = triton.next_power_of_2(block_rows * num_slots)
         grid = (
             max(
                 triton.cdiv(batch_size + 1, block_rows),
