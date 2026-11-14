@@ -5,6 +5,7 @@ import os
 import tempfile
 
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from prometheus_client.registry import Collector
 
 from vllm.logger import init_logger
 
@@ -12,6 +13,9 @@ logger = init_logger(__name__)
 
 # Global temporary directory for prometheus multiprocessing
 _prometheus_multiproc_dir: tempfile.TemporaryDirectory | None = None
+
+# Collectors each process serves from its own state, also in multiprocess mode.
+_process_local_registry = CollectorRegistry()
 
 
 def setup_multiprocess_prometheus():
@@ -48,9 +52,20 @@ def get_prometheus_registry() -> CollectorRegistry:
         logger.debug("Using multiprocess registry for prometheus metrics")
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
+        registry.register(_process_local_registry)
         return registry
 
     return REGISTRY
+
+
+def register_process_local_collector(collector: Collector) -> None:
+    """Register a collector whose samples this process computes from its own
+    state. With a multiprocess registry its series are not written to the
+    shared files, so a series it stops yielding is dropped from /metrics."""
+    if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
+        _process_local_registry.register(collector)
+    else:
+        REGISTRY.register(collector)
 
 
 def unregister_vllm_metrics():
@@ -62,11 +77,11 @@ def unregister_vllm_metrics():
     Also, in case of multiprocess, we need to unregister the metrics from the
     global registry.
     """
-    registry = REGISTRY
     # Unregister any existing vLLM collectors
-    for collector in list(registry._collector_to_names):
-        if hasattr(collector, "_name") and collector._name.startswith("vllm:"):
-            registry.unregister(collector)
+    for registry in (REGISTRY, _process_local_registry):
+        for collector in list(registry._collector_to_names):
+            if hasattr(collector, "_name") and collector._name.startswith("vllm:"):
+                registry.unregister(collector)
 
 
 def shutdown_prometheus():

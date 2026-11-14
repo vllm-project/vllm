@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -131,6 +132,7 @@ class EngineCoreReadyResponse:
     instance_id: str
     supports_lora: bool
     max_loras: int
+    max_cpu_loras: int = 0
     mamba_block_size: int | None = None
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
@@ -357,6 +359,9 @@ class EngineCoreOutputs(
 
     # Weight version used for this step.
     weight_version: str | None = None
+
+    # LoRA adapter caches changed; only client 0's copy carries the timings.
+    lora_load_event: LoRALoadEvent | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
