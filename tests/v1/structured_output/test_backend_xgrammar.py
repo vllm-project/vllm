@@ -539,10 +539,11 @@ class TestXgrammarBackend:
         _VOCAB_SIZE = 50257
         tokenizer: ClassVar[PreTrainedTokenizerBase]
 
-        @classmethod
+        # Not a classmethod: Python 3.14 no longer chains classmethod through
+        # the fixture's descriptor, so pytest would never run it.
         @pytest.fixture(scope="class", autouse=True)
-        def _shared_tokenizer(cls):
-            cls.tokenizer = AutoTokenizer.from_pretrained(cls._TOKENIZER)
+        def _shared_tokenizer(self, request):
+            request.cls.tokenizer = AutoTokenizer.from_pretrained(self._TOKENIZER)
 
         @classmethod
         def _backend(cls, *, disable_any_whitespace: bool) -> XgrammarBackend:

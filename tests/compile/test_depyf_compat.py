@@ -82,3 +82,11 @@ class TestPatchApplication:
             first = enable_debugging.patched_load_by_key_path
         with depyf_compat.prepare_debug(str(tmp_path)):
             assert enable_debugging.patched_load_by_key_path is first
+
+
+def test_compiled_fn_name_tracks_dynamo_counter():
+    # depyf's own version copies the counter, which Python 3.14 rejects.
+    from torch._dynamo.bytecode_transformation import _unique_id_counter
+
+    name = depyf_compat._current_compiled_fn_name()
+    assert name == f"__compiled_fn_{next(_unique_id_counter) - 1}"

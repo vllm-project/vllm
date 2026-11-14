@@ -10,7 +10,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 | `rocm700` | 3.12 | 7.0 | >= 2.35 | `0.14.0` to `0.18.0` |
 | `rocm721` | 3.12 | 7.2.1 | >= 2.35 | Nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9` |
 | `rocm72` | 3.12 | 7.2 | >= 2.39 | Earlier nightly releases on the legacy ROCm 7.2 stack (no longer built) |
-| `rocm100` | 3.12 | 10.0 | >= 2.35 | Nightly releases (default) |
+| `rocm100` | 3.14 | 10.0 | >= 2.35 | Nightly releases (default) |
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -29,20 +29,20 @@ If you need a different ROCm version or want to use an existing PyTorch installa
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
-!!! warning "Python 3.12 required for ROCm wheels"
+!!! warning "Python 3.14 required for ROCm wheels"
 
-    ROCm pre-built wheels are only available for **Python 3.12**. If you are using a different Python version (e.g. 3.11 or 3.13), the installer **will silently fall back** to the CUDA wheel from PyPI, which will fail on AMD GPUs with errors like `libcudart.so: cannot open shared object file`.
+    ROCm pre-built wheels are only available for **Python 3.14**. If you are using a different Python version (e.g. 3.12 or 3.13), the installer **will silently fall back** to the CUDA wheel from PyPI, which will fail on AMD GPUs with errors like `libcudart.so: cannot open shared object file`.
 
     To check your Python version: `python3 --version`
 
-    If you need Python 3.12, you can create an isolated environment with `uv`:
+    If you need Python 3.14, you can create an isolated environment with `uv`:
 
     ```bash
-    uv venv --python 3.12 --seed --managed-python
+    uv venv --python 3.14 --seed --managed-python
     source .venv/bin/activate
     ```
 
-To install the latest version of vLLM for Python 3.12, ROCm 10.0 and `glibc >= 2.35`:
+To install the latest version of vLLM for Python 3.14, ROCm 10.0 and `glibc >= 2.35`:
 
 ```bash
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
@@ -237,7 +237,7 @@ You can find more information about vLLM's wheels in
 
 0. Install the ROCm SDK and PyTorch (skip if you are already in an environment or docker image with them installed, e.g. `vllm/vllm-openai-rocm:base-nightly`).
 
-    ROCm 10.0 is installed from pip ([TheRock](https://github.com/ROCm/TheRock)), together with PyTorch and the GPU kernels for your GPU's architecture. In a Python 3.12 environment:
+    ROCm 10.0 is installed from pip ([TheRock](https://github.com/ROCm/TheRock)), together with PyTorch and the GPU kernels for your GPU's architecture. In a Python 3.14 environment:
 
     ```bash
     # Your GPU's architecture, e.g. gfx942 for MI300 or gfx950 for MI350

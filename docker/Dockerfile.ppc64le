@@ -8,7 +8,7 @@ ARG BASE_UBI_IMAGE_TAG=9.8
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS builder-base
 
 ARG VLLM_VERSION="0.0.0.dev"
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG VLLM_TARGET_DEVICE=cpu
 
 USER root
@@ -84,7 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS vllm-openai
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ENV VLLM_NO_USAGE_STATS=1
 
 # Set Environment Variables for venv & openblas
@@ -144,7 +144,7 @@ ARG PYTHON_VERSION
 
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
 LABEL ai.vllm.build.cpu-ppc64le="${VLLM_CPU_PPC64LE:-false}"
-LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.14}"
 
 USER 2000
 
