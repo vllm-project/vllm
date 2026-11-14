@@ -149,6 +149,35 @@ def test_flashinfer_bf16_query_with_checkpoint_q_scale(
     )
 
 
+@pytest.mark.skipif(not has_flashinfer(), reason="FlashInfer is not available.")
+@pytest.mark.parametrize("max_tokens", [4])
+def test_flashinfer_bf16_kv_cache_ignores_checkpoint_kv_scales(
+    vllm_runner, example_prompts, max_tokens: int
+) -> None:
+    """Checkpoint FP8 k/v scales must not reach layers whose KV cache is BF16."""
+    # The checkpoint declares an FP8 kv_cache_scheme with per-layer scales; the
+    # explicit BF16 cache leaves every layer unquantized.
+    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
+    outputs = []
+    for backend in ("TRITON_ATTN", "FLASHINFER"):
+        with vllm_runner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+            kv_cache_dtype="bfloat16",
+            attention_config={"backend": backend},
+        ) as vllm_model:
+            outputs.append(
+                vllm_model.generate_greedy_logprobs(example_prompts, max_tokens, 8)
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="triton",
+        name_1="flashinfer",
+    )
+
+
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
 @pytest.mark.parametrize(
