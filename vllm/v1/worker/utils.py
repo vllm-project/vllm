@@ -459,6 +459,14 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
+def groups_with_metadata_builders(
+    groups: Iterable[AttentionGroup],
+) -> list[AttentionGroup]:
+    """The groups that build attention metadata: groups made only of
+    init_attn_backend's no_attn_metadata_layer_names have no builders."""
+    return [group for group in groups if group.metadata_builders]
+
+
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
