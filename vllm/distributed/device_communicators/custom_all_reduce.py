@@ -235,21 +235,27 @@ class CustomAllreduce:
                 "group does not have MNNVL-capable GPUs on every rank."
             )
             return
+        # Per-architecture max sizes: the SM version on CUDA (with symmetric
+        # memory), the gfx architecture name on ROCm.
+        max_sizes_key: str | None = None
         device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
             and device_capability is not None
         ):
-            device_capability_str = device_capability.as_version_str()
-            if (
-                device_capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES
-                and world_size in CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str]
-            ):
-                max_size = min(
-                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
-                    max_size,
-                )
+            max_sizes_key = device_capability.as_version_str()
+        elif current_platform.is_rocm():
+            gcn_arch = torch.cuda.get_device_properties(device).gcnArchName
+            max_sizes_key = gcn_arch.split(":")[0]
+        if (
+            max_sizes_key in CUSTOM_ALL_REDUCE_MAX_SIZES
+            and world_size in CUSTOM_ALL_REDUCE_MAX_SIZES[max_sizes_key]
+        ):
+            max_size = min(
+                CUSTOM_ALL_REDUCE_MAX_SIZES[max_sizes_key][world_size],
+                max_size,
+            )
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:
