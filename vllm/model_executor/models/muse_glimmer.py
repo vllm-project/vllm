@@ -44,7 +44,11 @@ from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import (
+    ImageDummyOptions,
+    MultiModalDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -83,6 +87,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -115,6 +120,23 @@ def _text_config(config):
 
 def _muse_glimmer_has_vision(config) -> bool:
     return hasattr(config, "vision_config")
+
+
+def _get_canvas_with_most_tokens(
+    max_tokens: int,
+    factor: int,
+    overrides: ImageDummyOptions | VideoDummyOptions | None = None,
+) -> ImageSize:
+    max_height = max_width = max_tokens
+    if overrides is not None and overrides.height:
+        max_height = min(max_tokens, cdiv(overrides.height, factor))
+    if overrides is not None and overrides.width:
+        max_width = cdiv(overrides.width, factor)
+    height, width = max(
+        ((h, min(max_tokens // h, max_width)) for h in range(max_height, 0, -1)),
+        key=lambda hw: (hw[0] * hw[1], -abs(hw[0] - hw[1])),
+    )
+    return ImageSize(width=factor * width, height=factor * height)
 
 
 IMAGE_TOKEN = "<|patch|>"
@@ -179,13 +201,10 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_kwargs = self._get_effective_mm_processor_kwargs({})["images_kwargs"]
-        grid_size = math.isqrt(int(image_kwargs["max_image_tokens"]))
-        side = (
-            int(image_kwargs["patch_size"])
-            * int(image_kwargs["merge_size"])
-            * grid_size
+        return _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
         )
-        return ImageSize(width=side, height=side)
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
@@ -213,24 +232,28 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        image_kwargs = mm_kwargs["images_kwargs"]
         video_kwargs = mm_kwargs["videos_kwargs"]
-        image_width, image_height = self.info.get_image_size_with_most_features()
-        video_grid = math.isqrt(int(video_kwargs["max_video_frame_tokens"]))
-        video_size = (
-            int(video_kwargs["patch_size"])
-            * int(video_kwargs["merge_size"])
-            * video_grid
+        image_size = _get_canvas_with_most_tokens(
+            int(image_kwargs["max_image_tokens"]),
+            int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
+            mm_options.get("image"),
+        )
+        video_size = _get_canvas_with_most_tokens(
+            int(video_kwargs["max_video_frame_tokens"]),
+            int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
+            mm_options.get("video"),
         )
         return {
             "image": self._get_dummy_images(
-                width=image_width,
-                height=image_height,
+                width=image_size.width,
+                height=image_size.height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=video_size,
-                height=video_size,
+                width=video_size.width,
+                height=video_size.height,
                 num_frames=self.info.get_num_frames_with_most_features(
                     seq_len, mm_counts.get("video", 0)
                 ),
