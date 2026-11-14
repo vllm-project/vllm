@@ -147,3 +147,32 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "expected"),
+    [
+        pytest.param(SamplingParams(), False, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0, top_p=0.9), False, id="greedy"),
+        pytest.param(SamplingParams(temperature=0.7, top_p=0.9), False, id="top-p"),
+        pytest.param(SamplingParams(min_p=0.1), True, id="min-p"),
+        pytest.param(SamplingParams(top_k=10), True, id="top-k"),
+        pytest.param(SamplingParams(logprobs=0), True, id="logprobs"),
+        pytest.param(
+            SamplingParams(thinking_token_budget=3), True, id="thinking-budget"
+        ),
+        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
+        pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
+        pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),
+    ],
+)
+def test_needs_full_vocab_matches_request_features(
+    sampling_params: SamplingParams, expected: bool
+):
+    """Vocab-sharded verification serves only requests that need nothing but
+    temperature and top-p."""
+    sampler = _make_sampler()
+    sampler.add_request(3, SamplingParams(min_p=0.1))
+    sampler.add_request(3, sampling_params=sampling_params)
+
+    assert sampler.needs_full_vocab[3] == expected
