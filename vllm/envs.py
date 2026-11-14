@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
+    VLLM_ROCM_AITER_A16W4_STRIP16: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1386,6 +1387,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # gfx942 AITER Triton/Gluon a16w4 MoE: re-lay the MXFP4 expert weights into
+    # STRIP16 records at load (16 columns x 128 K of fp4 + their e8m0 scales,
+    # 17 contiguous cache lines). Kernel output is bit-identical; set to 0 to
+    # keep the column-major layout.
+    "VLLM_ROCM_AITER_A16W4_STRIP16": lambda: (
+        os.getenv("VLLM_ROCM_AITER_A16W4_STRIP16", "True").lower() in ("true", "1")
     ),
     # Activation dtype for the Kimi-K3 SiTU MXFP4 MoE (AITER FlyDSL SiTUv2):
     # auto (= a4w4), a4w4, a8w4 or a16w4. Legacy 1/0 mean a4w4/a16w4.
