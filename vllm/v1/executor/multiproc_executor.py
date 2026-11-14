@@ -461,14 +461,6 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
-    def flush_iteration_timings(self) -> Future[ModelRunnerOutput]:
-        return self.collective_rpc(
-            "flush_iteration_timings",
-            unique_reply_rank=self.output_rank,
-            non_block=True,
-            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-        )
-
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         return self.collective_rpc(

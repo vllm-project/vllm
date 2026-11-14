@@ -569,7 +569,7 @@ class VllmConfig:
             and parallel_config.distributed_executor_backend in ("uni", "mp")
             # With more API servers the frontend does not log iteration details.
             and parallel_config._api_process_count == 1
-            # The in-process engine has no idle loop to collect the last records.
+            # Only EngineCoreProc publishes the records a dummy batch returns.
             and envs.VLLM_ENABLE_V1_MULTIPROCESSING
         )
 

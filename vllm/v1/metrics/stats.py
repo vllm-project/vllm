@@ -237,7 +237,7 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
-    # Iterations timed on the GPU, which complete after their own output.
+    # Iterations timed on the GPU whose timing has completed.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

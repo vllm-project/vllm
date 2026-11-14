@@ -73,7 +73,7 @@ def test_execute_worker_rpc_returns_worker_exception():
     "method,result",
     [
         ("take_draft_token_ids", DraftTokenIds(["req"], [[1, 2, 3]])),
-        ("execute_dummy_batch", None),
+        ("execute_dummy_batch", ["iteration record"]),
     ],
 )
 def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stalled):
@@ -100,32 +100,6 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
-
-
-def test_flush_iteration_timings_does_not_wait_for_the_reply():
-    arrived: list[Any] = []
-
-    def dequeue(timeout):
-        assert timeout is not None  # a wedged worker must not block the engine
-        return arrived.pop()
-
-    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
-    executor.is_failed = False
-    executor.output_rank = 1
-    executor.futures_queue = deque()
-    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
-    reply = (WorkerProc.ResponseStatus.SUCCESS, "timings")
-    executor.response_mqs = [
-        None,
-        SimpleNamespace(readable=lambda: bool(arrived), dequeue=dequeue),
-    ]
-
-    flush = executor.flush_iteration_timings()
-    assert not flush.poll()
-
-    arrived.append(reply)
-    assert flush.poll()
-    assert flush.result() == "timings"
 
 
 @pytest.mark.parametrize(

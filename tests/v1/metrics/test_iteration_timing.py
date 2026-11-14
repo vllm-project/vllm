@@ -10,7 +10,6 @@ import vllm.v1.metrics.iteration_timing as iteration_timing
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.metrics import loggers
 from vllm.v1.metrics.iteration_timing import (
     IterationTimer,
@@ -31,7 +30,6 @@ class FakeGpu:
     def __init__(self):
         self.now_ms = 0.0
         self.events: list[FakeEvent] = []
-        self.waits = 0
 
     def run(self, ms: float = 1.0):
         """Complete everything recorded so far, one event every `ms`."""
@@ -44,7 +42,7 @@ class FakeGpu:
 class FakeEvent:
     gpu: FakeGpu
 
-    def __init__(self, enable_timing=False, blocking=False):
+    def __init__(self, enable_timing=False):
         self.completed_ms = None
 
     def record(self):
@@ -52,10 +50,6 @@ class FakeEvent:
 
     def query(self):
         return self.completed_ms is not None
-
-    def synchronize(self):
-        self.gpu.waits += 1
-        self.gpu.run()
 
     def elapsed_time(self, end):
         if self.completed_ms is None or end.completed_ms is None:
@@ -98,15 +92,16 @@ class FakeWorker:
         output = self.sample_tokens()
         return output and output.get_output().iteration_records
 
-    def flush(self):
-        return self.iteration_timer.flush().get_output().iteration_records
+    def completed(self):
+        """Let the GPU catch up and return the records the next reply carries."""
+        FakeEvent.gpu.run()
+        return self.iteration_timer.take_ready()
 
 
 @pytest.fixture
 def gpu(monkeypatch):
     gpu = FakeEvent.gpu = FakeGpu()
-    fake_torch = SimpleNamespace(Event=FakeEvent, cuda=SimpleNamespace(Event=FakeEvent))
-    monkeypatch.setattr(iteration_timing, "torch", fake_torch)
+    monkeypatch.setattr(iteration_timing, "torch", SimpleNamespace(Event=FakeEvent))
     return gpu
 
 
@@ -122,29 +117,18 @@ def test_record_rides_a_later_output_once_its_gpu_work_completes(gpu):
     assert (first.iteration_index, first.num_generation_tokens) == (0, 3)
     assert (second.iteration_index, second.num_generation_tokens) == (1, 5)
     assert first.elapsed_ms == 4.0 and not first.is_dummy
-    assert gpu.waits == 0
 
 
-def test_flush_waits_for_the_last_iteration_when_the_engine_goes_idle(gpu):
-    worker = FakeWorker()
-    assert worker.step(num_tokens=7) == []
-
-    (record,) = worker.flush()
-
-    assert record.num_generation_tokens == 7
-    assert gpu.waits == 1
-    assert worker.flush() == []
-
-
-def test_dummy_batches_return_earlier_records_and_flush_collects_the_tail(gpu):
+def test_dummy_batches_are_timed_and_return_earlier_records(gpu):
     worker = FakeWorker()
 
+    assert worker.step(num_tokens=3) == []
     assert worker.execute_dummy_batch() == []
     gpu.run()
-    assert [record.is_dummy for record in worker.execute_dummy_batch()] == [True]
-    assert worker.execute_dummy_batch() == []
-
-    assert [record.iteration_index for record in worker.flush()] == [1, 2]
+    step, dummy = worker.execute_dummy_batch()
+    assert (step.iteration_index, step.num_generation_tokens) == (0, 3)
+    assert (dummy.iteration_index, dummy.is_dummy) == (1, True)
+    assert worker.execute_dummy_batch() == []  # the previous one is still pending
 
 
 def test_only_iterations_that_finish_with_a_snapshot_are_timed(gpu):
@@ -155,11 +139,11 @@ def test_only_iterations_that_finish_with_a_snapshot_are_timed(gpu):
     assert worker.step(timed=False) == []  # no scheduling snapshot
     # A step that schedules no tokens has no sample_tokens call.
     worker.execute_model(SimpleNamespace(iteration_details=IterationDetails()))
-    assert worker.flush() == []
+    assert worker.completed() == []
 
     # None of these stops later iterations from being timed.
     worker.step(num_tokens=2)
-    assert [record.num_generation_tokens for record in worker.flush()] == [2]
+    assert [record.num_generation_tokens for record in worker.completed()] == [2]
 
 
 def test_failed_timing_read_drops_the_record_not_the_step(gpu, monkeypatch):
@@ -175,14 +159,13 @@ def test_failed_timing_read_drops_the_record_not_the_step(gpu, monkeypatch):
         assert worker.step() == []
 
     # Later records are unaffected.
-    assert [record.iteration_index for record in worker.flush()] == [1]
-
-
-def broken_event_call(self):
-    raise RuntimeError("CUDA error")
+    assert [record.iteration_index for record in worker.completed()] == [1]
 
 
 def test_failed_event_recording_drops_the_record_not_the_step(gpu, monkeypatch):
+    def broken_event_call(self):
+        raise RuntimeError("CUDA error")
+
     worker = FakeWorker()
     warning = Mock()
     monkeypatch.setattr(iteration_timing.logger, "warning_once", warning)
@@ -198,23 +181,13 @@ def test_failed_event_recording_drops_the_record_not_the_step(gpu, monkeypatch):
         patch.setattr(FakeEvent, "record", broken_event_call)
         assert isinstance(worker.sample_tokens(), FakeAsyncOutput)  # no end event
         assert worker.execute_dummy_batch() == []  # neither event
-        assert worker.flush() == []
+    assert worker.completed() == []
 
     # Later iterations are timed again; the three dropped ones keep their index.
     assert warning.called
     worker.step(num_tokens=2)
-    (record,) = worker.flush()
+    (record,) = worker.completed()
     assert (record.iteration_index, record.num_generation_tokens) == (3, 2)
-
-
-def test_failed_flush_wait_drops_the_tail_not_the_flush(gpu, monkeypatch):
-    worker = FakeWorker()
-    worker.step()
-
-    monkeypatch.setattr(FakeEvent, "record", broken_event_call)
-    monkeypatch.setattr(FakeEvent, "synchronize", broken_event_call)
-
-    assert worker.flush() == []
 
 
 def test_untimed_worker_is_untouched():
@@ -232,19 +205,6 @@ def test_output_carrying_records_keeps_its_kv_connector_output(gpu):
     worker.execute_model(SimpleNamespace(iteration_details=IterationDetails()))
 
     assert worker.sample_tokens().get_kv_connector_output() == "kv output"
-
-
-def test_executor_resolves_the_flush_into_records(gpu):
-    worker = FakeWorker()
-    worker.step(num_tokens=3)
-    executor = UniProcExecutor.__new__(UniProcExecutor)
-    executor.driver_worker = SimpleNamespace(
-        flush_iteration_timings=worker.iteration_timer.flush
-    )
-
-    (record,) = executor.flush_iteration_timings().result(timeout=0).iteration_records
-
-    assert record.num_generation_tokens == 3
 
 
 def test_only_the_output_rank_times_iterations():
@@ -273,7 +233,8 @@ def test_only_the_output_rank_times_iterations():
         ({"backend": "uni"}, True),
         ({"backend": "ray"}, False),
         ({"api_servers": 2}, False),  # the frontend then logs no iteration details
-        ({"multiprocessing": False}, False),  # the in-process engine never idles
+        # The in-process engine does not publish the records of dummy batches.
+        ({"multiprocessing": False}, False),
     ],
 )
 def test_gpu_iteration_timing_conditions(change, expected, monkeypatch):
@@ -309,7 +270,7 @@ def test_logger_logs_every_iteration_record(gpu, monkeypatch):
     worker = FakeWorker()
     worker.step(num_tokens=3)
     worker.step(num_tokens=5)
-    stats = SchedulerStats(iteration_records=worker.flush())
+    stats = SchedulerStats(iteration_records=worker.completed())
     info = Mock()
     monkeypatch.setattr(loggers.logger, "info", info)
     stat_logger = SimpleNamespace(

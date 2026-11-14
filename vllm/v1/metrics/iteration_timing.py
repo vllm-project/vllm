@@ -7,10 +7,11 @@ stream: one before `execute_model`, one after `sample_tokens` returns. The
 interval covers the model forward pass, sampling and speculative drafting,
 including host submission gaps.
 
-The end event is usually still pending when the iteration's own output is
-ready, so the finished timing leaves the worker as a record with a later reply:
-the next step's output, the next dummy batch, or the flush EngineCore requests
-before going idle.
+The end event is often still pending when the iteration's own output is built,
+so a finished timing leaves the worker as a record with the first reply built
+after its end event has completed: the iteration's own output, a later step's
+output or a dummy batch. No step waits for a timing, so the last iterations
+before the engine goes idle are reported once it steps again.
 """
 
 from __future__ import annotations
@@ -85,9 +86,7 @@ class _TimedIteration:
 class IterationTimer:
     """Times iterations on the calling thread's CUDA stream.
 
-    Only the worker's main thread uses it, so it needs no lock, and it never
-    waits for the GPU: `take_ready` returns what has completed, and `flush`
-    hands the rest to the thread that already waits for step outputs.
+    Only the worker's main thread uses it, and it never waits for the GPU.
     """
 
     def __init__(self) -> None:
@@ -124,44 +123,6 @@ class IterationTimer:
                 records.append(self._pending[0].read())
             self._pending.popleft()
         return records
-
-    def flush(self) -> IterationTimingFlush:
-        """Hand over every pending iteration, for the engine to wait on.
-
-        That includes dummy batches, so that every data-parallel rank has
-        reported the same iterations when a wave ends.
-        """
-        pending, self._pending = self._pending, deque()
-        return IterationTimingFlush(pending)
-
-
-class IterationTimingFlush(AsyncModelRunnerOutput):
-    """The iterations still on the GPU when the engine goes idle.
-
-    It resolves wherever a step's output resolves (the output thread with async
-    scheduling). The engine requests it when it has nothing else to run, and
-    with `MultiprocExecutor` stops waiting for it if new work arrives first.
-    """
-
-    def __init__(self, pending: deque[_TimedIteration]) -> None:
-        self._pending = pending
-        # Blocking (sleep) event, like AsyncOutput.copy_event. It is recorded
-        # after every pending end event on the same stream, so it completes last.
-        self._done = torch.cuda.Event(blocking=True)
-        with _drop_on_cuda_error():
-            self._done.record()
-
-    def get_output(self) -> ModelRunnerOutput:
-        with _drop_on_cuda_error():
-            self._done.synchronize()
-        records: list[SchedulerIterationDetails] = []
-        for timed in self._pending:
-            with _drop_on_cuda_error():
-                records.append(timed.read())
-        return ModelRunnerOutput(req_ids=[], iteration_records=records)
-
-    def get_kv_connector_output(self) -> KVConnectorOutput | None:
-        return None
 
 
 class _WithIterationRecords(AsyncModelRunnerOutput):

@@ -321,16 +321,6 @@ class Executor(ABC):
         """Returns the iteration records the output worker has completed."""
         return self.collective_rpc("execute_dummy_batch")[0]
 
-    def flush_iteration_timings(self) -> Future[ModelRunnerOutput]:
-        """Requests the iterations the output worker is still timing.
-
-        The default waits for them and returns a resolved future. An override may
-        return one the engine can poll instead, like `MultiprocExecutor`'s.
-        """
-        future = Future[ModelRunnerOutput]()
-        future.set_result(self.collective_rpc("flush_iteration_timings")[0])
-        return future
-
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]

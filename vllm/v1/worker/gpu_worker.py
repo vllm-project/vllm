@@ -1610,11 +1610,6 @@ class Worker(WorkerBase):
             num_active_loras=0,
         )
 
-    def flush_iteration_timings(self) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        """Hand over the iterations still being timed; see `IterationTimer`."""
-        timer = self.iteration_timer
-        return ModelRunnerOutput(req_ids=[]) if timer is None else timer.flush()
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 

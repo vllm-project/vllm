@@ -317,14 +317,13 @@ and includes waiting for the earlier stages. Other configurations, including
 the in-process engine, report the wall-clock time EngineCore waited for the
 iteration.
 
-An iteration's timing usually completes after its own output is delivered, so
-its record is logged with a later output and no step waits for its own timing.
-When the engine runs out of work it requests the remaining records and logs
-them once the GPU finishes, or ahead of the next step's output if new work
-arrives first.
-The KV cache usage on a line is the usage when the line is logged.
-Dummy iterations of data-parallel ranks are timed and logged as well.
-Iterations still being timed when the engine shuts down are not logged.
+An iteration's timing is often still pending when its own output is built, so
+its record is logged with the first output built after the timing has
+completed, its own or a later one, and no step waits for its timing. The last
+iterations before the engine runs out of work are therefore logged when it
+next steps, or not at all if it shuts down first. The KV cache usage on a line
+is the usage when the line is logged. Dummy iterations of data-parallel ranks
+are timed and logged as well.
 
 ### Metrics Publishing - Prometheus
 
