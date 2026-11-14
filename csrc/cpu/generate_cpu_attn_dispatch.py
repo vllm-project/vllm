@@ -21,6 +21,7 @@ ISA_TYPES = {
     "RVV": 5,
     "VSX": 6,
     "AMX_FP8": 7,
+    "SVE": 8,
 }
 
 # KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
@@ -38,7 +39,7 @@ KV_CACHE_CPP_TYPES = {
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "AMX_FP8", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX"]
+ISA_FOR_32 = ["AMX", "AMX_FP8", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX", "SVE"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
@@ -160,6 +161,10 @@ def generate_header_file() -> str:
   #include "cpu_attn_neon.hpp"
 #endif
 
+#if defined(CPU_CAPABILITY_SVE128) || defined(CPU_CAPABILITY_SVE256)
+  #include "cpu_attn_sve.hpp"
+#endif
+
 #ifdef __s390x__
   #include "cpu_attn_vxe.hpp"
 #endif
@@ -225,10 +230,18 @@ def generate_header_file() -> str:
         fp8=True,
     )
     header += _macro_block(
-        "#elif defined(CPU_CAPABILITY_AMXBF16)",
-        ["AMX", "VEC", "VEC16"],
+        "#elif defined(__aarch64__) && "
+        "(defined(CPU_CAPABILITY_SVE128) || defined(CPU_CAPABILITY_SVE256))",
+        ["SVE", "NEON", "VEC", "VEC16"],
         fp8=True,
     )
+
+    header += _macro_block(
+        "#elif defined(__aarch64__)",
+        ["NEON", "VEC", "VEC16"],
+        fp8=False,
+    )
+        
     header += _macro_block(
         "#elif defined(__aarch64__)",
         ["NEON", "VEC", "VEC16"],
