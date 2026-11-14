@@ -49,6 +49,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops import oscar_kv
 
 # FlyDSL TurboQuant decode (AMD gfx950). Auto-selected when FlyDSL is available
 # for eligible layers (SoA store + FlyDSL decode + SoA-aware continuation);
@@ -135,6 +136,9 @@ class TurboQuantAttentionBackend(AttentionBackend):
         "turboquant_4bit_nc",
         "turboquant_k3v4_nc",
         "turboquant_3bit_nc",
+        "turboquant_k3v3_oscar",
+        "turboquant_k3v2_oscar",
+        "turboquant_k2v2_oscar",
     ]
 
     @classmethod
@@ -222,6 +226,11 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        self._oscar = vllm_config.cache_config.cache_dtype.endswith("_oscar")
+        if self._oscar:
+            # Filled by the group's first KV write, which knows the page count.
+            self._oscar_window = oscar_kv.WindowHolder()
+            oscar_kv.register_window(layer_names, self._oscar_window)
         self._reserve_workspace()
 
     def _reserve_workspace(self) -> None:
@@ -240,6 +249,22 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
+        cache_dtype = self.vllm_config.cache_config.cache_dtype
+        if cache_dtype.endswith("_oscar"):
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            fmt = oscar_kv.OscarFormat.of(
+                TurboQuantConfig.from_cache_dtype(
+                    cache_dtype, model_config.get_head_size()
+                )
+            )
+            current_workspace_manager().get_simultaneous(
+                *oscar_kv.max_decode_workspace(
+                    fmt, max_num_reqs, num_heads, num_kv_heads, model_config.dtype
+                )
+            )
         current_workspace_manager().get_simultaneous(
             ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
             ((max_num_reqs, num_heads, head_size), model_config.dtype),
@@ -281,6 +306,10 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
+        if self._oscar and self._oscar_window.win is not None:
+            self._oscar_window.win.update(
+                cam.block_table_tensor[: cam.num_reqs], cam.seq_lens[: cam.num_reqs]
+            )
 
         return TurboQuantMetadata(
             seq_lens=cam.seq_lens,
@@ -337,6 +366,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         )
 
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
+        if self.tq_config.oscar and head_size not in oscar_kv.SUPPORTED_HEAD_DIMS:
+            raise ValueError(
+                f"{kv_cache_dtype} supports head_size in "
+                f"{oscar_kv.SUPPORTED_HEAD_DIMS}, got {head_size}"
+            )
 
         # Pre-compute kernel constants from config (avoid repeated arithmetic)
         cfg = self.tq_config
@@ -363,6 +397,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Cache max_model_len now (config is available at __init__ but NOT
         # during CUDA-graph capture when _ensure_on_device is re-entered).
         self._max_model_len = vllm_config.model_config.max_model_len
+        self._max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # SoA store is required by the FlyDSL decode/continuation path, so it
         # tracks FlyDSL availability (single switch for the whole pipeline).
         self._use_flydsl = is_flydsl_available()
@@ -682,6 +717,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: Any,
     ):
         """Quantize + store via fused Triton kernel."""
+        if self.tq_config.oscar:
+            oscar_kv.oscar_store(
+                key, value, kv_cache, slot_mapping, *self._oscar_state(layer, kv_cache)
+            )
+            return
         if self._soa_store:
             # SoA layout (data region + metadata region separated per block),
             # required by the FlyDSL decode kernel. Pure-Triton store; the
@@ -835,7 +875,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     # Slice from pre-built arange (no kernel launch)
                     synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
-                    if self._soa_store:
+                    if self.tq_config.oscar:
+                        out = self._oscar_decode(
+                            q_seq, kv_cache, synth_bt, synth_seq_lens, layer, False
+                        )
+                    elif self._soa_store:
                         # The cache was written in SoA layout (always, for FlyDSL),
                         # so it MUST be read with the SoA-aware decode. The
                         # default AoS decode reads k_norm/v_scale/v_zero from
@@ -948,7 +992,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         v_cached = v_buf[:, :, :alloc_len, :]
 
         grid = (alloc_len, 1 * Hk)
-        if self._soa_store:
+        if self.tq_config.oscar:
+            # Writes unrotated K/V (recent-window tokens at full precision).
+            oscar_kv.oscar_dequant(
+                kv_cache,
+                block_table[0],
+                cached_len,
+                *self._oscar_state(layer, kv_cache),
+                k_cached[0],
+                v_cached[0],
+            )
+        elif self._soa_store:
             # SoA-aware dequant: read the data/metadata-separated SoA cache
             # written by the SoA store. Constants must match the store side.
             _, soa_dequant, _ = _soa_imports()
@@ -1028,7 +1082,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             )
 
         # Inverse-rotate MSE keys back to original space
-        if not self.tq_config.key_fp8:
+        if not self.tq_config.key_fp8 and not self.tq_config.oscar:
             # fp16 matmul for rotation (2× less bandwidth, uses fp16 tensor cores)
             Pi_half = layer._tq_Pi_half
             k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D)
@@ -1107,6 +1161,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
+        if self.tq_config.oscar:
+            return self._oscar_decode(
+                query,
+                kv_cache,
+                attn_metadata.block_table,
+                attn_metadata.seq_lens,
+                layer,
+            )
         # Acquire shared decode scratch buffers from WorkspaceManager.
         # Layers execute sequentially so one set of buffers is sufficient.
         # Falls back to kernel-internal allocation if workspace unavailable.
@@ -1223,6 +1285,60 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             max_num_kv_splits=self.max_num_kv_splits,
         )
         return result
+
+    def _oscar_state(self, layer: Any, kv_cache: torch.Tensor):
+        """OSCAR (window table, this layer's window staging), created on first use."""
+        holder = oscar_kv.get_window(layer.layer_name)
+        stage = getattr(layer, "_oscar_stage", None)
+        if stage is not None and stage[0].device != kv_cache.device:
+            stage = None
+        if holder.win is None:
+            fmt = oscar_kv.OscarFormat.of(self.tq_config)
+            page = oscar_kv.cache_page_size(kv_cache, self.tq_config.slot_size_aligned)
+            if stage is not None:
+                # Sized on the profiling run: keep it, it is already accounted for.
+                rows = stage[0].shape[0]
+            else:
+                rows = oscar_kv.window_rows(
+                    fmt,
+                    page,
+                    self._max_num_seqs,
+                    holder.num_layers,
+                    self.num_kv_heads,
+                    torch.accelerator.get_memory_info(kv_cache.device)[0],
+                )
+            holder.win = oscar_kv.OscarWindow(
+                fmt, kv_cache.shape[0], page, rows, kv_cache.device
+            )
+            logger.info_once(
+                "OSCAR recent window: %d staging pages (%d windows) per layer",
+                rows,
+                rows // holder.win.pages_per_req,
+            )
+        if stage is None or stage[0].shape[0] != holder.win.rows:
+            stage = holder.win.alloc_stage(self.num_kv_heads, kv_cache.device)
+            layer._oscar_stage = stage
+        return holder.win, stage
+
+    def _oscar_decode(
+        self, query, kv_cache, block_table, seq_lens, layer, workspace=True
+    ):
+        # Decode batches fit the reserved workspace; short continuation chunks
+        # (up to _CONTINUATION_DECODE_THRESHOLD rows, outside cudagraphs) may not.
+        B = query.shape[0]
+        win, stage = self._oscar_state(layer, kv_cache)
+        specs = oscar_kv.decode_workspace(
+            win.fmt, B, self.num_heads, self.num_kv_heads, query.dtype
+        )
+        if workspace:
+            mid, qr, out = current_workspace_manager().get_simultaneous(*specs)
+        else:
+            mid, qr, out = (
+                torch.empty(shape, dtype=dt, device=query.device) for shape, dt in specs
+            )
+        return oscar_kv.oscar_decode(
+            query, kv_cache, block_table, seq_lens, win, stage, self.scale, mid, qr, out
+        )
 
     def _dispatch_decode_soa(self, **kwargs):
         """SoA-aware Triton decode — fallback for FlyDSL-ineligible layers.
