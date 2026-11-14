@@ -650,6 +650,7 @@ def dequantize_nvfp4_linear_weight(
     result = torch.empty(
         (weight.shape[0], input_size), dtype=dtype, device=weight.device
     )
+    # Limit temporary FP32 allocations in the PyTorch dequantization fallback.
     chunk_rows = max(1, 16 * 1024 * 1024 // input_size)
     offset = 0
     for partition, width in enumerate(partition_widths):

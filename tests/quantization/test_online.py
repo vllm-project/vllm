@@ -815,7 +815,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
 ):
     """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
-    quant_config = _fully_quantized_quark_config()
+    quant_config = _fully_quantized_modelopt_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         quant_config_args(linear="mxfp8", ignore=[prefix])
@@ -836,7 +836,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
         disable_tp=True,
     )
 
-    assert isinstance(layer.quant_method, QuarkLinearMethod)
+    assert isinstance(layer.quant_method, ModelOptLinearMethod)
 
 
 def test_online_quantization_configures_prequantized_moe(
