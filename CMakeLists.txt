@@ -504,6 +504,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_COOPERATIVE_TOPK=1")
 
     endif()
+
+    # Thread-block clusters and ~200 KB of shared memory per CTA: SM90 and
+    # datacenter Blackwell.
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(TOPP_CUTOFFS_LSE_ARCHS
+        "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(TOPP_CUTOFFS_LSE_ARCHS
+        "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -652,6 +662,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       set_gencode_flags_for_srcs(
         SRCS "csrc/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
+    endif()
+
+    if(TOPP_CUTOFFS_LSE_ARCHS)
+      list(APPEND VLLM_STABLE_EXT_SRC
+        "csrc/topp_cutoffs_lse.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/topp_cutoffs_lse.cu"
+        CUDA_ARCHS "${TOPP_CUTOFFS_LSE_ARCHS}")
     endif()
 
     # Only build Marlin kernels if we are building for at least some compatible archs.
@@ -1300,6 +1318,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
+    if(TOPP_CUTOFFS_LSE_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_TOPP_CUTOFFS_LSE=1)
     endif()
     if(FUSED_KDA_DECODE_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
