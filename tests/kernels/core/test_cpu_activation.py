@@ -17,6 +17,7 @@ from vllm.model_executor.layers.activation import (
     GELU,
     FastGELU,
     GeluAndMul,
+    GELUTanh,
     NewGELU,
     QuickGELU,
     SiluAndMul,
@@ -26,6 +27,69 @@ DTYPES = [torch.bfloat16, torch.float32]
 NUM_TOKENS = [7, 83]
 D = [512, 2048]
 SEEDS = [0]
+
+
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
+    reason="GELUTanh uses the CPU kernel on Arm",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    "layout", ["contiguous", "rows", "columns", "transpose", "batched"]
+)
+@torch.inference_mode()
+def test_cpu_gelu_tanh_input_layout(
+    default_vllm_config, dtype: torch.dtype, layout: str
+) -> None:
+    default_vllm_config.compilation_config.custom_ops.append("+gelu_tanh")
+    set_random_seed(0)
+    x = torch.randn(7, 32, dtype=dtype)
+    if layout == "rows":
+        x = x[:, 8:24]
+    elif layout == "columns":
+        x = x[:, 1::2]
+    elif layout == "transpose":
+        x = torch.randn(16, 7, dtype=dtype).t()
+    elif layout == "batched":
+        x = torch.randn(3, 7, 32, dtype=dtype)[:, ::2, 8:24]
+    original = x.clone()
+    expected = torch.nn.functional.gelu(x, approximate="tanh")
+
+    out = GELUTanh()(x)
+
+    torch.testing.assert_close(
+        out, expected, atol=get_default_atol(out), rtol=get_default_rtol(out)
+    )
+    torch.testing.assert_close(x, original, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("layout", ["rows", "columns", "transpose"])
+@torch.inference_mode()
+def test_cpu_gelu_tanh_output_layout(dtype: torch.dtype, layout: str) -> None:
+    set_random_seed(0)
+    x = torch.randn(7, 16, dtype=dtype)
+    storage = torch.full((7, 32), -123.0, dtype=dtype)
+    expected_storage = storage.clone()
+    if layout == "rows":
+        out = storage[:, 8:24]
+        expected_out = expected_storage[:, 8:24]
+    elif layout == "columns":
+        out = storage[:, 1::2]
+        expected_out = expected_storage[:, 1::2]
+    else:
+        out = storage.view(32, 7)[:16].t()
+        expected_out = expected_storage.view(32, 7)[:16].t()
+    expected_out.copy_(torch.nn.functional.gelu(x, approximate="tanh"))
+
+    torch.ops._C.gelu_tanh(out, x)
+
+    torch.testing.assert_close(
+        storage,
+        expected_storage,
+        atol=get_default_atol(storage),
+        rtol=get_default_rtol(storage),
+    )
 
 
 @pytest.mark.parametrize(
