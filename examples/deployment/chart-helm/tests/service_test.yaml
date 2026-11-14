@@ -4,6 +4,23 @@ templates:
 release:
   name: demo
 tests:
+  - it: should leave service labels unchanged when monitoring is disabled
+    asserts:
+      - notExists:
+          path: metadata.labels
+
+  - it: should label the service for this release's monitor
+    set:
+      serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.labels
+          value:
+            app.kubernetes.io/instance: demo
+      - equal:
+          path: spec.ports[0].name
+          value: service-port
+
   - it: should honor the configured service name
     set:
       serviceName: vllm-api
