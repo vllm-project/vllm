@@ -338,6 +338,7 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
         "temperature": 0.0,
     }
     engine_client.model_config.max_model_len = 8192
+    engine_client.model_config.multimodal_config = None
     engine_client.errored = False
     engine_client.generate.side_effect = [gen_hello(), gen_world()]
 
