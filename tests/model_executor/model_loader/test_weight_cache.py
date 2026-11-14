@@ -2180,6 +2180,47 @@ def test_host_arena_socket_round_trip_and_tensor_lifetime(tmp_path, monkeypatch)
     assert lifetime() is None
 
 
+def test_host_arena_releases_each_storage_before_pinning(monkeypatch):
+    import weakref
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import host_arena
+
+    model = torch.nn.Module()
+    model.first = torch.nn.Parameter(torch.arange(32.0), requires_grad=False)
+    model.second = torch.nn.Parameter(torch.arange(64.0), requires_grad=False)
+    first, second = model.first, model.second
+    expected_first, expected_second = first.detach().clone(), second.detach().clone()
+    first_storage = weakref.ref(first.untyped_storage())
+    second_storage = weakref.ref(second.untyped_storage())
+
+    monkeypatch.setattr(
+        host_arena._TensorGroup, "pin_required", property(lambda self: True)
+    )
+    cache_checks = []
+
+    def check_releases():
+        cache_checks.append((first_storage() is None, second_storage() is None))
+
+    def register(ptr, nbytes):
+        assert first_storage() is None
+        assert second_storage() is None
+        return True
+
+    monkeypatch.setattr(host_arena, "_empty_host_cache", check_releases)
+    monkeypatch.setattr(host_arena, "host_register", register)
+    monkeypatch.setattr(host_arena, "host_unregister", lambda ptr: None)
+
+    arena = host_arena.HostArena.from_model(model, min_bytes=1)
+    assert arena is not None
+    assert cache_checks == [(True, False), (True, True)]
+    assert model.first is first and model.second is second
+    torch.testing.assert_close(model.first, expected_first)
+    torch.testing.assert_close(model.second, expected_second)
+    arena.close()
+
+
 def test_host_arena_rejects_bad_descriptor_and_closes_fd():
     import os
 

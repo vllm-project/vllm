@@ -101,7 +101,9 @@ def _tensor_view(base: torch.Tensor, descriptor: HostTensorDescriptor) -> torch.
         if extent >= typed.numel():
             raise ValueError("Host arena tensor view is out of bounds")
     return typed.as_strided(
-        descriptor.shape, descriptor.stride, descriptor.storage_offset
+        descriptor.shape,
+        descriptor.stride,
+        typed.storage_offset() + descriptor.storage_offset,
     )
 
 
@@ -143,7 +145,6 @@ class _ArenaBase:
             self._finalizer = weakref.finalize(self._owner, self._lifetime.close)
             self._finalizer.atexit = False  # type: ignore[misc]
             self._base = torch.from_numpy(self._owner)
-            self._lifetime.ensure_pinned()
         except Exception:
             self._base = None
             self._owner = None
@@ -177,6 +178,7 @@ class HostArenaMapping(_ArenaBase):
         )
         self.descriptor = descriptor
         self._open_mapping(mapping, descriptor.pin_required)
+        self._lifetime.ensure_pinned()
 
     @classmethod
     def from_fds(
@@ -201,6 +203,12 @@ class HostArenaMapping(_ArenaBase):
 
     def close(self) -> None:
         self._release_views()
+
+
+def _empty_host_cache() -> None:
+    empty_cache = getattr(torch._C, "_host_emptyCache", None)
+    if empty_cache is not None:
+        empty_cache()
 
 
 class HostArena(_ArenaBase):
@@ -229,36 +237,47 @@ class HostArena(_ArenaBase):
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
             self._open_mapping(mapping, self.descriptor.pin_required)
-            assert self._base is not None
-            views: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
             for group, group_offset in zip(groups, offsets):
-                source = torch.empty(0, dtype=torch.uint8).set_(
-                    group.storage, 0, (group.nbytes,), (1,)
-                )
-                target = self._base.narrow(0, group_offset, group.nbytes)
-                target.copy_(source)
-                for tensor in group.tensors:
-                    descriptor = HostTensorDescriptor(
-                        offset=group_offset,
-                        nbytes=group.nbytes,
-                        dtype=tensor.dtype,
-                        shape=tuple(tensor.shape),
-                        stride=tuple(tensor.stride()),
-                        storage_offset=tensor.storage_offset(),
-                    )
-                    view = _tensor_view(self._base, descriptor)
-                    views.append((tensor, tensor.detach(), view))
-                    self._descriptors[id(tensor)] = descriptor
-            try:
-                for tensor, _, view in views:
-                    tensor.data = view
-            except Exception:
-                for tensor, original, _ in views:
-                    tensor.data = original
-                raise
+                pin_required = group.pin_required
+                self._retarget_group(group, group_offset)
+                if pin_required:
+                    _empty_host_cache()
+            self._lifetime.ensure_pinned()
         except Exception:
             self.close()
             raise
+
+    def _retarget_group(self, group: _TensorGroup, group_offset: int) -> None:
+        assert self._base is not None
+        source = torch.empty(0, dtype=torch.uint8).set_(
+            group.storage, 0, (group.nbytes,), (1,)
+        )
+        originals: list[tuple[torch.Tensor, torch.Tensor]] = []
+        try:
+            target = self._base.narrow(0, group_offset, group.nbytes)
+            target.copy_(source)
+            for tensor in group.tensors:
+                descriptor = HostTensorDescriptor(
+                    offset=group_offset,
+                    nbytes=group.nbytes,
+                    dtype=tensor.dtype,
+                    shape=tuple(tensor.shape),
+                    stride=tuple(tensor.stride()),
+                    storage_offset=tensor.storage_offset(),
+                )
+                view = _tensor_view(self._base, descriptor)
+                originals.append((tensor, tensor.detach()))
+                tensor.set_(view)
+                self._descriptors[id(tensor)] = descriptor
+        except Exception:
+            for tensor, original in reversed(originals):
+                tensor.set_(original)
+            raise
+        finally:
+            originals.clear()
+            group.storage = torch.UntypedStorage(0)
+            group.tensors.clear()
+            del source
 
     @classmethod
     def from_model(
@@ -295,7 +314,10 @@ class HostArena(_ArenaBase):
                 groups[key] = _TensorGroup(storage, [tensor])
             else:
                 group.tensors.append(tensor)
-        return cls(list(groups.values())) if groups else None
+        if not groups:
+            return None
+        del storage, tensor
+        return cls(list(groups.values()))
 
     @property
     def fd(self) -> int:

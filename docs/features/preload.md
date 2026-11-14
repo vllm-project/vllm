@@ -209,8 +209,10 @@ daemons at a trusted deployment.
 
 After loading and post-processing, and before warmup, the daemon packs large
 CPU parameter and buffer storages into a `memfd` arena and retargets the
-original tensors to views of that arena in place. This allows the original
-standalone storages to be released instead of keeping a second resident copy.
+original tensors to views of that arena in place. It releases each original
+storage and clears cached host allocations before moving to the next one, then
+registers the arena only after all replacements are complete. This bounds the
+peak overlap to one storage instead of keeping a second copy of every table.
 
 For `get_state`, the daemon sends the arena file descriptor with `SCM_RIGHTS`
 and sends only lightweight dtype, shape, stride, and offset descriptors in the
