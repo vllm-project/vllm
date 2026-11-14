@@ -35,6 +35,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 
 import datasets
+import jsonschema
 import numpy as np
 import pandas as pd
 from backend_request_func import (
@@ -548,10 +549,11 @@ async def benchmark(
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     expected: list[str] = []
+    schemas: list = []
+    structured_flags: list[bool] = []
     async for i, request in get_request(input_requests, request_rate, burstiness):
-        extra_body = (
-            prepare_extra_body(request) if i in structured_output_req_idx else None
-        )
+        is_structured = i in structured_output_req_idx
+        extra_body = prepare_extra_body(request) if is_structured else None
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=request.prompt,
@@ -562,6 +564,8 @@ async def benchmark(
             extra_body=extra_body,
         )
         expected.append(request.completion)
+        schemas.append(request.schema)
+        structured_flags.append(is_structured)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
@@ -637,8 +641,15 @@ async def benchmark(
     }
 
     ret = [
-        {"generated": output.generated_text, "expected": gt}
-        for output, gt in zip(outputs, expected)
+        {
+            "generated": output.generated_text,
+            "expected": gt,
+            "schema": schema,
+            "structured": is_structured,
+        }
+        for output, gt, schema, is_structured in zip(
+            outputs, expected, schemas, structured_flags
+        )
     ]
 
     def process_one_metric(
@@ -704,20 +715,53 @@ async def benchmark(
     return result, ret
 
 
-def evaluate(ret, args):
-    def _eval_correctness_json(expected, actual):
-        # extract json string from string using regex
-        import regex as re
+def _json_values_equal(actual, expected):
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _json_values_equal(actual[key], expected[key]) for key in actual
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _json_values_equal(left, right) for left, right in zip(actual, expected)
+        )
+    return actual == expected
 
-        actual = actual.replace("\n", "").replace(" ", "").strip()
+
+def _eval_correctness_json(expected, actual, schema=None, structured=True):
+    # Structured output must satisfy its schema even when it matches the
+    # reference. Any dataset reference, including one for a ratio-excluded
+    # request, is then compared without Python's bool/int equivalence.
+    import regex as re
+
+    match = re.search(r"\{.*\}", actual, re.DOTALL)
+    if match is None:
+        return False
+    try:
+        actual_obj = json.loads(match.group())
+    except Exception:
+        return False
+
+    if structured and schema is not None:
+        if isinstance(schema, str):
+            schema = json.loads(schema)
         try:
-            actual = re.search(r"\{.*\}", actual).group()
-            actual = json.loads(actual)
-        except Exception:
+            jsonschema.validate(actual_obj, schema)
+        except jsonschema.ValidationError:
             return False
 
-        return True
+    if expected is not None:
+        try:
+            expected_obj = json.loads(expected)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return _json_values_equal(actual_obj, expected_obj)
 
+    return True
+
+
+def evaluate(ret, args):
     def _eval_correctness_choice(expected, actual):
         return actual in args.choice
 
@@ -726,9 +770,9 @@ def evaluate(ret, args):
 
         return re.match(args.regex, actual) is not None
 
-    def _eval_correctness(expected, actual):
+    def _eval_correctness(expected, actual, schema=None, structured=True):
         if args.structure_type == "json":
-            return _eval_correctness_json(expected, actual)
+            return _eval_correctness_json(expected, actual, schema, structured)
         elif args.structure_type == "regex":
             return _eval_correctness_regex(expected, actual)
         elif args.structure_type == "choice":
@@ -738,7 +782,12 @@ def evaluate(ret, args):
 
     scores = []
     for res in ret:
-        score = _eval_correctness(res["expected"], res["generated"])
+        score = _eval_correctness(
+            res["expected"],
+            res["generated"],
+            res.get("schema"),
+            res.get("structured", True),
+        )
         res["correctness"] = score
         scores.append(score)
 
