@@ -13,6 +13,7 @@ import torch
 import zmq.asyncio
 from huggingface_hub.utils import httpx
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm.config import set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import mooncake_connector
@@ -24,10 +25,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferResponseStatus,
     PullReqMeta,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    MambaSpec,
 )
 
 from .test_mooncake_connector import (
@@ -49,18 +55,22 @@ def _layerwise_copy_worker(
     register=True,
     kv_role="kv_producer",
     writes=None,
+    spec=None,
+    manager_config=None,
 ):
     config = _make_worker_vllm_config(
         kv_role, {"transfer_mode": "layerwise", **(extra or {})}
     )
     config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    spec = FullAttentionSpec(
+    spec = spec or AttentionSpec(
         block_size=config.cache_config.block_size,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float16,
     )
-    cache = KVCacheConfig(64, [], [KVCacheGroupSpec(list(names), spec)])
+    cache = KVCacheConfig(
+        64, [], [make_kv_cache_group(list(names), spec, manager_config=manager_config)]
+    )
 
     def write(_session, sources, destinations, lengths):
         if writes is not None:
@@ -274,10 +284,14 @@ def test_layerwise_rejects_invalid_transfer_interval(interval):
 @pytest.mark.parametrize("prefix_delta", [-1, 0, 1])
 @pytest.mark.parametrize("ready_before_start", [False, True])
 @pytest.mark.parametrize("delayed_send", [False, True])
+@pytest.mark.parametrize("windowed", [False, True])
 async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
-    prefix_delta, ready_before_start, delayed_send
+    prefix_delta, ready_before_start, delayed_send, windowed
 ):
-    with _layerwise_copy_worker() as worker:
+    manager_config = (
+        SlidingWindowManager.config(sliding_window=17) if windowed else None
+    )
+    with _layerwise_copy_worker(manager_config=manager_config) as worker:
         name = worker.registered_layer_names[0]
         source = worker.device_kv_caches[name]
         destination = torch.zeros_like(source)
@@ -304,7 +318,7 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
             await worker.send_kv_to_decode(b"decode", socket, remote)
             worker._process_pending_transfers()
         worker._finish_pending_send(wait=True)
-        expected_prefix = 7 if prefix_delta >= 0 else 0
+        expected_prefix = 7 if prefix_delta >= 0 and not windowed else 0
         assert torch.all(destination[3] == expected_prefix)
         assert not torch.any(destination[4])
         socket.send_multipart.assert_not_awaited()
@@ -319,6 +333,54 @@ async def test_layerwise_prefix_copy_waits_for_complete_blocks_and_destination(
             worker.save_kv_layer(name)
             worker.wait_for_save()
         assert torch.equal(destination[3:5], source[1:3])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recurrent", [False, True])
+async def test_layerwise_state_copy_waits_for_final_kv_and_excludes_scratch(recurrent):
+    spec = (
+        MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float16,))
+        if recurrent
+        else None
+    )
+    manager_config = (
+        MambaManager.config(num_speculative_blocks=2)
+        if recurrent
+        else CircularBufferManager.config()
+    )
+    source_blocks = (1, 2, 3) if recurrent else (1,)
+    destination_blocks = (4, 5, 6) if recurrent else (4,)
+    with _layerwise_copy_worker(spec=spec, manager_config=manager_config) as worker:
+        name = worker.registered_layer_names[0]
+        source = worker.device_kv_caches[name]
+        source[1].fill_(7)
+        source[2:4].fill_(99)
+        destination = torch.zeros_like(source)
+        remote = _copy_destination_metadata(
+            worker, [destination], {"a": destination_blocks}
+        )
+        socket = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+        await worker.send_kv_to_decode(b"decode", socket, remote)
+        size = worker.logical_block_size
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = (
+            mooncake_connector.PushReqMeta(
+                "a",
+                "a",
+                (source_blocks,),
+                4 * size,
+                4 * size,
+                num_computed_tokens=3 * size,
+            ),
+        )
+        worker.start_load_kv(metadata)
+        worker._finish_pending_send(wait=True)
+        assert not torch.any(destination)
+        source[1].fill_(11)
+        worker.save_kv_layer(name)
+        worker.wait_for_save()
+        assert torch.equal(destination[4], source[1])
+        assert not torch.any(destination[5:7])
 
 
 @pytest.mark.asyncio
@@ -376,7 +438,7 @@ async def test_layerwise_ready_at_bootstrap_publication_copies_registered_cache(
         group = worker.kv_cache_config.transfer_groups[0]
         name = group.layer_names[0]
         source = torch.full(
-            (64, group.kv_cache_spec.page_size_bytes), 7, dtype=torch.uint8
+            (64, group.kv_cache_specs[name].page_size_bytes), 7, dtype=torch.uint8
         )
         destination = torch.zeros_like(source)
         replies: queue.Queue[tuple[bytes, bytes]] = queue.Queue()
