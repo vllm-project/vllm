@@ -23,6 +23,8 @@ import ray
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import new_kv_cache_group, uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
@@ -49,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorWorker,
     NixlHandshakePayload,
     NixlKVConnectorStats,
+    NixlPushConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
@@ -65,16 +68,16 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVQuantMode,
+    MambaSpec,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -89,6 +92,8 @@ from .utils import (
     expand_strided_descs,
     make_kv_cache_config,
     maybe_update_block_size,
+    region_pairs_by_index,
+    remote_stage,
 )
 
 
@@ -439,9 +444,9 @@ def test_kv_transfer_handshake(dist_init):
         # Prefill connector will register KV cache to populate proper handshake
         # metadata.
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0", "layer1", "layer2"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
@@ -456,7 +461,7 @@ def test_kv_transfer_handshake(dist_init):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         kv_cache_spec = cast(
-            AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
+            AttentionSpec, uniform_spec(kv_cache_config.kv_cache_groups[0])
         )
         raw = torch.zeros(
             kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks * 3,
@@ -561,7 +566,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Mock register_kv_caches attributes needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
         self.src_blocks_data = np.empty((0, 5), dtype=np.uint64)
-        rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        rep_spec = uniform_spec(self.kv_cache_config.kv_cache_groups[0])
         test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
@@ -603,9 +608,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.region_group_ids = [0]
         self.region_mem_types = [self.nixl_memory_type]
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
-        self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-        self.dst_region_mem_types[self.engine_id] = self.region_mem_types
         self._set_region_layers([["layer0"]])
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
@@ -787,10 +789,6 @@ class TestNixlHandshake:
         )
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
-        # simulate handshake
-        worker.dst_xfer_side_handles = {
-            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
-        }
         worker.kv_cache_layout = "LBHNC"
         num_xfers = 4
         while True:
@@ -968,10 +966,8 @@ class TestNixlHandshake:
             split_key = (-tp_ratio, worker.block_size)
             assert split_key in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[split_key]) == tp_ratio
-            assert remote_engine_id in worker.dst_xfer_side_handles
-            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
-            )
+            stage = worker._single_remote_stage(remote_engine_id)
+            assert set(stage.xfer_side_handles) == set(range(tp_ratio))
 
         remote_agents, _ = worker._nixl_handshake(
             host="localhost",
@@ -1418,9 +1414,7 @@ class TestNixlHandshake:
             )
             _advertise_one_layer_per_region(worker, meta)
             worker.add_remote_agent(meta, remote_tp_size=1)
-            assert (
-                FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker.dst_xfer_side_handles
-            )
+            assert FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker._remote_stages
             # Gate rejects an MLA region wrongly scaled by tp_ratio.
             worker2 = FakeNixlConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
@@ -1563,7 +1557,7 @@ class TestNixlHandshake:
         )
 
         def set_specs(num_kv_heads: int) -> None:
-            spec = FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=worker.block_size,
                 num_kv_heads=num_kv_heads,
                 head_size=64,
@@ -1853,9 +1847,9 @@ class TestNixlHandshake:
             num_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer0"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=max(1, num_kv_heads // local_tp),
                         head_size=16,
@@ -2760,7 +2754,7 @@ def test_register_kv_caches(
         num_heads = 4
         head_size = 16
 
-        kv_cache_spec = FullAttentionSpec(
+        kv_cache_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_heads,
             head_size=head_size,
@@ -2774,7 +2768,7 @@ def test_register_kv_caches(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer0", "layer1", "layer2", "layer3"], kv_cache_spec
                 )
             ],
@@ -2912,12 +2906,14 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
                 (_dsv4_mla_spec(528, 512, 2), 2),
                 (_dsv4_mla_spec(528, 512, 2), 2),
                 (
-                    CircularBufferSpec(
-                        block_size=8,
-                        num_kv_heads=1,
-                        head_size=8448,
-                        head_size_v=0,
-                        dtype=torch.uint8,
+                    CircularBufferManager.layer_config(
+                        AttentionSpec(
+                            block_size=8,
+                            num_kv_heads=1,
+                            head_size=8448,
+                            head_size_v=0,
+                            dtype=torch.uint8,
+                        )
                     ),
                     2,
                 ),
@@ -2944,7 +2940,11 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
     ):
         mock_backends.return_value = [TritonAttentionBackend]
         num_blocks = 2
-        specs = [spec for spec, _ in groups]
+        specs = [getattr(layer, "spec", layer) for layer, _ in groups]
+        is_ring = [
+            getattr(layer, "manager_cls", None) is CircularBufferManager
+            for layer, _ in groups
+        ]
         group_layers = [
             [f"group{group_idx}.layer{idx}" for idx in range(num_layers)]
             for group_idx, (_, num_layers) in enumerate(groups)
@@ -2953,8 +2953,8 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(layer_names, spec)
-                for layer_names, spec in zip(group_layers, specs)
+                make_kv_cache_group(layer_names, layer)
+                for layer_names, (layer, _) in zip(group_layers, groups)
             ],
         )
         vllm_config = create_vllm_config(attention_backend="TRITON_ATTN")
@@ -2996,8 +2996,8 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         # its own region.
         ring_pages = [
             (cache.data_ptr(), spec.page_size_bytes)
-            for layer_names, spec in zip(group_layers, specs)
-            if isinstance(spec, CircularBufferSpec)
+            for layer_names, spec, ring in zip(group_layers, specs, is_ring)
+            if ring
             for cache in (kv_caches[name] for name in layer_names)
             if cache.data_ptr() != raw.data_ptr()
         ]
@@ -3116,7 +3116,13 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
         worker.src_xfer_handles_by_tp_ratio = {(-2, block_size): [456, 457]}
-        worker.dst_xfer_side_handles = {"engine1": {0: 789}}
+        worker._remote_stages = {
+            "engine1": remote_stage(
+                region_pairs_by_index(1),
+                region_num_blocks=[50],
+                xfer_side_handles={0: 789},
+            )
+        }
         worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         # _cleanup_remote_engine (called by shutdown) also clears these:
         worker.kv_caches_base_addr["engine1"] = {0: [0xABC]}
@@ -3164,13 +3170,13 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     vllm_config = create_vllm_config(block_size=block_size)
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer0"], spec)],
     )
     raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
     (cache,) = dense_kv_cache_views(
@@ -3243,7 +3249,11 @@ def _setup_worker_with_remote_engine(
 
     engine_id = "remote-engine-1"
     worker._remote_agents[engine_id] = {(0, 0): "agent_0", (0, 1): "agent_1"}
-    worker.dst_xfer_side_handles[engine_id] = {0: 100, 1: 200}
+    worker._remote_stages[engine_id] = remote_stage(
+        region_pairs_by_index(1),
+        region_num_blocks=[50],
+        xfer_side_handles={0: 100, 1: 200},
+    )
     worker.kv_caches_base_addr[engine_id] = {0: [0xABC]}
     worker.dst_num_blocks[engine_id] = 50
     worker.tp_mappings[engine_id] = MagicMock()
@@ -3273,7 +3283,7 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
         worker._evict_stale_engines()
 
         assert engine_id not in worker._remote_agents
-        assert engine_id not in worker.dst_xfer_side_handles
+        assert engine_id not in worker._remote_stages
         assert engine_id not in worker.kv_caches_base_addr
         assert engine_id not in worker.dst_num_blocks
         assert engine_id not in worker.tp_mappings
@@ -3319,7 +3329,7 @@ def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_
         worker._evict_stale_engines()
 
         assert engine_id in worker._remote_agents
-        assert engine_id in worker.dst_xfer_side_handles
+        assert engine_id in worker._remote_stages
         mock_rel.assert_not_called()
         mock_rem.assert_not_called()
 
@@ -3391,7 +3401,7 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
 
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
-    assert engine_id in worker.dst_xfer_side_handles
+    assert engine_id in worker._remote_stages
 
 
 @pytest.mark.cpu_test
@@ -3461,7 +3471,7 @@ class TestPeerReplacement:
 
     def test_cleans_old_peer_after_confirmed_handshake(self):
         self._connect("healthy", host="other-host")
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
         self.worker.start_load_kv(self._request())
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_not_called()
@@ -3606,7 +3616,7 @@ class TestPeerReplacement:
     def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
         self, handshake_fails
     ):
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
         self._fail_old_peer()
         self.worker.get_transfer_results()
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
@@ -3628,7 +3638,7 @@ class TestPeerReplacement:
             return
 
         self._connect("old")
-        fresh_handle = self.worker.dst_xfer_side_handles["old"][0]
+        fresh_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
         assert fresh_handle != old_handle
         assert self.worker._engine_by_address == {("localhost", 1234): "old"}
         self.transport.check_xfer_state.return_value = "DONE"
@@ -3651,7 +3661,7 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.side_effect = lambda h: (
             "ERR" if h == 10 else "PROC"
         )
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
 
         result = self.worker.get_transfer_results()
         assert not result.finished_recving and not result.failed_recving
@@ -4805,7 +4815,7 @@ def test_compatibility_hash_validation(
     )
     decode_worker = decode_connector.connector_worker
     kv_cache_spec = cast(
-        AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        AttentionSpec, uniform_spec(kv_cache_config.kv_cache_groups[0])
     )
     shape = compute_layer_kv_cache_shape_bytes(
         kv_cache_spec, kv_cache_config.num_blocks
@@ -4937,7 +4947,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker = decode_connector.connector_worker
 
     backend = get_current_attn_backend(local_vllm_config)
-    probe_spec = decode_worker.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    probe_spec = uniform_spec(decode_worker.kv_cache_config.kv_cache_groups[0])
     test_shape = compute_layer_kv_cache_shape_bytes(probe_spec, 1)
     decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,
@@ -5038,7 +5048,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         # per-rank state the handshake would normally fill in. The real
         # `_nixl_handshake` is unnecessary here — we only need
         # `transfer_topo` to know `remote_tp_size`, and `_remote_agents`
-        # / `dst_xfer_side_handles` to be keyed by remote rank.
+        # / `_remote_stages` to be keyed by remote rank.
         remote_engine_id = "remote_engine"
         worker.transfer_topo.register_remote_engine(
             remote_engine_id=remote_engine_id,
@@ -5051,8 +5061,12 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         worker._remote_agents[remote_engine_id] = {
             (0, rank): f"agent_p{rank}" for rank in range(prefill_tp_size)
         }
-        worker.dst_xfer_side_handles = {
-            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+        worker._remote_stages = {
+            remote_engine_id: remote_stage(
+                region_pairs_by_index(1),
+                region_num_blocks=[worker.num_blocks],
+                xfer_side_handles={rank: 100 + rank for rank in range(prefill_tp_size)},
+            )
         }
         # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
         assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size
@@ -5168,6 +5182,70 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
         (
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@pytest.mark.parametrize("connector_role", list(KVConnectorRole))
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_rejects_receiving_roles(
+    default_vllm_config, dist_init, connector_cls, connector_role, kv_role
+):
+    """Reject decode PP before stages can report TP-only read completions."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role=kv_role, block_size=block_size)
+    config.parallel_config.pipeline_parallel_size = 2
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*kv_producer"):
+        connector_cls(
+            config,
+            connector_role,
+            make_kv_cache_config(block_size=block_size),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_rejects_mamba_with_shared_error(
+    default_vllm_config, dist_init, connector_cls, monkeypatch
+):
+    """Both transfer modes explain the shared Mamba PP restriction."""
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role="kv_producer", block_size=block_size)
+    config.parallel_config.pipeline_parallel_size = 2
+    cache = make_kv_cache_config(block_size=block_size)
+    cache = KVCacheConfig(
+        num_blocks=cache.num_blocks,
+        kv_cache_tensors=cache.kv_cache_tensors,
+        kv_cache_groups=[
+            *cache.kv_cache_groups,
+            make_kv_cache_group(
+                ["mamba0"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((16, 4), (16, 4)),
+                    dtypes=(torch.float16, torch.float32),
+                    mamba_type=MambaAttentionBackendEnum.MAMBA1,
+                ),
+            ),
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*Mamba/SSM"):
+        connector_cls(
+            config,
+            KVConnectorRole.WORKER,
+            cache,
         )
 
 
