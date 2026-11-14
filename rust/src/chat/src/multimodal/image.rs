@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use image::DynamicImage;
 use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPreprocessingContext};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
@@ -69,10 +70,11 @@ impl MultimodalModelInfo {
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs> {
         let processor = Arc::clone(&support.processor);
-        let images = image_frames
-            .iter()
-            .map(|frame| frame.image().cloned())
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let limit = std::env::var("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(715_827_880);
+        let images = collect_images(image_frames, limit)?;
 
         // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
@@ -80,5 +82,92 @@ impl MultimodalModelInfo {
         })
         .await
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
+    }
+}
+
+/// Charge every logical image slot, including aliases, before decoding or cloning.
+fn collect_images(frames: &[Arc<ImageFrame>], limit: u64) -> Result<Vec<DynamicImage>> {
+    let charge = |total: u64, bytes: u64| {
+        total
+            .checked_add(bytes)
+            .filter(|&total| limit == 0 || total <= limit)
+            .ok_or(Error::ImageDecodeBudgetExceeded { limit })
+    };
+    let mut estimated = 0;
+    for frame in frames {
+        let size = frame.size();
+        // Match the Python image admission estimate of four bytes per pixel.
+        let bytes = u64::from(size.width)
+            .checked_mul(u64::from(size.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(Error::ImageDecodeBudgetExceeded { limit })?;
+        estimated = charge(estimated, bytes)?;
+    }
+
+    let mut decoded = 0;
+    frames
+        .iter()
+        .map(|frame| {
+            let image = frame.image()?;
+            decoded = charge(decoded, image.as_bytes().len() as u64)?;
+            Ok(image.clone())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use llm_multimodal::{ImageDetail, ImageSize, ImageSource};
+
+    use super::*;
+
+    #[test]
+    fn repeated_images_are_rejected_before_decode() {
+        let frame = Arc::new(ImageFrame::encoded(
+            Bytes::new(),
+            ImageDetail::default(),
+            ImageSource::InlineBytes,
+            "image".into(),
+            ImageSize::new(12_000, 12_000),
+            None,
+        ));
+        let frames = vec![frame; 8];
+        let error = collect_images(&frames, 715_827_880).unwrap_err();
+        assert!(matches!(error, Error::ImageDecodeBudgetExceeded { .. }));
+        assert!(error.is_request_validation_error());
+    }
+
+    #[test]
+    fn image_budget_counts_aliases_and_accepts_the_boundary() {
+        let frame = Arc::new(ImageFrame::new(
+            DynamicImage::new_rgba8(2, 2),
+            Bytes::new(),
+            ImageDetail::default(),
+            ImageSource::InlineBytes,
+            "image".into(),
+        ));
+        let frames = vec![frame; 2];
+        assert_eq!(collect_images(&frames, 32).unwrap().len(), 2);
+        assert!(matches!(
+            collect_images(&frames, 31),
+            Err(Error::ImageDecodeBudgetExceeded { .. })
+        ));
+        assert_eq!(collect_images(&frames, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn image_budget_checks_actual_high_bit_depth_bytes_before_cloning() {
+        let frame = Arc::new(ImageFrame::new(
+            DynamicImage::new_rgba32f(2, 2),
+            Bytes::new(),
+            ImageDetail::default(),
+            ImageSource::InlineBytes,
+            "image".into(),
+        ));
+        assert!(matches!(
+            collect_images(&[frame], 16),
+            Err(Error::ImageDecodeBudgetExceeded { .. })
+        ));
     }
 }

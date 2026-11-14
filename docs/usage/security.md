@@ -106,6 +106,11 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+The Rust frontend also applies `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` to image
+preprocessing. It counts repeated image references separately before decoding
+and cloning their rasters. This check bounds image copies; it does not provide
+the Python frontend's combined image, video, and audio budget.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
