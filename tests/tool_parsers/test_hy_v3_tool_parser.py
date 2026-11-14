@@ -273,3 +273,27 @@ class TestHYV3ExtractToolCallsStreaming:
         tc = _collect_streaming_tool_calls(results)
         assert len(tc) == 1 and tc[0]["name"] == "get_current_date"
         assert json.loads(tc[0]["arguments"]) == {}
+
+    @pytest.mark.parametrize(
+        "city", ["page1\x0cpage2", "red\x1b[0m\x08", 'a\\b"c\nd\re\tf']
+    )
+    def test_partial_string_value_json_escaped(
+        self, hy_v3_tool_parser, mock_request, city
+    ):
+        """A string value streamed before </arg_value> must be escaped exactly
+        as the final json.dumps escapes it, control characters included."""
+        deltas = [
+            "<tool_calls>",
+            "\n<tool_call>",
+            "get_weather",
+            "<tool_sep>",
+            "\n<arg_key>city</arg_key>",
+            f"\n<arg_value>{city[:6]}",
+            f"{city[6:]}</arg_value>",
+            "\n</tool_call>",
+            "\n</tool_calls>",
+        ]
+        results = _simulate_streaming(hy_v3_tool_parser, deltas, mock_request)
+        tc = _collect_streaming_tool_calls(results)
+        assert len(tc) == 1 and tc[0]["name"] == "get_weather"
+        assert json.loads(tc[0]["arguments"]) == {"city": city}
