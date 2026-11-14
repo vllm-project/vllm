@@ -51,6 +51,7 @@ class NewRequestData:
     prefill_token_ids: list[int]
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
+    cache_salt: str | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -77,6 +78,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
+            cache_salt=request.cache_salt,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
         )
