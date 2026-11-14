@@ -328,4 +328,26 @@ __inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_silu_mul(
   return result;
 }
 
+template <class Type>
+__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_bias_gelu(
+    const PackedVec<Type, CVT_FP4_PACK16>& x_vec,
+    const PackedVec<Type, CVT_FP4_PACK16>& bias_vec) {
+  PackedVec<Type, CVT_FP4_PACK16> result;
+  // exact (erf) gelu, as torch.nn.functional.gelu
+  auto gelu = [](float v) {
+    return 0.5f * v * (1.f + erff(v * 0.70710678118654752f));
+  };
+
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    // bias add and gelu in float32
+    using packed_t = typename PackedTypeConverter<Type>::Type;
+    float2 x_f2 = cast_to_float2(x_vec.elts[i]);
+    float2 bias_f2 = cast_to_float2(bias_vec.elts[i]);
+    result.elts[i] = cast_to_packed<packed_t>(
+        make_float2(gelu(x_f2.x + bias_f2.x), gelu(x_f2.y + bias_f2.y)));
+  }
+  return result;
+}
+
 }  // namespace vllm

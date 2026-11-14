@@ -15,8 +15,14 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import (
+    has_fused_bias_act_quant,
+    maybe_fused_act_quant,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -186,9 +192,15 @@ class BertLayer(nn.Module):
             prefix=f"{prefix}.output",
         )
 
+        # intermediate.dense leaves its bias add to the fused bias add + GELU +
+        # quant kernel when output.dense takes that kernel's quantized output.
+        self.intermediate.dense.skip_bias_add = has_fused_bias_act_quant(
+            self.intermediate.intermediate_act_fn, self.output.dense
+        )
+
     def forward(self, hidden_states: torch.Tensor):
         attn_output = self.attention(hidden_states)
-        intermediate_output = self.intermediate(attn_output)
+        intermediate_output = self.intermediate(attn_output, self.output.dense)
         output = self.output(intermediate_output, attn_output)
         return output
 
@@ -329,10 +341,13 @@ class BertIntermediate(nn.Module):
         )
         self.intermediate_act_fn = get_act_fn(hidden_act)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-        return hidden_states
+    def forward(
+        self, hidden_states: torch.Tensor, next_linear: LinearBase
+    ) -> torch.Tensor | QuantizedActivation:
+        hidden_states, bias = self.dense(hidden_states)
+        return maybe_fused_act_quant(
+            self.intermediate_act_fn, hidden_states, next_linear, bias
+        )
 
 
 class BertOutput(nn.Module):
@@ -357,7 +372,9 @@ class BertOutput(nn.Module):
         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor | QuantizedActivation,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
