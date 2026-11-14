@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 from transformers import AutoTokenizer
 
 from vllm.sampling_params import SamplingParams
@@ -193,3 +194,39 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     "target_description": "Pays qui a obtenu à sa frontière libanaise « un niveau de calme inédit depuis les années 1960 »",
     "relationship": "Obtention d'un niveau de"""
     )
+
+
+def test_decode_error_keeps_output_text(monkeypatch):
+    """An error while decoding a token must not drop the text decoded before it,
+    since the offline LLM keeps the request alive after a failed step."""
+    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+    prompt_token_ids = tokenizer(
+        "Hello, my name is", add_special_tokens=False
+    ).input_ids
+    output_token_ids = tokenizer(
+        " Lee, and I'm a student", add_special_tokens=False
+    ).input_ids
+    request = EngineCoreRequest(
+        request_id="test",
+        external_req_id="test-ext",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+    detokenizer.update(output_token_ids[:3], False)
+    text_before = detokenizer.output_text
+    assert text_before
+
+    def fail(_token_id):
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(detokenizer, "decode_next", fail)
+    with pytest.raises(RuntimeError):
+        detokenizer.update(output_token_ids[3:], False)
+    assert detokenizer.output_text == text_before
