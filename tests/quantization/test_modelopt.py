@@ -56,6 +56,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -1840,7 +1841,8 @@ def test_modelopt_block_quant_dense_loading_preserves_whole_blocks(
             }
         }
     )
-    method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+    with set_default_torch_dtype(torch.bfloat16):
+        method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
     assert isinstance(method, ModelOptBlockQuantLinearMethod)
     layer = torch.nn.Module()
     n, k = (128, 256) if parallel == "row" else (64, 512)
