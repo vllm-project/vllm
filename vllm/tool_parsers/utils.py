@@ -199,7 +199,7 @@ def consume_space(i: int, s: str) -> int:
 _NAMESPACE_TOOL_SEPARATOR = "__"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResponsesToolCallName:
     name: str
     namespace: str | None = None

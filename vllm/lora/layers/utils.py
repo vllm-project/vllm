@@ -30,7 +30,7 @@ class LoRAMappingType(Enum):
     CONNECTOR = 3
 
 
-@dataclass
+@dataclass(slots=True)
 class LoRAMapping:
     index_mapping: tuple[int, ...]
     prompt_mapping: tuple[int, ...]
