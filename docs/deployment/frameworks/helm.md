@@ -52,6 +52,7 @@ The following table describes configurable parameters of the chart in `values.ya
 
 | Key | Type | Default | Description |
 | --- | ---- | ------- | ----------- |
+| affinity | object | {} | Pod affinity configuration. Takes precedence over gpuModels when non-empty. |
 | autoscaling | object | {"enabled":false,"maxReplicas":100,"minReplicas":1,"targetCPUUtilizationPercentage":80} | Autoscaling configuration |
 | autoscaling.enabled | bool | false | Enable autoscaling |
 | autoscaling.maxReplicas | int | 100 | Maximum replicas |
@@ -74,7 +75,7 @@ The following table describes configurable parameters of the chart in `values.ya
 | extraInit.s3modelpath | string | "relative_s3_model_path/opt-125m" | (Optional) Path of the model on S3 |
 | extraInit.awsEc2MetadataDisabled | bool | true | (Optional) Disable AWS EC2 metadata service |
 | extraPorts | list | [] | Additional ports configuration |
-| gpuModels | list | ["TYPE_GPU_USED"] | Type of gpu used |
+| gpuModels | list | [] | Legacy GPU product selector used only when affinity is empty and both NVIDIA GPU requests and limits are greater than zero. |
 | image | object | {"command":["vllm","serve","/data/","--served-model-name","opt-125m","--host","0.0.0.0","--port","8000"],"repository":"vllm/vllm-openai","tag":"latest"} | Image configuration |
 | image.command | list | ["vllm","serve","/data/","--served-model-name","opt-125m","--host","0.0.0.0","--port","8000"] | Container launch command |
 | image.repository | string | "vllm/vllm-openai" | Image repository |
