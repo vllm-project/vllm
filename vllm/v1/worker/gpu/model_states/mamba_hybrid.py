@@ -436,7 +436,7 @@ def _fill_num_accepted_kernel(
     tl.store(num_accepted_ptr + req_state_idx, num_sampled)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_real", "num_padded"])
 def _gather_num_accepted_kernel(
     src_ptr,  # [max_num_reqs]
     idx_mapping_ptr,  # [num_real]
