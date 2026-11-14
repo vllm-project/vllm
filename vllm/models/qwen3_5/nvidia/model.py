@@ -127,8 +127,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.flashinfer import has_flashinfer
 
+from ..common.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
-from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_norm_quant import (
     FP8_DTYPE,
     gemma_add_rms_norm,
