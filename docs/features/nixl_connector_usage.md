@@ -159,6 +159,11 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+- `whole_row_gqa` (via `kv_connector_extra_config`): When the layout is block-outermost (`VLLM_KV_CACHE_LAYOUT=BLHNC`), register a full-attention (GQA/MHA) KV cache as one region whose block is the whole row (every layer's page), so each block moves as one descriptor instead of one per layer. (Optional)
+    - Default: false
+    - Applies only when every layer is full attention, all layers share one storage and block stride, and no host buffer is used; otherwise per-layer regions are kept. Set it on both P and D. In pull mode, a whole-row decoder rejects a prefiller whose rows differ (for example per-layer regions, or a different number of KV heads per rank) at handshake, while a BLHNC decoder without the option can expand a whole-row prefiller's rows into per-layer regions.
+    - Example: `VLLM_KV_CACHE_LAYOUT=BLHNC vllm serve <MODEL> --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"whole_row_gqa": true}}'`
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.
