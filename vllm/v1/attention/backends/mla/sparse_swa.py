@@ -349,7 +349,7 @@ class DeepseekSparseSWAMetadata:
 class ComputePrefillMetadataKernel(
     VllmTritonJitKernel["ComputePrefillMetadataKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
 
@@ -390,7 +390,7 @@ class ComputePrefillMetadataKernel(
 
         tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_prefills: int,
@@ -1142,7 +1142,7 @@ def _compute_swa_indices_and_lens_kernel(
 class ComputeSWAIndicesAndLensKernel(
     VllmTritonJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int
@@ -1152,7 +1152,7 @@ class ComputeSWAIndicesAndLensKernel(
 
     kernel = staticmethod(_compute_swa_indices_and_lens_kernel)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1241,7 +1241,7 @@ class ComputeSWAIndicesAndLensKernel(
 class ComputeDSparkNoncausalSWAIndicesKernel(
     VllmTritonJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int
@@ -1327,7 +1327,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
                 mask=offset < index_width,
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         window_size: int,
