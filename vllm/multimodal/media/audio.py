@@ -80,6 +80,20 @@ _DURATION_GUARD_MARGIN_S = 1.0
 # Largest Vorbis block size in native-rate samples
 _VORBIS_MAX_BLOCK_SAMPLES = 8192
 
+_CORRUPT_AUDIO_MSG = (
+    "Invalid or corrupted audio data. Ensure the input is a valid "
+    "audio or video file (e.g. a complete WAV, MP3, or MP4)."
+)
+
+
+class _CorruptAudioError(ValueError):
+    """torchcodec could not open or decode the input.
+
+    Kept distinct from the duration/memory guard ValueErrors so that
+    `load_audio(backend="auto")` can retry with soundfile, whose decoders
+    (e.g. mpg123 for MP3) resync past bad frames that FFmpeg aborts on.
+    """
+
 
 def load_audio_pyav(
     path: BytesIO | Path | str,
@@ -306,10 +320,7 @@ def load_audio_torchcodec(
         # than at import. Treat that as backend-unavailable, not bad input.
         if "Could not load libtorchcodec" in str(e):
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
-        raise ValueError(
-            "Invalid or corrupted audio data. Ensure the input is a valid "
-            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
-        ) from e
+        raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
     # Pre-check the memory budget from container metadata so an obviously
     # oversized stream is rejected before allocating the PCM buffer. Metadata
@@ -365,10 +376,7 @@ def load_audio_torchcodec(
                 0.0, max_duration_s + _DURATION_GUARD_MARGIN_S
             )
     except RuntimeError as e:
-        raise ValueError(
-            "Invalid or corrupted audio data. Ensure the input is a valid "
-            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
-        ) from e
+        raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
     # FFmpeg < 5.0 misses Ogg end_trimming, leaving up to one Vorbis block of
     # padding at the tail; we need to trim for valid audio length.
@@ -442,7 +450,8 @@ def load_audio(
             many bytes.
         backend: One of `AUDIO_BACKENDS`. `None` (default) selects
             `"auto"`, which tries torchcodec, then falls back to the
-            soundfile → PyAV chain; the other values select a single
+            soundfile → PyAV chain (only to soundfile if torchcodec fails
+            to decode the input); the other values select a single
             backend with no fallback.
 
     """
@@ -463,10 +472,12 @@ def load_audio(
         )
 
     # "auto": torchcodec → soundfile → PyAV, each called by its bare name so
-    # monkeypatched tests take effect. Only ImportError (or, for soundfile, an
-    # unsupported-format error) defers to the next backend; anything else raises.
+    # monkeypatched tests take effect. ImportError (or, for soundfile, an
+    # unsupported-format error) defers to the next backend, and a torchcodec
+    # decode failure defers to soundfile only; anything else raises.
     if isinstance(path, BytesIO):
         path.seek(0)
+    torchcodec_error: _CorruptAudioError | None = None
     try:
         return load_audio_torchcodec(
             path,
@@ -476,10 +487,13 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
     except ImportError as exc:
-        # Decode errors don't defer: FFmpeg-based PyAV would fail the same way.
         logger.warning(
             "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
         )
+    except _CorruptAudioError as exc:
+        # libsndfile does not use FFmpeg, so it may still decode this input;
+        # FFmpeg-based PyAV would fail the same way and is skipped below.
+        torchcodec_error = exc
 
     if isinstance(path, BytesIO):
         path.seek(0)
@@ -496,8 +510,12 @@ def load_audio(
         # ImportError — i.e. soundfile is a real module — so evaluating
         # ``soundfile.LibsndfileError`` here is safe even when soundfile is a
         # PlaceholderModule (which would make that attribute access raise).
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
         logger.error("Failed to load audio via soundfile: %r", exc)
     except soundfile.LibsndfileError as exc:
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
         # libsndfile covers fewer containers than FFmpeg, so defer only on a
         # format-detection failure; re-raise anything else (e.g. corrupt but
         # recognised) since PyAV would hit the same corruption.
