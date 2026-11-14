@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.config import LoggingConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
@@ -288,3 +289,59 @@ def test_request_logger_log_request_body_truncation(max_log_len):
     assert mock_logger.log.call_args.args[0] == logging.DEBUG
     logged_body = mock_logger.log.call_args.args[3]
     assert logged_body == full_body[:max_log_len]
+
+
+@pytest.mark.parametrize(
+    "env_level, explicit_level, expected_level",
+    [
+        (None, None, logging.DEBUG),
+        ("WARN", None, logging.WARNING),
+        ("DEBUG", "INFO", logging.INFO),
+    ],
+)
+def test_request_body_uses_resolved_logging_config(
+    monkeypatch, caplog_vllm, env_level, explicit_level, expected_level
+):
+    if env_level is None:
+        monkeypatch.delenv("VLLM_REQUEST_BODY_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", env_level)
+    config = (
+        LoggingConfig()
+        if explicit_level is None
+        else LoggingConfig(request_body_log_level=explicit_level)
+    )
+    request = CompletionRequest(model="test-model", prompt="Hello, world!")
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"):
+        RequestLogger(
+            max_log_len=10,
+            request_body_log_level=config.request_body_log_level,
+        ).log_request_body(request)
+
+    (record,) = caplog_vllm.records
+    assert record.levelno == expected_level
+    assert record.getMessage().endswith(
+        request.model_dump_json(exclude_unset=True)[:10]
+    )
+
+
+@pytest.mark.parametrize("source", ["env", "explicit"])
+def test_invalid_request_body_level_warns_and_skips(monkeypatch, caplog_vllm, source):
+    monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", "INVALID_LEGACY_BODY_LEVEL")
+    config = (
+        LoggingConfig()
+        if source == "env"
+        else LoggingConfig(request_body_log_level="INVALID_EXPLICIT_BODY_LEVEL")
+    )
+    request = CompletionRequest(model="test-model", prompt="Hello")
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"):
+        request_logger = RequestLogger(
+            max_log_len=None,
+            request_body_log_level=config.request_body_log_level,
+        )
+        request_logger.log_request_body(request)
+        request_logger.log_request_body(request)
+
+    (record,) = caplog_vllm.records
+    assert record.levelno == logging.WARNING
+    assert "Invalid logging level for request content" in record.getMessage()
