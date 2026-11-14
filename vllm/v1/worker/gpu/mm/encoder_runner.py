@@ -112,17 +112,21 @@ class EncoderRunner:
         self,
         dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
         budget: MultiModalBudget,
-    ) -> None:
-        """Profile multimodal encoder and temporary encoder cache memory."""
+    ) -> list[torch.Tensor]:
+        """Profile multimodal encoder and temporary encoder cache memory.
+
+        Returns the dummy encoder outputs, which stay in the encoder cache
+        until `reset_encoder_cache()`.
+        """
         if (encoder_budget := budget.get_encoder_budget()) <= 0:
-            return
+            return []
 
         if not budget.mm_max_toks_per_item:
             logger.info(
                 "Skipping encoder profiling for embedding-only mode "
                 "(all modality limits=0 with enable_mm_embeds=True).",
             )
-            return
+            return []
 
         assert dummy_mm_inputs, "Dummy inputs should be generated for encoder profiling"
         dummy_modality = dummy_mm_inputs[0][0]
@@ -145,6 +149,7 @@ class EncoderRunner:
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
         )
+        return dummy_encoder_outputs
 
     @torch.inference_mode()
     def execute_mm_encoder(

@@ -10,12 +10,17 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    supports_multimodal_pruning,
+)
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.multimodal.utils import set_mm_embedding_modality
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -757,6 +762,57 @@ def sanity_check_mm_encoder_outputs(
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
+    )
+
+
+def profile_mm_embed_input_ids(
+    model: SupportsMultiModal,
+    mm_embeddings: MultiModalEmbeddings,
+    num_tokens: int,
+    device: torch.device,
+    modality: str,
+    model_config: ModelConfig,
+) -> None:
+    """Run `embed_input_ids` on a full batch so profiling includes its peak.
+
+    Dummy runs skip the merge, but its temporaries (e.g. deepstack embeddings)
+    scale with `max_num_batched_tokens`.
+    """
+    mm_config = model_config.multimodal_config
+    if (
+        supports_multimodal_pruning(model)
+        and model_config.uses_mrope
+        and mm_config is not None
+        and mm_config.is_multimodal_pruning_enabled()
+    ):
+        # Strip the appended mrope-position channels like the serving path does.
+        mm_embeddings, _, _ = model.recompute_mrope_positions(
+            input_ids=[],
+            multimodal_embeddings=mm_embeddings,
+            mrope_positions=torch.empty(3, 0, dtype=torch.long, device=device),
+            num_computed_tokens=0,
+        )
+
+    mm_embeds = list[torch.Tensor]()
+    num_mm_tokens = 0
+    for mm_embedding in mm_embeddings:
+        if num_mm_tokens >= num_tokens:
+            break
+        # Slicing drops the modality tag that interleaved merge requires.
+        mm_embeds.append(
+            set_mm_embedding_modality(
+                mm_embedding[: num_tokens - num_mm_tokens], modality
+            )
+        )
+        num_mm_tokens += mm_embeds[-1].size(0)
+
+    is_mm_embed = torch.zeros(num_tokens, dtype=torch.bool, device="cpu")
+    is_mm_embed[:num_mm_tokens] = True
+
+    model.embed_input_ids(
+        torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        multimodal_embeddings=mm_embeds,
+        is_multimodal=is_mm_embed,
     )
 
 
