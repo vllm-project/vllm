@@ -81,6 +81,7 @@ impl DsDialect {
 #[derive(Debug, Serialize)]
 struct RenderedToolSchema<'a> {
     name: &'a str,
+    #[serialize_always]
     description: Option<&'a str>,
     parameters: &'a Value,
     strict: Option<bool>,
