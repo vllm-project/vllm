@@ -1453,16 +1453,14 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
-    ray.init(
-        runtime_env={
-            "env_vars": env_vars,
-        }
-    )
+    world_size = data_parallel_size * tp_size * pp_size
+    # One CPU per rank: Ray prestarts a worker process per CPU, and hundreds of
+    # them starve the next test's ray.init past its 30 s GCS startup timeout.
+    ray.init(num_cpus=world_size, runtime_env={"env_vars": env_vars})
 
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
     data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
-    world_size = data_parallel_size * tp_size * pp_size
     try:
         refs = []
         for rank in range(world_size):
