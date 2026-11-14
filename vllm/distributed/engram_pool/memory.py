@@ -64,7 +64,6 @@ def _unregister(mapping: mmap.mmap, pointer: int) -> None:
     # Keeps the mapping alive until CUDA has released the registration.
     cudart = torch.cuda.cudart()
     if (result := cudart.cudaHostUnregister(pointer)).value != 0:
-        cudart.cudaGetLastError()
         logger.warning("Engram pool cudaHostUnregister failed: %s", result)
 
 

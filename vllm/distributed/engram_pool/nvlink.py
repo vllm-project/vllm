@@ -65,9 +65,6 @@ class NvlinkTransport:
         own = addresses[self.group.rank_in_group]
         return device_view(own, num_bytes, memory), addresses
 
-    def wake(self) -> None:
-        """Nothing to wake: SMs move rows."""
-
     @staticmethod
     def wait(state: None, table: int) -> None:
         """Rows are in place once `start` returns: SMs moved them."""

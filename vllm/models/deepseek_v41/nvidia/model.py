@@ -353,7 +353,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         if engram_layout is not None:
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
-                self.engram = Engram(
+                engram_cls = Engram
+                engram_config = vllm_config.engram_config
+                if engram_config and engram_config.peer_group_store is not None:
+                    from .ops.engram_pool import PoolEngram as engram_cls
+                self.engram = engram_cls(
                     config,
                     vllm_config.quant_config,
                     engram_layout,
@@ -878,7 +882,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.engram_batch = EngramBatch.create(
+        batch_cls = EngramBatch
+        if engram_config and engram_config.peer_group_store is not None:
+            from .ops.engram_pool import PoolEngramBatch as batch_cls
+        self.engram_batch = batch_cls.create(
             [
                 layer.engram
                 for layer in islice(self.layers, self.start_layer, self.end_layer)
@@ -1032,14 +1039,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             else None
         )
         streams: torch.Tensor | None = None
-        hash_engram = (
-            self.engram_hash is not None
-            and input_ids is not None
-            and is_forward_context_available()
-        )
-        if hash_engram and self.engram_batch is not None:
-            # Its fetch starts below: the embedding and hashes hide the wakeup.
-            self.engram_batch.wake()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1060,8 +1059,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
-        if hash_engram:
-            assert self.engram_hash is not None and input_ids is not None
+        if (
+            self.engram_hash is not None
+            and input_ids is not None
+            and is_forward_context_available()
+        ):
             attn_metadata = get_forward_context().attn_metadata
             if isinstance(attn_metadata, list):
                 attn_metadata = attn_metadata[dbo_current_ubatch_id()]

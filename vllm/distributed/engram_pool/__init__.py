@@ -9,7 +9,7 @@ stream, with no host sync, so it captures into CUDA graphs.
 
 Transports: `nvlink` maps every GPU's HBM shard (cuMem FABRIC) and loads rows
 directly; with `rdma`, the NICs of the GPUs holding host or HBM shards gather
-rows into RDMA WRITEs that each GPU builds, carried by proxy processes.
+rows into RDMA WRITEs that each GPU builds and hands to their proxy processes.
 """
 
 import json
@@ -23,7 +23,15 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-__all__ = ["EngramPool", "EngramTable", "PeerGroup", "join_peer_group", "wait_landed"]
+__all__ = [
+    "ROW_ALIGN",
+    "EngramFetch",
+    "EngramPool",
+    "EngramTable",
+    "PeerGroup",
+    "join_peer_group",
+    "wait_landed",
+]
 
 # Rows are copied 8 bytes at a time.
 ROW_ALIGN = 8
@@ -229,11 +237,6 @@ class EngramPool:
             meta = torch.stack([t.meta for t in tables]).to(self.device)
             self._metas[key] = meta
         return meta
-
-    def wake(self) -> None:
-        """Ready the transport for the next `start` on the current stream; work
-        queued in between hides its latency (RDMA: ~45 us)."""
-        self.transport.wake()  # type: ignore[attr-defined]
 
     def start(self, tables: list[EngramTable], ids: torch.Tensor) -> EngramFetch:
         """Start fetching `ids` (`[..., L, K]`, row L of table L) on the

@@ -207,9 +207,10 @@ launch. `peer_group_transport` picks how rows move:
   disabled.
 - `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
   with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
-  libibverbs) that the fetching GPU builds; no SM moves rows. Each GPU uses an
-  active RDMA device on its NUMA node and starts two proxy processes that post
-  the WRs. Peers exchange memory keys at startup, so the network must be
+  libibverbs) that the fetching GPU builds and hands to the owner itself (it
+  rings the NIC's doorbell); no SM moves rows. Each GPU uses an active mlx5
+  RDMA device on its NUMA node and starts a proxy process that posts the WRs
+  it is handed. Peers exchange memory keys at startup, so the network must be
   trusted.
 
 `peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the

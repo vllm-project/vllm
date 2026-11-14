@@ -302,14 +302,16 @@ def _check_pool_tables(store_dir: str):
         # GPUs of a node map each other's host shards; nodes of one use RDMA.
         modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
     weight, scale = _full_table(sum(HEAD_SIZES))
+    from vllm.models.deepseek_v41.nvidia.ops.engram_pool import PoolEngramEmbedding
+
     for transport, host, node in modes:
         group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}{node}/store")
         pool = EngramPool(group, transport, host, 9 * len(HEAD_SIZES), 72)
         if node == 1:
             pool.transport.node = str(group.rank_in_group)  # type: ignore[attr-defined]
         with torch.device("cuda"):
-            table = ParallelEngramEmbedding(
-                sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=host, pool=pool
+            table = PoolEngramEmbedding(
+                sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
             )
         assert table.dp_size == 1
         table.weight.weight_loader(table.weight, weight)
@@ -373,12 +375,14 @@ def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
 def test_engram_peer_group_table_rejects_reload(tmp_path, monkeypatch):
     """Other engines read a table's rows at any time, so it cannot reload."""
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
-    table = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
+    from vllm.models.deepseek_v41.nvidia.ops.engram_pool import PoolEngramEmbedding
+
+    table = PoolEngramEmbedding.__new__(PoolEngramEmbedding)
     torch.nn.Module.__init__(table)
     shard = torch.zeros(4, 16, dtype=torch.uint8)
-    table._table = SimpleNamespace(shard=shard)
-    table._pool = SimpleNamespace(ready=lambda: None)
-    table.row_bytes = 8
+    table.table = SimpleNamespace(shard=shard)
+    table.pool = SimpleNamespace(ready=lambda: None)
+    table.row_bytes, table._loaded = 8, False
     table.weight = torch.nn.Parameter(shard[:, :8], requires_grad=False)
     table.weight_scale_inv = torch.nn.Parameter(shard[:, 8:], requires_grad=False)
     table.process_weights_after_loading()
@@ -499,10 +503,10 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
     with pytest.MonkeyPatch.context() as patch:
         if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
+            from vllm.models.deepseek_v41.nvidia.ops import engram_pool
 
             # Exercise the /dev/shm path even where cuMem tables are used.
-            patch.setattr(engram_fabric_table, "share_host_table", lambda *args: None)
+            patch.setattr(engram_pool, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -580,9 +584,9 @@ def _check_cumem_host_table(failure, packed_fp4):
     import on any rank falls back to /dev/shm on all of them."""
     if not current_platform.is_cuda():
         return
-    from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
+    from vllm.models.deepseek_v41.nvidia.ops import engram_pool
 
-    if not engram_fabric_table.fabric_host_memory_supported():
+    if not engram_pool.fabric_host_memory_supported():
         return
 
     group = get_engram_dp_group()
@@ -590,15 +594,15 @@ def _check_cumem_host_table(failure, packed_fp4):
     row_bytes = DIM // 2 if packed_fp4 else DIM
     rows = 5 * (1 << 20) // row_bytes
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(engram_fabric_table, "CHUNK_BYTES", 2 << 20)
+        patch.setattr(engram_pool, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
-            patch.setattr(engram_fabric_table, "NUMA_RESERVE_FRACTION", 1.0)
+            patch.setattr(engram_pool, "NUMA_RESERVE_FRACTION", 1.0)
         if failure == "import" and group.rank_in_group == 1:
             patch.setattr(
-                engram_fabric_table.cu,
+                engram_pool.cu,
                 "cuMemImportFromShareableHandle",
                 lambda *args: (
-                    engram_fabric_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                    engram_pool.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
                     None,
                 ),
             )

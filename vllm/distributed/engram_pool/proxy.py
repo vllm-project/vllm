@@ -1,33 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RDMA proxies: per GPU, a requester process and an owner process that move
-table rows between GPUs.
+"""RDMA owner proxy: per GPU, a process whose NIC gathers rows of the shards
+it serves into other GPUs' landing buffers.
 
-Each has its own GIL and one thread that moves rows (its command thread sleeps
-in `recv` once set up), so neither waits on the other or on a CPU-busy model
-thread, and captured fetches need no host thread at all. The GPU
-process sends commands over a socket (fds by SCM_RIGHTS); fetches run through
-memory shared with the GPU. For a GPU fetching rows (requester) from GPUs
-holding them (owners):
+It has its own GIL and one thread that moves rows (its command thread sleeps
+in `recv` once set up), so it never waits on a CPU-busy model thread. The GPU
+process sends commands over a socket (fds by SCM_RIGHTS). For a GPU fetching
+rows (requester) from GPUs holding them (owners):
 
 1. The requester's GPU writes, per owner and table, chained RDMA WRITEs whose
    SGEs gather that owner's rows, a packet's worth each, into the requester's
    landing buffer, with the owner proxy's pointers. Each QP's last chain links
    a READ of the requester's memory, which returns only once the rows before
    it have landed, then a fenced inline WRITE of `seq` into that QP's flag for
-   the table. Then the GPU raises `go = seq` (if any row is remote) and
-   `issued`. A CUDA host function launched as the fetch starts posts a
-   semaphore.
-2. The requester process, asleep on that semaphore, waits for `issued` if
-   woken before it, then posts the WRITE_WITH_IMM the GPU wrote for each owner
-   and table, which copies its WRs and SGEs into that owner's mailbox.
-3. The owner process, asleep on its receive CQ's completion channel, posts the
+   the table. The GPU then posts a WRITE_WITH_IMM that copies them into this
+   owner's mailbox (`rdma.py`).
+2. The owner process, asleep on its receive CQ's completion channel, posts the
    WRs as they are: its NIC gathers the rows, then writes the flags. Rows in
    host memory of the requester's node are gathered the same way by the
    requester's own owner process over loopback QPs, so no GPU reads host
    memory.
 
-Each process wakes once per fetch and never spins.
+It wakes once per request and never spins.
 
 Run as a script: only the standard library and `verbs.py` are imported.
 """
@@ -43,7 +37,6 @@ import socket
 import struct
 import sys
 import threading
-import time
 import traceback
 
 if __package__:
@@ -52,20 +45,12 @@ else:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import verbs  # type: ignore[no-redef]
 
-# Shared control block, in int64 words: go, issued (fetches started), done
-# (`-seq` if the requester failed), the fetch's (table, gatherer) groups, then
-# per group its WRs that gather rows and the request the GPU wrote for it.
-GO, ISSUED, DONE, NUM_GROUPS, NUM_WRS, REQUESTS = 0, 8, 16, 24, 32, 544
-REQUEST_WORDS = 24
-# The GPU's process-shared semaphore follows the words.
-SEM_OFFSET = (REQUESTS + 512 * REQUEST_WORDS) * 8
-CTRL_BYTES = SEM_OFFSET + 64
 SGE_BYTES = 16
 # WRs per posted chain; the requester's GPU signals each chain's last. Few WRs
 # take one chain: each more QP costs a post and a READ round trip.
 MIN_CHAIN, MAX_CHAIN = 16, 64
-# Receive WRs kept posted for each requester, and requests in flight per QP.
-RECV_DEPTH, REQUEST_DEPTH = 32, 64
+# Receive WRs kept posted for each requester.
+RECV_DEPTH = 32
 _PR_SET_PDEATHSIG = 1
 
 
@@ -95,19 +80,13 @@ def _failed(wc: ctypes.Array, count: int, what: str) -> bool:
     return failed
 
 
-class _Proxy:
+class Owner:
+    """Posts requesters' WRs, so its NIC gathers rows of this GPU's shard and
+    of its node's host shards; rows and flags of this GPU land through it."""
+
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
         self.keep: list = []
-
-    def _open(self, device: str, world: int, rank: int) -> verbs.Device:
-        self.device = verbs.Device(device)
-        # CPUs of another NUMA node post twice as slowly.
-        if cpus := verbs.local_cpus(device) & os.sched_getaffinity(0):
-            os.sched_setaffinity(0, cpus)
-        self.world, self.rank = world, rank
-        self.gatherers = [p for p in range(world) if p != rank] + [rank]
-        return self.device
 
     def serve(self) -> None:
         while True:
@@ -116,7 +95,7 @@ class _Proxy:
                 return
             command, *args = json.loads(message)
             try:
-                if command in ("init", "register"):
+                if command == "register":
                     args.append(fds)
                 result = ("ok", getattr(self, command)(*args))
             except Exception:
@@ -126,96 +105,13 @@ class _Proxy:
     def start(self) -> None:
         threading.Thread(target=self.run, daemon=True).start()
 
-    def run(self) -> None:
-        raise NotImplementedError
-
-
-class Requester(_Proxy):
-    """Hands each gatherer its WRs of every fetch."""
-
-    def init(self, device, world, rank, max_tables, fds):
-        dev = self._open(device, world, rank)
-        self.ctrl = mmap.mmap(fds[0], CTRL_BYTES, flags=mmap.MAP_SHARED)
-        os.close(fds[0])
-        self.words = memoryview(self.ctrl).cast("B").cast("q")
-        self.sem = ctypes.addressof(ctypes.c_char.from_buffer(self.ctrl)) + SEM_OFFSET
-        self.cq, _ = dev.create_cq(len(self.gatherers) * REQUEST_DEPTH)
-        made = {
-            p: dev.create_qp(self.cq, self.cq, REQUEST_DEPTH, 2) for p in self.gatherers
-        }
-        self.qps = {p: qp for p, (qp, _) in made.items()}
-        # The first table first, and remote owners first: their requests have
-        # further to go.
-        requests = ctypes.addressof(ctypes.c_char.from_buffer(self.ctrl))
-        requests += REQUESTS * 8
-        order = [t * world + p for t in range(max_tables) for p in self.gatherers]
-        self.posts = [
-            (vg, self.qps[vg % world], requests + vg * REQUEST_WORDS * 8)
-            for vg in order
-        ]
-        return {"qpns": [made[p][1] for p in range(world)], "requests": requests}
-
-    def connect(self, owners):
-        """Connect to each gatherer's owner process: (gatherer, address, QP)."""
-        for peer, (gid, lid), remote in owners:
-            self.device.connect(self.qps[peer], remote, (bytes.fromhex(gid), lid))
-
-    def register(self, iova, size, fds):
-        """Register this GPU's descriptors (dmabuf); returns their lkey."""
-        (fd,) = fds
-        try:
-            return self.device.reg_dmabuf(fd, iova, size, verbs.LOCAL)[1]
-        finally:
-            os.close(fd)
-
-    def run(self) -> None:
-        """Once the GPU raises go, post the request it wrote for each gatherer
-        and table with rows of the fetch."""
-        libc = ctypes.CDLL(None, use_errno=True)
-        sched_yield, monotonic = libc.sched_yield, time.monotonic
-        sem_wait, sem = libc.sem_wait, ctypes.c_void_p(self.sem)
-        lock, unlock = libc.pthread_mutex_lock, libc.pthread_mutex_unlock
-        mutex = ctypes.create_string_buffer(64)
-        libc.pthread_mutex_init(mutex, None)
-        lock(mutex)
-        words, device = self.words, self.device
-        wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
-        seq = issued = 0
-        while True:
-            if sem_wait(sem):
-                continue
-            # The wakeup was launched as the fetch started: wait out its few
-            # kernels if they are still running (napping if that takes long).
-            deadline = monotonic() + 2e-4
-            while words[ISSUED] == issued:
-                sched_yield() if monotonic() < deadline else time.sleep(5e-4)
-            issued = words[ISSUED]
-            # Fetches with no remote rows leave go as it was.
-            if words[GO] == seq:
-                continue
-            seq = words[GO]
-            # Release then acquire: read what go publishes only after go.
-            unlock(mutex)
-            lock(mutex)
-            try:
-                while count := device.poll_cq(self.cq, wc, 64):
-                    if _failed(wc, count, "request"):
-                        raise RuntimeError("Engram pool RDMA request failed")
-                groups = words[NUM_GROUPS]
-                for vg, qp, at in self.posts:
-                    if vg < groups and words[NUM_WRS + vg]:
-                        device.post_send(qp, at)
-            except Exception:
-                traceback.print_exc()
-                words[DONE] = -seq
-
-
-class Owner(_Proxy):
-    """Posts requesters' WRs, so its NIC gathers rows of this GPU's shard and
-    of its node's host shards; rows and flags of this GPU land through it."""
-
-    def init(self, device, world, rank, qps_per_peer, sq_depth, fds):
-        dev = self._open(device, world, rank)
+    def init(self, device, world, rank, qps_per_peer, sq_depth):
+        self.device = dev = verbs.Device(device)
+        # CPUs of another NUMA node post twice as slowly.
+        if cpus := verbs.local_cpus(device) & os.sched_getaffinity(0):
+            os.sched_setaffinity(0, cpus)
+        self.world, self.rank = world, rank
+        self.gatherers = [p for p in range(world) if p != rank] + [rank]
         sge_cap = min(dev.max_sge, 16)
         depth = min(sq_depth, dev.max_qp_wr)
         # Gathers complete here unseen until a send queue fills, so it holds
@@ -383,8 +279,7 @@ def main() -> None:
         return
     # Native crashes (ctypes into verbs) print where it was.
     faulthandler.enable()
-    role = {"requester": Requester, "owner": Owner}[sys.argv[2]]
-    role(socket.socket(fileno=int(sys.argv[1]))).serve()
+    Owner(socket.socket(fileno=int(sys.argv[1]))).serve()
     # Its worker sleeps in a C call; leave it there.
     os._exit(0)
 

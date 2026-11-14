@@ -5,28 +5,27 @@
 A READ per row would cap a NIC at its message rate (~45M/s here, a fraction of
 line rate for small rows). Instead each owner's NIC gathers a packet's worth of
 rows per RDMA WRITE (one SGE per row) and writes them into the requester's
-landing buffer. The requester's GPU builds those WRs; the proxies (`proxy.py`)
-carry them to the owners and post them.
+landing buffer. The requester's GPU builds those WRs and hands each owner its
+share itself; owner proxy processes (`proxy.py`) post them.
 
-A fetch is stream-ordered kernels and a host function, so it captures into
-CUDA graphs, and no SM touches a row until it has landed. `start`:
+A fetch is two stream-ordered kernels, so it captures into CUDA graphs, needs
+no host thread, and no SM touches a row until it has landed. `start`:
 1. `_plan_kernel` numbers live rows within their (table, gatherer) group.
 2. `_wr_kernel` writes each group's gathering WRs and SGEs, in the gatherer
    proxy's addresses, into this GPU's descriptor buffer. Its last program
-   publishes each group's slots and WRs and the WRITE_WITH_IMM that hands them
-   over, bumps the device-side sequence number and raises the go flag. A CUDA
-   host function (libc's `sem_post`), launched beside the stream ahead of
-   plan (`wake`), wakes the sleeping requester process.
-Then `wait(table)`, before the layer that needs the table:
-3. `_place_kernel` holds the stream until the flag of every QP that gathered
-   the table's rows says they have landed, then moves them from group order
-   into the output.
+   bumps the device-side sequence number and posts, per group, an RDMA
+   WRITE_WITH_IMM that copies them into the gatherer's mailbox: it writes the
+   mlx5 WQE into the send queue of this GPU's QP to that gatherer and rings
+   the doorbell (GPU-initiated, as IBGDA).
+Then, before the layer that needs a table, `wait_landed` (in the consumer's
+kernel, or `_place_kernel`) spins until the flag of every QP that gathered the
+table's rows says they have landed.
 
 Shards live in host memory, or in dmabuf-registered HBM.
 """
 
-import ctypes
 import json
+import mmap
 import os
 import socket
 import subprocess
@@ -49,8 +48,10 @@ from vllm.triton_utils import tl, triton
 logger = init_logger(__name__)
 
 SQ_DEPTH = 1024
+# Requests in flight per QP to a gatherer: a fetch posts one per table.
+REQUEST_DEPTH = 64
 MIN_CHAIN: tl.constexpr = tl.constexpr(proxy.MIN_CHAIN)
-# A failed or dead proxy must not hang the GPU forever.
+# A failed transfer or dead proxy must not hang the GPU forever.
 TIMEOUT_NS = 60 * 10**9
 
 
@@ -82,12 +83,10 @@ def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
 def wait_landed(ready, table):
     """Spin until each QP that gathered rows of `table` in the fetch that
     `ready` (from `RdmaTransport.unplaced`) describes has flagged them landed;
-    trap if the requester failed or 60 s pass. Call from every program that
-    reads the rows."""
+    trap if 60 s pass. Call from every program that reads the rows."""
     seq = tl.load(tl.load(ready).to(tl.pointer_type(tl.int64)))
     # The first program to see every flag records `seq` here for the others.
-    landed_at = tl.load(ready + 7).to(tl.pointer_type(tl.int64)) + table
-    failed = False
+    landed_at = tl.load(ready + 6).to(tl.pointer_type(tl.int64)) + table
     waiting = 0
     # Acquire: rows are read only after the word that says they landed.
     mark = tl.inline_asm_elementwise(
@@ -99,11 +98,10 @@ def wait_landed(ready, table):
         pack=1,
     )
     if mark != seq:
-        done = tl.load(ready + 1).to(tl.pointer_type(tl.int64))
-        used = tl.load(ready + 2).to(tl.pointer_type(tl.int32))
-        flags = tl.load(ready + 3).to(tl.pointer_type(tl.int64))
-        world, qps = tl.load(ready + 4), tl.load(ready + 5)
-        deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 6)
+        used = tl.load(ready + 1).to(tl.pointer_type(tl.int32))
+        flags = tl.load(ready + 2).to(tl.pointer_type(tl.int64))
+        world, qps = tl.load(ready + 3), tl.load(ready + 4)
+        deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 5)
         q = tl.arange(0, 16)[None, :]
         # Eight gatherers' flags (QPs per peer <= 16) per load.
         for first in range(0, world, 8):
@@ -113,16 +111,13 @@ def wait_landed(ready, table):
             mask = q < count[:, None]
             at = flags + group[:, None] * qps + q
             waiting = 1
-            while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
+            while (waiting > 0) & (tl.extra.cuda.globaltimer() < deadline):
                 landed = tl.load(at, mask=mask, other=seq, volatile=True)
                 waiting = tl.sum(tl.sum((landed != seq).to(tl.int32), 1))
-                # Only a fetch with rows still to come can have failed.
-                state = tl.load(done, mask=waiting > 0, other=0, volatile=True)
-                failed = (waiting > 0) & (state == -seq)
-        if ~failed & (waiting == 0):
+        if waiting == 0:
             tl.atomic_xchg(landed_at, seq, sem="release")
-    if failed | (waiting > 0):
-        tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
+    if waiting > 0:
+        tl.device_print("Engram pool RDMA fetch timed out, seq", seq)
         tl.inline_asm_elementwise(
             "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
@@ -135,12 +130,11 @@ def _plan_kernel(
     counts,
     owner_pos,
     remote_addr,
-    key_out,
+    keys,
     num_items,
     world,
     num_vg,
     ticket,
-    ctrl,
     starts,
     wr_starts,
     wr_counts,
@@ -148,8 +142,6 @@ def _plan_kernel(
     TABLES: tl.constexpr,
     K: tl.constexpr,
     WORDS: tl.constexpr,
-    NUM_GROUPS: tl.constexpr,
-    NUM_WRS: tl.constexpr,
     ROWS_PER_WR: tl.constexpr,
     QPS: tl.constexpr,
     MAX_CHAIN: tl.constexpr,
@@ -165,6 +157,7 @@ def _plan_kernel(
     shard, rows, and device arrays of shard bases and lkeys for the NICs that
     gather them, and of those NICs' ranks (words 1 to 5).
     """
+    peers = tl.arange(0, VG_P2)
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = item < num_items
     index = item // K % TABLES
@@ -178,7 +171,6 @@ def _plan_kernel(
     gatherer = tl.load(gatherers + owner, mask=live, other=0).to(tl.int64)
     gatherer += index * world
     # Positions: ranks within the block, after one atomic per group.
-    peers = tl.arange(0, VG_P2)
     mine = ((gatherer[:, None] == peers[None, :]) & live[:, None]).to(tl.int32)
     sizes = tl.sum(mine, 0)
     base = tl.atomic_add(counts + peers, sizes, mask=sizes > 0)
@@ -190,11 +182,11 @@ def _plan_kernel(
     bases = tl.load(table + 3, mask=live, other=0).to(tl.pointer_type(tl.int64))
     base_at = tl.load(bases + owner, mask=live, other=0)
     tl.store(remote_addr + item, base_at + local * (WORDS * 8), mask=live)
-    keys = tl.load(table + 4, mask=live, other=0).to(tl.pointer_type(tl.int32))
-    tl.store(key_out + item, tl.load(keys + owner, mask=live, other=0), mask=live)
+    lkeys = tl.load(table + 4, mask=live, other=0)
+    lkey = tl.load(lkeys.to(tl.pointer_type(tl.int32)) + owner, mask=live)
+    tl.store(keys + item, lkey, mask=live)
     tl.debug_barrier()
-    if tl.atomic_add(ticket, 1, sem="acq_rel") == tl.num_programs(0) - 1:
-        tl.store(ticket, 0)
+    if _last_program(ticket):
         in_vg = peers < num_vg
         group_rows = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
         group_wrs, _, group_qps = _wr_layout(group_rows, ROWS_PER_WR, QPS, MAX_CHAIN)
@@ -203,8 +195,6 @@ def _plan_kernel(
         tl.store(wr_starts + peers, tl.cumsum(all_wrs, 0) - all_wrs, mask=in_vg)
         tl.store(wr_counts + peers, group_wrs, mask=in_vg)
         tl.store(used + peers, group_qps, mask=in_vg)
-        tl.store(ctrl + NUM_WRS + peers, group_wrs, mask=in_vg)
-        tl.store(ctrl + NUM_GROUPS, num_vg.to(tl.int64))
 
 
 @triton.jit(
@@ -218,7 +208,6 @@ def _plan_kernel(
         "flags_rkey",
         "desc_at",
         "desc_lkey",
-        "requests",
     ]
 )
 def _wr_kernel(
@@ -239,7 +228,6 @@ def _wr_kernel(
     num_vg,
     rank,
     ticket,
-    ctrl,
     starts,
     wr_starts,
     wr_counts,
@@ -247,12 +235,8 @@ def _wr_kernel(
     box_rkeys,
     desc_at,
     desc_lkey,
-    requests,
+    queues,
     slots,
-    GO: tl.constexpr,
-    ISSUED: tl.constexpr,
-    REQUESTS: tl.constexpr,
-    REQUEST_WORDS: tl.constexpr,
     BOX_BYTES: tl.constexpr,
     MAX_WRS: tl.constexpr,
     ROWS_PER_WR: tl.constexpr,
@@ -275,10 +259,10 @@ def _wr_kernel(
     SGEs.
 
     Groups are laid out by `_plan_kernel`. The last program to finish then
-    publishes each group's WRITE_WITH_IMM (imm: its gathering WRs | table <<
-    24) that copies its WRs and SGEs from `desc` to its mailbox (`requests`:
-    these in the requester's addresses), raises go with the next `seq` if any
-    row is remote, and always counts the fetch in `issued`."""
+    bumps `seq` if any row is remote and posts each group's WRITE_WITH_IMM
+    (imm: its gathering WRs | table << 24) that copies its WRs and SGEs from
+    `desc` to its mailbox, on this GPU's QP to the gatherer (`queues`)."""
+    peers = tl.arange(0, VG_P2)
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     packed = tl.load(owner_pos + item, mask=item < num_items, other=-1)
     remote = packed >= 0
@@ -348,55 +332,133 @@ def _wr_kernel(
     wr = tl.where(col == 13, 8, wr)
     wr = tl.where(col == 14, tl.load(seq_ptr) + 1, wr)
     tl.store(record + 16, wr, mask=is_flag)
-    # The NIC reads these only after go, which the last program raises.
-    tl.inline_asm_elementwise(
-        "membar.sys; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-    )
+    # The NIC reads these only after the doorbell the last program rings.
+    _fence_sys()
     tl.debug_barrier()
-    if tl.atomic_add(ticket, 1, sem="acq_rel") == tl.num_programs(0) - 1:
-        tl.store(ticket, 0)
-        peers = tl.arange(0, VG_P2)
+    if _last_program(ticket):
         in_vg = peers < num_vg
         sizes = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
-        group_first = tl.load(starts + peers, mask=in_vg, other=0)
-        group_first_wr = tl.load(wr_starts + peers, mask=in_vg, other=0)
         all_wrs = tl.load(wr_counts + peers, mask=in_vg, other=0)
-        group_wrs = all_wrs + 2 * tl.load(used + peers, mask=in_vg, other=0)
-        # ibv_send_wr (sg_list, num_sge | WRITE_WITH_IMM << 32,
-        # IBV_SEND_SIGNALED | imm << 32, remote_addr, rkey), then two ibv_sge.
-        word = tl.arange(0, 32)[None, :]
-        desc_key = desc_lkey.to(tl.int64) << 32
-        imm = all_wrs | (peers // world) << 24
-        request = tl.where(
-            word == 2, requests + (peers * REQUEST_WORDS + 16)[:, None] * 8, 0
-        )
-        request = tl.where(word == 3, 2 | 1 << 32, request)
-        request = tl.where(word == 4, (2 | imm << 32)[:, None], request)
-        group_box = tl.load(boxes + peers % world, mask=in_vg, other=0)
-        request = tl.where(
-            word == 5, (group_box + peers // world * BOX_BYTES)[:, None], request
-        )
-        group_rkey = tl.load(box_rkeys + peers % world, mask=in_vg, other=0).to(
-            tl.int64
-        )
-        request = tl.where(word == 6, group_rkey[:, None], request)
-        request = tl.where(word == 16, desc_at + group_first_wr[:, None] * 128, request)
-        request = tl.where(word == 17, (group_wrs * 128)[:, None] | desc_key, request)
-        request = tl.where(
-            word == 18, desc_at + MAX_WRS * 128 + group_first[:, None] * 16, request
-        )
-        request = tl.where(word == 19, (sizes * 16)[:, None] | desc_key, request)
-        request_at = ctrl + REQUESTS + peers[:, None] * REQUEST_WORDS + word
-        tl.store(request_at, request, mask=in_vg[:, None] & (word < REQUEST_WORDS))
         tl.debug_barrier()
         tl.store(counts + peers, tl.zeros_like(peers), mask=in_vg)
         if tl.sum(sizes) > 0:
             # One read-modify-write, so every thread agrees on the sequence number.
-            seq = tl.atomic_add(seq_ptr, 1) + 1
-            tl.debug_barrier()
-            tl.atomic_xchg(ctrl + GO, seq, sem="release", scope="sys")
-        tl.debug_barrier()
-        tl.atomic_add(ctrl + ISSUED, 1, sem="release", scope="sys")
+            tl.atomic_add(seq_ptr, 1)
+            _post_requests(
+                peers,
+                in_vg & (all_wrs > 0),
+                all_wrs,
+                sizes,
+                tl.load(starts + peers, mask=in_vg, other=0),
+                tl.load(wr_starts + peers, mask=in_vg, other=0),
+                all_wrs + 2 * tl.load(used + peers, mask=in_vg, other=0),
+                world,
+                boxes,
+                box_rkeys,
+                desc_at,
+                desc_lkey,
+                queues,
+                BOX_BYTES,
+                MAX_WRS,
+            )
+
+
+@triton.jit
+def _last_program(ticket):
+    """Whether this program is the last of its launch to get here."""
+    last = tl.atomic_add(ticket, 1, sem="acq_rel") == tl.num_programs(0) - 1
+    if last:
+        tl.store(ticket, 0)
+    return last
+
+
+@triton.jit
+def _fence_sys():
+    tl.inline_asm_elementwise(
+        "membar.sys; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+    )
+
+
+@triton.jit
+def _be32(x):
+    """The low 32 bits of `x`, big-endian, as stored by a little-endian GPU."""
+    x = x.to(tl.int64)
+    swapped = (x & 0xFF) << 24 | (x & 0xFF00) << 8 | (x >> 8) & 0xFF00
+    return (swapped | (x >> 24) & 0xFF).to(tl.uint32)
+
+
+@triton.jit
+def _post_requests(
+    vg,
+    active,
+    imm_wrs,
+    sizes,
+    group_first,
+    group_first_wr,
+    group_wrs,
+    world,
+    boxes,
+    box_rkeys,
+    desc_at,
+    desc_lkey,
+    queues,
+    BOX_BYTES: tl.constexpr,
+    MAX_WRS: tl.constexpr,
+):
+    """Post each active group's request on the QP to its gatherer: write the
+    mlx5 WQE (ctrl, remote address and two data segments, 64 bytes), then the
+    doorbell record and register. `queues` rows: send queue, its WQE count,
+    doorbell record, doorbell register, QP number and WQEs posted."""
+    gatherer = vg % world
+    queue = queues + gatherer * 8
+    # Each group's WQE index on its QP: after the active groups before it there.
+    other = vg[None, :]
+    same = (gatherer[:, None] == other % world) & active[None, :]
+    before = tl.sum((same & (other < vg[:, None])).to(tl.int64), 1)
+    last = active & (tl.sum((same & (other > vg[:, None])).to(tl.int32), 1) == 0)
+    index = tl.load(queue + 5, mask=active, other=0) + before
+    wqe_count = tl.load(queue + 1, mask=active, other=1)
+    qpn = tl.load(queue + 4, mask=active, other=0)
+    wqe = tl.load(queue, mask=active, other=0) + index % wqe_count * 64
+    box = tl.load(boxes + gatherer, mask=active, other=0) + vg // world * BOX_BYTES
+    rkey = tl.load(box_rkeys + gatherer, mask=active, other=0)
+    wrs_at = desc_at + group_first_wr * 128
+    sges_at = desc_at + MAX_WRS * 128 + group_first * 16
+    # ctrl: WQE index | RDMA_WRITE_WITH_IMM, QP | 4 segments, unsignaled, imm
+    # (raw, as the owner reads it); then remote address and rkey; then each
+    # data segment's length, lkey and address. All big-endian.
+    word = tl.arange(0, 16)[None, :]
+    ctrl0 = _be32(index << 8 & 0xFFFF00 | 0x09)[:, None]
+    ctrl1 = _be32(qpn << 8 | 4)[:, None]
+    value = tl.where(word == 0, ctrl0, ctrl1)
+    imm = (imm_wrs | vg // world << 24).to(tl.uint32)[:, None]
+    value = tl.where(word == 2, 0, value)
+    value = tl.where(word == 3, imm, value)
+    value = tl.where(word == 4, _be32(box >> 32)[:, None], value)
+    value = tl.where(word == 5, _be32(box)[:, None], value)
+    value = tl.where(word == 6, _be32(rkey)[:, None], value)
+    value = tl.where(word == 7, 0, value)
+    value = tl.where(word == 8, _be32(group_wrs * 128)[:, None], value)
+    value = tl.where((word == 9) | (word == 13), _be32(desc_lkey), value)
+    value = tl.where(word == 10, _be32(wrs_at >> 32)[:, None], value)
+    value = tl.where(word == 11, _be32(wrs_at)[:, None], value)
+    value = tl.where(word == 12, _be32(sizes * 16)[:, None], value)
+    value = tl.where(word == 14, _be32(sges_at >> 32)[:, None], value)
+    value = tl.where(word == 15, _be32(sges_at)[:, None], value)
+    at = wqe.to(tl.pointer_type(tl.uint32))[:, None] + word
+    tl.store(at, value, mask=active[:, None])
+    # The NIC reads the WQEs (host memory) once the doorbell rings, and the
+    # register is rung with the last WQE's first 8 bytes.
+    _fence_sys()
+    tl.debug_barrier()
+    record = tl.load(queue + 2, mask=last, other=0).to(tl.pointer_type(tl.uint32))
+    tl.store(record + 1, _be32(index + 1 & 0xFFFF), mask=last)
+    tl.store(queue + 5, index + 1, mask=last)
+    _fence_sys()
+    tl.debug_barrier()
+    register = tl.load(queue + 3, mask=last, other=0).to(tl.pointer_type(tl.uint64))
+    ring = ctrl0.to(tl.uint64) | ctrl1.to(tl.uint64) << 32
+    tl.store(register, tl.sum(ring, 1), mask=last, cache_modifier=".wt")
 
 
 @triton.jit(do_not_specialize=["num_words", "table"])
@@ -408,7 +470,6 @@ def _place_kernel(
     num_words,
     table,
     seq_ptr,
-    ctrl,
     used,
     flags,
     world,
@@ -417,7 +478,6 @@ def _place_kernel(
     K: tl.constexpr,
     HOST: tl.constexpr,
     WORDS: tl.constexpr,
-    DONE: tl.constexpr,
     QPS: tl.constexpr,
     QPS_P2: tl.constexpr,
     WORLD_P2: tl.constexpr,
@@ -435,15 +495,11 @@ def _place_kernel(
     seq = tl.load(seq_ptr)
     deadline = tl.extra.cuda.globaltimer() + timeout_ns
     waiting = tl.full((), 1, tl.int32)
-    failed = waiting < 0
-    while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
+    while (waiting > 0) & (tl.extra.cuda.globaltimer() < deadline):
         landed = tl.load(at, mask=mask, other=seq, volatile=True)
         waiting = tl.sum((landed != seq).to(tl.int32))
-        # Only a fetch with rows still to come can have failed.
-        done = tl.load(ctrl + DONE, mask=waiting > 0, other=0, volatile=True)
-        failed = (waiting > 0) & (done == -seq)
-    if failed | (waiting > 0):
-        tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
+    if waiting > 0:
+        tl.device_print("Engram pool RDMA fetch timed out, seq", seq)
         tl.inline_asm_elementwise(
             "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
@@ -464,9 +520,9 @@ def _place_kernel(
 
 
 class RdmaTransport:
-    """RC QPs from this GPU's proxy processes to every peer's, and the buffers
-    fetches go through. `group` provides rank_in_group, world_size and
-    all_gather(bytes)."""
+    """RC QPs from this GPU to every peer's owner proxy (requests) and from its
+    owner proxy to every peer's (gathers), and the buffers fetches go through.
+    `group` provides rank_in_group, world_size and all_gather(bytes)."""
 
     def __init__(
         self,
@@ -484,50 +540,30 @@ class RdmaTransport:
             self.node = f.read().strip()
         # Bound the WRITEs in flight per NIC: many QPs for few peers, few for many.
         self.qps_per_peer = min(16, max(2, 128 // max(self.world - 1, 1)))
-        self.ctrl = SharedHost(proxy.CTRL_BYTES, "ctrl")
-        # The requester sleeps on this process-shared semaphore; a CUDA host
-        # function posts it from the stream, with no Python on that path.
-        libc = ctypes.CDLL(None, use_errno=True)
-        self.sem = self.ctrl.cpu.data_ptr() + proxy.SEM_OFFSET
-        if libc.sem_init(ctypes.c_void_p(self.sem), 1, 0):
-            raise OSError(ctypes.get_errno(), "sem_init failed")
-        self.sem_post = ctypes.cast(libc.sem_post, ctypes.c_void_p)
-        self.launch_host_func = ctypes.CDLL("libcuda.so.1").cuLaunchHostFunc
-        self.launch_host_func.argtypes = [ctypes.c_void_p] * 3
-        # A host function holds its stream until it returns: run it beside.
-        self.wake_stream = torch.cuda.Stream()
-        self._ready, self._joined = torch.cuda.Event(), torch.cuda.Event()
-        self._woken = False
         self._compiled: dict[tuple, Any] = {}
-        # Each its own process, so neither ever waits for the other's GIL.
-        self.procs: dict[str, tuple[subprocess.Popen, socket.socket]] = {}
-        for role in ("owner", "requester"):
-            ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-            process = subprocess.Popen(
-                [sys.executable, proxy.__file__, str(theirs.fileno()), role],
-                pass_fds=[theirs.fileno()],
-            )
-            theirs.close()
-            self.procs[role] = (process, ours)
-            # Sets returncode when it exits, so fetches check without a syscall.
-            threading.Thread(target=process.wait, daemon=True).start()
+        # Its own process, so it never waits for this one's GIL.
+        ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.proc = subprocess.Popen(
+            [sys.executable, proxy.__file__, str(theirs.fileno())],
+            pass_fds=[theirs.fileno()],
+        )
+        theirs.close()
+        self.sock = ours
+        # Sets returncode when it exits, so fetches check without a syscall.
+        threading.Thread(target=self.proc.wait, daemon=True).start()
         device = pick_device()
         info = self._call(
-            "owner", "init", device, self.world, self.rank, self.qps_per_peer, SQ_DEPTH
+            "init", device, self.world, self.rank, self.qps_per_peer, SQ_DEPTH
         )
-        requester = self._call(
-            "requester",
-            "init",
-            device,
-            self.world,
-            self.rank,
-            max_tables,
-            fds=[os.dup(self.ctrl.fd)],
-        )
-        requests, self.requests_at = requester["qpns"], requester["requests"]
+        # This GPU posts its requests itself, on one QP per gatherer.
+        self.verbs = verbs.Device(device)
+        cq, _ = self.verbs.create_cq(self.world * REQUEST_DEPTH)
+        made = [
+            self.verbs.create_qp(cq, cq, REQUEST_DEPTH, 2) for _ in range(self.world)
+        ]
         logger.info(
-            "Engram pool RDMA proxies (pids %s) on %s, %d QPs per peer",
-            [process.pid for process, _ in self.procs.values()],
+            "Engram pool RDMA proxy (pid %d) on %s, %d QPs per peer",
+            self.proc.pid,
             info["device"],
             self.qps_per_peer,
         )
@@ -538,7 +574,7 @@ class RdmaTransport:
                 info["max_sge"],
                 info["mtu"],
                 info["notices"],
-                requests,
+                [qpn for _, qpn in made],
             ]
         )
         # Every owner posts our WRs, so they fit every NIC and path.
@@ -552,7 +588,6 @@ class RdmaTransport:
             1 + 2 * self.qps_per_peer
         )
         mailboxes = self._call(
-            "owner",
             "connect",
             [
                 [peer, e[0], e[1][self.rank]]
@@ -564,11 +599,8 @@ class RdmaTransport:
             max_items,
             max_tables,
         )
-        self._call(
-            "requester",
-            "connect",
-            [[peer, e[0], e[4][self.rank]] for peer, e in enumerate(everyone)],
-        )
+        for (qp, _), e in zip(made, everyone):
+            self.verbs.connect(qp, e[4][self.rank], (bytes.fromhex(e[0][0]), e[0][1]))
         gpu = torch.device("cuda", torch.accelerator.current_device_index())
         from cuda.bindings import driver as cu
 
@@ -616,18 +648,19 @@ class RdmaTransport:
         memory = CuMem(desc_bytes, rdma=True)
         address = memory.map()
         self.desc = device_view(address, desc_bytes, memory).view(torch.int64)
-        self.desc_lkey = self._call(
-            "requester",
-            "register",
-            address,
-            desc_bytes,
-            fds=[memory.dmabuf_fd(address)],
+        fd = memory.dmabuf_fd(address)
+        try:
+            self.desc_lkey = self.verbs.reg_dmabuf(
+                fd, address, desc_bytes, verbs.LOCAL
+            )[1]
+        finally:
+            os.close(fd)
+        self.queues = torch.tensor(
+            self._map_queues(made), dtype=torch.int64, device=gpu
         )
         # Peers' QPs and mailboxes must be ready before anyone requests.
         group.barrier()
-        for role in self.procs:
-            self._call(role, "start")
-        self.ctrl_words = self.ctrl.gpu.view(torch.int64)
+        self._call("start")
         self.counts = torch.zeros(groups, dtype=torch.int32, device=gpu)
         self.starts = torch.zeros(groups, dtype=torch.int64, device=gpu)
         self.used = torch.zeros(groups, dtype=torch.int32, device=gpu)
@@ -637,13 +670,12 @@ class RdmaTransport:
         self.desc_at = self.desc.data_ptr()
         self.world_p2 = triton.next_power_of_2(self.world)
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
-        # `wait_landed`'s view of a fetch: seq, done, QPs per group, flags,
-        # world, QPs per peer, timeout and each table's last landed seq.
+        # `wait_landed`'s view of a fetch: seq, QPs per group, flags, world,
+        # QPs per peer, timeout and each table's last landed seq.
         self.landed = torch.full((max_tables,), -1, dtype=torch.int64, device=gpu)
         self.ready = torch.tensor(
             [
                 self.seq.data_ptr(),
-                self.ctrl_words.data_ptr() + proxy.DONE * 8,
                 self.used.data_ptr(),
                 self.flags.data_ptr(),
                 self.world,
@@ -658,6 +690,26 @@ class RdmaTransport:
         self.remote_addr = torch.empty(total, dtype=torch.int64, device=gpu)
         self.keys = torch.empty(total, dtype=torch.int32, device=gpu)
 
+    @staticmethod
+    def _map_queues(qps: list[tuple[int, int]]) -> list[list[int]]:
+        """Map QPs' send queues, doorbell records and registers for this GPU;
+        returns their `queues` rows (see `_post_requests`)."""
+        rows, pages = [], {}
+        page = mmap.PAGESIZE
+        for qp, qpn in qps:
+            sq, wqes, record, register, _ = verbs.Device.mlx5_queue(qp)
+            rows.append([sq, wqes, record, register, qpn, 0, 0, 0])
+            # cudaHostRegisterMapped, | IoMemory for the register (MMIO).
+            for address, size, kind in ((sq, wqes * 64, 2), (record, 8, 2)):
+                for at in range(address // page, -(-(address + size) // page)):
+                    pages[at * page] = kind
+            pages[register // page * page] = 6
+        cudart = torch.cuda.cudart()
+        for address, kind in pages.items():
+            if (result := cudart.cudaHostRegister(address, page, kind)).value:
+                raise RuntimeError(f"cudaHostRegister of an RDMA queue: {result}")
+        return rows
+
     def rows_per_wr(self, row_bytes: int) -> int:
         """Rows one WRITE gathers: a packet's worth, within every NIC's SGEs."""
         return max(1, min(self.max_sge, self.mtu // row_bytes))
@@ -667,8 +719,8 @@ class RdmaTransport:
             json.loads(v) for v in self.group.all_gather(json.dumps(value).encode())
         ]
 
-    def _call(self, role: str, command: str, *args, fds: list[int] | None = None):
-        sock = self.procs[role][1]
+    def _call(self, command: str, *args, fds: list[int] | None = None):
+        sock = self.sock
         socket.send_fds(sock, [json.dumps([command, *args]).encode()], fds or [])
         for fd in fds or ():
             os.close(fd)
@@ -690,7 +742,7 @@ class RdmaTransport:
             cumem, address = memory
             fd = cumem.dmabuf_fd(address)
             args = ["dmabuf", cumem.size, address, access]
-        return self._call("owner", "register", *args, fds=[fd])
+        return self._call("register", *args, fds=[fd])
 
     def register(self, shard: SharedHost | tuple[CuMem, int]) -> tuple[list, ...]:
         """Register this GPU's shard (host memory, or HBM as (allocation,
@@ -712,7 +764,7 @@ class RdmaTransport:
             if host and node == self.node and rank != self.rank:
                 try:
                     size = shard.nbytes  # type: ignore[union-attr]
-                    address, lkey = self._call("owner", "map_peer", pid, fd, size)
+                    address, lkey = self._call("map_peer", pid, fd, size)
                     gatherer = self.rank
                 except RuntimeError as e:
                     logger.warning_once(
@@ -741,58 +793,45 @@ class RdmaTransport:
         n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
         if n > self.max_items * self.max_tables or tables > self.max_tables:
             raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
-        if any(process.returncode is not None for process, _ in self.procs.values()):
+        if self.proc.returncode is not None:
             raise RuntimeError("Engram pool RDMA proxy exited")
-        stream = torch.cuda.current_stream()
         if not n:
-            # An early wakeup still joins this stream (the requester naps).
-            if self._woken:
-                self._woken = False
-                self._joined.record(self.wake_stream)
-                stream.wait_event(self._joined)
             return []
         rows_per_wr = self.rows_per_wr(words * 8)
         num_vg, vg_p2 = self.world * tables, triton.next_power_of_2(self.world * tables)
-        qps = self.qps_per_peer
-        plan = self._kernel(
+        stream = torch.cuda.current_stream().cuda_stream
+        self._kernel(
             _plan_kernel,
             (triton.cdiv(n, 256),),
             (ids, meta, self.counts, self.owner_pos, self.remote_addr, self.keys)
-            + (n, self.world, num_vg, self.ticket, self.ctrl_words, self.starts)
+            + (n, self.world, num_vg, self.ticket, self.starts)
             + (self.wr_starts, self.wr_counts, self.used),
             4,
             dict(
                 TABLES=tables,
                 K=k,
                 WORDS=words,
-                NUM_GROUPS=proxy.NUM_GROUPS,
-                NUM_WRS=proxy.NUM_WRS,
                 ROWS_PER_WR=rows_per_wr,
-                QPS=qps,
+                QPS=self.qps_per_peer,
                 MAX_CHAIN=proxy.MAX_CHAIN,
                 VG_P2=vg_p2,
                 BLOCK=256,
             ),
-        )
-        wr = self._kernel(
+        )(stream)
+        self._kernel(
             _wr_kernel,
             (triton.cdiv(n, 128),),
             (self.owner_pos, self.counts, self.remote_addr, self.keys, self.boxes)
             + (self.box_keys, self.desc, self.seq, self.landing_at, self.landing_rkey)
             + (self.flags_at, self.flags_rkey, n, self.world, num_vg, self.rank)
-            + (self.ticket, self.ctrl_words, self.starts, self.wr_starts)
-            + (self.wr_counts, self.used, self.box_rkeys, self.desc_at)
-            + (self.desc_lkey, self.requests_at, slots),
+            + (self.ticket, self.starts, self.wr_starts, self.wr_counts, self.used)
+            + (self.box_rkeys, self.desc_at, self.desc_lkey, self.queues, slots),
             4,
             dict(
-                GO=proxy.GO,
-                ISSUED=proxy.ISSUED,
-                REQUESTS=proxy.REQUESTS,
-                REQUEST_WORDS=proxy.REQUEST_WORDS,
                 BOX_BYTES=self.box_bytes,
                 MAX_WRS=self.max_wrs,
                 ROWS_PER_WR=rows_per_wr,
-                QPS=qps,
+                QPS=self.qps_per_peer,
                 MAX_CHAIN=proxy.MAX_CHAIN,
                 VG_P2=vg_p2,
                 WORDS=words,
@@ -800,29 +839,8 @@ class RdmaTransport:
                 K=k,
                 BLOCK=128,
             ),
-        )
-        # Once nothing is left to compile, unless `wake` came earlier.
-        if not self._woken:
-            self.wake()
-        self._woken = False
-        for launch in (plan, wr):
-            launch(stream.cuda_stream)
-        self._joined.record(self.wake_stream)
-        stream.wait_event(self._joined)
+        )(stream)
         return [n, tables, k, words, out, slots]
-
-    def wake(self) -> None:
-        """Wake the requester for the next `start`, from a CUDA host function
-        beside the current stream. It holds its stream until it returns
-        (~45 us), so the stream's work until `start`'s kernels raise go hides
-        that: call this as early before `start` as the stream allows."""
-        stream = torch.cuda.current_stream()
-        self._ready.record(stream)
-        self.wake_stream.wait_event(self._ready)
-        wake = self.wake_stream.cuda_stream
-        if error := self.launch_host_func(wake, self.sem_post, self.sem):
-            raise RuntimeError(f"cuLaunchHostFunc failed: {error}")
-        self._woken = True
 
     def wait(self, fetch: list, table: int) -> None:
         """Hold the current stream until table `table`'s rows of `fetch` have
@@ -835,7 +853,7 @@ class RdmaTransport:
             _place_kernel,
             (triton.cdiv(num_words, 1024),),
             (self.owner_pos, self.starts, self.landing, out[table], num_words)
-            + (table, self.seq, self.ctrl_words, self.used, self.flags)
+            + (table, self.seq, self.used, self.flags)
             + (self.world, TIMEOUT_NS),
             4,
             dict(
@@ -843,7 +861,6 @@ class RdmaTransport:
                 K=k,
                 HOST=self.host_landing,
                 WORDS=words,
-                DONE=proxy.DONE,
                 QPS=self.qps_per_peer,
                 QPS_P2=triton.next_power_of_2(self.qps_per_peer),
                 WORLD_P2=self.world_p2,
@@ -890,6 +907,5 @@ class RdmaTransport:
         return launch
 
     def close(self) -> None:
-        for process, sock in self.procs.values():
-            sock.close()
-            process.wait()
+        self.sock.close()
+        self.proc.wait()

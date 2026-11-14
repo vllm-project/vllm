@@ -299,6 +299,21 @@ class Device:
         if lib.ibv_modify_qp(qp, attr, mask):
             raise RuntimeError(f"QP RTS failed: {os.strerror(ctypes.get_errno())}")
 
+    @staticmethod
+    def mlx5_queue(qp: int) -> tuple[int, int, int, int, int]:
+        """An mlx5 QP's send queue for posting without libibverbs: its WQE
+        buffer, WQE count, doorbell record and doorbell register (BlueFlame
+        register and size), from mlx5dv_init_obj."""
+        mlx5 = ctypes.CDLL("libmlx5.so.1")
+        mlx5.mlx5dv_init_obj.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        # struct mlx5dv_qp: dbrec, sq {buf, wqe_cnt, stride}, rq {..}, bf {reg,
+        # size}; struct mlx5dv_obj starts with qp {in, out}.
+        out = (ctypes.c_uint64 * 16)()
+        obj = (ctypes.c_uint64 * 16)(qp, ctypes.addressof(out))
+        if mlx5.mlx5dv_init_obj(ctypes.addressof(obj), 1):
+            raise RuntimeError("mlx5dv_init_obj failed: not an mlx5 device?")
+        return out[1], out[2] & 0xFFFFFFFF, out[0], out[5], out[6] & 0xFFFFFFFF
+
     def post_send(self, qp: int, wr: int) -> None:
         if error := self._post(qp, wr, self._bad_ref):
             raise RuntimeError(f"ibv_post_send failed: {os.strerror(error)}")
