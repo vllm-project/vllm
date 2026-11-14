@@ -214,6 +214,24 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
+        replicate = envs.VLLM_QWEN4EXP_REPLICATE_MIXER
+        if replicate:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
+        pc = vllm_config.parallel_config
+        if replicate and (
+            self.use_hc_sequence_parallel
+            or pc.enable_expert_parallel
+            or pc.decode_context_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
+        ):
+            # These turn the TP-synced autotune off: replicated mixers would drift.
+            raise NotImplementedError(
+                "VLLM_QWEN4EXP_REPLICATE_MIXER is not supported with expert "
+                "parallelism, sequence-parallel HC/MoE or context parallelism."
+            )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
         if (self.layer_idx + 1) in ple_layer_ids:
@@ -238,10 +256,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=not self.use_hc_sequence_parallel,
+                replicate=replicate,
             )
         elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
             if not use_qsa:
+                if replicate:
+                    raise NotImplementedError(
+                        "VLLM_QWEN4EXP_REPLICATE_MIXER requires QSA attention."
+                    )
                 self.self_attn = Qwen3NextAttention(
                     config,
                     model_config=vllm_config.model_config,
@@ -261,6 +284,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                     reduce_results=not self.use_hc_sequence_parallel,
+                    replicate=replicate,
                 )
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
@@ -857,7 +881,12 @@ class Qwen4ExpForCausalLM(
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
+        # Replicated GDN keeps the full recurrent state on every rank.
+        tp_size = (
+            1
+            if envs.VLLM_QWEN4EXP_REPLICATE_MIXER
+            else parallel_config.tensor_parallel_size
+        )
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config
