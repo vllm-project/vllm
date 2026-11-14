@@ -826,13 +826,14 @@ class TestTieringOffloadingManager:
         assert self.primary_tier.num_deferred_release_chunks == 0
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
-        """Resolved lookups report one sync delay sample per tier and chunk."""
+        """Resolved lookups report one sync delay sample per tier and request."""
         self._start_request()
         chunks = to_keys(range(2))
 
         # No tier has these chunks: they resolve immediately as misses.
         for chunk in chunks:
             assert self.manager.lookup(chunk, _CTX) is LookupResult.MISS
+        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -843,7 +844,7 @@ class TestTieringOffloadingManager:
                     TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("0:primary",)
                 )
             ]
-            == 2
+            == 1
         )
         assert (
             reduced[
@@ -851,7 +852,7 @@ class TestTieringOffloadingManager:
                     TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("1:example",)
                 )
             ]
-            == 2
+            == 1
         )
         assert (
             reduced[
@@ -859,7 +860,7 @@ class TestTieringOffloadingManager:
                     TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("2:example",)
                 )
             ]
-            == 2
+            == 1
         )
         assert not has_histogram_count(
             reduced, TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
@@ -934,6 +935,7 @@ class TestTieringOffloadingManager:
             )
 
         assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
+        self._simulate_on_schedule_end(new_req_ids=[ctx.req_id])
 
         stats = self.manager.get_stats()
         assert stats is not None
