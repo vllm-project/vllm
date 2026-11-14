@@ -340,6 +340,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "GraniteMoeSWAForCausalLM": _HfExamplesInfo("ibm-granite/granite-swash-3b-a600m"),
     "GraniteSWAForCausalLM": _HfExamplesInfo("ibm-granite/granite-swash-2b"),
+    "GRTForCausalLM": _HfExamplesInfo(
+        "matterwaveai/grt-30m", min_transformers_version="5.21"
+    ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
     ),
