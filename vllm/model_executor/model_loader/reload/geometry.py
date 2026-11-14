@@ -151,7 +151,7 @@ def _merge(a: Write, b: Write) -> Write | None:
     delta = b.dst.offset - a.dst.offset
     stride_a = a.dst.stride[k] if na > 1 else delta
     stride_b = b.dst.stride[k] if nb > 1 else stride_a
-    if stride_a != stride_b or delta != stride_a * na:
+    if stride_a <= 0 or stride_a != stride_b or delta != stride_a * na:
         return None
     src = tuple((a.src[j][0], b.src[j][1]) if j == k else a.src[j] for j in range(rank))
     shape = tuple(na + nb if j == k else n for j, n in enumerate(a.dst.shape))
