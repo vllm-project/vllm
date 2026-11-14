@@ -171,7 +171,7 @@ impl ManagedEngineHandle {
             ?shutdown_timeout,
             "shutting down managed engine with SIGTERM"
         );
-        process_group::terminate_launcher(pid)?;
+        terminate(pid)?;
 
         // Wait for the process to exit on its own.
         if tokio::time::timeout(shutdown_timeout, self.wait_for_exit()).await.is_err() {
@@ -188,6 +188,26 @@ impl ManagedEngineHandle {
         process_group::kill(pid)?;
         Ok(())
     }
+}
+
+/// Send SIGTERM to one process.
+fn terminate(pid: u32) -> Result<()> {
+    signal(pid as i32, libc::SIGTERM)
+}
+
+/// Deliver one signal to a process or, for a negative `target`, to the process
+/// group of that id.
+fn signal(target: i32, signal: i32) -> Result<()> {
+    let rc = unsafe { libc::kill(target, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(code) if code == libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("failed to signal managed engine")
 }
 
 /// Process group helper functions for managing the Python subprocess and its
@@ -208,32 +228,9 @@ mod process_group {
         }
     }
 
-    /// Send SIGTERM to the launcher process alone, not to its process group:
-    /// the engine workers exit immediately on SIGTERM, which would abort
-    /// in-flight requests, while the launcher drains them before stopping the
-    /// workers in order.
-    pub fn terminate_launcher(pid: u32) -> Result<()> {
-        signal(pid as i32, libc::SIGTERM)
-    }
-
     /// Send SIGKILL to the managed Python process group.
     pub fn kill(pid: u32) -> Result<()> {
         signal(-(pid as i32), libc::SIGKILL)
-    }
-
-    /// Deliver one signal to a process or, for a negative `target`, to the
-    /// process group of that id.
-    fn signal(target: i32, signal: i32) -> Result<()> {
-        let rc = unsafe { libc::kill(target, signal) };
-        if rc == 0 {
-            return Ok(());
-        }
-
-        let error = io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(code) if code == libc::ESRCH) {
-            return Ok(());
-        }
-        Err(error).context("failed to signal managed engine")
     }
 }
 
