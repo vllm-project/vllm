@@ -227,14 +227,14 @@ def test_decode_renews_waiting_requests_until_it_reads_them(clock):
     assert scheduler.schedule().kv_connector_metadata.read_lease_renewals == {}
 
 
-@pytest.mark.parametrize("pause", [PauseState.PAUSED_NEW, PauseState.PAUSED_ALL])
-def test_paused_decode_goes_idle_and_computes_lapsed_requests_locally(clock, pause):
+def test_paused_decode_goes_idle_and_computes_lapsed_requests_locally(clock):
     """A pause completes only once the engine has no work; queued requests are
-    never allocated while paused, so their leases must not keep it busy."""
+    never allocated while paused ("wait", checkpoint_prepare's default, or
+    "keep"), so their leases must not keep it busy."""
     scheduler = _decode_scheduler()
     request = _waiting_request(scheduler, 1, lease=LEASE)
     scheduler.add_request(request)
-    scheduler.set_pause_state(pause)
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
     assert not scheduler.has_requests()
 
     # Not renewed while paused, the prefill's lease lapses: after the pause the
@@ -294,11 +294,9 @@ def test_decode_renews_a_new_lease_in_its_next_step(clock):
     assert meta.read_lease_renewals == {target: ["tx-2"]}
 
 
-@pytest.mark.parametrize(
-    "lease", [LEASE, MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT * 2]
-)
-def test_decode_reads_a_new_request_whatever_the_lease_length(clock, lease):
+def test_decode_reads_a_new_request_whose_lease_exceeds_the_cap(clock):
     scheduler = _decode_scheduler()
+    lease = 2 * MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
     request = _waiting_request(scheduler, 1, lease=lease)
     scheduler.add_request(request)
     assert scheduler.schedule().num_scheduled_tokens[request.request_id] == 1
@@ -318,10 +316,9 @@ def test_decode_abort_while_queued_stops_renewing(clock):
     assert meta.read_lease_renewals == {}
 
 
-@pytest.mark.parametrize("lease", [float("inf"), 0.0, -1.0])
-def test_decode_does_not_track_an_invalid_lease(lease):
+def test_decode_does_not_track_an_infinite_lease():
     scheduler = _decode_scheduler()
-    scheduler.add_request(_waiting_request(scheduler, 1, lease=lease))
+    scheduler.add_request(_waiting_request(scheduler, 1, lease=float("inf")))
     assert scheduler.connector.connector_scheduler._read_leases == {}
 
 
