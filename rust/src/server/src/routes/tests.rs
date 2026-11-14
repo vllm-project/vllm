@@ -927,6 +927,49 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// `--tokens-only` registers the scale-out routes without `--enable-scale-out`,
+/// plus the legacy `/abort_requests` unless dev mode registers its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokens_only_registers_scale_out_and_legacy_abort_routes() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tokens-only",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            tokens_only: true,
+            ..Default::default()
+        }),
+    );
+
+    let mut app = build_router(state.clone());
+    let (status, json) = post_json(&mut app, "/inference/v1/generate", json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    for uri in ["/inference/v1/abort_requests", "/abort_requests"] {
+        assert_route_not_supported(&app, "POST", uri, uri).await;
+    }
+
+    let mut dev_app = build_router_with_gates(
+        state,
+        RouteGates {
+            dev_mode: true,
+            scale_out: true,
+            tokens_only: true,
+            ..RouteGates::default()
+        },
+    );
+    let (status, json) = post_json(
+        &mut dev_app,
+        "/abort_requests",
+        json!({"request_ids": ["missing-request"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
 /// `VLLM_SERVER_DEV_MODE` reaches the router through `ApiServerOptions`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]

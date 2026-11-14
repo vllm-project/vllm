@@ -599,6 +599,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_tokenizer_info_endpoint: bool,
 
+    /// Serve the token-in/token-out API, as in a disaggregated setup: registers
+    /// the scale-out endpoints without `--enable-scale-out` and the legacy
+    /// `/abort_requests`. Forwarded to the engine, which skips tokenizer
+    /// initialization.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub tokens_only: bool,
+
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
     /// prevent reverse proxies/tunnels with read timeouts from closing the
@@ -1174,6 +1186,7 @@ impl SharedRuntimeArgs {
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
+            tokens_only: self.tokens_only,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
@@ -1525,6 +1538,9 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        if self.runtime.tokens_only {
+            managed_engine.python_args.push("--tokens-only".to_string());
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

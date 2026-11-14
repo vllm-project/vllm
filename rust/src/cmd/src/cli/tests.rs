@@ -304,6 +304,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -2309,6 +2310,7 @@ fn frontend_args_accept_json() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -3268,6 +3270,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_error_stack: None,
                         enable_scale_out: None,
                         enable_tokenizer_info_endpoint: false,
+                        tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
                         fingerprint_value: None,
@@ -3577,6 +3580,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                tokens_only: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
                 sse_keep_alive_interval: None,
@@ -3711,6 +3715,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                tokens_only: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
                 sse_keep_alive_interval: None,
@@ -3958,6 +3963,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                tokens_only: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
                 sse_keep_alive_interval: None,
@@ -4178,4 +4184,36 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     );
     let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+}
+
+#[test]
+fn tokens_only_reaches_router_and_managed_engine() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--tokens-only"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(config.api_server_options.tokens_only);
+    assert!(!config.api_server_options.enable_scale_out);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(engine.python_args.iter().any(|arg| arg == "--tokens-only"));
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tokens_only":true}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().api_server_options.tokens_only);
 }

@@ -91,6 +91,10 @@ pub struct ApiServerOptions {
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
     pub enable_tokenizer_info_endpoint: bool,
+    /// When `true`, serve the token-in/token-out API as Python's
+    /// `--tokens-only` does: register the scale-out routes and the legacy
+    /// `/abort_requests`.
+    pub tokens_only: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
