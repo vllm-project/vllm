@@ -310,7 +310,7 @@ class MonoProbe:
                 )
                 return out
 
-            mgr.run_fullgraph = merged_then_unmerged
+            mgr.run_fullgraph = _host_reads(merged_then_unmerged)
 
         both(
             "target",
