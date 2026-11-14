@@ -45,6 +45,7 @@ TOOL_SECTION_END = "<|tool_calls_section_end|>"
 TOOL_CALL_START = "<|tool_call_begin|>"
 TOOL_CALL_END = "<|tool_call_end|>"
 TOOL_ARG_START = "<|tool_call_argument_begin|>"
+KIMI_TURN_BOUNDARIES = frozenset(("<|im_user|>", "<|im_assistant|>", "<|im_system|>"))
 
 _TOOL_ID_RE = re.compile(r"(?P<id>.+:\d+)")
 
@@ -82,6 +83,7 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
         name="kimi_k2",
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
         wait_for_reasoning=thinking,
+        turn_boundary_tokens=KIMI_TURN_BOUNDARIES,
         terminals={
             **reasoning_terminals,
             "TOOL_SECTION_START": TOOL_SECTION_START,
