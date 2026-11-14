@@ -84,6 +84,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
+from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -681,6 +682,7 @@ class Worker(WorkerBase):
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
+        self._check_eplb_weight_update()
         # Kernel-format weights are copied into place, needing no room.
         kv_cache_loan = (
             kv_cache_lent_for_weight_update(
@@ -1330,6 +1332,7 @@ class Worker(WorkerBase):
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
             and not speculative_config.prefill_context_kv_only
+            and not self._weight_update_target_uses_eplb(is_draft=True)
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1677,6 +1680,26 @@ class Worker(WorkerBase):
                 "Please set weight_transfer_config to enable weight transfer."
             )
 
+    def _weight_update_target_uses_eplb(self, *, is_draft: bool) -> bool:
+        eplb_state = getattr(self.model_runner, "eplb_state", None)
+        if eplb_state is None:
+            return False
+
+        model = self.get_draft_model() if is_draft else self.get_model()
+        moe_model = get_mixture_of_experts_model(model)
+        return any(
+            state.model is moe_model for state in eplb_state.model_states.values()
+        )
+
+    def _check_eplb_weight_update(self, *, is_draft: bool = False) -> None:
+        if self._weight_update_target_uses_eplb(is_draft=is_draft):
+            raise RuntimeError(
+                "Weight updates are not supported for models managed by EPLB: "
+                "checkpoint loading does not preserve expert mappings, and pending "
+                "rebalances can overwrite updated weights. Start the engine with "
+                "enable_eplb=False to update model weights."
+            )
+
     def init_weight_transfer_engine(self, init_info: dict) -> None:
         """Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
@@ -1745,6 +1768,8 @@ class Worker(WorkerBase):
                 "start_weight_update called while a weight update is already "
                 "active. Call finish_weight_update first."
             )
+
+        self._check_eplb_weight_update(is_draft=is_draft)
 
         draft_model = self.get_draft_model() if is_draft else None
         try:

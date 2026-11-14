@@ -62,6 +62,9 @@ The layerwise reloading system is integrated with the post-training weight trans
 
 ### Mid Level `reload_weights` API
 
+!!! note
+    Models managed by Expert Parallel Load Balancing (EPLB) reject `reload_weights`. Start the engine without `--enable-eplb` to reload weights.
+
 Layerwise reloading is also exposed via the `reload_weights` API. This interface can be called using the following code:
 
 ```python
