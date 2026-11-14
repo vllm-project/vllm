@@ -4,6 +4,7 @@ import hashlib
 import secrets
 from collections.abc import Awaitable
 
+from starlette._utils import get_route_path
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -52,8 +53,9 @@ class AuthenticationMiddleware:
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
-        root_path = scope.get("root_path", "")
-        url_path = scope["path"].removeprefix(root_path)
+        # Use Starlette's own segment-boundary-aware root_path stripping
+        # so the auth guard agrees with the router on the effective path.
+        url_path = get_route_path(scope)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
