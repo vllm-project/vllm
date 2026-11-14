@@ -3,6 +3,6 @@
 # variants. tools/kv_connector_lock.py checks that the two stay aligned.
 lmcache == 0.5.6
 cupy-cuda13x != 14.1.0
-nixl == 1.5.2
-nixl-cu13 == 1.5.2
+nixl == 1.6.0rc1.dev81879244 # do-not-merge: NIXL RC validation
+nixl-cu13 == 1.6.0rc1.dev81879244 # do-not-merge: NIXL RC validation
 mooncake-transfer-engine-cuda13 >= 0.3.14
