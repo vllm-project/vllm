@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
@@ -27,9 +28,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
 )
 
@@ -45,10 +45,10 @@ ELEM = 2  # bytes per fp16 element
 NIXL_WORKER = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
 
 
-def _flashinfer_split_spec(block_size: int) -> FullAttentionSpec:
+def _flashinfer_split_spec(block_size: int) -> AttentionSpec:
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -86,7 +86,7 @@ def _register(
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+        kv_cache_groups=[new_kv_cache_group(layers, spec)],
     )
     with (
         patch(f"{NIXL_WORKER}.NixlWrapper") as mock_wrapper,
@@ -130,7 +130,7 @@ def _register(
 def test_customize_spec_splits_unquantized_kv_only_when_enabled():
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    base = FullAttentionSpec(
+    base = AttentionSpec(
         block_size=16, num_kv_heads=NUM_KV_HEADS, head_size=HEAD_SIZE, dtype=DTYPE
     )
     off = create_vllm_config(attention_backend="FLASHINFER")
@@ -413,7 +413,7 @@ def test_has_separate_kv_head_slots_matches_only_this_layout(
 
     from vllm.v1.kv_cache_interface import KVQuantMode
 
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=NUM_KV_HEADS, head_size=HEAD_SIZE, dtype=DTYPE
     )
     if num_head_slots is not None:

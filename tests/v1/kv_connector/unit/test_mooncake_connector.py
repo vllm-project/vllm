@@ -3519,7 +3519,7 @@ def test_head_resharding_rejects_separate_kv_head_slots(
     worker.transfer_topo = SimpleNamespace(total_num_kv_heads=4)
     layer = "model.layers.0.self_attn"
     head_size, num_kv_heads, elem = 64, 4, 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
