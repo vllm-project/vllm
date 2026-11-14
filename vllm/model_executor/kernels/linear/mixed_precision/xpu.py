@@ -12,6 +12,11 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 _XPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
+_XPUW4A8_SUPPORTED_QUANT_TYPES = (
+    scalar_types.int4,
+    scalar_types.uint4,
+    scalar_types.uint4b8,
+)
 
 logger = init_logger(__name__)
 
@@ -127,21 +132,22 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
             return False, "XPUW4A8Int only supported on XPU"
+
         if c.act_type not in (torch.bfloat16, torch.float16):
             return False, "XPUW4A8Int requires BF16/FP16 activations"
-        if c.weight_type != scalar_types.int4:
+        if c.weight_type not in _XPUW4A8_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"XPUW4A8Int requires int4 weights, got {c.weight_type}",
+                f"XPUW4A8Int requires int4/uint4 weights, got {c.weight_type}",
             )
         if c.zero_points:
             return False, "XPUW4A8Int only supports symmetric weight quantization"
-        if c.group_size != -1 and c.group_size % 32 != 0:
+        if c.group_size != -1 and (c.group_size <= 0 or c.group_size % 32 != 0):
             return (
                 False,
                 (
                     f"Group size ({c.group_size}) not supported by XPUW4A8Int, "
-                    "must be a multiple of 32"
+                    "must be a positive multiple of 32"
                 ),
             )
         in_size, out_size = c.partition_weight_shape

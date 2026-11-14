@@ -2736,3 +2736,82 @@ def test_e2e_selects_w4a8_for_every_linear(vllm_runner, monkeypatch) -> None:
             assert all(i % 8 == 0 and o % 8 == 0 for i, o in shapes), shapes
 
         vllm_model.apply_model(check_model)
+
+
+# ---------------------------------------------------------------------------
+# Linear-kernel system integration (Option A)
+# ---------------------------------------------------------------------------
+
+
+def test_xpu_linear_kernels_registered_in_linear_system() -> None:
+    """Verify that XPU W4A8 and W4A16 linear kernels are registered in the
+    shared linear-kernel dispatch registry.
+    """
+    from vllm.model_executor.kernels.linear import (
+        _LINEAR_BACKEND_KERNEL_MAP,
+        _POSSIBLE_KERNELS,
+        PlatformEnum,
+        XPUW4A8IntLinearKernel,
+        XPUwNa16LinearKernel,
+    )
+
+    xpu_kernels = _POSSIBLE_KERNELS.get(PlatformEnum.XPU, [])
+    assert XPUW4A8IntLinearKernel in xpu_kernels
+    assert XPUwNa16LinearKernel in xpu_kernels
+
+    # Verify backend filtering map contains XPU linear kernels
+    assert XPUwNa16LinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("xpu", set())
+    assert XPUW4A8IntLinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("xpu", set())
+    assert XPUW4A8IntLinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("w4a8", set())
+    assert XPUwNa16LinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("w4a16", set())
+    assert XPUwNa16LinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("onednn", set())
+    assert XPUW4A8IntLinearKernel in _LINEAR_BACKEND_KERNEL_MAP.get("onednn", set())
+
+
+def test_xpu_w4a8_can_implement_quant_types(monkeypatch) -> None:
+    """Verify that XPUW4A8IntLinearKernel supports int4, uint4, and uint4b8."""
+    from vllm.model_executor.kernels.linear import (
+        MPLinearLayerConfig,
+        XPUW4A8IntLinearKernel,
+    )
+    from vllm.scalar_type import scalar_types
+
+    _fake_xpu(monkeypatch, ark_available=False)
+    _with_w4a8_kernel(monkeypatch)
+
+    for qtype in (scalar_types.int4, scalar_types.uint4, scalar_types.uint4b8):
+        cfg = MPLinearLayerConfig(
+            full_weight_shape=(128, 64),
+            partition_weight_shape=(128, 64),
+            weight_type=qtype,
+            act_type=torch.float16,
+            group_size=32,
+            zero_points=False,
+        )
+        can_impl, reason = XPUW4A8IntLinearKernel.can_implement(cfg)
+        assert can_impl, f"Failed for {qtype}: {reason}"
+
+
+def test_inc_xpu_methods_bind_linear_kernels(monkeypatch, single_tp_rank) -> None:
+    """Verify that INCXPULinearMethod and INCXPUW4A8LinearMethod bind to
+    their respective MPLinearKernel instances on create_weights.
+    """
+    _fake_xpu(monkeypatch, ark_available=False)
+    _with_w4a8_kernel(monkeypatch)
+
+    # w4a16 method
+    method_w4a16 = INCXPULinearMethod(make_layer_config(group_size=32))
+    layer_w4a16 = _create_weights(
+        method_w4a16, input_size_per_partition=128, output_partition_sizes=[64]
+    )
+    assert method_w4a16.kernel is not None
+    assert method_w4a16.kernel.__class__.__name__ == "XPUwNa16LinearKernel"
+
+    # w4a8 method
+    method_w4a8 = INCXPUW4A8LinearMethod(make_layer_config(group_size=32))
+    layer_w4a8 = _create_weights(
+        method_w4a8, input_size_per_partition=128, output_partition_sizes=[64]
+    )
+    assert method_w4a8.w4a8_kernel is not None
+    assert method_w4a8.w4a8_kernel.__class__.__name__ == "XPUW4A8IntLinearKernel"
+

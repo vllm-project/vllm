@@ -314,6 +314,60 @@ class INCXPULinearMethod(INCXPULinearBase):
     that `torch.ops._xpu_C.int4_gemm_w4a16` expects.
     """
 
+    def __init__(self, layer_config: "INCLayerConfig") -> None:
+        super().__init__(layer_config)
+        self.kernel: Any | None = None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        super().create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+        try:
+            from vllm.model_executor.kernels.linear import (
+                MPLinearLayerConfig,
+                XPUwNa16LinearKernel,
+            )
+
+            quant_type = (
+                scalar_types.uint4 if self.is_awq_packed else scalar_types.uint4b8
+            )
+            mp_config = MPLinearLayerConfig(
+                full_weight_shape=(input_size, output_size),
+                partition_weight_shape=(
+                    input_size_per_partition,
+                    sum(output_partition_sizes),
+                ),
+                weight_type=quant_type,
+                act_type=params_dtype,
+                group_size=self.group_size,
+                zero_points=False,
+            )
+            can_impl, _ = XPUwNa16LinearKernel.can_implement(mp_config)
+            if can_impl:
+                self.kernel = XPUwNa16LinearKernel(
+                    mp_config,
+                    w_q_param_name="qweight",
+                    w_s_param_name="scales",
+                    w_zp_param_name="qzeros",
+                )
+        except Exception:
+            self.kernel = None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.data.device
 

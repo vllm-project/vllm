@@ -403,9 +403,27 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "xpu": {
         XPUW8A8FP8LinearKernel,
         XPUFp8BlockScaledMMKernel,
+        XPUW4A8IntLinearKernel,
+        XPUwNa16LinearKernel,
     },
     "xpu_woq": {
         XPUW8A16FP8LinearKernel,
+        XPUwNa16LinearKernel,
+    },
+    "w4a8": {
+        XPUW4A8IntLinearKernel,
+        CutlassW4A8LinearKernel,
+    },
+    "w4a16": {
+        XPUwNa16LinearKernel,
+        TritonW4A16LinearKernel,
+        RDNA3W4A16LinearKernel,
+        CPUWNA16LinearKernel,
+    },
+    "onednn": {
+        XPUW4A8IntLinearKernel,
+        XPUwNa16LinearKernel,
+        ZentorchWNA16LinearKernel,
     },
 }
 

@@ -38,6 +38,10 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
     # unaligned partition.
     _DIM_ALIGNMENT = 8
 
+    def __init__(self, layer_config) -> None:
+        super().__init__(layer_config)
+        self.w4a8_kernel = None
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -74,6 +78,37 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
             params_dtype=params_dtype,
             **extra_weight_attrs,
         )
+        try:
+            from vllm.model_executor.kernels.linear import (
+                MPLinearLayerConfig,
+                XPUW4A8IntLinearKernel,
+            )
+            from vllm.scalar_type import scalar_types
+
+            quant_type = (
+                scalar_types.uint4 if self.is_awq_packed else scalar_types.uint4b8
+            )
+            mp_config = MPLinearLayerConfig(
+                full_weight_shape=(input_size, output_size),
+                partition_weight_shape=(
+                    input_size_per_partition,
+                    output_size_per_partition,
+                ),
+                weight_type=quant_type,
+                act_type=params_dtype,
+                group_size=self.group_size,
+                zero_points=False,
+            )
+            can_impl, _ = XPUW4A8IntLinearKernel.can_implement(mp_config)
+            if can_impl:
+                self.w4a8_kernel = XPUW4A8IntLinearKernel(
+                    mp_config,
+                    w_q_param_name="qweight",
+                    w_s_param_name="scales_fp16",
+                    w_zp_param_name="qzeros",
+                )
+        except Exception:
+            self.w4a8_kernel = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
