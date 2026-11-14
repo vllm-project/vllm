@@ -29,6 +29,8 @@ from typing import Annotated, Any, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
@@ -632,6 +634,12 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         return mm_data
 
 
+# Transformers 5.23 validates audio counts unless video audio slots are marked.
+_PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
+    "5.23.0.dev0"
+)
+
+
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -655,6 +663,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 standalone_mm_counts = dict(mm_counts)
                 standalone_mm_counts["audio"] -= num_videos
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
+                if _PASS_AUDIO_FROM_VIDEO_INDICES:
+                    num_standalone = standalone_mm_counts["audio"]
+                    hf_inputs.hf_data["audio_from_video_indices"] = [
+                        *range(num_videos),
+                        *[None] * num_standalone,
+                    ]
 
         hf_data = hf_inputs.hf_data
         normalized_kwargs = hf_inputs.hf_kwargs

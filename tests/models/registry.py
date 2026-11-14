@@ -1302,19 +1302,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "Remote modeling code is not compatible with Transformers v5."
         },
     ),
-    "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-VL-7B",
-        trust_remote_code=True,
-        max_model_len=4096,
-        enforce_eager=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
-                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
-            )
-        },
-    ),
     "OpenVLAForActionPrediction": _HfExamplesInfo(
         "openvla/openvla-7b",
         trust_remote_code=True,

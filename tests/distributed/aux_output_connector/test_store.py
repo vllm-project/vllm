@@ -11,12 +11,14 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import connector as connector_module
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
+    retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -85,7 +87,7 @@ def _kv_cache_manager(
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}), 0)
 
 
 @dataclass(slots=True)
@@ -2010,7 +2012,9 @@ def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
 
 def _finished_request_with_cached_blocks(num_blocks: int = 1):
     cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
-    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager(cached, 2, num_blocks), 2 * num_blocks
+    )
     request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
     connector.request_finished(request)
     assert _kv_cache_metadata(connector) == (_HASHES, [])
@@ -2020,6 +2024,28 @@ def _finished_request_with_cached_blocks(num_blocks: int = 1):
 def _finish_empty_request(connector: AuxOutputSchedulerConnector):
     connector.request_finished(_SchedulerRequest("empty", [], 1))
     return _kv_cache_metadata(connector)
+
+
+@pytest.mark.parametrize(
+    "max_bytes,kv_transfer_config,expected",
+    [(None, None, 6), (None, object(), 12), (400, object(), 5), (1, None, 1)],
+    ids=["kv-cache", "kv-connector", "max-bytes", "max-bytes-floor"],
+)
+def test_retained_objects_follow_max_bytes(
+    monkeypatch, max_bytes, kv_transfer_config, expected
+):
+    monkeypatch.setattr(
+        connector_module, "resolve_kv_cache_block_sizes", lambda *_: (16, 8)
+    )
+    monkeypatch.setattr(
+        connector_module, "get_routed_experts_bytes_per_token", lambda _: 10
+    )
+    vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
+        kv_transfer_config=kv_transfer_config,
+    )
+    kv_cache_config = SimpleNamespace(num_blocks=3)
+    assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
 
 
 def test_connector_releases_oldest_uncached_blocks_past_capacity():

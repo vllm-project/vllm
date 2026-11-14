@@ -518,7 +518,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/laguna.py
@@ -637,7 +636,6 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/
-      - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/qwen3_dspark.py
