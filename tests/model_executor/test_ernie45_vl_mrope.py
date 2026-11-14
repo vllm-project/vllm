@@ -26,7 +26,7 @@ def _force_cpu_default_device():
     torch.set_default_device(original)
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyConfig:
     spatial_conv_size: int = 2
     temporal_conv_size: int = 2

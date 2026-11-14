@@ -50,7 +50,7 @@ WIDE_LOW_LATENCY_MAX_ROWS = 48
 MIN_FLASHINFER_VERSION = "0.7.2"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     # Tune the executor's FlashInfer GEMMs at build
     # (kernel_config.enable_flashinfer_autotune is not False).

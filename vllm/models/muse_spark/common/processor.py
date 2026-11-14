@@ -48,7 +48,7 @@ DEFAULT_IMAGE_STD: tuple[float, float, float] = (0.5, 0.5, 0.5)
 RGBA_BACKGROUND_COLOR: tuple[int, int, int] = (255, 255, 255)
 
 
-@dataclass
+@dataclass(slots=True)
 class PreprocessConfig:
     patch_height: int = 14
     patch_width: int = 14
@@ -343,7 +343,7 @@ def preprocess_video(
     return video_tensor, per_frame_token_counts, factored_timestamps
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoClipMetadata:
     """Metadata for temporal clips in a preprocessed video."""
 

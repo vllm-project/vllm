@@ -6,6 +6,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -24,6 +25,12 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
         if is_fp8_marlin_supported():
             return True, None
         return False, "Marlin FP8 not available"
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:

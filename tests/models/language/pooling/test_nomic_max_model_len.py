@@ -108,7 +108,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_use_rope_scaling_legal(model_info, vllm_runner):
+def test_use_rope_parameters_legal(model_info, vllm_runner):
     hf_overrides = {
         "rope_parameters": {
             "rope_theta": rope_theta,

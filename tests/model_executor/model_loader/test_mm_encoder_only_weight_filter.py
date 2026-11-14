@@ -5,9 +5,12 @@
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     resolve_mm_encoder_only_lm_prefixes,
@@ -120,10 +123,7 @@ def test_resolve_returns_module_prefixes_without_hf_hardcode():
     """No global Qwen HF nest list — just vLLM module prefixes."""
     prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
     assert prefixes == ("language_model.",)
-    # With Qwen mapper, still module prefixes (keys classified via mapper).
-    assert resolve_mm_encoder_only_lm_prefixes(
-        ["language_model"], weights_mapper=_qwen25_mapper()
-    ) == ("language_model.",)
+    assert resolve_mm_encoder_only_lm_prefixes(["model."]) == ("model.",)
 
 
 def test_resolve_empty_language_model_names_fail_closed():
@@ -131,17 +131,6 @@ def test_resolve_empty_language_model_names_fail_closed():
     assert resolve_mm_encoder_only_lm_prefixes(None) is None
     assert resolve_mm_encoder_only_lm_prefixes([]) is None
     assert resolve_mm_encoder_only_lm_prefixes(()) is None
-
-
-def test_resolve_skips_filter_for_shared_hf_root():
-    """Shared HF root (Molmo-shaped mapper) → fail-closed, not magic name list."""
-    assert (
-        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
-        is None
-    )
-    # Without a mapper, identity layout: module prefix is returned as-is.
-    assert resolve_mm_encoder_only_lm_prefixes(["model"]) == ("model.",)
-    assert resolve_mm_encoder_only_lm_prefixes(["model."]) == ("model.",)
 
 
 def test_resolve_keeps_llm_prefix_without_model_broadening():
@@ -167,9 +156,7 @@ def test_qwen3_nested_index_skips_lm_keeps_visual():
                 "model.visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(
-            ["language_model"], weights_mapper=_qwen3_mapper()
-        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
             files,
@@ -201,9 +188,7 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
                 "visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(
-            ["language_model"], weights_mapper=_qwen25_mapper()
-        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
             files,
@@ -215,12 +200,8 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
         assert kept == [files[1]]
 
 
-def test_molmo_shaped_index_not_filtered_when_deny_disabled():
-    """Shared-root LM attr → resolve None; callers leave the file list alone."""
-    assert (
-        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
-        is None
-    )
+def test_molmo_shaped_index_not_filtered_for_shared_hf_root():
+    """A non-LM key under the LM prefix's HF root keeps every shard."""
     with tempfile.TemporaryDirectory() as folder:
         files = [
             os.path.join(folder, "vision.safetensors"),
@@ -241,3 +222,54 @@ def test_molmo_shaped_index_not_filtered_when_deny_disabled():
             files, folder, SAFE_WEIGHTS_INDEX_NAME, ("model.",)
         )
         assert if_applied_naively == []
+        kept = filter_mm_encoder_only_safetensors_files(
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            ("model.",),
+            weights_mapper=_molmo_mapper(),
+        )
+        assert kept == files
+
+
+def test_dropped_key_under_lm_prefix_keeps_shard_filtering():
+    """A key the mapper drops is not a non-LM weight, so filtering stays on."""
+    mapper = WeightsMapper(orig_to_new_substr={"rotary": None})
+    with tempfile.TemporaryDirectory() as folder:
+        files = [
+            os.path.join(folder, "lm.safetensors"),
+            os.path.join(folder, "dropped.safetensors"),
+            os.path.join(folder, "vision.safetensors"),
+        ]
+        for path in files:
+            open(path, "wb").close()
+        _write_index(
+            folder,
+            {
+                "language_model.layers.0.weight": "lm.safetensors",
+                "language_model.layers.0.rotary.inv_freq": "dropped.safetensors",
+                "visual.blocks.0.weight": "vision.safetensors",
+            },
+        )
+        kept = filter_mm_encoder_only_safetensors_files(
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            ("language_model.",),
+            weights_mapper=mapper,
+        )
+        assert kept == files[1:]
+
+
+def test_default_loader_passes_the_model_mapper_to_the_shard_filter():
+    """The filter can only classify HF keys if it receives the model's mapper."""
+    loader = DefaultModelLoader(LoadConfig())
+    mapper = _molmo_mapper()
+    model = SimpleNamespace(hf_to_vllm_mapper=mapper, _language_model_names=["model"])
+    mm_config = SimpleNamespace(mm_encoder_only=True)
+    model_config = SimpleNamespace(multimodal_config=mm_config)
+
+    loader._init_mm_encoder_only_weight_filter(model, model_config)
+
+    assert loader._encoder_only_lm_prefixes == ("model.",)
+    assert loader._encoder_only_weights_mapper is mapper

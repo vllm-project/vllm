@@ -89,6 +89,7 @@ steps:
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   commands:
     - >-
       pytest -v -s
@@ -109,6 +110,7 @@ steps:
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_mono.py
+      kernels/models/amd/test_muse_spark_fused_markov.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -130,6 +132,7 @@ steps:
       - tests/models/test_deepseek_v41_replay_start.py
       - tests/models/test_deepseek_v41_decoder_replay_layers.py
       - tests/models/test_deepseek_v41_replay_batch.py
+      - tests/models/test_deepseek_v41_pcp.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
@@ -141,9 +144,12 @@ steps:
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
+      - vllm/v1/worker/gpu/spec_decode/dspark/
+      - vllm/v1/worker/gpu/sample/gumbel.py
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/kernels/models/amd/test_muse_spark_fused_markov.py
       commands:
       - >-
         pytest -v -s
@@ -156,6 +162,7 @@ steps:
         models/test_deepseek_v41_replay_start.py
         models/test_deepseek_v41_decoder_replay_layers.py
         models/test_deepseek_v41_replay_batch.py
+        models/test_deepseek_v41_pcp.py
         models/test_deepseek_v41_amd_replay_forward.py
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py
@@ -166,6 +173,7 @@ steps:
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_mono.py
+        kernels/models/amd/test_muse_spark_fused_markov.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
@@ -223,6 +231,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/kimi_k3/
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
@@ -250,6 +259,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/kimi_k3/
+      - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
       - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
@@ -286,12 +296,17 @@ steps:
   - vllm/model_executor/layers/mamba/
   - tests/models/kimi_k3/test_prefix_cache.py
   - .buildkite/scripts/check-kv-connectors.sh
+  env:
+    # The test checks prompt-checkpoint reuse, not the transport, and not every
+    # b200-k8s pod exposes an RDMA device to the container.
+    MOONCAKE_PROTOCOL: "tcp"
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - pytest -v -s models/kimi_k3/test_prefix_cache.py
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -428,6 +443,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       depends_on:
@@ -590,6 +606,7 @@ steps:
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
@@ -603,3 +620,31 @@ steps:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 boundary, draft norm and logits gather tests.
   - pytest -v -s models/glm5next -k specialized_decode
+
+- label: ":nvidia: (B200) Mistral Large 4"
+  key: mistral-large-4-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/mistral/
+  - tests/models/mistral/
+  commands:
+  - >-
+    pytest -v -s models/mistral
+    --ignore=models/mistral/mistral_large4/amd_specialized_decode
+  mirror:
+    amd:
+      label: ":amd: (MI355) Mistral Large 4"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/mistral/
+      - tests/models/mistral/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s models/mistral

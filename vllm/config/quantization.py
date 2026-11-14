@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import field
@@ -418,7 +418,7 @@ _layer_target_spec: ContextVar[QuantSpec | None] = ContextVar(
 
 
 @contextmanager
-def layer_target_spec_scope(spec: QuantSpec | None) -> Iterator[None]:
+def layer_target_spec_scope(spec: QuantSpec | None) -> Generator[None]:
     """Apply a layer's `targets` spec to `user_activation_override`."""
     token = _layer_target_spec.set(spec)
     try:

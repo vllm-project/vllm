@@ -32,7 +32,7 @@ _QWEN_MODEL_TYPES = frozenset(
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _QwenGDNWarmupConfig:
     h: int
     hv: int

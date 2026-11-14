@@ -26,7 +26,7 @@ from vllm.utils.torch_utils import get_dtype_size
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParamInfo:
     """Metadata about an offloaded parameter."""
 

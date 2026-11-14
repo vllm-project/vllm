@@ -59,6 +59,18 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
 
     Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
 
+## Activation Quantization Fallbacks
+
+A quantized checkpoint (or `--quantization` / `--quantization-config`) requests both a weight and an activation scheme, for example FP8 W8A8 or NVFP4 W4A4. When the kernels that run the requested activation quantization are unavailable for the device or deployment, vLLM by default falls back to a weight-only kernel (Marlin, Humming, the CPU W8A16 kernels) that keeps the quantized weights but runs activations in 16-bit, so W8A8 runs as W8A16 and W4A4 as W4A16. This costs no accuracy, but it is not the scheme the checkpoint was calibrated and benchmarked with, and it is logged once as a warning:
+
+```text
+MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.
+```
+
+Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
+
+Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

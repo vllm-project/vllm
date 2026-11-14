@@ -19,7 +19,7 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
 from .utils import make_parser, stream_parser
 
 
-@dataclass
+@dataclass(slots=True)
 class ReasoningCase:
     parser_name: str
     model_output: str

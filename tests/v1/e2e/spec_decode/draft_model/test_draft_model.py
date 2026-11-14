@@ -27,7 +27,7 @@ from ..utils import (
 
 # Tomas R: TODO: Improve naming of this class and
 # assert_draft_model_correctness and move to common SD test utils
-@dataclass
+@dataclass(slots=True)
 class ArgsTest:
     target_model: str
     draft_model: str
@@ -169,6 +169,32 @@ def test_draft_model_tensor_parallelism(vllm_runner):
         **some_high_acceptance_metrics(),
         enforce_eager=False,
         expected_gsm8k_accuracy=0.5,
+    )
+    assert_draft_model_correctness(sd_case, vllm_runner)
+
+
+@multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize(
+    "load_kwargs",
+    [
+        {"load_format": "auto"},
+        {"load_format": "fastsafetensors"},
+    ],
+    ids=["auto", "fastsafetensors"],
+)
+def test_draft_model_pipeline_parallelism(vllm_runner, load_kwargs: dict):
+    """Ensure the draft model runs whole on the last stage when PP > 1.
+
+    fastsafetensors synchronizes across ranks, so it must load the draft model
+    without the other stages.
+    """
+    sd_case = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="Qwen/Qwen3-0.6B",
+        pipeline_parallel_size=2,
+        **some_high_acceptance_metrics(),
+        enforce_eager=False,
+        engine_kwargs=load_kwargs,
     )
     assert_draft_model_correctness(sd_case, vllm_runner)
 

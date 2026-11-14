@@ -388,7 +388,7 @@ class _ReplaySSMMaterializeTables(NamedTuple):
     state_scale_slot_strides: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMModelContext:
     """Shared replay plans with independent physical slots for each cache group."""
 
@@ -418,6 +418,7 @@ class ReplaySSMModelContext:
         cls,
         grouped: Sequence[tuple[list[Any], MambaSpec, torch.Tensor]],
         max_num_reqs: int,
+        materialize_prefixes: bool,
     ) -> "ReplaySSMModelContext":
         mixers = [mixer for group, _, _ in grouped for mixer in group]
         first = mixers[0]
@@ -506,7 +507,7 @@ class ReplaySSMModelContext:
             mamba_block_size=first_spec.block_size,
             logical_window=int(first.replayssm_buffer_len),
             ring_buffer_len=first.kv_cache[2].size(2),
-            materialize_prefixes=first_spec.mamba_cache_mode == "align",
+            materialize_prefixes=materialize_prefixes,
         )
 
     def _materialize(self, num_reqs: int) -> None:

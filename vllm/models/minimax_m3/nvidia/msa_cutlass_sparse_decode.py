@@ -66,7 +66,7 @@ def nvfp4_kv_cache_slots(
     return kv_cache[:, 0::2], kv_cache[:, 1::2]
 
 
-@dataclass
+@dataclass(slots=True)
 class MSACutlassDecodeMetadata:
     plan: Any
     page_table: torch.Tensor

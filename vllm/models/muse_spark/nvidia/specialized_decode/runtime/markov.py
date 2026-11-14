@@ -53,7 +53,7 @@ logger = init_logger(__name__)
 MARKOV_BLOCK = 1024
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FusedMarkovParams:
     """Static inputs of the fused loop, fixed once the draft model loads."""
 
@@ -70,7 +70,7 @@ class FusedMarkovParams:
     """Set when `markov_w2` is vocab-parallel."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MarkovVocabShard:
     """This rank's contiguous vocab range of the draft lm_head and Markov w2."""
 

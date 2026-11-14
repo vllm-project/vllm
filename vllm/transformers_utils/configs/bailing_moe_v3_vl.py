@@ -77,7 +77,6 @@ class BailingMoeV3TextConfig(PreTrainedConfig):
         max_position_embeddings: int = 32768,
         rope_theta: float = 600000.0,
         rope_parameters: dict[str, Any] | None = None,
-        rope_scaling: dict[str, Any] | None = None,
         partial_rotary_factor: float | None = None,
         mrope_section: list[int] | tuple[int, ...] | None = None,
         use_cache: bool = True,
@@ -125,12 +124,7 @@ class BailingMoeV3TextConfig(PreTrainedConfig):
         if architectures is None:
             architectures = ["BailingMoeV3ForCausalLM"]
 
-        if rope_parameters is not None:
-            self.rope_parameters = dict(rope_parameters)
-        elif rope_scaling is not None:
-            self.rope_parameters = dict(rope_scaling)
-        else:
-            self.rope_parameters = {}
+        self.rope_parameters = dict(rope_parameters or {})
         if (
             "rope_type" not in self.rope_parameters
             and "type" not in self.rope_parameters

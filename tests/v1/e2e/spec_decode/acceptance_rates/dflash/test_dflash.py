@@ -13,7 +13,7 @@ from ...utils import compute_acceptance_len
 from ..utils import run_acceptance_length_eval
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DFlashCorrectnessConfig:
     model: str
     draft_model: str

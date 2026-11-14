@@ -3,6 +3,7 @@
 
 import functools
 import json
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -39,6 +40,9 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_torch_sdpa_wrapper,
     vit_triton_attn_wrapper,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphPaddingLogic
 
 logger = init_logger(__name__)
 
@@ -214,6 +218,27 @@ def bucket_flashinfer_max_seqlen(
     )
 
 
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
+
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
@@ -313,6 +338,21 @@ class MMEncoderAttention(CustomOp):
 
         cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
+
+    @classmethod
+    def get_cu_seqlens_padding_logics(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        *keys: str,
+    ) -> dict[str, "EncoderCudaGraphPaddingLogic"]:
+        if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
+            return oot_class.get_cu_seqlens_padding_logics(  # type: ignore[attr-defined]
+                attn_backend, *keys
+            )
+
+        if attn_backend != AttentionBackendEnum.FLASHINFER:
+            return {}
+        return dict.fromkeys(keys, _pad_flashinfer_cu_seqlens_buffer)
 
     def __init__(
         self,

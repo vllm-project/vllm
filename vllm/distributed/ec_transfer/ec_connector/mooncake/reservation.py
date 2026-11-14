@@ -72,7 +72,7 @@ _WRITER_OWNED_STATES = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerReservation:
     """Own the identity and destination allocation of one remote push."""
 

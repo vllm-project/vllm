@@ -29,7 +29,7 @@ from vllm.platforms import current_platform
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     num_layers: int
     num_experts: int

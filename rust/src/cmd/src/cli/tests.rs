@@ -75,6 +75,8 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--grpc-port",
+        "50051",
         "--dtype",
         "float16",
         "--lora-modules",
@@ -116,6 +118,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.grpc_port, Some(50051));
     assert_eq!(config.dtype, Some(ModelDtype::Float16));
     assert_eq!(config.lora_modules[0].name, "adapter-a");
     assert!(!config.language_model_only);
@@ -448,11 +451,11 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--hf-overrides.rope_scaling.rope_type",
+        "--hf-overrides.rope_parameters.rope_type",
         "yarn",
         "--compilation-config.mode",
         "3",
-        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.rope_parameters.factor=4",
         "--hf-overrides.max_position_embeddings",
         "32k",
         "--hf-overrides.sliding_window=4K",
@@ -472,7 +475,7 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         panic!("expected serve args");
     };
     let hf_overrides = serde_json::json!({
-        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "rope_parameters": {"rope_type": "yarn", "factor": 4},
         "max_position_embeddings": 32000,
         "sliding_window": 4096,
         "note": "1.5K",

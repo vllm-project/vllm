@@ -60,7 +60,7 @@ class ChannelReduction(StrEnum):
     SUM = "sum"  # Sum across channels
 
 
-@dataclass
+@dataclass(slots=True)
 class AudioSpec:
     """Specification for target audio format.
 

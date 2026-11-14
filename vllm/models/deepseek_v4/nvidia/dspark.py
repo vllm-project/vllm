@@ -524,6 +524,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
+                # A checkpoint expert can map to multiple local physical replicas.
+                # Load every local slot or the remaining replicas stay uninitialized.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
@@ -539,7 +541,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                     )
                     if success:
                         loaded_params.add(name_mapped)
-                        break
                 continue
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params

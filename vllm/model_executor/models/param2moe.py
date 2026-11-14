@@ -161,11 +161,8 @@ class Param2MoEAttention(nn.Module):
             "rope_type": "default",
             "base": config.rope_theta,
         }
-        if config.rope_scaling is not None:
-            rope_parameters.update(config.rope_scaling)
-            # Normalise key: some checkpoints use "type", vLLM wants "rope_type"
-            if "type" in rope_parameters and "rope_type" not in rope_parameters:
-                rope_parameters["rope_type"] = rope_parameters.pop("type")
+        if config.rope_parameters is not None:
+            rope_parameters.update(config.rope_parameters)
 
         self.rotary_emb = get_rope(
             rope_dim,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -51,41 +52,42 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
-    `weights_transforms` rewrite the raw weight stream in list order before
-    any name mapping."""
+    Fields are applied in declaration order. `weights_transforms` rewrite the raw
+    weight stream in list order before any name mapping, and stacked rules run
+    last so that they see the final vLLM names."""
 
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
         default_factory=dict
     )
-    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
-    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
             orig_to_new_renaming=[
                 *self.orig_to_new_renaming,
                 *other.orig_to_new_renaming,
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
             orig_to_new_stacked={
                 **self.orig_to_new_stacked,
                 **other.orig_to_new_stacked,
             },
-            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
-            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
-            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
@@ -133,12 +135,6 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardIds | None = None
-        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
-            if substr in key:
-                key = key.replace(substr, new_key, 1)
-                shard_id = new_shard_id
-
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
                 if new_key is None:
@@ -152,6 +148,12 @@ class WeightsMapper:
                     return None
 
                 key = new_key.join(key.rsplit(suffix, 1))
+
+        shard_id: ShardIds | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         return key, shard_id
 
@@ -204,12 +206,12 @@ class WeightsMapper:
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,
+            weights_transforms=[],
             orig_to_new_regex=remove_none(self.orig_to_new_regex),
             orig_to_new_substr=remove_none(self.orig_to_new_substr),
-            orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
-            weights_transforms=[],
+            orig_to_new_stacked={},
         )
 
 
@@ -705,6 +707,19 @@ def init_vllm_registered_model(
         hf_config = vllm_config.model_config.hf_config
 
     if hf_config is not None:
+        # Top-level Qwen2 uses the Transformers backend, but inner Qwen2 models stay
+        # native so that composite models can keep using their submodules.
+        # `with_hf_config` infers missing architectures from `model_type`
+        if (archs := architectures or hf_config.architectures) is not None:
+            is_qwen2 = "Qwen2ForCausalLM" in archs
+        else:
+            is_qwen2 = hf_config.model_type == "qwen2"
+        if is_qwen2:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
+
+            hf_config = copy.deepcopy(hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            architectures = ["Qwen3ForCausalLM"]
         vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
 
     return initialize_model(vllm_config=vllm_config, prefix=prefix)

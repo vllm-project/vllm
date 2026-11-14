@@ -45,6 +45,8 @@ class UnquantizedMoeBackend(Enum):
     XPU = "XPU"
     TPU = "TPU"
     OOT = "OOT"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
@@ -233,7 +235,14 @@ def select_unquantized_moe_backend(
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class when an online method
+    replaces the unquantized one.
     """
+    # TODO: migrate to oracle base method.
+    source = UnquantizedMoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -518,6 +527,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """
 
     name = "Unquantized"
+    placeholder_backend = UnquantizedMoeBackend.NONE
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend

@@ -135,6 +135,9 @@ class BeeMultiModalProjector(nn.Module):
     dummy_inputs=BeeDummyInputsBuilder,
 )
 class BeeForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
+    # Not validated for Bee; keep CPU-side normalisation.
+    supports_mm_device_do_normalize = False
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers
