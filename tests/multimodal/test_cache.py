@@ -399,6 +399,78 @@ def test_receiver_cache_features_keep_resent_payload():
     assert updated[0].mm_position.length == 2048
 
 
+@pytest.mark.skip_global_cleanup
+def test_receiver_cache_keeps_metadata_only_features_out():
+    """An EC consumer's metadata-only item must not replace a cached item the
+    encoder can run on, nor be cached to stand in for one later."""
+    from vllm.distributed.ec_transfer.ec_connector.utils import (
+        PlaceholderMetadataResolver,
+    )
+
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    model_config._mm_config.allow_missing_mm_embeddings = True
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    resolver = PlaceholderMetadataResolver(model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    p1._metadata_resolver = resolver
+
+    def _feature(data: MultiModalKwargsItem | None, mm_hash: str):
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=4),
+            mm_hash=mm_hash,
+        )
+
+    def _grid() -> MultiModalKwargsItem:
+        return MultiModalKwargsItem(
+            {
+                "image_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor([1, 2, 2]), field=MultiModalBatchedField()
+                )
+            }
+        )
+
+    pixels = MultiModalKwargsItem.dummy(nbytes=64)
+    p1.get_and_update_features([_feature(pixels, "seen")])
+    grid = _grid()
+    (served,) = p1.get_and_update_features([_feature(grid, "seen")])
+    assert served.data is grid
+    assert p1.get_and_update_item(None, "seen") is pixels
+
+    p1.get_and_update_features([_feature(_grid(), "fresh")])
+    assert "fresh" not in p1._cache
+    with pytest.raises(MultiModalCacheMissError):
+        p1.get_and_update_item(None, "fresh")
+
+
+@pytest.mark.skip_global_cleanup
+def test_receiver_cache_caches_everything_off_ec_consumers():
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    grid = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(
+                data=torch.tensor([1, 2, 2]), field=MultiModalBatchedField()
+            )
+        }
+    )
+    p1.get_and_update_features(
+        [
+            MultiModalFeatureSpec(
+                data=grid,
+                modality="image",
+                identifier="h",
+                mm_position=PlaceholderRange(offset=0, length=4),
+                mm_hash="h",
+            )
+        ]
+    )
+    assert p1._metadata_resolver is None
+    assert p1.get_and_update_item(None, "h") is grid
+
+
 def test_mm_cache_miss_batches_all_drifted_hashes():
     """All hashes drifted within one request must surface in a single error.
 

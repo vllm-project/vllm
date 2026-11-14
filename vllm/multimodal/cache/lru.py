@@ -2,10 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of Key-Replicated Cache (see docs/configuration/optimization.md)."""
 
+from typing import TYPE_CHECKING
+
 from typing_extensions import override
 
 from vllm.config import ModelConfig
 from vllm.utils.cache import CacheInfo
+
+if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.utils import (
+        PlaceholderMetadataResolver,
+    )
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
 
 from ..inputs import MultiModalKwargsItem
 from .base import (
@@ -94,6 +102,9 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
     - If the caller sent no data and the item is cached, return the cached item.
     - If the caller sent no data and the item is not cached, raise
       `MultiModalCacheMissError`.
+    - A payload with only placeholder metadata (an EC consumer's metadata-only
+      item) bypasses the cache: it must not replace, or later stand in for,
+      an item that the encoder can run on.
     """
 
     def __init__(self, model_config: ModelConfig) -> None:
@@ -105,6 +116,33 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
             mm_config.mm_processor_cache_gb,
             MultiModalKwargsItem,
         )
+        self._model_config = model_config
+        self._accepts_metadata_only = mm_config.allow_missing_mm_embeddings
+        self._metadata_resolver: PlaceholderMetadataResolver | None = None
+
+    @override
+    def get_and_update_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        if not self._accepts_metadata_only:
+            return super().get_and_update_features(mm_features)
+        cacheable = [
+            feature
+            for feature in mm_features
+            if feature.data is None or self._has_encoder_input(feature)
+        ]
+        super().get_and_update_features(cacheable)
+        return mm_features
+
+    def _has_encoder_input(self, feature: "MultiModalFeatureSpec") -> bool:
+        if self._metadata_resolver is None:
+            from vllm.distributed.ec_transfer.ec_connector.utils import (
+                PlaceholderMetadataResolver,
+            )
+
+            self._metadata_resolver = PlaceholderMetadataResolver(self._model_config)
+        return self._metadata_resolver.has_encoder_input(feature)
 
     @override
     def get_and_update_item(
