@@ -511,7 +511,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
 #pragma unroll
         for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
           finalLogits[ii] = useTopK512Optimization ? -INFINITY : -FLT_MAX;
-          if constexpr (useTopK512Optimization) finalIndices[ii] = -1;
+          finalIndices[ii] = -1;
         }
 
         // Read the elements from SMEM.
@@ -564,7 +564,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
         // the rowStart.
         outIndices[i] = smemOutput[i];
       } else {
-        outIndices[i] = smemOutput[i] - rowStart;
+        outIndices[i] = smemOutput[i] < 0 ? -1 : smemOutput[i] - rowStart;
       }
     }
   }
