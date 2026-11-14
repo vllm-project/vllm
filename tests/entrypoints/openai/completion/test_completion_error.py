@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.requests import Request
@@ -1409,6 +1409,87 @@ class TestCompletionPromptListLimit:
             max_tokens=1,
         )
         assert len(request.prompt_embeds) == 5
+
+
+@pytest.mark.asyncio
+async def test_multi_prompt_with_kv_transfer_params_rejected():
+    """Multi-prompt completions with kv_transfer_params must be rejected
+    to prevent NIXL Decode worker crashes (GHSA-6vh8-5j8f-m4vf)."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+    preprocess = AsyncMock(
+        return_value=[
+            {"prompt_token_ids": [1, 2, 3]},
+            {"prompt_token_ids": [4, 5, 6]},
+        ]
+    )
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["prompt one", "prompt two"],
+        max_tokens=10,
+        kv_transfer_params={"some": "params"},
+    )
+
+    with patch.object(
+        serving_completion.online_renderer, "preprocess_completion", preprocess
+    ):
+        result = await serving_completion._create_completion(request)
+    assert isinstance(result, ErrorResponse)
+    assert "Multi-prompt" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_single_prompt_with_kv_transfer_params_allowed():
+    """A single-prompt request with kv_transfer_params must not be rejected."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+    preprocess = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="single prompt",
+        max_tokens=10,
+        kv_transfer_params={"some": "params"},
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield RequestOutput(
+            request_id="test-id",
+            prompt="single prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello",
+                    token_ids=[100],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+            metrics=_PER_REQUEST_STATS,
+        )
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    with patch.object(
+        serving_completion.online_renderer, "preprocess_completion", preprocess
+    ):
+        result = await serving_completion._create_completion(request)
+    assert not isinstance(result, ErrorResponse)
 
 
 @pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
