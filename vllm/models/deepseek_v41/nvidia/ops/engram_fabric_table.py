@@ -9,12 +9,12 @@ with 2M pages instead of /dev/shm's 64K pages, so row lookups miss the TLB less.
 import ctypes
 import weakref
 from functools import cache
-from types import SimpleNamespace
 from typing import NamedTuple
 
 import torch
 from cuda.bindings import driver as cu
 
+from vllm.distributed.engram_pool.memory import device_view
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.common.engram import describe_error, gather_errors
@@ -191,25 +191,8 @@ def _map_table(
         host_buffer, _unmap, address, table.padded_bytes, mapped
     )
     finalizer.atexit = False  # type: ignore[misc]
-    gpu_view = _gpu_view(address, num_bytes, owner=host_buffer)
+    gpu_view = device_view(address, num_bytes, owner=host_buffer)
     return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
-
-
-def _gpu_view(address: int, num_bytes: int, owner: object = None) -> torch.Tensor:
-    """A uint8 tensor over mapped memory; torch retains `owner` with it."""
-    # Name the device: an index-less "cuda" makes torch copy the memory.
-    return torch.as_tensor(
-        SimpleNamespace(
-            __cuda_array_interface__={
-                "shape": (num_bytes,),
-                "typestr": "|u1",
-                "data": (address, False),
-                "version": 3,
-            },
-            owner=owner,
-        ),
-        device=torch.device("cuda", torch.accelerator.current_device_index()),
-    )
 
 
 def share_host_table(

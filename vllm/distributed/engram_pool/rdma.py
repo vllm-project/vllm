@@ -31,6 +31,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import torch
@@ -130,84 +131,6 @@ def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
     return num_wrs, chain, tl.minimum(tl.cdiv(num_wrs, chain), QPS)
 
 
-@triton.jit
-def _go(
-    counts,
-    seq_ptr,
-    ctrl,
-    starts,
-    used,
-    boxes,
-    box_rkeys,
-    desc,
-    desc_lkey,
-    requests,
-    world,
-    num_vg,
-    GO: tl.constexpr,
-    ISSUED: tl.constexpr,
-    STARTS: tl.constexpr,
-    WR_STARTS: tl.constexpr,
-    NUM_WRS: tl.constexpr,
-    REQUESTS: tl.constexpr,
-    REQUEST_WORDS: tl.constexpr,
-    BOX_BYTES: tl.constexpr,
-    MAX_WRS: tl.constexpr,
-    ROWS_PER_WR: tl.constexpr,
-    QPS: tl.constexpr,
-    MAX_CHAIN: tl.constexpr,
-    VG_P2: tl.constexpr,
-):
-    """Publish each (table, gatherer) group's first slot and WR, its gathering
-    WRs and the WRITE_WITH_IMM (imm: those WRs | table << 24) that copies its
-    WRs and SGEs from `desc` to its mailbox (`requests`: these in the
-    requester's addresses). Then raise go with the next sequence number if any
-    row is remote, and always count the fetch in `issued`. Counts are read
-    before they are reset."""
-    peers = tl.arange(0, VG_P2)
-    in_vg = peers < num_vg
-    sizes = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
-    first = tl.cumsum(sizes, 0) - sizes
-    tl.store(ctrl + STARTS + peers, first, mask=in_vg)
-    tl.store(ctrl + STARTS + num_vg, tl.sum(sizes))
-    tl.store(starts + peers, first, mask=in_vg)
-    num_wrs, _, num_qps = _wr_layout(sizes, ROWS_PER_WR, QPS, MAX_CHAIN)
-    wrs = num_wrs + 2 * num_qps
-    first_wr = tl.cumsum(wrs, 0) - wrs
-    tl.store(ctrl + WR_STARTS + peers, first_wr, mask=in_vg)
-    tl.store(ctrl + WR_STARTS + num_vg, tl.sum(wrs))
-    tl.store(ctrl + NUM_WRS + peers, num_wrs, mask=in_vg)
-    tl.store(used + peers, num_qps, mask=in_vg)
-    # ibv_send_wr (sg_list, num_sge | WRITE_WITH_IMM << 32, IBV_SEND_SIGNALED
-    # | imm << 32, remote_addr, rkey), then its two ibv_sge.
-    col = tl.arange(0, 32)[None, :]
-    lkey = desc_lkey.to(tl.int64) << 32
-    sges = requests + (peers * REQUEST_WORDS + 16)[:, None] * 8
-    imm = num_wrs | (peers // world) << 24
-    wr = tl.where(col == 2, sges, 0)
-    wr = tl.where(col == 3, 2 | 1 << 32, wr)
-    wr = tl.where(col == 4, (2 | imm << 32)[:, None], wr)
-    box = tl.load(boxes + peers % world, mask=in_vg, other=0)
-    wr = tl.where(col == 5, (box + peers // world * BOX_BYTES)[:, None], wr)
-    rkey = tl.load(box_rkeys + peers % world, mask=in_vg, other=0).to(tl.int64)
-    wr = tl.where(col == 6, rkey[:, None], wr)
-    wr = tl.where(col == 16, desc + first_wr[:, None] * 128, wr)
-    wr = tl.where(col == 17, (wrs * 128)[:, None] | lkey, wr)
-    wr = tl.where(col == 18, desc + MAX_WRS * 128 + first[:, None] * 16, wr)
-    wr = tl.where(col == 19, (sizes * 16)[:, None] | lkey, wr)
-    at = ctrl + REQUESTS + peers[:, None] * REQUEST_WORDS + col
-    tl.store(at, wr, mask=in_vg[:, None] & (col < REQUEST_WORDS))
-    tl.debug_barrier()
-    tl.store(counts + peers, tl.zeros_like(peers), mask=in_vg)
-    if tl.sum(sizes) > 0:
-        # One read-modify-write, so every thread agrees on the sequence number.
-        seq = tl.atomic_add(seq_ptr, 1) + 1
-        tl.debug_barrier()
-        tl.atomic_xchg(ctrl + GO, seq, sem="release", scope="sys")
-    tl.debug_barrier()
-    tl.atomic_add(ctrl + ISSUED, 1, sem="release", scope="sys")
-
-
 @triton.jit(
     do_not_specialize=[
         "num_items",
@@ -249,8 +172,7 @@ def _wr_kernel(
     requests,
     GO: tl.constexpr,
     ISSUED: tl.constexpr,
-    STARTS: tl.constexpr,
-    WR_STARTS: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
     NUM_WRS: tl.constexpr,
     REQUESTS: tl.constexpr,
     REQUEST_WORDS: tl.constexpr,
@@ -269,15 +191,21 @@ def _wr_kernel(
     READ of its flag, which returns once the QP's rows have landed, and a
     fenced inline WRITE of the next `seq` to it. Groups are (table, gatherer);
     WR pointers are into the gatherer's mailbox for this GPU and the table
-    (`boxes`, then BOX_BYTES per table): WRs, flag WRs, then SGEs. The last
-    program to finish then runs `_go`."""
+    (`boxes`, then BOX_BYTES per table): WRs, flag WRs, then SGEs.
+
+    The last program to finish then publishes each group's gathering WRs and
+    the WRITE_WITH_IMM (imm: those WRs | table << 24) that copies its WRs and
+    SGEs from `desc` to its mailbox (`requests`: these in the requester's
+    addresses), raises go with the next `seq` if any row is remote, and always
+    counts the fetch in `issued`."""
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     packed = tl.load(owner_pos + item, mask=item < num_items, other=-1)
     remote = packed >= 0
     owner = packed >> 32
     position = packed & 0xFFFFFFFF
     peers = tl.arange(0, VG_P2)
-    sizes = tl.load(counts + peers, mask=peers < num_vg, other=0).to(tl.int64)
+    in_vg = peers < num_vg
+    sizes = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
     all_wrs, _, all_qps = _wr_layout(sizes, ROWS_PER_WR, QPS, MAX_CHAIN)
     before = peers[None, :] < owner[:, None]
     start = tl.sum(tl.where(before, sizes[None, :], 0), 1)
@@ -321,28 +249,23 @@ def _wr_kernel(
     # the WRITE (IBV_SEND_INLINE | IBV_SEND_FENCE) of seq from its word 14.
     # Each keeps its SGE in words 12-13.
     is_flag = (remote & (position < num_qps))[:, None]
-    read = box + (num_wrs + 2 * position) * 128
+    read = (box + (num_wrs + 2 * position) * 128)[:, None]
     write = read + 128
-    flag_at = (flags + (owner * QPS + position) * 8)[:, None]
     lkey = tl.load(box_keys + owner % world, mask=remote, other=0).to(tl.int64)
-    lkey <<= 32
-    wr = tl.where(col == 0, rank.to(tl.int64), 0)
-    wr = tl.where(col == 1, write[:, None], wr)
-    wr = tl.where(col == 2, (read + 96)[:, None], wr)
+    flag = tl.where(col == 0, rank.to(tl.int64), 0)
+    flag = tl.where(col == 5, (flags + (owner * QPS + position) * 8)[:, None], flag)
+    flag = tl.where(col == 6, flags_rkey.to(tl.int64), flag)
+    wr = tl.where(col == 1, write, flag)
+    wr = tl.where(col == 2, read + 96, wr)
     wr = tl.where(col == 3, 1 | 4 << 32, wr)
-    wr = tl.where(col == 5, flag_at, wr)
-    wr = tl.where(col == 6, flags_rkey.to(tl.int64), wr)
-    wr = tl.where(col == 12, (read + 120)[:, None], wr)
-    wr = tl.where(col == 13, (8 | lkey)[:, None], wr)
+    wr = tl.where(col == 12, read + 120, wr)
+    wr = tl.where(col == 13, (8 | lkey << 32)[:, None], wr)
     record = desc + (wr_start + num_wrs + 2 * position)[:, None] * 16 + col
     tl.store(record, wr, mask=is_flag)
-    wr = tl.where(col == 0, rank.to(tl.int64), 0)
-    wr = tl.where(col == 2, (write + 96)[:, None], wr)
+    wr = tl.where(col == 2, write + 96, flag)
     wr = tl.where(col == 3, 1, wr)
     wr = tl.where(col == 4, 8 | 1, wr)
-    wr = tl.where(col == 5, flag_at, wr)
-    wr = tl.where(col == 6, flags_rkey.to(tl.int64), wr)
-    wr = tl.where(col == 12, (write + 112)[:, None], wr)
+    wr = tl.where(col == 12, write + 112, wr)
     wr = tl.where(col == 13, 8, wr)
     wr = tl.where(col == 14, tl.load(seq_ptr) + 1, wr)
     tl.store(record + 16, wr, mask=is_flag)
@@ -353,33 +276,48 @@ def _wr_kernel(
     tl.debug_barrier()
     if tl.atomic_add(ticket, 1, sem="acq_rel") == tl.num_programs(0) - 1:
         tl.store(ticket, 0)
-        _go(
-            counts,
-            seq_ptr,
-            ctrl,
-            starts,
-            used,
-            boxes,
-            box_rkeys,
-            desc_at,
-            desc_lkey,
-            requests,
-            world,
-            num_vg,
-            GO,
-            ISSUED,
-            STARTS,
-            WR_STARTS,
-            NUM_WRS,
-            REQUESTS,
-            REQUEST_WORDS,
-            BOX_BYTES,
-            MAX_WRS,
-            ROWS_PER_WR,
-            QPS,
-            MAX_CHAIN,
-            VG_P2,
+        group_first = tl.cumsum(sizes, 0) - sizes
+        group_wrs = all_wrs + 2 * all_qps
+        group_first_wr = tl.cumsum(group_wrs, 0) - group_wrs
+        tl.store(starts + peers, group_first, mask=in_vg)
+        tl.store(used + peers, all_qps, mask=in_vg)
+        tl.store(ctrl + NUM_WRS + peers, all_wrs, mask=in_vg)
+        tl.store(ctrl + NUM_GROUPS, num_vg.to(tl.int64))
+        # ibv_send_wr (sg_list, num_sge | WRITE_WITH_IMM << 32,
+        # IBV_SEND_SIGNALED | imm << 32, remote_addr, rkey), then two ibv_sge.
+        word = tl.arange(0, 32)[None, :]
+        desc_key = desc_lkey.to(tl.int64) << 32
+        imm = all_wrs | (peers // world) << 24
+        request = tl.where(
+            word == 2, requests + (peers * REQUEST_WORDS + 16)[:, None] * 8, 0
         )
+        request = tl.where(word == 3, 2 | 1 << 32, request)
+        request = tl.where(word == 4, (2 | imm << 32)[:, None], request)
+        group_box = tl.load(boxes + peers % world, mask=in_vg, other=0)
+        request = tl.where(
+            word == 5, (group_box + peers // world * BOX_BYTES)[:, None], request
+        )
+        group_rkey = tl.load(box_rkeys + peers % world, mask=in_vg, other=0).to(
+            tl.int64
+        )
+        request = tl.where(word == 6, group_rkey[:, None], request)
+        request = tl.where(word == 16, desc_at + group_first_wr[:, None] * 128, request)
+        request = tl.where(word == 17, (group_wrs * 128)[:, None] | desc_key, request)
+        request = tl.where(
+            word == 18, desc_at + MAX_WRS * 128 + group_first[:, None] * 16, request
+        )
+        request = tl.where(word == 19, (sizes * 16)[:, None] | desc_key, request)
+        request_at = ctrl + REQUESTS + peers[:, None] * REQUEST_WORDS + word
+        tl.store(request_at, request, mask=in_vg[:, None] & (word < REQUEST_WORDS))
+        tl.debug_barrier()
+        tl.store(counts + peers, tl.zeros_like(peers), mask=in_vg)
+        if tl.sum(sizes) > 0:
+            # One read-modify-write, so every thread agrees on the sequence number.
+            seq = tl.atomic_add(seq_ptr, 1) + 1
+            tl.debug_barrier()
+            tl.atomic_xchg(ctrl + GO, seq, sem="release", scope="sys")
+        tl.debug_barrier()
+        tl.atomic_add(ctrl + ISSUED, 1, sem="release", scope="sys")
 
 
 @triton.jit(do_not_specialize=["num_words", "table"])
@@ -411,22 +349,20 @@ def _place_kernel(
     places in `out` (that table's `[..., K]` rows) and zero dead rows; one word
     per lane."""
     peers = tl.arange(0, WORLD_P2)
-    in_world = peers < world
     vg = table * world + peers
     qps = tl.arange(0, QPS_P2)[None, :]
-    mask = qps < tl.load(used + vg, mask=in_world, other=0)[:, None]
+    mask = qps < tl.load(used + vg, mask=peers < world, other=0)[:, None]
     at = flags + vg[:, None] * QPS + qps
     seq = tl.load(seq_ptr)
     deadline = tl.extra.cuda.globaltimer() + timeout_ns
-    waiting = tl.sum(
-        (tl.load(at, mask=mask, other=seq, volatile=True) != seq).to(tl.int32)
-    )
-    # Only a fetch with rows still to come can have failed.
-    failed = (waiting > 0) & (tl.load(ctrl + DONE, volatile=True) == -seq)
+    waiting = tl.full((), 1, tl.int32)
+    failed = waiting < 0
     while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
         landed = tl.load(at, mask=mask, other=seq, volatile=True)
         waiting = tl.sum((landed != seq).to(tl.int32))
-        failed = (waiting > 0) & (tl.load(ctrl + DONE, volatile=True) == -seq)
+        # Only a fetch with rows still to come can have failed.
+        done = tl.load(ctrl + DONE, mask=waiting > 0, other=0, volatile=True)
+        failed = (waiting > 0) & (done == -seq)
     if failed | (waiting > 0):
         tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
         tl.inline_asm_elementwise(
@@ -462,7 +398,6 @@ class RdmaTransport:
         max_items: int,
         max_row_bytes: int,
         max_tables: int = 1,
-        qps_per_peer: int = 0,
     ) -> None:
         self.group = group
         self.rank, self.world = group.rank_in_group, group.world_size
@@ -472,9 +407,7 @@ class RdmaTransport:
         with open("/proc/sys/kernel/random/boot_id") as f:
             self.node = f.read().strip()
         # Bound the WRITEs in flight per NIC: many QPs for few peers, few for many.
-        self.qps_per_peer = qps_per_peer or min(
-            16, max(2, 128 // max(self.world - 1, 1))
-        )
+        self.qps_per_peer = min(16, max(2, 128 // max(self.world - 1, 1)))
         self.ctrl = SharedHost(proxy.CTRL_BYTES, "ctrl")
         # The requester sleeps on this process-shared semaphore; a CUDA host
         # function posts it from the stream, with no Python on that path.
@@ -500,6 +433,8 @@ class RdmaTransport:
             )
             theirs.close()
             self.procs[role] = (process, ours)
+            # Sets returncode when it exits, so fetches check without a syscall.
+            threading.Thread(target=process.wait, daemon=True).start()
         device = pick_device()
         info = self._call(
             "owner", "init", device, self.world, self.rank, self.qps_per_peer, SQ_DEPTH
@@ -535,9 +470,11 @@ class RdmaTransport:
         self.mtu = min(e[3] for e in everyone)
         # Per (table, gatherer): a partial WR, and a READ and a flag WR per QP.
         rows_per_wr = self.rows_per_wr(max_row_bytes)
-        box_wrs = -(-max_items // rows_per_wr) + 1 + 2 * self.qps_per_peer
+        box_wrs = triton.cdiv(max_items, rows_per_wr) + 1 + 2 * self.qps_per_peer
         groups = self.world * max_tables
-        self.max_wrs = -(-total // rows_per_wr) + groups * (1 + 2 * self.qps_per_peer)
+        self.max_wrs = triton.cdiv(total, rows_per_wr) + groups * (
+            1 + 2 * self.qps_per_peer
+        )
         mailboxes = self._call(
             "owner",
             "connect",
@@ -695,18 +632,24 @@ class RdmaTransport:
 
     def start(
         self, meta: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, words: int
-    ) -> None:
+    ) -> list:
         """Start gathering rows `ids` (`[..., TABLES, K]`) of the tables in `meta`
         into `out` (`[TABLES, ..., K]` rows), on the current stream: the NICs
-        move them while the stream goes on, and `wait` takes each table's."""
+        move them while the stream goes on. Returns, for `wait`, a launcher
+        per table that places its rows once they have landed."""
         n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
         if n > self.max_items * self.max_tables or tables > self.max_tables:
             raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
-        if any(process.poll() is not None for process, _ in self.procs.values()):
+        if any(process.returncode is not None for process, _ in self.procs.values()):
             raise RuntimeError("Engram pool RDMA proxy exited")
-        self._fetch = (n, tables, k, words, out)
+        stream = torch.cuda.current_stream()
         if not n:
-            return
+            # An early wakeup still joins this stream (the requester naps).
+            if self._woken:
+                self._woken = False
+                self._joined.record(self.wake_stream)
+                stream.wait_event(self._joined)
+            return []
         rows_per_wr = self.rows_per_wr(words * 8)
         num_vg, vg_p2 = self.world * tables, triton.next_power_of_2(self.world * tables)
         qps = self.qps_per_peer
@@ -730,8 +673,7 @@ class RdmaTransport:
             dict(
                 GO=proxy.GO,
                 ISSUED=proxy.ISSUED,
-                STARTS=proxy.STARTS,
-                WR_STARTS=proxy.WR_STARTS,
+                NUM_GROUPS=proxy.NUM_GROUPS,
                 NUM_WRS=proxy.NUM_WRS,
                 REQUESTS=proxy.REQUESTS,
                 REQUEST_WORDS=proxy.REQUEST_WORDS,
@@ -745,15 +687,38 @@ class RdmaTransport:
                 BLOCK=128,
             ),
         )
+        num_words = n // tables * words
+        place = [
+            self._kernel(
+                _place_kernel,
+                (triton.cdiv(num_words, 1024),),
+                (self.owner_pos, self.starts, self.landing, out[table], num_words)
+                + (table, self.seq, self.ctrl_words, self.used, self.flags)
+                + (self.world, TIMEOUT_NS),
+                4,
+                dict(
+                    TABLES=tables,
+                    K=k,
+                    HOST=self.host_landing,
+                    WORDS=words,
+                    DONE=proxy.DONE,
+                    QPS=qps,
+                    QPS_P2=triton.next_power_of_2(qps),
+                    WORLD_P2=self.world_p2,
+                    BLOCK=1024,
+                ),
+            )
+            for table in range(tables)
+        ]
         # Once nothing is left to compile, unless `wake` came earlier.
         if not self._woken:
             self.wake()
         self._woken = False
-        stream = torch.cuda.current_stream()
         for launch in (plan, wr):
             launch(stream.cuda_stream)
         self._joined.record(self.wake_stream)
         stream.wait_event(self._joined)
+        return place
 
     def wake(self) -> None:
         """Wake the requester for the next `start`, from a CUDA host function
@@ -768,40 +733,18 @@ class RdmaTransport:
             raise RuntimeError(f"cuLaunchHostFunc failed: {error}")
         self._woken = True
 
-    def wait(self, table: int) -> None:
-        """Hold the current stream until table `table`'s rows of the last
-        `start` have landed, and place them."""
-        n, tables, k, words, out = self._fetch
-        if not n:
-            return
-        qps = self.qps_per_peer
-        num_words = n // tables * words
-        self._launch(
-            _place_kernel,
-            (triton.cdiv(num_words, 1024),),
-            torch.cuda.current_stream().cuda_stream,
-            (self.owner_pos, self.starts, self.landing, out[table], num_words, table)
-            + (self.seq, self.ctrl_words, self.used, self.flags, self.world)
-            + (TIMEOUT_NS,),
-            TABLES=tables,
-            K=k,
-            HOST=self.host_landing,
-            WORDS=words,
-            DONE=proxy.DONE,
-            QPS=qps,
-            QPS_P2=triton.next_power_of_2(qps),
-            WORLD_P2=self.world_p2,
-            BLOCK=1024,
-        )
-
-    def _launch(self, kernel, grid, stream: int, args: tuple, num_warps=4, **consts):
-        """Launch `kernel` with `args` then `consts` (its constexprs, in order)."""
-        self._kernel(kernel, grid, args, num_warps, consts)(stream)
+    @staticmethod
+    def wait(place: list, table: int) -> None:
+        """Hold the current stream until table `table`'s rows of the fetch that
+        `start` returned `place` for have landed, and place them."""
+        if place:
+            place[table](torch.cuda.current_stream().cuda_stream)
 
     def _kernel(self, kernel, grid, args: tuple, num_warps: int, consts: dict):
-        """A launcher (taking the stream) of `kernel` on `grid`, compiled once
-        per constexprs and tensor alignment; Triton's per-call dispatch would
-        cost ~20 us per launch here."""
+        """A launcher (taking the stream) of `kernel` on `grid` with `args`, then
+        `consts` (its constexprs, in order). Each kernel is compiled once per
+        constexprs and tensor alignment; Triton's per-call dispatch would cost
+        ~20 us per launch here."""
         aligned = tuple(a.data_ptr() % 16 == 0 for a in args if type(a) is torch.Tensor)
         key = (kernel, num_warps, *consts.values(), *aligned)
         if (compiled := self._compiled.get(key)) is None:

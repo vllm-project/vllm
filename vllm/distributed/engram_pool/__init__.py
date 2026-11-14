@@ -4,12 +4,12 @@
 
 The pool owns registration, rendezvous, row sharding, address maps and
 fetches; models own hashing, row encoding and decoding. A fetch gathers
-`[..., L, K]` row ids of L tables into `[..., L, K, row_bytes]` HBM rows on a
+`[..., L, K]` row ids of L tables into `[L, ..., K, row_bytes]` HBM rows on a
 stream, with no host sync, so it captures into CUDA graphs.
 
 Transports: `nvlink` maps every GPU's HBM shard (cuMem FABRIC) and loads rows
-directly; `rdma` reads remote rows with one-sided READs from host or HBM
-shards, posted by a proxy process per GPU.
+directly; with `rdma`, the NICs of the GPUs holding host or HBM shards gather
+rows into RDMA WRITEs that each GPU builds, carried by proxy processes.
 """
 
 import json
@@ -60,13 +60,13 @@ class EngramTable:
 class EngramFetch:
     """A started fetch: `wait(i)` returns table i's rows once they landed."""
 
-    def __init__(self, transport, rows: torch.Tensor) -> None:
-        self.transport, self.rows = transport, rows
+    def __init__(self, transport, rows: torch.Tensor, state) -> None:
+        self.transport, self.rows, self.state = transport, rows, state
 
     def wait(self, index: int) -> torch.Tensor:
         """Rows `[..., K, row_bytes]` of table `index`; the current stream
         waits for them."""
-        self.transport.wait(index)
+        self.transport.wait(self.state, index)
         return self.rows[index]
 
 
@@ -232,8 +232,8 @@ class EngramPool:
         row_bytes = tables[0].row_bytes
         shape = (len(tables), *ids.shape[:-2], ids.shape[-1], row_bytes)
         rows = self.output[: ids.numel() * row_bytes].view(shape)
-        self.transport.start(meta, ids.contiguous(), rows, row_bytes // 8)  # type: ignore[attr-defined]
-        return EngramFetch(self.transport, rows)
+        state = self.transport.start(meta, ids.contiguous(), rows, row_bytes // 8)  # type: ignore[attr-defined]
+        return EngramFetch(self.transport, rows, state)
 
     def lookup(self, tables: list[EngramTable], ids: torch.Tensor) -> torch.Tensor:
         """Rows `[L, ..., K, row_bytes]` (uint8) of `ids`, as `start` takes."""

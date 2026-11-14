@@ -53,11 +53,9 @@ else:
     import verbs  # type: ignore[no-redef]
 
 # Shared control block, in int64 words: go, issued (fetches started), done
-# (`-seq` if the requester failed), then per (table, gatherer) its first slot
-# and first WR (one more each), its WRs that gather rows, and the request the
-# GPU wrote for it (REQUEST_WORDS).
-GO, ISSUED, DONE, STARTS, WR_STARTS = 0, 8, 16, 32, 544
-NUM_WRS, REQUESTS = 1056, 1568
+# (`-seq` if the requester failed), the fetch's (table, gatherer) groups, then
+# per group its WRs that gather rows and the request the GPU wrote for it.
+GO, ISSUED, DONE, NUM_GROUPS, NUM_WRS, REQUESTS = 0, 8, 16, 24, 32, 544
 REQUEST_WORDS = 24
 # The GPU's process-shared semaphore follows the words.
 SEM_OFFSET = (REQUESTS + 512 * REQUEST_WORDS) * 8
@@ -69,8 +67,6 @@ MIN_CHAIN, MAX_CHAIN = 16, 64
 # Receive WRs kept posted for each requester, and requests in flight per QP.
 RECV_DEPTH, REQUEST_DEPTH = 32, 64
 _PR_SET_PDEATHSIG = 1
-_NOTICE = -1
-_U64 = 0xFFFFFFFFFFFFFFFF
 
 
 def chain_length(num_wrs: int, qps: int) -> int:
@@ -183,7 +179,6 @@ class Requester(_Proxy):
         libc.pthread_mutex_init(mutex, None)
         lock(mutex)
         words, device = self.words, self.device
-        bad = ctypes.byref(ctypes.c_void_p())
         wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
         seq = issued = 0
         while True:
@@ -206,9 +201,10 @@ class Requester(_Proxy):
                 while count := device.poll_cq(self.cq, wc, 64):
                     if _failed(wc, count, "request"):
                         raise RuntimeError("Engram pool RDMA request failed")
-                for peer, qp, at in self.posts:
-                    if words[NUM_WRS + peer] and (error := device._post(qp, at, bad)):
-                        raise RuntimeError(f"ibv_post_send: {os.strerror(error)}")
+                groups = words[NUM_GROUPS]
+                for vg, qp, at in self.posts:
+                    if vg < groups and words[NUM_WRS + vg]:
+                        device.post_send(qp, at)
             except Exception:
                 traceback.print_exc()
                 words[DONE] = -seq
@@ -253,8 +249,6 @@ class Owner(_Proxy):
             dev.create_qp(self.data_cq, self.recv_cq, 1) for _ in range(qps_per_peer)
         ]
         self.data_wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
-        self.bad = ctypes.c_void_p()
-        self.bad_ref = ctypes.byref(self.bad)
         gid, lid = dev.address()
         return {
             "address": [gid.hex(), lid],
@@ -279,7 +273,7 @@ class Owner(_Proxy):
         ):
             dev.connect(qp, partner_qpn, dev.address())
             dev.connect(partner, qpn, dev.address())
-        self.recv_wr = (ctypes.c_uint64 * 4)(_NOTICE & _U64, 0, 0, 0)
+        self.recv_wr = (ctypes.c_uint64 * 4)()
         by_peer = {peer: qp for peer, qp in self.receivers.values()}
         for peer, (gid, lid), remote in requesters:
             dev.connect(by_peer[peer], remote, (bytes.fromhex(gid), lid))
@@ -356,11 +350,12 @@ class Owner(_Proxy):
                     traceback.print_exc()
 
     def post(self, qp: int, wr: int) -> None:
-        while error := self.device._post(qp, wr, self.bad_ref):
+        device = self.device
+        while error := device._post(qp, wr, device._bad_ref):
             if error != errno.ENOMEM:
                 raise RuntimeError(f"ibv_post_send: {os.strerror(error)}")
             # The send queue is full: resume at the first WR that did not fit.
-            wr = self.bad.value or 0
+            wr = device._bad.value or 0
             self.retire(block=True)
 
     def retire(self, block: bool) -> None:

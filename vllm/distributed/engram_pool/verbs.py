@@ -14,12 +14,7 @@ import struct
 from functools import cache
 
 SEND_WR_BYTES = 128
-RECV_WR_BYTES = 32
 WC_BYTES = 48
-SEND_SIGNALED, SEND_INLINE = 2, 8
-WR_WRITE_WITH_IMM = 1
-# ibv_wc opcodes from here on are receive completions.
-WC_RECV = 128
 
 # enum ibv_access_flags
 _LOCAL_WRITE, _REMOTE_WRITE, _REMOTE_READ = 1, 2, 4
@@ -181,6 +176,8 @@ class Device:
         self._notify = _NOTIFY_CQ(ops[_OPS_NOTIFY_CQ])
         self._bad = ctypes.c_void_p()
         self._bad_ref = ctypes.byref(self._bad)
+        self._event = ctypes.c_void_p(), ctypes.c_void_p()
+        self._event_refs = tuple(ctypes.byref(p) for p in self._event)
 
     def describe(self) -> str:
         kind = "InfiniBand" if self.is_ib else f"RoCE, GID index {self.gid_index}"
@@ -232,13 +229,9 @@ class Device:
 
     def cq_event(self, channel: int) -> None:
         """Sleep until the next event of `channel` and consume it."""
-        cq, context = ctypes.c_void_p(), ctypes.c_void_p()
-        _check(
-            _lib().ibv_get_cq_event(channel, ctypes.byref(cq), ctypes.byref(context))
-            == 0,
-            "ibv_get_cq_event",
-        )
-        _lib().ibv_ack_cq_events(cq, 1)
+        lib = _lib()
+        _check(lib.ibv_get_cq_event(channel, *self._event_refs) == 0, "get_cq_event")
+        lib.ibv_ack_cq_events(self._event[0], 1)
 
     def post_recv(self, qp: int, wr: int) -> None:
         if error := self._post_recv(qp, wr, self._bad_ref):

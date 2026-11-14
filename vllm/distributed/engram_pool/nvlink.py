@@ -72,7 +72,8 @@ class NvlinkTransport:
     def wake(self) -> None:
         """Nothing to wake: SMs move rows."""
 
-    def wait(self, table: int) -> None:
+    @staticmethod
+    def wait(state: None, table: int) -> None:
         """Rows are in place once `start` returns: SMs moved them."""
 
     def start(

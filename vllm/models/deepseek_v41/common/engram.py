@@ -1958,11 +1958,11 @@ class Engram(nn.Module):
             head_dim,
             dtype=torch.bfloat16,
         )
-        # Pool fetches run on the compute stream (EngramBatch overlaps them).
+        # Pool tables need no prefetch stream.
         if self.embed_tokens._pool is not None or not self.embed_tokens.cpu_offload:
             self._prefetch_stream = None
             return
-        elif self._prefetch_stream is None:
+        if self._prefetch_stream is None:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
         self._prefetch_done = torch.cuda.Event()
 

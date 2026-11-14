@@ -205,11 +205,17 @@ launch. `peer_group_transport` picks how rows move:
 - `nvlink` (default): GPUs load rows straight from their owner's HBM. Requires
   CUDA FABRIC handles (an IMEX channel, as on NVL72) and `cpu_offload`
   disabled.
-- `rdma`: one-sided RDMA READs (RoCE v2 or InfiniBand, through libibverbs) from
-  the owner's HBM, or from its host memory with `cpu_offload` enabled. Each GPU
-  uses an active RDMA device on its NUMA node and starts one proxy process that
-  posts the READs. Peers exchange memory keys at startup, so the network must
-  be trusted.
+- `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
+  with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
+  libibverbs) that the fetching GPU builds; no SM moves rows. Each GPU uses an
+  active RDMA device on its NUMA node and starts two proxy processes that post
+  the WRs. Peers exchange memory keys at startup, so the network must be
+  trusted.
+
+`peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
+compute stream, started before the decoder layers with each Engram layer
+waiting for its own rows; `async` on a side stream, at a CUDA graph break per
+fetch.
 
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.

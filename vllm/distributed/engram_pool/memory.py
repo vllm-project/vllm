@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.host_memory import pin_tensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -61,8 +62,9 @@ def _prefer_numa_node(address: int, num_bytes: int, node: int) -> None:
 
 def _unregister(mapping: mmap.mmap, pointer: int) -> None:
     # Keeps the mapping alive until CUDA has released the registration.
-    result = torch.cuda.cudart().cudaHostUnregister(pointer)
-    if result.value != 0:
+    cudart = torch.cuda.cudart()
+    if (result := cudart.cudaHostUnregister(pointer)).value != 0:
+        cudart.cudaGetLastError()
         logger.warning("Engram pool cudaHostUnregister failed: %s", result)
 
 
@@ -79,16 +81,11 @@ class SharedHost:
         pointer = owner.ctypes.data
         _prefer_numa_node(pointer, self.nbytes, gpu_numa_node())
         owner[:: mmap.PAGESIZE] = 0
-        result = torch.cuda.cudart().cudaHostRegister(pointer, self.nbytes, 0)
-        if result.value != 0:
-            raise RuntimeError(f"cudaHostRegister({self.nbytes} B) failed: {result}")
+        self.cpu = torch.from_numpy(owner)
+        pin_tensor(self.cpu)
         finalizer = weakref.finalize(owner, _unregister, mapping, pointer)
         finalizer.atexit = False  # type: ignore[misc]
-        self.cpu = torch.from_numpy(owner)
         self.gpu = get_accelerator_view_from_cpu_tensor(self.cpu)
-
-    def close(self) -> None:
-        os.close(self.fd)
 
 
 def device_view(address: int, num_bytes: int, owner: object = None) -> torch.Tensor:
