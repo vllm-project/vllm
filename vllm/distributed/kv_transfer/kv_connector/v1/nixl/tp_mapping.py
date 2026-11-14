@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 # ======================================================================
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadSpec:
     """Specification for a single remote block read operation."""
 
@@ -37,7 +37,7 @@ def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, MambaSpec)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TPMapping:
     """Complete local-to-remote TP mapping for one remote engine.
 

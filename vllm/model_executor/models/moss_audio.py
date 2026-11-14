@@ -219,7 +219,7 @@ def _merge_moss_audio_processor_configs(
     return merged
 
 
-@dataclass
+@dataclass(slots=True)
 class MossAudioEncoderConfig:
     d_model: int = 1280
     output_dim: int = 1280
@@ -1345,9 +1345,10 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
+        mel_sr = self.info.get_hf_processor().mel_config["mel_sr"]
         return {
             "audio": self._get_dummy_audios(
-                length=16000,
+                length=int(mel_sr * DEFAULT_MAX_AUDIO_SECONDS),
                 num_audios=mm_counts.get("audio", 0),
                 overrides=mm_options.get("audio"),
             )

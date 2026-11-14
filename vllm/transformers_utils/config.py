@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
@@ -235,7 +235,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
 
 
 @contextmanager
-def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+def _mistral_patch_hf_hub_constants() -> Generator[None]:
     hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
     hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
     constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
@@ -1022,6 +1022,13 @@ def get_config(
                     scale_fmt,
                 )
 
+    # Sentence Transformers v6 prefers the CrossEncoder activation it saves outside
+    # config.json. Set it under the legacy key so that hf_overrides of either key win.
+    if act_fn := get_sentence_transformers_activation_fn(model, revision):
+        sentence_transformers = getattr(config, "sentence_transformers", None) or {}
+        sentence_transformers.pop("activation_fn", None)
+        config.sbert_ce_default_activation_function = act_fn
+
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
         config.update(hf_overrides_kw)
@@ -1486,6 +1493,36 @@ def get_sentence_transformers_chat_template_kwargs(
             f"Unsupported Sentence Transformers chat template settings: {reserved}"
         )
     return chat_template_kwargs
+
+
+@cache
+def get_sentence_transformers_activation_fn(
+    model: str | Path,
+    revision: str | None = None,
+) -> str | None:
+    try:
+        if not file_or_path_exists(
+            model, "config_sentence_transformers.json", revision
+        ):
+            return None
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if modules is not None:
+        types = [m.get("type") if isinstance(m, dict) else None for m in modules]
+        if not (len(types) == 1 and types[0] in _ST_TRANSFORMER_MODULE_TYPES):
+            return None
+    activation_fn = st_config.get("activation_fn")
+    return activation_fn if isinstance(activation_fn, str) else None
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
