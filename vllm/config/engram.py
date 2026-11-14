@@ -69,9 +69,15 @@ class EngramConfig:
 
     peer_group_transport: Literal["nvlink", "rdma"] = "nvlink"
     """How a peer group reads rows: `nvlink` loads them from peers' HBM (CUDA
-    FABRIC handles, an IMEX channel, cpu_offload=False); `rdma` reads them with
-    one-sided RDMA READs from peers' HBM, or from their host memory with
+    FABRIC handles, an IMEX channel, cpu_offload=False); with `rdma`, the NICs
+    of the GPUs holding them gather them from HBM, or from host memory with
     cpu_offload."""
+
+    peer_group_fetch: Literal["auto", "async", "sync"] = "auto"
+    """Where a peer group's fetches run: `async` beside the decoder layers
+    before each Engram layer, `sync` on the compute stream. RDMA moves rows
+    without SMs and suits `async`; NVLink moves them with SMs, which compute
+    then shares, and suits `sync`. `auto` picks by transport."""
 
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required

@@ -115,7 +115,8 @@ class EngramPool:
         self.output = torch.empty(
             max_items * max_row_bytes, dtype=torch.uint8, device=self.device
         )
-        self.stream = torch.cuda.Stream(device=self.device)
+        # High priority: a fetch's few short kernels go ahead of queued compute.
+        self.stream = torch.cuda.Stream(device=self.device, priority=-1)
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
     @staticmethod
@@ -144,7 +145,7 @@ class EngramPool:
         shard_rows = min(rows_per_shard, num_rows - row_start)
         num_bytes = max(rows_per_shard * row_bytes, ROW_ALIGN)
         keep: list = []
-        keys_ptr = mapped_ptr = gatherers_ptr = 0
+        keys_ptr = gatherers_ptr = 0
         peer_ptrs = None
         if self.kind == "nvlink":
             local, addresses = self.transport.share(num_bytes)  # type: ignore[attr-defined]
@@ -167,23 +168,20 @@ class EngramPool:
                 address = cumem.map()
                 local = local_gpu = device_view(address, num_bytes, cumem)
                 registered = (cumem, address)
-            bases, keys, gatherers, mapped = self.transport.register(registered)  # type: ignore[attr-defined]
+            bases, keys, gatherers = self.transport.register(registered)  # type: ignore[attr-defined]
             arrays = [
                 torch.tensor(values, dtype=dtype, device=self.device)
                 for values, dtype in (
                     (bases, torch.int64),
                     (keys, torch.int32),
-                    (mapped, torch.int64),
                     (gatherers, torch.int32),
                 )
             ]
             keep += arrays
-            bases_ptr, keys_ptr, mapped_ptr, gatherers_ptr = (
-                array.data_ptr() for array in arrays
-            )
+            bases_ptr, keys_ptr, gatherers_ptr = (array.data_ptr() for array in arrays)
         meta = torch.tensor(
             [local_gpu.data_ptr(), rows_per_shard, num_rows, bases_ptr, keys_ptr]
-            + [mapped_ptr, gatherers_ptr, 0],
+            + [gatherers_ptr, 0, 0],
             dtype=torch.int64,
         )
         shard = local[: shard_rows * row_bytes].view(shard_rows, row_bytes)

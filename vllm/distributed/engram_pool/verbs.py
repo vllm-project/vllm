@@ -21,15 +21,20 @@ WR_WRITE_WITH_IMM = 1
 # ibv_wc opcodes from here on are receive completions.
 WC_RECV = 128
 
-_REMOTE_WRITE = 1 | 2 | 4  # local write, remote write, remote read
-_RELAXED = 1 << 20
-# Access of registered memory: read by this NIC only; peers' bulk writes, which
-# may land in any order; peers' flags, which land after their earlier writes.
-LOCAL, BULK, FLAGS = _RELAXED, _REMOTE_WRITE | _RELAXED, _REMOTE_WRITE
+# enum ibv_access_flags
+_LOCAL_WRITE, _REMOTE_WRITE, _REMOTE_READ = 1, 2, 4
+_RELAXED_ORDERING = 1 << 20
+# Access of registered memory: read only by this NIC (shards, descriptors);
+# written by peers in any order (landing); written by peers in order, and read
+# back by them (flags, mailboxes).
+LOCAL = _RELAXED_ORDERING
+BULK = _LOCAL_WRITE | _REMOTE_WRITE | _RELAXED_ORDERING
+FLAGS = _LOCAL_WRITE | _REMOTE_WRITE | _REMOTE_READ
 _QPT_RC = 2
 _QPS_INIT, _QPS_RTR, _QPS_RTS = 1, 2, 3
-_OPS_POLL_CQ, _OPS_NOTIFY_CQ = 8 + 88, 8 + 96
-_OPS_POST_SEND, _OPS_POST_RECV = 8 + 200, 8 + 208
+# Words of ibv_context (its device pointer, then struct ibv_context_ops) that
+# hold the calls verbs.h inlines.
+_OPS_POLL_CQ, _OPS_NOTIFY_CQ, _OPS_POST_SEND, _OPS_POST_RECV = 12, 13, 26, 27
 MTU_BYTES = {1: 256, 2: 512, 3: 1024, 4: 2048, 5: 4096}
 
 _POST_SEND = ctypes.CFUNCTYPE(
@@ -170,10 +175,10 @@ class Device:
             raise RuntimeError(f"ibv_query_gid({name}) failed")
         self.gid = gid.raw
         ops = ctypes.cast(self.context, ctypes.POINTER(ctypes.c_void_p))
-        self._post = _POST_SEND(ops[_OPS_POST_SEND // 8])
-        self._poll = _POLL_CQ(ops[_OPS_POLL_CQ // 8])
-        self._post_recv = _POST_SEND(ops[_OPS_POST_RECV // 8])
-        self._notify = _NOTIFY_CQ(ops[_OPS_NOTIFY_CQ // 8])
+        self._post = _POST_SEND(ops[_OPS_POST_SEND])
+        self._poll = _POLL_CQ(ops[_OPS_POLL_CQ])
+        self._post_recv = _POST_SEND(ops[_OPS_POST_RECV])
+        self._notify = _NOTIFY_CQ(ops[_OPS_NOTIFY_CQ])
         self._bad = ctypes.c_void_p()
         self._bad_ref = ctypes.byref(self._bad)
 
@@ -264,7 +269,7 @@ class Device:
         lib = _lib()
         attr = ctypes.create_string_buffer(144)
         struct.pack_into("<I", attr, 0, _QPS_INIT)
-        struct.pack_into("<i", attr, 32, _REMOTE_WRITE)
+        struct.pack_into("<i", attr, 32, _REMOTE_WRITE | _REMOTE_READ)
         struct.pack_into("<H", attr, 120, 0)
         struct.pack_into("<B", attr, 129, 1)  # port
         mask = 1 | 8 | 16 | 32  # state, access, pkey, port

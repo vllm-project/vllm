@@ -32,7 +32,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
@@ -1661,8 +1665,14 @@ class EngramBatch:
                 "Engram pool fetches stage the MXFP8 WKV input of %d layers.",
                 len(layers),
             )
-        # The pool fetches and unpacks on its stream while layers run.
+        # The pool fetches and unpacks on its stream while layers run, unless
+        # fetches are sync.
         self._pool_done = [torch.cuda.Event() for _ in layers]
+        vllm_config = get_current_vllm_config_or_none()
+        config = vllm_config.engram_config if vllm_config is not None else None
+        fetch = config.peer_group_fetch if config is not None else "auto"
+        rdma = self.pool is not None and self.pool.kind == "rdma"
+        self._async = fetch == "async" or (fetch == "auto" and rdma)
         if self.pool is None:
             self.packed_rows = torch.empty(
                 max_tokens * table.dp_size,
@@ -1723,7 +1733,8 @@ class EngramBatch:
         DP-sharded tables decide on the group's slot, so every rank agrees.
         """
         if self.pool is not None:
-            self._fetch(hashes)
+            # Sync fetches are captured; async ones join in a later segment.
+            (self._fetch if self._async else self._fetch_rows)(hashes)
             return
         slot = engram_gathered_num_tokens()
         peer = self.peer_exchange is not None and slot < ENGRAM_A2A_MIN_SLOT
@@ -1731,10 +1742,13 @@ class EngramBatch:
 
     @eager_break_during_capture
     def _fetch(self, hashes: torch.Tensor) -> None:
-        """Fetch and unpack each layer's rows on the pool stream, one layer at a
-        time: a layer waits only for its own rows."""
+        self._fetch_rows(hashes)
+
+    def _fetch_rows(self, hashes: torch.Tensor) -> None:
+        """Fetch and unpack each layer's rows, one layer at a time; if async, on
+        the pool stream, and a layer waits only for its own rows."""
         assert self.pool is not None
-        stream = self.pool.stream
+        stream = self.pool.stream if self._async else torch.cuda.current_stream()
         stream.wait_stream(torch.cuda.current_stream())
         hashes.record_stream(stream)
         first, num_tokens = self.layers[0].layer_hash_index, hashes.shape[0]
@@ -1803,7 +1817,7 @@ class EngramBatch:
 
     def wkv_input(self, layer: "Engram", num_tokens: int) -> QuantizedActivation:
         index = layer.layer_hash_index - self.layers[0].layer_hash_index
-        if self.pool is not None:
+        if self.pool is not None and self._async:
             self._wait_fetch(index)
         values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
         return QuantizedActivation(

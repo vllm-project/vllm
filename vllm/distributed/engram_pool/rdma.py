@@ -32,6 +32,7 @@ import os
 import socket
 import subprocess
 import sys
+from typing import Any
 
 import torch
 
@@ -72,7 +73,6 @@ def pick_device() -> str:
 def _plan_kernel(
     ids,
     meta,
-    out,
     counts,
     owner_pos,
     remote_addr,
@@ -81,17 +81,15 @@ def _plan_kernel(
     TABLES: tl.constexpr,
     K: tl.constexpr,
     WORDS: tl.constexpr,
-    BLOCK_W: tl.constexpr,
+    WORLD_P2: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Copy rows of shards mapped here, zero dead ones, and place remote rows
-    in their owner's group: `owner_pos` packs (owner, position in group), -1 if
-    not remote.
+    """Place each live row in its gatherer's group: `owner_pos` packs
+    (gatherer, position in group), -1 for dead rows. Reads no row data.
 
     Items are `[..., TABLES, K]` row ids; `meta` rows hold each table's rows per
-    shard, rows, and device arrays of shard bases and lkeys for their NICs,
-    mapped shards and gatherers (words 1 to 6). Remote rows are grouped by the
-    GPU whose NIC gathers them.
+    shard, rows, and device arrays of shard bases and lkeys for the NICs that
+    gather them, and of those NICs' ranks (words 1 to 5).
     """
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = item < num_items
@@ -101,31 +99,23 @@ def _plan_kernel(
     live = valid & (row >= 0) & (row < tl.load(table + 2, mask=valid, other=0))
     owner = tl.where(live, row // rows_per_shard, 0)
     local = row - owner * rows_per_shard
-    mapped = tl.load(table + 5, mask=live, other=0).to(tl.pointer_type(tl.int64))
-    base = tl.load(mapped + owner, mask=live, other=0)
-    direct = live & (base != 0)
-    remote = live & ~direct
-    shard = base.to(tl.pointer_type(tl.uint64))
-    words = tl.arange(0, BLOCK_W)
-    in_row = words[None, :] < WORDS
-    data = tl.load(
-        shard[:, None] + local[:, None] * WORDS + words[None, :],
-        mask=direct[:, None] & in_row,
-        other=0,
+    gatherers = tl.load(table + 5, mask=live, other=0).to(tl.pointer_type(tl.int32))
+    gatherer = tl.load(gatherers + owner, mask=live, other=0).to(tl.int64)
+    # Positions: ranks within the block, after one atomic per gatherer.
+    peers = tl.arange(0, WORLD_P2)
+    mine = ((gatherer[:, None] == peers[None, :]) & live[:, None]).to(tl.int32)
+    sizes = tl.sum(mine, 0)
+    base = tl.atomic_add(counts + peers, sizes, mask=sizes > 0)
+    before = tl.cumsum(mine, 0) - mine + base[None, :]
+    position = tl.sum(tl.where(mine > 0, before, 0), 1).to(tl.int64)
+    tl.store(
+        owner_pos + item, tl.where(live, gatherer << 32 | position, -1), mask=valid
     )
-    dst = out.to(tl.pointer_type(tl.uint64)) + item[:, None] * WORDS + words[None, :]
-    # Remote rows come from the NIC.
-    tl.store(dst, data, mask=(valid & ~remote)[:, None] & in_row)
-    gatherers = tl.load(table + 6, mask=remote, other=0).to(tl.pointer_type(tl.int32))
-    gatherer = tl.load(gatherers + owner, mask=remote, other=0).to(tl.int64)
-    position = tl.atomic_add(counts + gatherer, 1, mask=remote)
-    packed = (gatherer << 32) | position.to(tl.int64)
-    tl.store(owner_pos + item, tl.where(remote, packed, -1), mask=valid)
-    bases = tl.load(table + 3, mask=remote, other=0).to(tl.pointer_type(tl.int64))
-    base = tl.load(bases + owner, mask=remote, other=0)
-    tl.store(remote_addr + item, base + local * (WORDS * 8), mask=remote)
-    keys = tl.load(table + 4, mask=remote, other=0).to(tl.pointer_type(tl.int32))
-    tl.store(key_out + item, tl.load(keys + owner, mask=remote, other=0), mask=remote)
+    bases = tl.load(table + 3, mask=live, other=0).to(tl.pointer_type(tl.int64))
+    base_at = tl.load(bases + owner, mask=live, other=0)
+    tl.store(remote_addr + item, base_at + local * (WORDS * 8), mask=live)
+    keys = tl.load(table + 4, mask=live, other=0).to(tl.pointer_type(tl.int32))
+    tl.store(key_out + item, tl.load(keys + owner, mask=live, other=0), mask=live)
 
 
 @triton.jit
@@ -261,6 +251,7 @@ def _go_kernel(
     counts,
     seq_ptr,
     ctrl,
+    starts,
     boxes,
     box_rkeys,
     desc,
@@ -292,6 +283,7 @@ def _go_kernel(
     sizes = tl.load(counts + peers, mask=in_world, other=0).to(tl.int64)
     tl.store(ctrl + STARTS + peers, tl.cumsum(sizes, 0) - sizes, mask=in_world)
     tl.store(ctrl + STARTS + world, tl.sum(sizes))
+    tl.store(starts + peers, tl.cumsum(sizes, 0) - sizes, mask=in_world)
     num_wrs, _, num_qps = _wr_layout(sizes, ROWS_PER_WR, QPS, MAX_CHAIN)
     wrs = num_wrs + 2 * num_qps
     tl.store(ctrl + WR_STARTS + peers, tl.cumsum(wrs, 0) - wrs, mask=in_world)
@@ -363,35 +355,35 @@ def _wait_kernel(
     tl.device_assert(waiting == 0, "Engram pool RDMA fetch timed out")
 
 
-@triton.jit(do_not_specialize=["num_items"])
+@triton.jit(do_not_specialize=["num_words"])
 def _scatter_kernel(
     owner_pos,
-    ctrl,
+    starts,
     landing,
     out,
-    num_items,
-    STARTS: tl.constexpr,
+    num_words,
     HOST: tl.constexpr,
     WORDS: tl.constexpr,
-    BLOCK_W: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Copy landed remote rows, in owner order, to their items in the output."""
-    item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    packed = tl.load(owner_pos + item, mask=item < num_items, other=-1)
-    remote = packed >= 0
-    start = tl.load(ctrl + STARTS + (packed >> 32), mask=remote, other=0)
-    slot = start + (packed & 0xFFFFFFFF)
-    words = tl.arange(0, BLOCK_W)
-    mask = remote[:, None] & (words[None, :] < WORDS)
-    src = landing.to(tl.pointer_type(tl.uint64)) + slot[:, None] * WORDS + words
+    """Copy landed rows, in gatherer order, to their items in the output, and
+    zero dead items' rows; one word per lane."""
+    word = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    valid = word < num_words
+    item = word // WORDS
+    packed = tl.load(owner_pos + item, mask=valid, other=-1)
+    live = packed >= 0
+    start = tl.load(starts + (packed >> 32), mask=live, other=0)
+    src = (
+        landing.to(tl.pointer_type(tl.uint64)) + (start + (packed & 0xFFFFFFFF)) * WORDS
+    )
+    src += word - item * WORDS
     # NICs rewrite host landing between fetches: bypass caches there.
     if HOST:
-        data = tl.load(src, mask=mask, other=0, cache_modifier=".cv")
+        data = tl.load(src, mask=live, other=0, cache_modifier=".cv")
     else:
-        data = tl.load(src, mask=mask, other=0)
-    dst = out.to(tl.pointer_type(tl.uint64)) + item[:, None] * WORDS + words[None, :]
-    tl.store(dst, data, mask=mask)
+        data = tl.load(src, mask=live, other=0)
+    tl.store(out.to(tl.pointer_type(tl.uint64)) + word, data, mask=valid)
 
 
 class RdmaTransport:
@@ -423,6 +415,8 @@ class RdmaTransport:
         self.launch_host_func.argtypes = [ctypes.c_void_p] * 3
         # A host function holds its stream until it returns: run it beside.
         self.wake_stream = torch.cuda.Stream()
+        self._ready, self._joined = torch.cuda.Event(), torch.cuda.Event()
+        self._compiled: dict[tuple, Any] = {}
         # Each its own process, so neither ever waits for the other's GIL.
         self.procs: dict[str, tuple[subprocess.Popen, socket.socket]] = {}
         for role in ("owner", "requester"):
@@ -545,6 +539,9 @@ class RdmaTransport:
             self._call(role, "start")
         self.ctrl_words = self.ctrl.gpu.view(torch.int64)
         self.counts = torch.zeros(self.world, dtype=torch.int32, device=gpu)
+        self.starts = torch.zeros(self.world, dtype=torch.int64, device=gpu)
+        self.desc_at = self.desc.data_ptr()
+        self.world_p2 = triton.next_power_of_2(self.world)
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
         self.owner_pos = torch.empty(max_items, dtype=torch.int64, device=gpu)
         self.remote_addr = torch.empty(max_items, dtype=torch.int64, device=gpu)
@@ -587,11 +584,10 @@ class RdmaTransport:
     def register(self, shard: SharedHost | tuple[CuMem, int]) -> tuple[list, ...]:
         """Register this GPU's shard (host memory, or HBM as (allocation,
         address)) for gathers by its NIC. Returns, for every GPU's shard:
-        its address and lkey for the NIC that gathers it, that NIC's rank,
-        and its address on this GPU if this GPU reads it directly (else 0).
+        its address and lkey for the NIC that gathers it, and that NIC's rank.
 
-        A GPU reads only its own HBM shard directly. Its proxy gathers the host
-        shards of its node over loopback; owners gather everything else.
+        No SM reads a shard: this GPU's NIC gathers its own shard and its
+        node's host shards over loopback; owners gather everything else.
         Collective: every GPU registers its shards in one order.
         """
         address, lkey, _ = self._register(shard, verbs.LOCAL)
@@ -599,7 +595,7 @@ class RdmaTransport:
         # Peers on this node open the memfd through /proc.
         mine = [address, lkey, self.node, os.getpid(), shard.fd if host else -1]  # type: ignore[union-attr]
         peers = self._all_gather(mine)
-        bases, keys, gatherers, mapped = [], [], [], []
+        bases, keys, gatherers = [], [], []
         for rank, (address, lkey, node, pid, fd) in enumerate(peers):
             gatherer = rank
             if host and node == self.node and rank != self.rank:
@@ -616,9 +612,7 @@ class RdmaTransport:
             bases.append(address)
             keys.append(lkey)
             gatherers.append(gatherer)
-            own_hbm = rank == self.rank and not host
-            mapped.append(shard[1] if own_hbm else 0)  # type: ignore[index]
-        return bases, keys, gatherers, mapped
+        return bases, keys, gatherers
 
     def fetch(
         self, meta: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, words: int
@@ -634,59 +628,67 @@ class RdmaTransport:
             return
         # Wake the requester now, so it is often up once go is, and after go.
         stream = torch.cuda.current_stream()
+        handle = stream.cuda_stream
         self._wake(stream)
-        block_w = triton.next_power_of_2(words)
-        world_p2 = triton.next_power_of_2(self.world)
         rows_per_wr = self.rows_per_wr(words * 8)
-        _plan_kernel[(triton.cdiv(n, 64),)](
-            ids,
-            meta,
-            out,
-            self.counts,
-            self.owner_pos,
-            self.remote_addr,
-            self.keys,
-            n,
+        world_p2, qps = self.world_p2, self.qps_per_peer
+        self._launch(
+            _plan_kernel,
+            (triton.cdiv(n, 256),),
+            handle,
+            (ids, meta, self.counts, self.owner_pos, self.remote_addr, self.keys, n),
             TABLES=meta.shape[0],
             K=ids.shape[-1],
             WORDS=words,
-            BLOCK_W=block_w,
-            BLOCK=64,
+            WORLD_P2=world_p2,
+            BLOCK=256,
         )
-        _wr_kernel[(triton.cdiv(n, 128),)](
-            self.owner_pos,
-            self.counts,
-            self.remote_addr,
-            self.keys,
-            self.boxes,
-            self.box_keys,
-            self.desc,
-            self.seq,
-            self.landing_at,
-            self.landing_rkey,
-            self.flags_at,
-            self.flags_rkey,
-            n,
-            self.world,
-            self.rank,
+        self._launch(
+            _wr_kernel,
+            (triton.cdiv(n, 128),),
+            handle,
+            (
+                self.owner_pos,
+                self.counts,
+                self.remote_addr,
+                self.keys,
+                self.boxes,
+                self.box_keys,
+                self.desc,
+                self.seq,
+                self.landing_at,
+                self.landing_rkey,
+                self.flags_at,
+                self.flags_rkey,
+                n,
+                self.world,
+                self.rank,
+            ),
             MAX_WRS=self.max_wrs,
             ROWS_PER_WR=rows_per_wr,
-            QPS=self.qps_per_peer,
+            QPS=qps,
             MAX_CHAIN=proxy.MAX_CHAIN,
             WORLD_P2=world_p2,
             WORDS=words,
             BLOCK=128,
         )
-        _go_kernel[(1,)](
-            self.counts,
-            self.seq,
-            self.ctrl_words,
-            self.boxes,
-            self.box_rkeys,
-            self.desc.data_ptr(),
-            self.desc_lkey,
-            self.requests_at,
-            self.world,
+        self._launch(
+            _go_kernel,
+            (1,),
+            handle,
+            (
+                self.counts,
+                self.seq,
+                self.ctrl_words,
+                self.starts,
+                self.boxes,
+                self.box_rkeys,
+                self.desc_at,
+                self.desc_lkey,
+                self.requests_at,
+                self.world,
+            ),
+            num_warps=1,
             GO=proxy.GO,
             STARTS=proxy.STARTS,
             WR_STARTS=proxy.WR_STARTS,
@@ -695,44 +697,66 @@ class RdmaTransport:
             REQUEST_WORDS=proxy.REQUEST_WORDS,
             MAX_WRS=self.max_wrs,
             ROWS_PER_WR=rows_per_wr,
-            QPS=self.qps_per_peer,
+            QPS=qps,
             MAX_CHAIN=proxy.MAX_CHAIN,
             WORLD_P2=world_p2,
-            num_warps=1,
         )
         self._wake(stream)
-        _wait_kernel[(1,)](
-            self.seq,
-            self.ctrl_words,
-            self.flags,
-            self.world,
-            TIMEOUT_NS,
+        self._launch(
+            _wait_kernel,
+            (1,),
+            handle,
+            (self.seq, self.ctrl_words, self.flags, self.world, TIMEOUT_NS),
+            num_warps=1,
             DONE=proxy.DONE,
             WR_STARTS=proxy.WR_STARTS,
             NUM_WRS=proxy.NUM_WRS,
-            QPS=self.qps_per_peer,
-            QPS_P2=triton.next_power_of_2(self.qps_per_peer),
+            QPS=qps,
+            QPS_P2=triton.next_power_of_2(qps),
             WORLD_P2=world_p2,
-            num_warps=1,
         )
-        _scatter_kernel[(triton.cdiv(n, 64),)](
-            self.owner_pos,
-            self.ctrl_words,
-            self.landing,
-            out,
-            n,
-            STARTS=proxy.STARTS,
+        self._launch(
+            _scatter_kernel,
+            (triton.cdiv(n * words, 1024),),
+            handle,
+            (self.owner_pos, self.starts, self.landing, out, n * words),
             HOST=self.host_landing,
             WORDS=words,
-            BLOCK_W=block_w,
-            BLOCK=64,
+            BLOCK=1024,
         )
-        stream.wait_stream(self.wake_stream)
+        self._joined.record(self.wake_stream)
+        stream.wait_event(self._joined)
+
+    def _launch(self, kernel, grid, stream: int, args: tuple, num_warps=4, **consts):
+        """Launch `kernel` with `args` then `consts` (its constexprs, in order).
+        It is compiled once per constexprs and tensor alignment; Triton's
+        per-call dispatch would cost ~20 µs per launch here."""
+        aligned = tuple(a.data_ptr() % 16 == 0 for a in args if type(a) is torch.Tensor)
+        key = (kernel, num_warps, *consts.values(), *aligned)
+        if (compiled := self._compiled.get(key)) is None:
+            compiled = kernel.warmup(*args, grid=grid, num_warps=num_warps, **consts)
+            compiled._init_handles()
+            self._compiled[key] = compiled
+        grid = (*grid, 1, 1)
+        compiled.run(
+            grid[0],
+            grid[1],
+            grid[2],
+            stream,
+            compiled.function,
+            compiled.packed_metadata,
+            None,
+            None,
+            None,
+            *args,
+            *consts.values(),
+        )
 
     def _wake(self, stream: torch.cuda.Stream) -> None:
         """Post the requester's semaphore once `stream`'s work so far is done,
         from a CUDA host function (no Python runs) beside it."""
-        self.wake_stream.wait_stream(stream)
+        self._ready.record(stream)
+        self.wake_stream.wait_event(self._ready)
         wake = self.wake_stream.cuda_stream
         if error := self.launch_host_func(wake, self.sem_post, self.sem):
             raise RuntimeError(f"cuLaunchHostFunc failed: {error}")
