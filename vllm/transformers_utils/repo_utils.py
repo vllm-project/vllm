@@ -21,8 +21,8 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 
-from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import is_modelscope_hub_enabled
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -73,7 +73,7 @@ def resolve_revision(
         (local path, ModelScope, or any Hub error).
 
     """
-    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
+    if Path(repo_id).exists() or is_modelscope_hub_enabled():
         return revision
 
     try:
@@ -151,7 +151,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if envs.VLLM_USE_MODELSCOPE:
+            if is_modelscope_hub_enabled():
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
                 return modelscope_list_repo_files(
@@ -293,7 +293,7 @@ def get_model_path(model: str | Path, revision: str | None = None):
         revision=revision,
     )
 
-    if envs.VLLM_USE_MODELSCOPE:
+    if is_modelscope_hub_enabled():
         from modelscope.hub.snapshot_download import snapshot_download
 
         return snapshot_download(model_id=model, **common_kwargs)
@@ -399,7 +399,7 @@ def get_non_weight_snapshot_path(
     listing). Returns `repo_id` unchanged if it is local or cannot be fetched, so
     Transformers handles it as before. Failures are not cached, so they are retried.
     """
-    if envs.VLLM_USE_MODELSCOPE or Path(repo_id).exists():
+    if is_modelscope_hub_enabled() or Path(repo_id).exists():
         return repo_id
     # Normalise so that `None` and "main" share a cache entry
     revision = revision or huggingface_hub.constants.DEFAULT_REVISION

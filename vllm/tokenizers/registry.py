@@ -12,6 +12,7 @@ from typing_extensions import TypeVar
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import is_modelscope_hub_enabled
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
@@ -113,7 +114,7 @@ def resolve_tokenizer_args(
     revision: str | None = kwargs.get("revision")
     download_dir: str | None = kwargs.get("download_dir")
 
-    if envs.VLLM_USE_MODELSCOPE:
+    if is_modelscope_hub_enabled():
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         from modelscope.hub.snapshot_download import snapshot_download
@@ -272,7 +273,7 @@ def get_tokenizer(
         tokenizer_cls_ = TokenizersBackend
 
     if config is not None and tokenizer_cls_ is CachedHfTokenizer:
-        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
+        if not is_modelscope_hub_enabled() and str(tokenizer_name) != requested_name:
             # AutoTokenizer selects some tokenizer classes by Hub ID
             config = copy(config)
             config._name_or_path = requested_name
@@ -283,7 +284,7 @@ def get_tokenizer(
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     # Report the Hub ID rather than the local snapshot it was loaded from
-    if tokenizer_mode == "hf" and not envs.VLLM_USE_MODELSCOPE:
+    if tokenizer_mode == "hf" and not is_modelscope_hub_enabled():
         cast(HfTokenizer, tokenizer).name_or_path = requested_name
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from vllm.tokenizers.hf import get_cached_tokenizer

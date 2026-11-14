@@ -649,6 +649,54 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
+        if (
+            envs.VLLM_DRAFT_USE_MODELSCOPE is not None
+            and envs.VLLM_DRAFT_USE_MODELSCOPE != envs.VLLM_USE_MODELSCOPE
+        ):
+            from vllm.model_executor.model_loader.weight_utils import (
+                maybe_download_from_modelscope,
+            )
+
+            use_modelscope = (
+                envs.VLLM_DRAFT_USE_MODELSCOPE
+                if self.runner == "draft"
+                else envs.VLLM_USE_MODELSCOPE
+            )
+            self.model = (
+                maybe_download_from_modelscope(
+                    self.model, self.revision, use_modelscope=use_modelscope
+                )
+                or self.model
+            )
+            if isinstance(self.hf_config_path, str):
+                self.hf_config_path = (
+                    maybe_download_from_modelscope(
+                        self.hf_config_path,
+                        self.revision,
+                        use_modelscope=use_modelscope,
+                    )
+                    or self.hf_config_path
+                )
+            if self.generation_config not in {"auto", "vllm"}:
+                self.generation_config = (
+                    maybe_download_from_modelscope(
+                        self.generation_config,
+                        allow_patterns=["*.json"],
+                        use_modelscope=use_modelscope,
+                    )
+                    or self.generation_config
+                )
+            # Drafts share the target tokenizer, including its source.
+            self.tokenizer = (
+                maybe_download_from_modelscope(
+                    self.tokenizer,
+                    self.tokenizer_revision,
+                    ignore_patterns=[".*.pt", ".*.safetensors", ".*.bin"],
+                    use_modelscope=envs.VLLM_USE_MODELSCOPE,
+                )
+                or self.tokenizer
+            )
+
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream. A resolved revision
         # only pins the repo it was resolved for, so each repo needs its own call.
