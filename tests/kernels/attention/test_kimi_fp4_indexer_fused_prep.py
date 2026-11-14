@@ -234,3 +234,37 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
             atol=0,
         )
 
+
+@pytest.mark.parametrize("width", [131072, 1 << 20])
+@pytest.mark.parametrize("length", [100, 2048, 40000, 360000])
+def test_sampled_select_matches_decode(monkeypatch, width, length):
+    """VLLM_K3_INDEXER_SAMPLED_TOPK: AITER's sampled select under a graph
+    picks the decode kernel's set, including rows shorter than k."""
+    from vllm.models.kimi_k3.amd.dsa import _sampled_serves, _select
+
+    rows = 8
+    length = min(length, width)
+    if not _sampled_serves(rows, width, TOPK, torch.accelerator.current_device_index()):
+        pytest.skip("sampled top-k not served on this GPU")
+    torch.manual_seed(length)
+    logits = torch.full((rows, width), 1e20, device="cuda")  # poisoned tail
+    s = torch.randn((rows, length, HEADS), device="cuda").relu_()
+    logits[:, :length] = (s * torch.randn((rows, 1, HEADS), device="cuda")).sum(-1)
+    ends = torch.arange(length - rows + 1, length + 1, device="cuda")
+    ends = ends.clamp(min=1).to(torch.int32)
+
+    monkeypatch.setenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0")
+    ref = torch.full((rows, TOPK), 9, device="cuda", dtype=torch.int32)
+    _select(logits, ends, ref)
+    monkeypatch.setenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "1")
+    out = torch.full_like(ref, 9)
+    _select(logits, ends, out)  # warm up outside the capture
+    out.fill_(9)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _select(logits, ends, out)
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(
+        out.sort(dim=1).values, ref.sort(dim=1).values, rtol=0, atol=0
+    )

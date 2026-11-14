@@ -228,6 +228,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
+    VLLM_K3_INDEXER_SAMPLED_TOPK: bool = False
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -1789,6 +1790,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scaling and tile start clamp into the query quantize launch.
     "VLLM_K3_FUSED_INDEXER_PREP": lambda: bool(
         int(os.getenv("VLLM_K3_FUSED_INDEXER_PREP", "1"))
+    ),
+    # Kimi-K3.1 indexer decode top-k on ROCm: AITER's sampled select (three
+    # launches whose cost follows the row pitch, ~21 us at 8 rows of 1M on
+    # MI355X) instead of the per-row decode kernel, which follows the live
+    # length (~7 us at 2k, ~40 us at 360k). Wins on long contexts.
+    "VLLM_K3_INDEXER_SAMPLED_TOPK": lambda: bool(
+        int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0"))
     ),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs

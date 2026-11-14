@@ -9,6 +9,7 @@ cache. The DeepGEMM-only 32/64 index-head zero padding is dropped: the ROCm
 indexer kernels take the native head count.
 """
 
+import functools
 import math
 from typing import cast
 
@@ -246,10 +247,61 @@ direct_register_custom_op(
 )
 
 
+@functools.cache
+def _sampled_buffers(device, rows, width, k):
+    """Zero row starts and scratch for AITER's sampled top-k, kept for every
+    graph: Phase A clears what it shares before anything reads it."""
+    from aiter.ops.topk import topk_sampled_workspace_size
+    from aiter.utility.graph_alloc import persistent_alloc
+
+    with persistent_alloc(device):
+        starts = torch.zeros(rows, dtype=torch.int32, device=device)
+        scratch = torch.empty(
+            topk_sampled_workspace_size(rows, width, k),
+            dtype=torch.uint8,
+            device=device,
+        )
+    return starts, scratch
+
+
+@functools.cache
+def _sampled_serves(rows, width, k, device_index):
+    from aiter.ops.topk import topk_sampled_supports
+
+    # The shapes AITER measured `sampled` ahead on: few rows, wide pitch.
+    return (
+        rows <= 64
+        and width >= 131072
+        and 512 <= k <= 2048
+        and bool(topk_sampled_supports(rows, width, k, device_index))
+    )
+
+
 def _select(logits, lengths, out, values=None):
     rows, width = logits.shape
     k = out.shape[1]
-    if values is not None:
+    if (
+        values is None
+        and envs.VLLM_K3_INDEXER_SAMPLED_TOPK
+        and logits.stride(1) == 1
+        and _sampled_serves(rows, logits.stride(0), k, logits.get_device())
+    ):
+        from aiter.ops.topk import top_k_per_row_prefill_sampled
+
+        starts, scratch = _sampled_buffers(logits.device, rows, logits.stride(0), k)
+        top_k_per_row_prefill_sampled(
+            logits,
+            starts,
+            lengths,
+            out,
+            None,
+            rows,
+            logits.stride(0),
+            1,
+            k,
+            workspace=scratch,
+        )
+    elif values is not None:
         from aiter.ops.topk import top_k_per_row_decode
 
         top_k_per_row_decode(
