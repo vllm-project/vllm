@@ -926,6 +926,8 @@ class CompilationConfig:
     _attention_ops: ClassVar[list[str]] = [
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention_with_output",
+        # Qwen3-Next on gfx950 (PrequantizedQKVAttention).
+        "vllm::unified_prequantized_attention_with_output",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
@@ -945,6 +947,13 @@ class CompilationConfig:
         "vllm::deepseek_v4_attention",
         "vllm::hpc_rope_norm_forward",
         "vllm::step5_csa_attention",
+    ]
+
+    # Ops that consume runtime-only forward context and must execute outside
+    # mixed piecewise CUDA graphs. Unlike attention ops, these do not affect
+    # splitting_ops_contain_attention().
+    _piecewise_cudagraph_unsafe_ops: ClassVar[list[str]] = [
+        "vllm::fused_qk_norm_rope_gate_fp8_quant",
     ]
 
     def compile_factors(self) -> CompileFactors:
@@ -1342,6 +1351,7 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+                self.splitting_ops.extend(self._piecewise_cudagraph_unsafe_ops)
 
                 # unified_kv_cache_update has a string param that prevents Inductor
                 # from reusing piecewise graphs. Remove it from the compiled graph.

@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from transformers import Qwen3NextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -19,7 +20,12 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+    PrequantizedQKVAttention,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -28,6 +34,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fused_qk_norm_rope_gate_fp8_quant import (
+    MAX_PREQUANTIZED_SEQUENCES,
+    fused_qk_norm_rope_gate_fp8_quant,
+    supports_prequantized_scheduler,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -88,6 +99,8 @@ from .utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -292,6 +305,7 @@ class Qwen3NextAttention(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        max_num_seqs: int | None = None,
         reduce_results: bool = True,
         prefix: str = "",
         mrope_positions_factor: int = 4,
@@ -354,7 +368,15 @@ class Qwen3NextAttention(nn.Module):
             if getattr(config, "is_causal", True)
             else AttentionType.ENCODER_ONLY
         )
-        self.attn = Attention(
+        # This file also runs on RDNA and on ROCm without AITER; the fused
+        # kernel exists only for AITER on CDNA4 (gfx950).
+        is_aiter_cdna4 = False
+        if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+            from vllm.platforms.rocm import get_cdna_version
+
+            is_aiter_cdna4 = get_cdna_version() == 4
+        attn_cls = PrequantizedQKVAttention if is_aiter_cdna4 else Attention
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -390,10 +412,97 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
+        # gfx950 vllm serve defaults to max_num_seqs=1024, and a multimodal
+        # config without --language-model-only is not text-only. Either one
+        # leaves this layer on the BF16 path, so say so instead of serving
+        # quietly.
+        prequantized_ready = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
+            and is_aiter_cdna4
+            and isinstance(self.attn, PrequantizedQKVAttention)
+            and self.attn.supports_prequantized_qkv_input
+        )
+        scheduler_ok = supports_prequantized_scheduler(max_num_seqs)
+        self.use_prequantized_qkv = prequantized_ready and text_only and scheduler_ok
+        if self.use_prequantized_qkv:
+            self.attn.receives_prequantized_qkv = True
+            logger.info_once(
+                "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
+            )
+        elif prequantized_ready:
+            missing = []
+            if not text_only:
+                missing.append("--language-model-only")
+            if not scheduler_ok:
+                missing.append(
+                    f"--max-num-seqs at most {MAX_PREQUANTIZED_SEQUENCES} "
+                    f"(got {max_num_seqs})"
+                )
+            logger.info_once(
+                "Prequantized FP8 QKV attention is off (%s); "
+                "serving uses the BF16 path.",
+                ", ".join(missing),
+            )
 
         # Off by default; Qwen3.5 enables the fused sigmoid-gate-mul Triton
         # kernel post-construction (see Qwen3_5DecoderLayer).
         self.use_fused_output_gate = False
+
+    def _project_prequantized_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        PrequantizedQKV,
+    ]:
+        """Like `_project_qkv_gate`, plus FP8 Q/K/V and their descales."""
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        pos = positions[0] if positions.ndim == 2 else positions
+        (
+            q,
+            k,
+            gate,
+            q_fp8,
+            k_fp8,
+            v_fp8,
+            q_descale,
+            k_descale,
+            v_descale,
+        ) = fused_qk_norm_rope_gate_fp8_quant(
+            q_gate,
+            k,
+            v,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            pos,
+            self.attn.layer_name,
+            self.q_norm.variance_epsilon,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rotary_dim,
+        )
+        return (
+            q,
+            k,
+            v,
+            gate,
+            PrequantizedQKV(
+                query=q_fp8,
+                key=k_fp8,
+                value=v_fp8,
+                query_descale=q_descale,
+                key_descale=k_descale,
+                value_descale=v_descale,
+            ),
+        )
 
     def _project_qkv_gate(
         self,
@@ -463,8 +572,14 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(q, k, v)
+        if self.use_prequantized_qkv:
+            q, k, v, gate, prequantized_qkv = self._project_prequantized_qkv_gate(
+                qkv, positions
+            )
+            attn_output = self.attn(q, k, v, prequantized_qkv=prequantized_qkv)
+        else:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            attn_output = self.attn(q, k, v)
         if gate is not None:
             if not self.use_fused_output_gate:
                 attn_output = attn_output * torch.sigmoid(gate)
@@ -526,6 +641,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
                 prefix=f"{prefix}.self_attn",
             )
