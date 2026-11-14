@@ -14,12 +14,12 @@ from vllm.utils.gc_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class Normal:
     v: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ListWrapper:
     vs: list[int]
 

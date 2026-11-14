@@ -950,7 +950,7 @@ _OOT_SUPPORTED_MODELS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ModelInfo:
     architecture: str
     is_text_generation_model: bool

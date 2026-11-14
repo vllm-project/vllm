@@ -13,7 +13,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.config.model import ModelDType, TokenizerMode
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _HfExamplesInfo:
     default: str
     """The default model to use for testing this architecture."""
