@@ -23,6 +23,8 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
+from vllm.platforms.rocm import on_gfx950  # noqa: E402
+
 device = "cuda"
 
 triton_w4a16_module = importlib.import_module(
@@ -193,6 +195,45 @@ def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
     )
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 split-K dispatch only")
+@pytest.mark.parametrize(
+    "M,K,N,G,has_zp",
+    [
+        (1, 4096, 256, 128, False),
+        (32, 2048, 512, 32, True),
+        (128, 2048, 256, 64, False),
+    ],
+)
+def test_triton_w4a16_gemm_split_k_matches_reference(M, K, N, G, has_zp):
+    """Split-K partials are reduced in fixed order: accurate and deterministic."""
+    assert triton_w4a16_module._gfx950_config(M, N, K)[3] > 1
+
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4 = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    b_packed = _pack_int4_along_n(w_int4)
+    scales = (0.05 * torch.rand((K // G, N), device=device)).to(dtype)
+    qzeros = None
+    if has_zp:
+        qzeros = _pack_int4_along_n(
+            torch.randint(0, 16, (K // G, N), device=device, dtype=torch.int32)
+        )
+
+    def run():
+        return triton_w4a16_gemm(
+            a=a, b_q=b_packed, scales=scales, qzeros=qzeros, group_size=G
+        )
+
+    out = run()
+    ref = _w4a16_reference(
+        a, b_packed, scales, group_size=G, qzeros_gn8=qzeros, zp_bias=8
+    )
+    # Outputs reach |9| at K=2048, where one bf16 ulp is 0.0625.
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=2e-2)
+    assert torch.equal(out, run())
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
