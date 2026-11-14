@@ -58,11 +58,11 @@ from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
-    DeepseekV41LLMForCausalLM,
     DeepseekV4DecoderLayer,
     DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     DeepseekV4MoE,
+    DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
     _use_mega_gate,
     _use_sequence_parallel,
