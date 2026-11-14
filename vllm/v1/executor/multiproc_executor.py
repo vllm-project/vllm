@@ -513,7 +513,15 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        enqueue_timeout = (
+            None if deadline is None else max(0.0, deadline - time.monotonic())
+        )
+        try:
+            self.rpc_broadcast_mq.enqueue(
+                (send_method, args, kwargs, output_rank), timeout=enqueue_timeout
+            )
+        except TimeoutError as e:
+            raise TimeoutError(f"RPC call to {method} timed out.") from e
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:

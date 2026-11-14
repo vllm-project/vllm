@@ -81,6 +81,7 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
     execute_dummy_batch this is an idle DP rank stuck in a collective with a
     hung peer."""
     monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7")
+    enqueue_timeouts: list[float | None] = []
 
     def dequeue(*, timeout=None):
         assert timeout is not None and 0 < timeout <= 7
@@ -88,11 +89,14 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             raise TimeoutError
         return WorkerProc.ResponseStatus.SUCCESS, result
 
+    def enqueue(_payload, *, timeout=None):
+        enqueue_timeouts.append(timeout)
+
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.is_failed = False
     executor.output_rank = 1
     executor.futures_queue = deque()
-    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=enqueue)
     executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
 
     if stalled:
@@ -100,6 +104,69 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
+
+    assert len(enqueue_timeouts) == 1
+    assert enqueue_timeouts[0] is not None
+    assert 0 < enqueue_timeouts[0] <= 7
+
+
+def test_collective_rpc_without_timeout_does_not_limit_enqueue():
+    enqueue_timeouts: list[float | None] = []
+
+    def enqueue(_payload, *, timeout=None):
+        enqueue_timeouts.append(timeout)
+
+    def dequeue(*, timeout=None):
+        assert timeout is None
+        return WorkerProc.ResponseStatus.SUCCESS, "result"
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=enqueue)
+    executor.response_mqs = [SimpleNamespace(dequeue=dequeue)]
+
+    assert executor.collective_rpc("test_rpc") == ["result"]
+    assert enqueue_timeouts == [None]
+
+
+def test_collective_rpc_passes_remaining_timeout_to_enqueue(monkeypatch):
+    import vllm.v1.executor.multiproc_executor as mp_executor
+
+    times = iter([100.0, 102.0, 103.0])
+    monkeypatch.setattr(
+        mp_executor, "time", SimpleNamespace(monotonic=lambda: next(times))
+    )
+    enqueue_timeouts: list[float | None] = []
+
+    def enqueue(_payload, *, timeout=None):
+        enqueue_timeouts.append(timeout)
+
+    def dequeue(*, timeout=None):
+        assert timeout == 4.0
+        return WorkerProc.ResponseStatus.SUCCESS, "result"
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=enqueue)
+    executor.response_mqs = [SimpleNamespace(dequeue=dequeue)]
+
+    assert executor.collective_rpc("test_rpc", timeout=7) == ["result"]
+    assert enqueue_timeouts == [5.0]
+
+
+def test_collective_rpc_wraps_enqueue_timeout():
+    def enqueue(_payload, *, timeout=None):
+        raise TimeoutError
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=enqueue)
+    executor.response_mqs = []
+
+    with pytest.raises(TimeoutError, match="RPC call to test_rpc timed out"):
+        executor.collective_rpc("test_rpc", timeout=7)
 
 
 @pytest.mark.parametrize(
