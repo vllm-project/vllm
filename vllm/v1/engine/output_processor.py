@@ -774,14 +774,10 @@ class OutputProcessor:
                     reqs_to_abort.append(req_id)
                 continue
 
-            # 1) Compute stats for this iteration.
-            self._update_stats_from_output(
-                req_state, engine_core_output, engine_core_timestamp, iteration_stats
-            )
-
             # A frame that carries only prefill progress has no token, pooling or
-            # terminal event. Falling through would end the prefill bookkeeping
-            # below, and a pooling request has no detokenizer to reach.
+            # terminal event. Counting it would record a first token that has not
+            # been produced, and falling through would end the prefill bookkeeping
+            # below while a pooling request has no detokenizer to reach.
             if (
                 engine_core_output.prefill_progress is not None
                 and not engine_core_output.new_token_ids
@@ -789,6 +785,11 @@ class OutputProcessor:
                 and engine_core_output.finish_reason is None
             ):
                 continue
+
+            # 1) Compute stats for this iteration.
+            self._update_stats_from_output(
+                req_state, engine_core_output, engine_core_timestamp, iteration_stats
+            )
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
