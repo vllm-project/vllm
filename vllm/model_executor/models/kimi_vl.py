@@ -488,7 +488,7 @@ class KimiVLForConditionalGeneration(
         buffers = self.vision_tower.prepare_encoder_metadata(
             grid_hws_list,
             max_batch_size=max_batch_size,
-            max_seqlen_override=token_budget,
+            max_seqlen_override=token_budget * kh * kw,
             device=device,
         )
         values = buffers | {"pixel_values": dummy_pixel_values}
