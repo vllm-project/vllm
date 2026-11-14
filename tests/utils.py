@@ -1589,6 +1589,11 @@ def record_gpu_memory_usage_stats(
     return output
 
 
+# ROCm can keep a small runtime/driver footprint resident even after all model
+# allocations are gone. On MI300 this has been observed around 2.5 GiB.
+ROCM_IDLE_FOOTPRINT_BYTES = 4 * 1024**3
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
@@ -1598,7 +1603,13 @@ def wait_for_gpu_memory_to_clear(
     stable_duration_s: float = 0,
     stable_tolerance_bytes: int = 512 * 1024**2,
     poll_interval_s: float = 5,
+    idle_bytes: int | None = None,
 ) -> None:
+    """Block until every device's used memory is below the threshold.
+
+    With `stable_duration_s`, the usage must also hold steady that long,
+    unless every device is at or below `idle_bytes`.
+    """
     assert threshold_bytes is not None or threshold_ratio is not None
     # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
@@ -1612,16 +1623,14 @@ def wait_for_gpu_memory_to_clear(
     elif isinstance(threshold_ratio, dict):
         assert threshold_ratio.keys() == set(devices)
     if current_platform.is_rocm() and threshold_ratio is not None:
-        # ROCm can keep a small runtime/driver footprint resident even after
-        # all model allocations are gone. On MI300 this has been observed
-        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
-        # near the amount of free memory needed by the next vLLM runner.
-        min_threshold_b = 4 * 1024**3
+        # The ROCm idle footprint is above a strict 1% idle threshold but
+        # nowhere near the amount of free memory needed by the next vLLM runner.
         if threshold_bytes is None:
             threshold_bytes = {}
         for device, ratio in threshold_ratio.items():
             threshold_bytes[device] = max(
-                threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
+                threshold_bytes.get(device, 0),
+                ROCM_IDLE_FOOTPRINT_BYTES if ratio < 0.05 else 0,
             )
 
     start_time = time.time()
@@ -1679,7 +1688,12 @@ def wait_for_gpu_memory_to_clear(
 
         dur_s = time.time() - start_time
         if all_free:
-            if stable_duration_s <= 0:
+            # At the idle footprint nothing is left to release, so there is
+            # nothing for the stability window to wait for.
+            idle = idle_bytes is not None and all(
+                used_bytes_by_device[device] <= idle_bytes for device in devices
+            )
+            if stable_duration_s <= 0 or idle:
                 print(
                     f"Done waiting for free GPU memory on devices {devices=} "
                     f"({threshold=}) {dur_s=:.02f}"
@@ -1730,7 +1744,8 @@ def wait_for_memory_to_settle(
     ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
     even after `cleanup_dist_env_and_memory`. This gives the driver time to
-    actually release VRAM before the next allocation. No-op off ROCm.
+    actually release VRAM before the next allocation. On ROCm it returns at once
+    when the devices are at their idle footprint. No-op off ROCm and XPU.
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
@@ -1747,6 +1762,7 @@ def wait_for_memory_to_settle(
         timeout_s=timeout_s,
         stable_duration_s=2.0,
         poll_interval_s=1.0,
+        idle_bytes=ROCM_IDLE_FOOTPRINT_BYTES if current_platform.is_rocm() else None,
     )
 
 
