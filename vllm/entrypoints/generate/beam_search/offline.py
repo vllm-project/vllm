@@ -203,6 +203,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
+                if (
+                    beam.stop_reason in eos_token_ids
+                    and not params.include_stop_str_in_output
+                ):
+                    beam.tokens = beam.tokens[:-1]
                 beam.text = tokenizer.decode(
                     beam.tokens, skip_special_tokens=params.skip_special_tokens
                 )
@@ -366,6 +371,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         )
 
                         if token_id in eos_token_ids and not ignore_eos:
+                            new_beam.finish_reason = "stop"
+                            new_beam.stop_reason = token_id
                             instance.completed.append(new_beam)
                         else:
                             instance_new_beams.append(new_beam)
