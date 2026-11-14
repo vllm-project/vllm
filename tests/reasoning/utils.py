@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
+import random
+from collections.abc import Sequence
+from typing import Any, cast
 
 from transformers import PreTrainedTokenizerBase
 
@@ -9,6 +11,8 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.v1.token_buffer import TokenBuffer, TokenIdsView
+from vllm.v1.utils import ConstantList
 
 
 class StreamingReasoningReconstructor:
@@ -160,3 +164,56 @@ def run_reasoning_extraction_streaming_mistral(
         previous_text = current_text
         previous_tokens = current_tokens
     return reconstructor
+
+
+class _UnreadableIds(Sequence[int]):
+    """Token ids that fail when read."""
+
+    def __len__(self) -> int:
+        raise AssertionError("input_ids was read")
+
+    def __getitem__(self, index):
+        raise AssertionError("input_ids was read")
+
+
+def check_streaming_end_matches_default(
+    parser: Any,
+    alphabet: list[int],
+    hand_cases: list[tuple[list[int], list[int], bool]],
+    num_random_cases: int = 2000,
+) -> None:
+    """Check a parser's is_reasoning_end_streaming against the base default,
+    which re-runs is_reasoning_end on the whole sequence.
+
+    Only cases where reasoning has not ended before the delta count, since
+    callers stop asking once it has. A delta without the end token must not
+    read input_ids at all. ``hand_cases`` are (prefix, delta, expected).
+    """
+    rng = random.Random(0)
+    cases: list[tuple[list[int], list[int], bool | None]] = list(hand_cases)
+    for _ in range(num_random_cases):
+        ids = [rng.choice(alphabet) for _ in range(rng.randint(1, 12))]
+        num_delta = rng.randint(1, min(5, len(ids)))
+        cases.append((ids[:-num_delta], ids[-num_delta:], None))
+
+    num_random_checked = 0
+    for prefix, delta, expected in cases:
+        if parser.is_reasoning_end(prefix):
+            assert expected is None, f"hand case {prefix=} has already ended"
+            continue
+        ids = prefix + delta
+        default = ReasoningParser.is_reasoning_end_streaming(parser, ids, delta)
+        if expected is not None:
+            assert default == expected, (prefix, delta)
+        for input_ids in (
+            ids,
+            ConstantList(TokenBuffer(ids)),
+            TokenIdsView(TokenBuffer(prefix), delta),
+        ):
+            result = parser.is_reasoning_end_streaming(input_ids, delta)
+            assert result == default, (prefix, delta, type(input_ids))
+        if parser.end_token_id not in delta:
+            assert not parser.is_reasoning_end_streaming(_UnreadableIds(), delta)
+        num_random_checked += expected is None
+    # The prefix filter must leave a meaningful number of cases.
+    assert num_random_checked > num_random_cases // 4
