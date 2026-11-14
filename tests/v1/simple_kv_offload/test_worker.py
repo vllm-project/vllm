@@ -260,13 +260,15 @@ def _drive_store(
     return corrupt
 
 
-def test_store_orders_after_compute_write():
+@pytest.mark.parametrize("descriptor_cap", [0, 64])
+def test_store_orders_after_compute_write(monkeypatch, descriptor_cap: int):
     """The store must wait for the compute event; without it, it races.
 
     Asserts both directions so the test is self-validating: the no-barrier
     control must actually corrupt (proving the race window is exercised), and
     the fixed path with the compute-done event must be clean.
     """
+    monkeypatch.setenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", str(descriptor_cap))
     backend, gpu, cpu = _make_backend()
     try:
         control = _drive_store(backend, gpu, cpu, with_barrier=False)
@@ -279,6 +281,61 @@ def test_store_orders_after_compute_write():
         "exercises the hazard it is meant to guard"
     )
     assert fixed == 0, f"store raced compute even with the barrier: {fixed} corrupt"
+
+
+@pytest.mark.parametrize("descriptor_cap", [0, 64])
+@pytest.mark.parametrize("num_copies", [0, 64, 65])
+@pytest.mark.parametrize("widths", [(512,), (512, 1025)])
+def test_dma_roundtrip_preserves_block_mapping(
+    monkeypatch, descriptor_cap: int, num_copies: int, widths: tuple[int, ...]
+):
+    """Roundtrips preserve selected bytes and leave other blocks untouched."""
+    monkeypatch.setenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", str(descriptor_cap))
+    expected = {
+        str(layer): (
+            torch.arange(70 * width, dtype=torch.int64).reshape(70, width) % 251
+        ).to(torch.uint8)
+        for layer, width in enumerate(widths)
+    }
+    gpu = {name: tensor.to("cuda") for name, tensor in expected.items()}
+    cpu = {
+        name: torch.full_like(tensor, 255, pin_memory=True)
+        for name, tensor in expected.items()
+    }
+    load_stream, store_stream = torch.cuda.Stream(), torch.cuda.Stream()
+    backend = DmaCopyBackend()
+    backend.init(gpu, cpu, gpu["0"].device, load_stream, store_stream)
+    source_ids = list(range(num_copies))
+    target_ids = source_ids[::-1]
+    events: list[tuple[int, torch.Event]] = []
+
+    def wait_for_copy() -> None:
+        deadline = time.monotonic() + 10
+        while not events or not events[-1][1].query():
+            if time.monotonic() >= deadline:
+                pytest.fail("DMA roundtrip did not complete")
+
+    try:
+        ready = torch.Event()
+        ready.record()
+        backend.launch_copy(source_ids, target_ids, True, 0, events, ready)
+        wait_for_copy()
+        for name, tensor in expected.items():
+            stored = torch.full_like(tensor, 255)
+            stored[target_ids] = tensor[source_ids]
+            assert torch.equal(cpu[name], stored)
+            gpu[name].zero_()
+
+        ready.record()
+        events.clear()
+        backend.launch_copy(target_ids, source_ids, False, 1, events, ready)
+        wait_for_copy()
+        for name, tensor in expected.items():
+            restored = torch.zeros_like(tensor)
+            restored[source_ids] = tensor[source_ids]
+            assert torch.equal(gpu[name].cpu(), restored)
+    finally:
+        backend.shutdown()
 
 
 class _RecordingBackend:
