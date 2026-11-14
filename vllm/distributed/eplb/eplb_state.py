@@ -1246,6 +1246,7 @@ class EplbState:
             backend,
             model_state.model.expert_weights,
             model_state.expert_buffer,
+            prev_communicator=model_state.communicator,
         )
 
     def update_communicator(
@@ -1253,7 +1254,10 @@ class EplbState:
         model_config: ModelConfig,
         communicator: EplbCommunicator,
     ) -> None:
-        self.model_states[hash_config_cached(model_config)].communicator = communicator
+        model_state = self.model_states[hash_config_cached(model_config)]
+        previous = model_state.communicator
+        model_state.communicator = communicator
+        communicator.on_activated(previous)
 
 
 @dataclass(slots=True)
