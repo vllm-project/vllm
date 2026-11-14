@@ -317,6 +317,33 @@ _GFX1151_PREFILL_OVERRIDES: dict[
 }
 
 
+def _gfx1151_bf16_decode_tile(
+    M: int, N: int, K: int, group_size: int
+) -> tuple[int, int, int, int] | None:
+    """bf16 (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for 9 <= M <= 128 (decode
+    batches, speculative-decoding verify) where it beats the ladder below;
+    None keeps the ladder.
+
+    Swept on gfx1151 over 25 Qwen3, Qwen3.8 and SmolLM2 shapes at group sizes
+    32, 64 and 128. At 33..64 the ladder's (64, 64, 32, 4) falls to about
+    30 GB/s on wide-N layers.
+    """
+    if M <= 8 or M > 128:
+        return None
+    tall = K >= 2 * N
+    if M <= 16:
+        return (16, 32, 128, 2) if group_size >= 128 else None
+    if M <= 32:
+        return None
+    if M <= 64:
+        if group_size == 32:
+            return (64, 32, 32, 4) if not tall and N >= 2 * K else None
+        return (64, 64, 64, 4) if tall else (64, 32, 64, 2)
+    if group_size == 32:
+        return (128, 128, 32, 8) if tall else (128, 64, 32, 8)
+    return (128, 64, 64, 8) if tall else None
+
+
 def _select_skinny_gfx1151_config(
     M: int,
     N: int,
@@ -359,7 +386,17 @@ def _select_skinny_gfx1151_config(
         packed_dequant = dtype == torch.float16 and not has_zp
         key = (group_size, K, N)
         override = _GFX1151_PREFILL_OVERRIDES.get(key) if M <= 128 else None
-        if override is not None:
+        if dtype == torch.bfloat16 and 8 < M <= 64:
+            # Tuned at M=128; 2-4x slower than the ladder at 9..64.
+            override = None
+        bf16_tile = (
+            _gfx1151_bf16_decode_tile(M, N, K, group_size)
+            if dtype == torch.bfloat16 and override is None
+            else None
+        )
+        if bf16_tile is not None:
+            block_m, block_n, block_k, num_warps = bf16_tile
+        elif override is not None:
             block_m, block_n, block_k, num_warps, num_stages = override
         elif M <= 32:
             block_m, block_n, block_k, num_warps = 32, 32, 128, 4
