@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from dataclasses import replace
 from typing import NamedTuple
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
@@ -10,7 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.request import RequestStatus
 
@@ -211,16 +210,17 @@ def _reachable_store_block_mask(
 ) -> list[bool] | None:
     """Build the block mask for a range of candidate offload chunks."""
     blocks_per_chunk = config.blocks_per_chunk
-    kv_cache_spec = group_config.kv_cache_spec
-    if isinstance(kv_cache_spec, SlidingWindowSpec) and (
-        kv_cache_spec.extra_retained_tokens
+    manager_config = group_config.manager_config
+    if (
+        isinstance(manager_config.params, SlidingWindowManager.Params)
+        and manager_config.params.extra_retained_tokens
     ):
         # Offload restores all allocated history, including MTP re-prefill
         # tokens. Widen only the store mask, not the model's attention window.
-        kv_cache_spec = replace(
-            kv_cache_spec,
+        manager_config = manager_config.replace_params(
             sliding_window=(
-                kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+                manager_config.params.sliding_window
+                + manager_config.params.extra_retained_tokens
             ),
             extra_retained_tokens=0,
         )
@@ -228,7 +228,8 @@ def _reachable_store_block_mask(
         start_block=start_chunk_idx * blocks_per_chunk,
         end_block=end_chunk_idx * blocks_per_chunk,
         alignment_tokens=config.alignment_tokens,
-        kv_cache_spec=kv_cache_spec,
+        block_size=group_config.block_size,
+        manager_config=manager_config,
         use_eagle=(
             group_config.is_eagle_group and config.num_hash_lookahead_tokens == 0
         ),
@@ -251,7 +252,7 @@ def _final_swa_alignment_blocks(
     if (
         alignment_tokens is None
         or group_config.is_eagle_group
-        or not isinstance(group_config.kv_cache_spec, SlidingWindowSpec)
+        or not issubclass(group_config.manager_cls, SlidingWindowManager)
         or alignment_tokens % group_config.tokens_per_block != 0
     ):
         return None

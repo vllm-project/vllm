@@ -9,13 +9,12 @@ import pytest
 import torch
 
 from tests.v1.attention.test_gdn_metadata_builder import (
-    BLOCK_SIZE,
     DEVICE,
+    _common_attn_metadata,
     _create_gdn_builder,
 )
 from tests.v1.attention.utils import (
     BatchSpec,
-    create_common_attn_metadata,
     create_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
@@ -30,7 +29,8 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup, MambaSpec
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -167,8 +167,8 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     ]
     assert mamba_metadata.is_prefilling.tolist() == [False, False, True]
     builder = _create_gdn_builder(num_speculative_tokens=k)
-    common = create_common_attn_metadata(
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
+    common = _common_attn_metadata(
+        builder, BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     ).replace(**mamba_metadata.get_extra_common_attn_kwargs(0, 3))
     meta = builder.build(
         common_prefix_len=0,
@@ -291,7 +291,13 @@ def test_replayssm_uses_built_mamba_decode_split(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(group.layer_names, group.kv_cache_spec) for group in groups
+            KVCacheGroup.from_layers(
+                {
+                    name: MambaManager.layer_config(group.kv_cache_spec)
+                    for name in group.layer_names
+                }
+            )
+            for group in groups
         ],
     )
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
