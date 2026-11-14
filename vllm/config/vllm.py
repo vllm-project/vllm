@@ -3700,9 +3700,23 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.cache_config.use_kda_recoverssm
+            ):
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
+                )
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.cache_config.mamba_cache_mode == "align"
+            ):
+                # GDN RecoverSSM on non-last PP ranks commits in the deferred PP
+                # postprocess (see RecoverSSMState.detach_step); the align-mode
+                # boundary postprocess is not wired through that path yet.
+                raise ValueError(
+                    "RecoverSSM with pipeline_parallel_size > 1 does not support "
+                    "--mamba-cache-mode align yet"
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
