@@ -89,6 +89,7 @@ def unsupported(vllm_config) -> list[str]:
     import torch
 
     from vllm.config import CompilationMode, CUDAGraphMode
+    from vllm.models.glm5next.quant_config import bf16_projection_quant_config
     from vllm.platforms import current_platform
     from vllm.utils.import_utils import has_cutedsl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -164,6 +165,11 @@ def unsupported(vllm_config) -> list[str]:
             vllm_config.cache_config.use_replayssm
             or vllm_config.cache_config.use_kda_recoverssm,
             "ReplaySSM / RecoverSSM (--use-replayssm)",
+        ),
+        # The KDA decode reads the projection weights directly as BF16.
+        (
+            bf16_projection_quant_config(vllm_config.quant_config) is not None,
+            "online quantization of the attention projections (--quantization-config)",
         ),
     )
     return [reason for failed, reason in checks if failed]
