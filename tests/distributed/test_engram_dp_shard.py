@@ -835,6 +835,7 @@ def _check_dummy_hash_model_forward(
     model.end_layer = 1
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
+    model.pipeline_relay = None
     model.aux_hidden_state_layers = ()
     model.mhc_post = lambda hidden, *args: hidden
     metadata = (
