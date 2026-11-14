@@ -69,6 +69,12 @@ class TieringOffloadingMetrics:
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
     DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
     DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
+    PROMOTED_CHUNK_OUTCOMES = "vllm:kv_offload_tiering_promoted_chunk_outcomes"
+    PROMOTED_CHUNK_TIME_TO_OUTCOME = (
+        "vllm:kv_offload_tiering_promoted_chunk_time_to_outcome_seconds"
+    )
+    PROMOTED_CHUNKS_PENDING = "vllm:kv_offload_tiering_promoted_chunks_pending"
+    CHUNK_REPROMOTIONS = "vllm:kv_offload_tiering_chunk_repromotions"
 
 
 @dataclass

@@ -315,3 +315,93 @@ def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     assert stats is not None
     values = stats.data["data"]
     assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
+
+
+OUTCOMES = TieringOffloadingMetrics.PROMOTED_CHUNK_OUTCOMES
+PENDING = TieringOffloadingMetrics.PROMOTED_CHUNKS_PENDING
+REPROMOTED = TieringOffloadingMetrics.CHUNK_REPROMOTIONS
+
+
+def _promotion_tracker(num_primary_chunks: int = 8) -> TieringMetricsTracker:
+    return TieringMetricsTracker(
+        tier_types=["fs"],
+        num_primary_chunks=num_primary_chunks,
+        primary_chunk_size=16,
+    )
+
+
+def _values(tracker: TieringMetricsTracker) -> dict:
+    stats = tracker.take_stats()
+    assert stats is not None
+    return stats.data["data"]
+
+
+def _outcomes(values: dict) -> dict[str, int]:
+    return {labels[1]: count for labels, count in values.get(OUTCOMES, {}).items()}
+
+
+def test_promoted_chunk_records_exactly_one_outcome():
+    tracker = _promotion_tracker()
+    key, unpromoted = to_keys(range(2))
+    tracker.on_promotion_landed(0, [key])
+    # Two loads are in flight; only the first completion is an outcome.
+    tracker.on_promoted_reads_started([key, unpromoted])
+    tracker.on_promoted_reads_started([key])
+    tracker.on_promoted_reads_done([key, unpromoted], success=True, by_gpu_load=True)
+    tracker.on_promoted_reads_done([key], success=True, by_gpu_load=True)
+    # Events after the outcome, and events for chunks that were never
+    # promoted, change nothing.
+    tracker.on_primary_evicted([key, unpromoted])
+    tracker.on_primary_reset()
+    tracker.on_promotion_slots_allocated(0, [key, unpromoted])
+    values = _values(tracker)
+    assert _outcomes(values) == {"loaded": 1}
+    assert REPROMOTED not in values
+    assert values[PENDING] == {("1:fs", "unread"): 0, ("1:fs", "reading"): 0}
+
+
+def test_failed_peer_read_leaves_promoted_chunk_unread():
+    tracker = _promotion_tracker()
+    (key,) = to_keys([1])
+    tracker.on_promotion_landed(0, [key])
+    job = JobMetadata(TransferJob(3, [key], np.array([0]), False, _CTX), 0)
+    tracker.on_job_registered(job)
+    tracker.on_peer_read_job(3, [key])
+    tracker.on_job_finished(job, JobResult(job_id=3, success=False))
+    values = _values(tracker)
+    assert OUTCOMES not in values
+    assert values[PENDING][("1:fs", "unread")] == 1
+
+    tracker.on_primary_evicted([key])
+    assert _outcomes(_values(tracker)) == {"evicted_unloaded": 1}
+
+
+def test_repromotion_after_unread_eviction_is_counted_once():
+    """Re-promotion memory holds the most recent wasted chunks, up to the
+    primary tier's capacity."""
+    tracker = _promotion_tracker(num_primary_chunks=2)
+    keys = to_keys(range(3))
+    tracker.on_promotion_landed(0, keys)
+    tracker.on_primary_evicted(keys)
+    tracker.on_promotion_slots_allocated(0, keys)
+    tracker.on_promotion_slots_allocated(0, keys)
+    values = _values(tracker)
+    assert _outcomes(values) == {"evicted_unloaded": 3}
+    assert values[REPROMOTED][("1:fs",)] == 2  # the oldest one was forgotten
+
+
+def test_reset_closes_pending_chunks_and_ignores_pre_reset_completions():
+    tracker = _promotion_tracker()
+    unread, reading, wasted = to_keys(range(3))
+    tracker.on_promotion_landed(0, [unread, reading, wasted])
+    tracker.on_primary_evicted([wasted])
+    tracker.on_promoted_reads_started([reading])
+    tracker.on_primary_reset()
+    assert _outcomes(_values(tracker)) == {"evicted_unloaded": 1, "reset": 2}
+
+    # A load submitted before the reset completes afterwards, and a promotion
+    # after a reset is not a re-promotion.
+    tracker.on_promoted_reads_done([reading], success=True, by_gpu_load=True)
+    tracker.on_promotion_slots_allocated(0, [wasted])
+    values = _values(tracker)
+    assert OUTCOMES not in values and REPROMOTED not in values
