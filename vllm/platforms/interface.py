@@ -1180,7 +1180,7 @@ class Platform:
             )
 
         if cache_config.mamba_cache_mode == "align":
-            cache_config.mamba_block_size = cache_config.block_size
+            cache_config.apply_align_mode_mamba_block_size()
 
         if packed_block_size is not None:
             return
