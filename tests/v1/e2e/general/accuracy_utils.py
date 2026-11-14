@@ -20,7 +20,7 @@ from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AccuracyTolerance:
     logprob_atol: float
     greedy_atol: float

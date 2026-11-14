@@ -185,7 +185,7 @@ def _gemma3_overrides(cfg) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArchCase:
     model: str
     overrides: Callable[[Any], dict[str, Any]]
@@ -262,7 +262,7 @@ def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
 # Serving
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Case:
     arch: str
     attention_backend: str
@@ -785,7 +785,7 @@ def _external_hits(server: RemoteOpenAIServer) -> float:
     return sum(sample.value for sample in samples)
 
 
-@dataclass
+@dataclass(slots=True)
 class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
