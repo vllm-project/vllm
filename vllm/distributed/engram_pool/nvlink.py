@@ -73,11 +73,20 @@ class NvlinkTransport:
         """Nothing to wake: SMs move rows."""
 
     @staticmethod
-    def wait(state: None, table: int, index: object = None) -> None:
+    def wait(state: None, table: int) -> None:
         """Rows are in place once `start` returns: SMs moved them."""
 
+    @staticmethod
+    def unplaced(state: None, table: int) -> None:
+        """Rows are in place: see `wait`."""
+
     def start(
-        self, meta: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, words: int
+        self,
+        meta: torch.Tensor,
+        ids: torch.Tensor,
+        out: torch.Tensor,
+        words: int,
+        slots: torch.Tensor,
     ) -> None:
         if n := ids.numel():
             _gather_kernel[(triton.cdiv(n, 64),)](

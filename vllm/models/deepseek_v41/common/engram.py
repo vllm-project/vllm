@@ -55,6 +55,7 @@ from vllm.distributed.engram_pool import (
     EngramTable,
     join_peer_group,
 )
+from vllm.distributed.engram_pool.rdma import wait_landed
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -1606,11 +1607,13 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
 def _engram_unpack_fp8_kernel(
     packed,
     slots,
+    ready,
     values,
     scales,
     num_tokens,
     values_stride,
     scales_stride,
+    table,
     HEADS: tl.constexpr,
     LOCAL_HEADS: tl.constexpr,
     LAYERS: tl.constexpr,
@@ -1622,8 +1625,9 @@ def _engram_unpack_fp8_kernel(
 ):
     """Split `[rank][token][layer][local head]` packed rows into MXFP8 values and
     F8_128x4 scales, one layer per grid column; `packed` holds per-rank
-    pointers if PEER. If SLOTS, row i is row `slots[i]` of `packed` (zeros if
-    -1). Scales past `num_tokens` zero-pad the 128-row tile.
+    pointers if PEER. If SLOTS, rows are pool table `table`'s unplaced ones:
+    row i is row `slots[i]` of `packed` (zeros if -1), read once they landed.
+    Scales past `num_tokens` zero-pad the 128-row tile.
     """
     row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     layer = tl.program_id(1).to(tl.int64)
@@ -1639,6 +1643,7 @@ def _engram_unpack_fp8_kernel(
     valid = token < num_tokens
     live = valid
     if SLOTS:
+        wait_landed(ready, table)
         source = tl.load(slots + source, mask=valid, other=-1).to(tl.int64)
         live = valid & (source >= 0)
     # Packed rows are only scale-width aligned.
@@ -1778,8 +1783,8 @@ class EngramBatch:
                 self.tables, hashes[:, first : first + len(self.tables)]
             )
             for index in range(len(self.tables)):
-                rows, slots = fetch.wait_index(index)
-                self._unpack(rows, num_tokens, 0, False, index, index + 1, slots)
+                rows = fetch.unplaced(index)
+                self._unpack(rows[0], num_tokens, 0, False, index, index + 1, rows)
                 self._pool_done[index].record(stream)
 
     @eager_break_during_capture
@@ -1814,10 +1819,14 @@ class EngramBatch:
         peer: bool,
         start: int = 0,
         end: int | None = None,
-        slots: torch.Tensor | None = None,
+        unplaced: tuple | None = None,
     ) -> None:
-        """Unpack layers [start, end) of `rows` (row i at `slots[i]` if given)
-        into the MXFP8 WKV inputs."""
+        """Unpack layers [start, end) of `rows` into the MXFP8 WKV inputs; or,
+        given `unplaced` (a pool fetch's `(rows, slots, ready)` for table
+        `start`), rows where they land."""
+        slots = ready = None
+        if unplaced is not None:
+            rows, slots, ready = unplaced
         if slot == 0:
             return
         end = len(self.layers) if end is None else end
@@ -1827,11 +1836,13 @@ class EngramBatch:
         _engram_unpack_fp8_kernel[grid](
             rows,
             rows if slots is None else slots,
+            rows if ready is None else ready,
             self.fp8_values[start:end],
             self.fp8_scales[start:end],
             slot,
             self.fp8_values.stride(0),
             self.fp8_scales.stride(0),
+            start,
             HEADS=heads,
             LOCAL_HEADS=table.part_n_hash_cols,
             LAYERS=end - start,
@@ -1847,8 +1858,8 @@ class EngramBatch:
         if self.pool is not None and self._async:
             self._wait_fetch(index)
         elif self.pool is not None:
-            rows, slots = self._started.wait_index(index)
-            self._unpack(rows, self._num_tokens, 0, False, index, index + 1, slots)
+            rows = self._started.unplaced(index)
+            self._unpack(rows[0], self._num_tokens, 0, False, index, index + 1, rows)
         values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
         return QuantizedActivation(
             values,

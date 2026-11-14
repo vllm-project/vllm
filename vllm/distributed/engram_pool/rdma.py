@@ -78,6 +78,40 @@ def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
     return num_wrs, chain, tl.minimum(tl.cdiv(num_wrs, chain), QPS)
 
 
+@triton.jit
+def wait_landed(ready, table):
+    """Spin until each QP that gathered rows of `table` in the fetch that
+    `ready` (from `RdmaTransport.unplaced`) describes has flagged them landed;
+    trap if the requester failed or 60 s pass. Call from every program that
+    reads the rows."""
+    seq = tl.load(tl.load(ready).to(tl.pointer_type(tl.int64)))
+    done = tl.load(ready + 1).to(tl.pointer_type(tl.int64))
+    used = tl.load(ready + 2).to(tl.pointer_type(tl.int32))
+    flags = tl.load(ready + 3).to(tl.pointer_type(tl.int64))
+    world, qps = tl.load(ready + 4), tl.load(ready + 5)
+    deadline = tl.extra.cuda.globaltimer() + tl.load(ready + 6)
+    q = tl.arange(0, 16)
+    failed = False
+    waiting = 0
+    for peer in range(world):
+        group = table * world + peer
+        mask = q < tl.load(used + group)
+        waiting = 1
+        while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
+            landed = tl.load(
+                flags + group * qps + q, mask=mask, other=seq, volatile=True
+            )
+            waiting = tl.sum((landed != seq).to(tl.int32))
+            # Only a fetch with rows still to come can have failed.
+            state = tl.load(done, mask=waiting > 0, other=0, volatile=True)
+            failed = (waiting > 0) & (state == -seq)
+    if failed | (waiting > 0):
+        tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
+        tl.inline_asm_elementwise(
+            "trap;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+
+
 @triton.jit(do_not_specialize=["num_items", "num_vg"])
 def _plan_kernel(
     ids,
@@ -198,6 +232,7 @@ def _wr_kernel(
     desc_at,
     desc_lkey,
     requests,
+    slots,
     GO: tl.constexpr,
     ISSUED: tl.constexpr,
     REQUESTS: tl.constexpr,
@@ -209,15 +244,19 @@ def _wr_kernel(
     MAX_CHAIN: tl.constexpr,
     VG_P2: tl.constexpr,
     WORDS: tl.constexpr,
+    TABLES: tl.constexpr,
+    K: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Write each remote row's SGE at its slot, and for every ROWS_PER_WR rows
-    of an owner one RDMA WRITE to `landing`, chained as `proxy.chain_length`
-    says with each chain's last signaled. Each QP's last chain then links a
-    READ of its flag, which returns once the QP's rows have landed, and a
-    fenced inline WRITE of the next `seq` to it. Groups are (table, gatherer);
-    WR pointers are into the gatherer's mailbox for this GPU and the table
-    (`boxes`, then BOX_BYTES per table): WRs, flag WRs, then SGEs.
+    """Store each row's slot in `landing` (-1 if dead) into `slots` (that
+    table's `[..., K]` rows), write each remote row's SGE at its slot, and for
+    every ROWS_PER_WR rows of an owner one RDMA WRITE to `landing`, chained as
+    `proxy.chain_length` says with each chain's last signaled. Each QP's last
+    chain then links a READ of its flag, which returns once the QP's rows have
+    landed, and a fenced inline WRITE of the next `seq` to it. Groups are
+    (table, gatherer); WR pointers are into the gatherer's mailbox for this GPU
+    and the table (`boxes`, then BOX_BYTES per table): WRs, flag WRs, then
+    SGEs.
 
     Groups are laid out by `_plan_kernel`. The last program to finish then
     publishes each group's WRITE_WITH_IMM (imm: its gathering WRs | table <<
@@ -236,6 +275,9 @@ def _wr_kernel(
     box = tl.load(boxes + owner % world, mask=remote, other=0)
     box += owner // world * BOX_BYTES
     slot = start + position
+    row = item // (TABLES * K) * K + item % K
+    at = slots + item // K % TABLES * (num_items // TABLES) + row
+    tl.store(at, tl.where(remote, slot, -1).to(tl.int32), mask=item < num_items)
     # ibv_sge: addr, length | lkey << 32.
     pair = tl.arange(0, 2)[None, :]
     key = tl.load(keys + item, mask=remote, other=0).to(tl.int64) & 0xFFFFFFFF
@@ -363,14 +405,12 @@ def _place_kernel(
     QPS: tl.constexpr,
     QPS_P2: tl.constexpr,
     WORLD_P2: tl.constexpr,
-    INDEX: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """Once each QP that gathered rows of `table` in this fetch has written
     `seq` into its flag (after its rows), copy them, in group order, to their
-    places in `out` (that table's `[..., K]` rows) and zero dead rows, one word
-    per lane; or, if INDEX, store each row's slot in `landing` (-1 if dead)
-    into `out` (int32), one row per lane."""
+    places in `out` (that table's `[..., K]` rows) and zero dead rows; one word
+    per lane."""
     peers = tl.arange(0, WORLD_P2)
     vg = table * world + peers
     qps = tl.arange(0, QPS_P2)[None, :]
@@ -393,14 +433,11 @@ def _place_kernel(
         )
     word = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = word < num_words
-    row = word if INDEX else word // WORDS
+    row = word // WORDS
     item = row // K * (TABLES * K) + table * K + row % K
     packed = tl.load(owner_pos + item, mask=valid, other=-1)
     live = packed >= 0
     slot = tl.load(starts + (packed >> 32), mask=live, other=0) + (packed & 0xFFFFFFFF)
-    if INDEX:
-        tl.store(out + row, tl.where(live, slot, -1).to(tl.int32), mask=valid)
-        return
     src = landing.to(tl.pointer_type(tl.uint64)) + slot * WORDS + word - row * WORDS
     # NICs rewrite host landing between fetches: bypass caches there.
     if HOST:
@@ -584,6 +621,22 @@ class RdmaTransport:
         self.desc_at = self.desc.data_ptr()
         self.world_p2 = triton.next_power_of_2(self.world)
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
+        # `wait_landed`'s view of a fetch: seq, done, QPs per group, flags,
+        # world, QPs per peer and timeout.
+        self.ready = torch.tensor(
+            [
+                self.seq.data_ptr(),
+                self.ctrl_words.data_ptr() + proxy.DONE * 8,
+                self.used.data_ptr(),
+                self.flags.data_ptr(),
+                self.world,
+                self.qps_per_peer,
+                TIMEOUT_NS,
+                0,
+            ],
+            dtype=torch.int64,
+            device=gpu,
+        )
         self.owner_pos = torch.empty(total, dtype=torch.int64, device=gpu)
         self.remote_addr = torch.empty(total, dtype=torch.int64, device=gpu)
         self.keys = torch.empty(total, dtype=torch.int32, device=gpu)
@@ -656,11 +709,18 @@ class RdmaTransport:
         return bases, keys, gatherers
 
     def start(
-        self, meta: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, words: int
+        self,
+        meta: torch.Tensor,
+        ids: torch.Tensor,
+        out: torch.Tensor,
+        words: int,
+        slots: torch.Tensor,
     ) -> list:
         """Start gathering rows `ids` (`[..., TABLES, K]`) of the tables in `meta`
-        into `out` (`[TABLES, ..., K]` rows), on the current stream: the NICs
-        move them while the stream goes on. Returns the fetch for `wait`."""
+        on the current stream: the NICs move them while the stream goes on.
+        Each row's slot in the landing buffer goes to `slots` (`[TABLES, ...]`
+        int32, -1 if dead). Returns the fetch for `wait` (which places rows
+        into `out`, `[TABLES, ..., K]` rows) and `unplaced`."""
         n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
         if n > self.max_items * self.max_tables or tables > self.max_tables:
             raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
@@ -705,7 +765,7 @@ class RdmaTransport:
             + (self.flags_at, self.flags_rkey, n, self.world, num_vg, self.rank)
             + (self.ticket, self.ctrl_words, self.starts, self.wr_starts)
             + (self.wr_counts, self.used, self.box_rkeys, self.desc_at)
-            + (self.desc_lkey, self.requests_at),
+            + (self.desc_lkey, self.requests_at, slots),
             4,
             dict(
                 GO=proxy.GO,
@@ -719,6 +779,8 @@ class RdmaTransport:
                 MAX_CHAIN=proxy.MAX_CHAIN,
                 VG_P2=vg_p2,
                 WORDS=words,
+                TABLES=tables,
+                K=k,
                 BLOCK=128,
             ),
         )
@@ -730,7 +792,7 @@ class RdmaTransport:
             launch(stream.cuda_stream)
         self._joined.record(self.wake_stream)
         stream.wait_event(self._joined)
-        return [n, tables, k, words, out]
+        return [n, tables, k, words, out, slots]
 
     def wake(self) -> None:
         """Wake the requester for the next `start`, from a CUDA host function
@@ -745,22 +807,19 @@ class RdmaTransport:
             raise RuntimeError(f"cuLaunchHostFunc failed: {error}")
         self._woken = True
 
-    def wait(self, fetch: list, table: int, index: torch.Tensor | None = None):
+    def wait(self, fetch: list, table: int) -> None:
         """Hold the current stream until table `table`'s rows of `fetch` have
-        landed, then place them; or, given `index` (int32, one per row), store
-        each row's slot in the landing buffer there (-1 if dead) and return
-        that buffer, which keeps the rows until the next `start`."""
-        n, tables, k, words, out = fetch
-        if not n:
-            return None
-        rows = n // tables
-        num = rows if index is not None else rows * words
+        landed, and place them."""
+        if not fetch:
+            return
+        n, tables, k, words, out, _ = fetch
+        num_words = n // tables * words
         self._kernel(
             _place_kernel,
-            (triton.cdiv(num, 1024),),
-            (self.owner_pos, self.starts, self.landing)
-            + (out[table] if index is None else index, num, table, self.seq)
-            + (self.ctrl_words, self.used, self.flags, self.world, TIMEOUT_NS),
+            (triton.cdiv(num_words, 1024),),
+            (self.owner_pos, self.starts, self.landing, out[table], num_words)
+            + (table, self.seq, self.ctrl_words, self.used, self.flags)
+            + (self.world, TIMEOUT_NS),
             4,
             dict(
                 TABLES=tables,
@@ -771,11 +830,17 @@ class RdmaTransport:
                 QPS=self.qps_per_peer,
                 QPS_P2=triton.next_power_of_2(self.qps_per_peer),
                 WORLD_P2=self.world_p2,
-                INDEX=index is not None,
                 BLOCK=1024,
             ),
         )(torch.cuda.current_stream().cuda_stream)
-        return self.landing
+
+    def unplaced(self, fetch: list, table: int):
+        """Table `table`'s rows of `fetch` where they land: the landing buffer,
+        each row's slot in it (-1 if dead), and the descriptor that a kernel
+        reading them passes to `wait_landed` first. Launches nothing."""
+        if not fetch:
+            return None
+        return self.landing, fetch[5][table], self.ready
 
     def _kernel(self, kernel, grid, args: tuple, num_warps: int, consts: dict):
         """A launcher (taking the stream) of `kernel` on `grid` with `args`, then
