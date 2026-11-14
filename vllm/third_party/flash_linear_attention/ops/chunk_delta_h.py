@@ -34,7 +34,7 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 @triton.autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
+        for num_warps in NUM_WARPS
         for num_stages in _CHUNK_DELTA_H_NUM_STAGES
         for BV in [32, 64]
     ],
