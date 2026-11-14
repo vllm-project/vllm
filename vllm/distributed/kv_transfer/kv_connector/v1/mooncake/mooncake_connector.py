@@ -21,6 +21,7 @@ import torch
 import zmq
 import zmq.asyncio
 from huggingface_hub.utils import httpx
+from numpy.typing import NDArray
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
@@ -1416,6 +1417,19 @@ class MooncakeConnectorWorker:
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
+        array_write = getattr(self.engine, "batch_transfer_sync_write_arrays", None)
+        self._use_transfer_arrays = callable(array_write)
+        if callable(array_write):
+            self._batch_transfer_sync_write = array_write
+        else:
+            self._batch_transfer_sync_write = self.engine.batch_transfer_sync_write
+            logger.info(
+                "Mooncake Transfer Engine does not expose a callable "
+                "batch_transfer_sync_write_arrays; falling back to "
+                "batch_transfer_sync_write (list API). Install "
+                "mooncake-transfer-engine v0.3.14 or newer to use the array API."
+            )
+
         self.rpc_port = self.engine.get_rpc_port()
 
         logger.debug(
@@ -1947,7 +1961,7 @@ class MooncakeConnectorWorker:
                 if d_req_id not in err_req_set
             ]
 
-            if src_ptrs:
+            if len(src_ptrs):
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
                 ret_value = await self.sender_loop.run_in_executor(
                     self._sender_executor,
@@ -2045,10 +2059,16 @@ class MooncakeConnectorWorker:
         agent_meta: MooncakeXferMetadata,
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
-    ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        src_ptrs = []
-        dst_ptrs = []
-        lengths = []
+    ) -> tuple[
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        list[ReqId],
+        str | None,
+    ]:
+        src_chunks: list[NDArray[np.uint64]] = []
+        dst_chunks: list[NDArray[np.uint64]] = []
+        length_chunks: list[NDArray[np.uint64]] = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
@@ -2220,20 +2240,20 @@ class MooncakeConnectorWorker:
                 if can_coalesce:
                     local_ids = local_ids[run_starts]
                     remote_ids = remote_ids[run_starts]
-                    lengths.extend((run_lens * transfer_len).tolist())
+                    length_chunks.append(
+                        run_lens.astype(np.uint64) * np.uint64(transfer_len)
+                    )
                 else:
-                    lengths.extend([transfer_len] * len(local_ids))
-                src_ptrs.extend(
-                    (
-                        local_ids * local_region.block_len
-                        + (local_region.base_addr + src_region_offset)
-                    ).tolist()
+                    length_chunks.append(
+                        np.full(len(local_ids), transfer_len, dtype=np.uint64)
+                    )
+                src_chunks.append(
+                    local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
+                    + np.uint64(local_region.base_addr + src_region_offset)
                 )
-                dst_ptrs.extend(
-                    (
-                        remote_ids * remote_region.block_len
-                        + (remote_region.base_addr + dst_region_offset)
-                    ).tolist()
+                dst_chunks.append(
+                    remote_ids.astype(np.uint64) * np.uint64(remote_region.block_len)
+                    + np.uint64(remote_region.base_addr + dst_region_offset)
                 )
 
             logger.debug(
@@ -2243,6 +2263,18 @@ class MooncakeConnectorWorker:
                 remote_session,
             )
 
+        if not src_chunks:
+            src_ptrs = np.empty(0, dtype=np.uint64)
+            dst_ptrs = np.empty(0, dtype=np.uint64)
+            lengths = np.empty(0, dtype=np.uint64)
+        elif len(src_chunks) == 1:
+            src_ptrs = src_chunks[0]
+            dst_ptrs = dst_chunks[0]
+            lengths = length_chunks[0]
+        else:
+            src_ptrs = np.concatenate(src_chunks)
+            dst_ptrs = np.concatenate(dst_chunks)
+            lengths = np.concatenate(length_chunks)
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
     def _bind_sender_thread_device(self) -> None:
@@ -2254,19 +2286,23 @@ class MooncakeConnectorWorker:
     def _send_blocks(
         self,
         remote_session: str,
-        src_ptrs: list[int],
-        dst_ptrs: list[int],
-        lengths: list[int],
+        src_ptrs: NDArray[np.uint64],
+        dst_ptrs: NDArray[np.uint64],
+        lengths: NDArray[np.uint64],
     ) -> int:
-        start_time = time.perf_counter()
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
+        total_bytes = int(lengths.sum())
+        write_args = (
+            (src_ptrs, dst_ptrs, lengths)
+            if self._use_transfer_arrays
+            else (src_ptrs.tolist(), dst_ptrs.tolist(), lengths.tolist())
         )
+        start_time = time.perf_counter()
+        ret_value = self._batch_transfer_sync_write(remote_session, *write_args)
         duration = time.perf_counter() - start_time
         if ret_value == 0:
             self.xfer_stats.record_transfer(
                 duration_s=duration,
-                total_bytes=sum(lengths),
+                total_bytes=total_bytes,
                 num_descs=len(src_ptrs),
             )
             logger.debug("Sending to %s done, took %s", remote_session, duration)
@@ -2278,7 +2314,7 @@ class MooncakeConnectorWorker:
                 ret_value,
                 duration,
                 len(src_ptrs),
-                sum(lengths),
+                total_bytes,
             )
         return ret_value
 

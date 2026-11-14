@@ -503,13 +503,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes
-    ]
-    assert dst_ptrs == [
-        remote_base_addr + remote_logical_block * ratio * physical_page_bytes
-    ]
-    assert lengths == [num_kernel_blocks * physical_page_bytes]
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [remote_base_addr + remote_logical_block * ratio * physical_page_bytes],
+    )
+    np.testing.assert_array_equal(lengths, [num_kernel_blocks * physical_page_bytes])
 
     def split_contiguous_blocks(src_ids, dst_ids):
         return np.arange(len(src_ids)), np.ones(len(src_ids), dtype=np.int64)
@@ -543,9 +545,9 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     ]
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == expected_src_ptrs
-    assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * num_kernel_blocks
+    np.testing.assert_array_equal(src_ptrs, expected_src_ptrs)
+    np.testing.assert_array_equal(dst_ptrs, expected_dst_ptrs)
+    np.testing.assert_array_equal(lengths, [physical_page_bytes] * num_kernel_blocks)
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
@@ -709,15 +711,21 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == [
-            0x5000 + 4 * block_len,
-            0x1000 + 10 * block_len,
-        ]
-        assert dst_ptrs == [
-            0x6000 + 7 * block_len,
-            0x2000 + 30 * block_len,
-        ]
-        assert lengths == [block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs,
+            [
+                0x5000 + 4 * block_len,
+                0x1000 + 10 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs,
+            [
+                0x6000 + 7 * block_len,
+                0x2000 + 30 * block_len,
+            ],
+        )
+        np.testing.assert_array_equal(lengths, [block_len, 2 * block_len])
 
         worker.shutdown()
         worker.shutdown = noop_shutdown

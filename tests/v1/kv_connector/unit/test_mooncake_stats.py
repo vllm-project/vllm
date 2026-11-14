@@ -10,6 +10,11 @@ import numpy as np
 import pytest
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
+from tests.v1.kv_connector.unit.test_mooncake_connector import (
+    FakeMooncakeWrapper,
+    _make_test_kv_cache_config,
+    mooncake_register_worker,
+)
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -222,15 +227,27 @@ def _bare_worker() -> MooncakeConnectorWorker:
     return worker
 
 
-def test_send_blocks_records_success():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
+@pytest.fixture
+def transfer_worker(request, monkeypatch):
+    status = getattr(request, "param", 0)
+    monkeypatch.setattr(
+        FakeMooncakeWrapper, "batch_transfer_sync_write", lambda *args: status
+    )
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        try:
+            yield worker
+        finally:
+            worker.shutdown()
+
+
+def test_send_blocks_records_success(transfer_worker):
+    worker = transfer_worker
 
     ret = worker._send_blocks(
         "host:1234",
-        src_ptrs=[0x1000, 0x2000],
-        dst_ptrs=[0x3000, 0x4000],
-        lengths=[1024, 2048],
+        src_ptrs=np.array([0x1000, 0x2000], dtype=np.uint64),
+        dst_ptrs=np.array([0x3000, 0x4000], dtype=np.uint64),
+        lengths=np.array([1024, 2048], dtype=np.uint64),
     )
 
     assert ret == 0
@@ -241,11 +258,13 @@ def test_send_blocks_records_success():
     assert data["num_failed_transfers"] == []
 
 
-def test_send_blocks_records_failure():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 1  # non-zero = fail
+@pytest.mark.parametrize("transfer_worker", [1], indirect=True)
+def test_send_blocks_records_failure(transfer_worker):
+    worker = transfer_worker
 
-    ret = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    ret = worker._send_blocks(
+        "host:1234", *(np.array([v], dtype=np.uint64) for v in (0x1000, 0x2000, 4096))
+    )
 
     assert ret == 1
     assert worker.xfer_stats.num_successful_transfers == 0
@@ -258,10 +277,11 @@ def test_get_kv_connector_stats_returns_none_when_empty():
     assert worker.get_kv_connector_stats() is None
 
 
-def test_get_kv_connector_stats_returns_and_resets():
-    worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
-    worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+def test_get_kv_connector_stats_returns_and_resets(transfer_worker):
+    worker = transfer_worker
+    worker._send_blocks(
+        "host:1234", *(np.array([v], dtype=np.uint64) for v in (0x1000, 0x2000, 4096))
+    )
 
     snapshot = worker.get_kv_connector_stats()
     assert isinstance(snapshot, MooncakeKVConnectorStats)
