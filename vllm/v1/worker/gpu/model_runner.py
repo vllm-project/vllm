@@ -320,8 +320,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculative_config.uses_aux_hidden_states
             )
 
-        # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        # Remote fallback must propagate zero-length drafts to the scheduler.
+        self.draft_tokens_handler = DraftTokensHandler(
+            self.device,
+            variable_length=(
+                self.speculative_config is not None
+                and self.speculative_config.use_remote_draft()
+            ),
+        )
 
         # Built before memory profiling; block tables are attached at KV init.
         self.pcp_manager = pcp.maybe_build_pcp_manager(
@@ -1262,6 +1268,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
+        if self.speculator is not None:
+            self.speculator.close_requests(finished_req_ids)
         # Sorted so every TP rank frees request slots in the same order.
         # Features like batch-sharded sampling derive rank request ownership
         # from the slot index.
@@ -1284,6 +1292,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.use_remote_draft()
+                and (
+                    req_id in self.req_states.req_id_to_index
+                    or new_req_data.num_computed_tokens != 0
+                )
+            ):
+                raise ValueError(
+                    "remote drafter requires new requests to prefill from zero; "
+                    "streaming input updates and cached prefixes are unsupported"
+                )
 
             # Streaming input update: request already exists from a prior
             # chunk. Remove old state so it can be cleanly re-added below
@@ -2539,6 +2560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # time LLMEngine's finalizer runs, the top-level model may be gone.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
+            speculator.close()
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
                 remove_bytecode_hooks(draft_model)

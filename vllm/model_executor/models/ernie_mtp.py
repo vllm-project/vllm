@@ -144,6 +144,11 @@ class ErnieMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            vllm_config = vllm_config.with_hf_config(
+                speculative_config.draft_model_config.hf_config
+            )
         self.config = vllm_config.model_config.hf_config
         # MTP weights are stored under a flat `mtp_*.0.` block in the
         # checkpoint; rewrite them into `model.layers.{spec_layer}.*`.
