@@ -711,11 +711,13 @@ class OpenAIServingResponses(GenerateBaseServing):
             # Create inputs for the next turn.
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, HarmonyContext):
+                render_start = time.perf_counter()
                 engine_input = self.online_renderer.render_responses_harmony_messages(
                     context.messages,
                     cache_salt=cache_salt,
                     tok_params=tok_params,
                 )
+                self.online_renderer.observe_render_duration("responses", render_start)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,

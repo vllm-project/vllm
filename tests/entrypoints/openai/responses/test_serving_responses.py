@@ -34,6 +34,7 @@ from openai.types.responses.tool import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
+from prometheus_client import REGISTRY
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -90,6 +91,7 @@ def _new_online_renderer() -> OnlineRenderer:
     renderer.parser = None
     renderer.trust_request_chat_template = True
     renderer.reasoning_effort_map = {}
+    renderer.model_config = SimpleNamespace(served_model_name="test-model")
     return renderer
 
 
@@ -596,7 +598,7 @@ async def test_online_renderer_adjusts_harmony_tool_choice(
     renderer = _new_online_renderer()
     renderer.use_harmony = True
     renderer.parser = StubParser
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     tokenizer = SimpleNamespace(truncation_side="left")
     renderer.renderer = SimpleNamespace(
         tokenizer=tokenizer,
@@ -631,7 +633,7 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=5)
+    renderer.model_config.max_model_len = 5
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )
@@ -662,7 +664,7 @@ async def test_online_renderer_renders_harmony_continuation_with_call_linkage(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )
@@ -753,7 +755,7 @@ async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
 ):
     renderer = _new_online_renderer()
     renderer.use_harmony = True
-    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.model_config.max_model_len = 100
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
     )
@@ -1069,7 +1071,16 @@ class TestInitializeToolSessions:
         serving_responses_instance.online_renderer.render_responses_harmony_messages = (
             OnlineRenderer.render_responses_harmony_messages.__get__(online_renderer)
         )
+        online_renderer.observe_render_duration = (
+            OnlineRenderer.observe_render_duration.__get__(online_renderer)
+        )
+        online_renderer.model_config = SimpleNamespace(served_model_name="test-model")
         serving_responses_instance._extract_prompt_len = MagicMock(return_value=2)
+        render_count = (
+            "vllm:request_render_duration_seconds_count",
+            {"model_name": "test-model", "request_type": "responses"},
+        )
+        renders_before = REGISTRY.get_sample_value(*render_count) or 0
 
         async for _ in serving_responses_instance._generate_with_builtin_tools(
             request_id="req",
@@ -1096,6 +1107,7 @@ class TestInitializeToolSessions:
         )
         assert followup_engine_input.get("cache_salt") == "request-salt"
         assert followup_engine_input["prompt_token_ids"] == [3, 4]
+        assert REGISTRY.get_sample_value(*render_count) == renders_before + 1
 
     @pytest.mark.asyncio
     async def test_harmony_tool_followup_respects_max_output_tokens(

@@ -71,7 +71,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_metrics::{METRICS, RenderRequestType};
+use vllm_metrics::METRICS;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -496,6 +496,7 @@ impl ChatLlm {
         // Like Python's `render_chat`, record successful renders: templating,
         // multimodal preprocessing, and tokenization.
         let render_start = Instant::now();
+        let render_request_type = request.render_request_type;
         let PreparedChatRequest {
             text_request,
             output_processors,
@@ -503,7 +504,7 @@ impl ChatLlm {
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         METRICS.renderer.observe_request_render_duration(
             self.served_model_name(),
-            RenderRequestType::Chat,
+            render_request_type,
             render_start.elapsed(),
         );
         let request_id = text_request.request_id.clone();

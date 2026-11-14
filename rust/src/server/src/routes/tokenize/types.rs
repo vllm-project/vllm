@@ -9,6 +9,7 @@ use serde_json::Value;
 use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
+use vllm_metrics::RenderRequestType;
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{Prompt, TextRequest};
 
@@ -133,6 +134,7 @@ impl TokenizeChatRequest {
             session_id: None,
             lora_request: None,
             return_prompt_text: false,
+            render_request_type: RenderRequestType::Chat,
         })
     }
 }

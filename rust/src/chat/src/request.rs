@@ -7,6 +7,7 @@ use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_metrics::RenderRequestType;
 pub use vllm_parser::tool::Tool as ChatTool;
 use vllm_text::TextDecodeOptions;
 pub use vllm_text::{PromptTruncation, SamplingParams};
@@ -702,6 +703,10 @@ pub struct ChatRequest {
     /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
     #[serde(default)]
     pub return_prompt_text: bool,
+    /// The `request_type` label under which the render duration is recorded:
+    /// the API this request was lowered from.
+    #[serde(skip)]
+    pub render_request_type: RenderRequestType,
 }
 
 impl ChatRequest {
@@ -724,6 +729,7 @@ impl ChatRequest {
             session_id: None,
             lora_request: None,
             return_prompt_text: false,
+            render_request_type: RenderRequestType::Chat,
         }
     }
 
