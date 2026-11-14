@@ -51,9 +51,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.tool_call_validation import (
+    validate_chat_tool_call_ids,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
@@ -701,6 +705,31 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
     @classmethod
+    def _validate_tool_result_ids(
+        cls, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+    ) -> None:
+        messages: list[dict[str, Any]] = []
+        for message in request.messages:
+            if isinstance(message.content, str):
+                continue
+            for block in message.content:
+                if message.role == "assistant" and block.type == "tool_use":
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [{"id": block.id}],
+                        }
+                    )
+                elif message.role == "user" and block.type == "tool_result":
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_use_id": block.tool_use_id,
+                        }
+                    )
+        validate_chat_tool_call_ids(messages, field="tool_use_id")
+
+    @classmethod
     def _build_base_request(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
@@ -909,6 +938,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
+        try:
+            self._validate_tool_result_ids(request)
+        except VLLMValidationError as exc:
+            return self.create_error_response(exc)
         disabled_thinking_effort = (
             await self.disabled_thinking_effort_resolver.resolve_for(request)
         )
@@ -1330,6 +1363,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
+        try:
+            self._validate_tool_result_ids(request)
+        except VLLMValidationError as exc:
+            return self.create_error_response(exc)
         disabled_thinking_effort = (
             await self.disabled_thinking_effort_resolver.resolve_for(request)
         )

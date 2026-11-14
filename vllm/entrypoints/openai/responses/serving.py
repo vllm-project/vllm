@@ -635,6 +635,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             previous_messages=None,
             previous_response_outputs=None,
             tool_server=self.tool_server,
+            validate_tool_call_ids=False,
         )
         if isinstance(render_result, ErrorResponse):
             raise VLLMValidationError(render_result.error.message)

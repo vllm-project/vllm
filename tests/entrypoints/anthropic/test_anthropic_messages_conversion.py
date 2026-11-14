@@ -53,7 +53,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorResponse,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
@@ -2055,6 +2059,160 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_messages_rejects_orphan_tool_use_id_before_generation():
+    handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    request = _make_request(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_missing",
+                        "content": "orphan",
+                    }
+                ],
+            }
+        ]
+    )
+
+    result = await handler.create_messages(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "tool_use_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_use_id", [None, ""])
+async def test_messages_rejects_missing_tool_use_id(tool_use_id):
+    handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    result = await handler.create_messages(
+        _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": "orphan",
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "tool_use_id"
+
+
+def _messages_validation_handler() -> tuple[AnthropicServingMessages, AsyncMock]:
+    handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    handler.disabled_thinking_effort_resolver = SimpleNamespace(
+        resolve_for=AsyncMock(return_value="none")
+    )
+    handler._merge_inline_system = False
+    create_chat_completion = AsyncMock(return_value=object())
+    object.__setattr__(handler, "create_chat_completion", create_chat_completion)
+    return handler, create_chat_completion
+
+
+@pytest.mark.asyncio
+async def test_messages_accepts_matching_parallel_tool_results():
+    handler, create_chat_completion = _messages_validation_handler()
+    result = await handler.create_messages(
+        _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "one"},
+                        {"type": "tool_use", "id": "toolu_2", "name": "two"},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_2"},
+                        {"type": "tool_result", "tool_use_id": "toolu_1"},
+                    ],
+                },
+            ]
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    create_chat_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_messages_accepts_matching_tool_results_across_turns():
+    handler, create_chat_completion = _messages_validation_handler()
+    result = await handler.create_messages(
+        _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "one"}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1"}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_2", "name": "two"}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_2"}],
+                },
+            ]
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    create_chat_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_messages_treats_assistant_tool_result_as_text():
+    handler, create_chat_completion = _messages_validation_handler()
+    result = await handler.create_messages(
+        _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_result", "tool_use_id": "not_a_call"}],
+                }
+            ]
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    create_chat_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_rejects_orphan_tool_use_id():
+    handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    result = await handler.count_tokens(
+        _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "unknown"}],
+                }
+            ]
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "tool_use_id"
 
 
 # ======================================================================

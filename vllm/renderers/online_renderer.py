@@ -39,6 +39,10 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.tool_call_validation import (
+    validate_chat_tool_call_ids,
+    validate_responses_tool_call_ids,
+)
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -259,6 +263,15 @@ class OnlineRenderer:
         render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer
 
+        try:
+            validate_chat_tool_call_ids(request.messages)
+        except VLLMValidationError as exc:
+            return self.create_error_response(
+                str(exc),
+                err_type="invalid_request_error",
+                param=exc.parameter,
+            )
+
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
 
         if is_mistral_tokenizer(tokenizer):
@@ -348,8 +361,25 @@ class OnlineRenderer:
         previous_response_outputs: list[ResponseOutputItem] | None = None,
         tool_server: "ToolServer | None" = None,
         skip_mm_cache: bool = False,
+        validate_tool_call_ids: bool = True,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
+        if validate_tool_call_ids:
+            try:
+                validate_responses_tool_call_ids(
+                    previous_messages=previous_messages or (),
+                    previous_outputs=previous_response_outputs or (),
+                    input_items=(
+                        request.input if isinstance(request.input, list) else ()
+                    ),
+                )
+            except VLLMValidationError as exc:
+                return self.create_error_response(
+                    str(exc),
+                    err_type="invalid_request_error",
+                    param=exc.parameter,
+                )
+
         template_error = self.validate_chat_template(
             request_chat_template=None,
             chat_template_kwargs=request.chat_template_kwargs,
