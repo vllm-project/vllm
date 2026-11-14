@@ -31,6 +31,7 @@ def _run_dummy_batch(
     speculator,
     *,
     max_num_reqs=512,
+    max_model_len=4096,
     is_profile=False,
     skip_attn=False,
 ):
@@ -42,6 +43,7 @@ def _run_dummy_batch(
 
     runner = SimpleNamespace(
         max_num_reqs=max_num_reqs,
+        max_model_len=max_model_len,
         max_num_tokens=2048,
         decode_query_len=1,
         speculator=speculator,
@@ -97,3 +99,13 @@ def test_dummy_run_keeps_already_fitting_parallel_draft_batch():
 def test_dummy_run_keeps_default_speculator_batch():
     scheduler_output = _run_dummy_batch(_DefaultSpeculator())
     assert len(scheduler_output.num_scheduled_tokens) == 512
+
+
+def test_dummy_run_caps_tokens_at_max_num_reqs_times_max_model_len():
+    # FlashInfer autotune passes max_num_batched_tokens (2048 here), but a real
+    # batch can hold at most max_num_reqs * max_model_len = 2 * 448 tokens.
+    scheduler_output = _run_dummy_batch(
+        _DefaultSpeculator(), max_num_reqs=2, max_model_len=448
+    )
+    assert scheduler_output.total_num_scheduled_tokens == 896
+    assert list(scheduler_output.num_scheduled_tokens.values()) == [448, 448]
