@@ -2190,6 +2190,30 @@ def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
     return 128, 128, 128, 4, 2
 
 
+def _aiter_wo_a_bmm(a, a_scale, weight_preshuffled, weight_scale, n_groups, rank):
+    """wo_a on AITER's tuned batched GEMMs and the preshuffled weight; [T, G * R]."""
+    from aiter.ops.batched_gemm_op_a8w8 import batched_gemm_a8w8_mxscale_bpreshuffle
+
+    # Imported here to avoid an import cycle with the linear kernels package.
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        FLYDSL_MAX_BYTES,
+    )
+
+    t, k = a.shape[0], a.shape[1] // n_groups
+    w = weight_preshuffled.view(n_groups, rank, k)
+    w_scale = weight_scale.view(n_groups, rank // 32, k // 32)
+    a, a_scale = a.contiguous().view(t, n_groups, k), a_scale.contiguous()
+    a_scale = a_scale.view(t, n_groups, k // 32)
+    rows = FLYDSL_MAX_BYTES // max(n_groups * k, 2 * n_groups * rank)
+    outs = [
+        batched_gemm_a8w8_mxscale_bpreshuffle(
+            a[i : i + rows], w, a_scale[i : i + rows], w_scale, torch.bfloat16
+        ).view(-1, n_groups * rank)
+        for i in range(0, t, rows)
+    ]
+    return outs[0] if len(outs) == 1 else torch.cat(outs)
+
+
 def _rocm_mxfp8_wo_a_bmm_impl(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -2197,9 +2221,14 @@ def _rocm_mxfp8_wo_a_bmm_impl(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_tokens = a.shape[0]
     group_dim = a.shape[1] // n_groups
+    if num_tokens > 0 and weight_preshuffled is not None:
+        return _aiter_wo_a_bmm(
+            a, a_scale, weight_preshuffled, weight_scale, n_groups, o_lora_rank
+        )
     out = torch.empty(
         (num_tokens, n_groups * o_lora_rank), dtype=torch.bfloat16, device=a.device
     )
@@ -2240,6 +2269,7 @@ def _rocm_mxfp8_wo_a_bmm_fake(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return a.new_empty((a.shape[0], n_groups * o_lora_rank), dtype=torch.bfloat16)
 
@@ -2266,11 +2296,18 @@ def rocm_mxfp8_wo_a_bmm(
     [T, G * K // 32] E8M0 scales, as the sparse decode reduce writes them.
     The weight is the checkpoint's MXFP8 `wo_a` as loaded, [G * R, K] with
     either [G * R // 32, K // 32] block scales or [G * R, K // 32] per-row
-    scales, so there is no dequantized copy to keep.
+    scales, so there is no dequantized copy to keep. A `weight_preshuffled`
+    the linear kernel set (possibly the weight itself) runs AITER's GEMMs.
     Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
-        a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
+        a,
+        a_scale,
+        wo_a.weight,
+        wo_a.weight_scale,
+        n_groups,
+        o_lora_rank,
+        getattr(wo_a, "weight_preshuffled", None),
     )
 
 
