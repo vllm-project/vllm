@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class RankFileMetadata:
     """Manages file page allocation for a single rank."""
 
@@ -49,7 +49,7 @@ class RankFileMetadata:
         return len(self.free_pages)
 
 
-@dataclass
+@dataclass(slots=True)
 class KeyMetadata:
     """Manages metadata for a single key across multiple ranks."""
 

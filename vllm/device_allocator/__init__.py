@@ -18,7 +18,7 @@ HandleType: TypeAlias = tuple[int, int, int, list[int] | int]
 DEFERRABLE_TAGS: tuple[str, ...] = ("weights", "kv_cache")
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class AllocationData:
     handle: HandleType
     tag: str

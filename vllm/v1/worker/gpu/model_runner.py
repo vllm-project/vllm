@@ -78,6 +78,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
@@ -707,8 +708,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
+        no_attn_metadata_layer_names: set[str] = set()
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
+            if self.speculator.speculative_config.prefill_context_kv_only:
+                no_attn_metadata_layer_names = draft_attn_layer_names
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():
             (
@@ -720,6 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                no_attn_metadata_layer_names=no_attn_metadata_layer_names,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
@@ -812,6 +817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.block_tables,
                 self.input_buffers,
                 self.attn_groups,
+                self.kernel_block_sizes,
             )
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
@@ -1941,7 +1947,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # DP padding can exceed max_model_len; split so each dummy request
+            # fits a block-table row (bounded by max_num_reqs).
+            needed_num_reqs = max(
+                batch_desc.num_reqs or num_reqs,
+                cdiv(batch_desc.num_tokens, self.max_model_len),
+            )
+            dummy_num_reqs = min(needed_num_reqs, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
@@ -2092,10 +2104,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
-                assert self.pp_handler is not None
-                self.pp_handler.check_received_tensors(
-                    intermediate_tensors.tensors, self.intermediate_tensors.tensors
-                )
                 num_tokens = input_batch.num_tokens
                 received = intermediate_tensors.tensors
                 for k, v in self.intermediate_tensors.tensors.items():
@@ -2316,6 +2324,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
 
+        num_drafted_tokens_per_req, num_verified_tokens_per_req = (
+            self._get_num_drafted_and_verified(input_batch)
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -2325,6 +2336,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            num_drafted_tokens_per_req=num_drafted_tokens_per_req,
+            num_verified_tokens_per_req=num_verified_tokens_per_req,
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
@@ -2418,6 +2431,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
+
+    def _get_num_drafted_and_verified(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Drafted and verified draft tokens per request.
+
+        Must run before the drafter overwrites the draft tokens being verified.
+        """
+        if self.speculator is None or input_batch.num_draft_tokens_per_req is None:
+            return None, None
+        draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+        # -1 marks a draft slot without a draft token.
+        num_drafted = (draft_tokens != -1).sum(dim=-1)
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        num_in_forward = input_batch.cu_num_logits.diff() - num_bonus_tokens
+        num_verified = torch.minimum(num_in_forward, num_drafted)
+        return num_drafted, num_verified
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()

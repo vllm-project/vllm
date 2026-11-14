@@ -142,7 +142,7 @@ def import_m2n() -> Any:
     return m2n
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class M2NMesh:
     """One side's rank topology — pure topology, no tensor placement.
 
@@ -185,7 +185,7 @@ Placements = tuple[int, int]
 REPLICATED: Placements | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class M2NLayout:
     """A tensor's mesh and placement on one side of a transfer."""
 
@@ -434,7 +434,7 @@ def m2n_param_meta(meta: ParamMeta, num_trainer_ranks: int) -> M2NParamMeta:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class M2NWireParam:
     """JSON-safe source metadata for one parameter in the init handshake."""
 
