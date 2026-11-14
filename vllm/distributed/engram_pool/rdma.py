@@ -456,9 +456,16 @@ def _post_requests(
     tl.store(queue + 5, index + 1, mask=last)
     _fence_sys()
     tl.debug_barrier()
-    register = tl.load(queue + 3, mask=last, other=0).to(tl.pointer_type(tl.uint64))
-    ring = ctrl0.to(tl.uint64) | ctrl1.to(tl.uint64) << 32
-    tl.store(register, tl.sum(ring, 1), mask=last, cache_modifier=".wt")
+    register = tl.load(queue + 3, mask=last, other=0)
+    ring = tl.sum(ctrl0.to(tl.uint64) | ctrl1.to(tl.uint64) << 32, 1)
+    # One doorbell at a time: stores to several registers at once can merge
+    # into one write that the NIC takes as a single doorbell.
+    for g in range(world):
+        mine = last & (gatherer == g)
+        if tl.sum(mine.to(tl.int32)) > 0:
+            door = tl.sum(tl.where(mine, register, 0)).to(tl.pointer_type(tl.uint64))
+            tl.store(door, tl.sum(tl.where(mine, ring, 0)), cache_modifier=".wt")
+            _fence_sys()
 
 
 @triton.jit(do_not_specialize=["num_words", "table"])
