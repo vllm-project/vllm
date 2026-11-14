@@ -304,7 +304,10 @@ def _is_member(param: torch.Tensor) -> bool:
 
 
 class ModuleSource(WeightSource):
-    """`WeightSource` over `module.named_parameters()`: plain, FSDP or DTensor.
+    """`WeightSource` over every parameter name, including tied aliases.
+
+    Inference workers may keep a trainer's tied parameters on different
+    pipeline stages, so each name must be transferred even when storage is shared.
 
     A plain tensor is owned by every rank. A `DTensor` is owned by the global
     ranks of its device mesh, with the mesh's shape and the DTensor's
@@ -324,7 +327,7 @@ class ModuleSource(WeightSource):
     @cached_property
     def metadata(self) -> list[ParamMeta]:
         metas = []
-        for name, p in self._module.named_parameters():
+        for name, p in self._module.named_parameters(remove_duplicate=False):
             layout = _dtensor_layout(p)
             if layout is None:
                 metas.append(ParamMeta(name, p.dtype, tuple(p.shape)))
@@ -343,12 +346,12 @@ class ModuleSource(WeightSource):
         return metas
 
     def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
-        for name, param in self._module.named_parameters():
+        for name, param in self._module.named_parameters(remove_duplicate=False):
             if _is_member(param):
                 yield name, materialize_full_tensor(param)
 
     def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
-        for name, param in self._module.named_parameters():
+        for name, param in self._module.named_parameters(remove_duplicate=False):
             if not _is_member(param):
                 continue
             layout = _dtensor_layout(param)
