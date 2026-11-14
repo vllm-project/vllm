@@ -1173,10 +1173,13 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         mla_num_heads = base_mla_num_heads
         need_lse = self.sinks is not None
-        from vllm.platforms.rocm import on_gfx942
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-        # Keep sink attention available for dtypes/head shapes without an
-        # AITER return-LSE kernel. Sink layers never need persistent metadata.
+        # Keep sink attention available for dtypes/head shapes without a
+        # correct AITER return-LSE kernel. gfx950's nonpersistent BF16 kernels
+        # for 33-128 heads are nondeterministic (ROCm/aiter#7631); drop the
+        # gfx950 clause once the pinned AITER has that fix. Sink layers never
+        # need persistent metadata.
         triton_sink_fallback = (
             need_lse
             and q.dtype == kv_c_and_k_pe_cache.dtype
@@ -1187,6 +1190,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     and (
                         mla_num_heads > 128
                         or (on_gfx942() and 32 < mla_num_heads <= 64)
+                        or (on_gfx950() and mla_num_heads > 32)
                     )
                 )
             )
