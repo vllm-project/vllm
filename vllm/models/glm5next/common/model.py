@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -112,6 +112,7 @@ from .multimodal import (
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
+from .specialized_decode import requested
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -133,6 +134,36 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     kpool = config.index_kpool
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
+
+
+def _specialized_decode_config(vllm_config: VllmConfig):
+    """The ROCm specialized decode's config (the backbone's per-layer kernels), None
+    unless it is requested on ROCm. Off ROCm, `decode_backend=latency_specialized`
+    is the NVIDIA executor's (`Glm5NextForCausalLM`) and `--monokernel` is refused,
+    so a stock deployment never reaches AMD code. A ROCm GPU other than gfx950 is
+    refused by the runtime's own checks (`spec.refusal_reasons`)."""
+    if not requested(vllm_config):
+        return None
+    if not current_platform.is_rocm():
+        if vllm_config.kernel_config.monokernel:
+            raise ValueError(
+                "--monokernel runs GLM-5.3-Flash's specialized decode only on ROCm "
+                f"CDNA4 (gfx950); drop it on {current_platform.device_name}"
+            )
+        return None
+    from vllm.models.glm5next.amd.specialized_decode.runtime import (
+        specialized_decode_config,
+    )
+
+    return specialized_decode_config(vllm_config)
+
+
+def _executor_config(vllm_config: VllmConfig):
+    """The NVIDIA specialized decode executor's config, None on ROCm, where the
+    backbone serves the same switch with its own kernels."""
+    if current_platform.is_rocm():
+        return None
+    return specialized_decode_config(vllm_config)
 
 
 _MHC_TAU = 0.05
@@ -955,6 +986,22 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.vllm_config = vllm_config
+        self.specialized_decode_config = _specialized_decode_config(vllm_config)
+        self.specialized_decode: Any = None
+
+    def build_specialized_decode(self) -> None:
+        """Called by `Glm5NextModelState` once the weights are loaded."""
+        from vllm.models.glm5next.amd.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        if self.specialized_decode is not None:
+            raise ValueError("--monokernel: reloading weights is not supported")
+        self.specialized_decode = SpecializedDecode(
+            self, self.specialized_decode_config
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1008,6 +1055,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self._active_layers, start=self.start_layer):
             if idx in self.aux_hidden_state_layers:
@@ -1017,7 +1066,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual, post, comb = layer(
+            kernel = step.layer(idx) if step is not None else None
+            hidden_states, residual, post, comb = (kernel or layer)(
                 positions, hidden_states, residual, post, comb
             )
 
@@ -1283,7 +1333,7 @@ class Glm5NextForCausalLM(
         )
         # decode_backend=latency_specialized: a specialized decode executor over
         # self.model, built by the model state once the weights are loaded.
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config = _executor_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
 
     def build_specialized_decode(self) -> None:
@@ -1293,11 +1343,6 @@ class Glm5NextForCausalLM(
             self.model, self.specialized_decode_config
         )
         self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
-
-    def get_model_state_cls(self) -> "type[ModelState]":
-        from ..nvidia.model_state import Glm5NextModelState
-
-        return Glm5NextModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1363,6 +1408,8 @@ class Glm5NextForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.model.specialized_decode is not None:
+            self.model.specialized_decode.after_step()
         decode = self.specialized_decode
         if decode is not None:
             logits = decode.compute_logits(
@@ -1372,6 +1419,15 @@ class Glm5NextForCausalLM(
                 return logits
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.model.specialized_decode_config is not None:
+            from ..amd.model_state import Glm5NextModelState as AmdModelState
+
+            return AmdModelState
+        from ..nvidia.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
