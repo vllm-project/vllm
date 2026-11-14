@@ -1072,9 +1072,34 @@ class Worker(WorkerBase):
             warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
             cg_capture_sizes: list[int] = []
 
+            max_model_len = getattr(
+                self.vllm_config.model_config, "max_model_len", None
+            )
+            max_num_seqs = getattr(
+                self.vllm_config.scheduler_config, "max_num_seqs", None
+            )
+            max_possible_tokens = (
+                max_num_seqs * max_model_len
+                if isinstance(max_model_len, int)
+                and max_model_len > 0
+                and isinstance(max_num_seqs, int)
+                and max_num_seqs > 0
+                else None
+            )
+            if max_possible_tokens is not None:
+                warmup_sizes = [
+                    x
+                    for x in warmup_sizes
+                    if not isinstance(x, int) or x <= max_possible_tokens
+                ]
+
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
                 cg_capture_sizes = [] if cg_sizes is None else cg_sizes
+                if max_possible_tokens is not None:
+                    cg_capture_sizes = [
+                        x for x in cg_capture_sizes if x <= max_possible_tokens
+                    ]
                 warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
 
             compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
@@ -1084,8 +1109,20 @@ class Worker(WorkerBase):
             all_sizes = set(cg_capture_sizes)
             all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
             for compile_range in compile_ranges:
+                if (
+                    max_possible_tokens is not None
+                    and compile_range.start > max_possible_tokens
+                ):
+                    continue
                 if not any(x in compile_range for x in all_sizes):
-                    warmup_sizes.append(compile_range.end)
+                    target_size = (
+                        min(compile_range.end, max_possible_tokens)
+                        if max_possible_tokens is not None
+                        else compile_range.end
+                    )
+                    if target_size not in all_sizes:
+                        warmup_sizes.append(target_size)
+                        all_sizes.add(target_size)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):

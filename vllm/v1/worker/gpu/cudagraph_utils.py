@@ -354,9 +354,20 @@ class CudaGraphManager:
                 if ubatch_desc is not None:
                     decode_descs.append(ubatch_desc)
 
+        max_model_len = getattr(self.vllm_config.model_config, "max_model_len", None)
+        max_possible_tokens = (
+            self.max_num_reqs * max_model_len
+            if isinstance(max_model_len, int)
+            and max_model_len > 0
+            and isinstance(self.max_num_reqs, int)
+            and self.max_num_reqs > 0
+            else None
+        )
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
+            if max_possible_tokens is not None and num_tokens > max_possible_tokens:
+                continue
             # recoverSSM cannot capture a dummy query wider than its workspace.
             if mixed_mode and (
                 not self.vllm_config.cache_config.use_kda_recoverssm

@@ -989,3 +989,34 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+def test_cudagraph_candidates_skip_sizes_exceeding_max_model_len(monkeypatch):
+    """Full/mixed CUDA graph candidates must not exceed max_num_reqs * max_model_len."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    vllm_config = _create_decode_vllm_config(
+        [1, 8, 512],
+        num_speculative_tokens=0,
+        max_num_seqs=1,
+    )
+    vllm_config.model_config = SimpleNamespace(max_model_len=448)
+
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_lens={1: 1},
+    )
+
+    all_descs = [desc for descs in manager._capture_descs.values() for desc in descs]
+    assert all(desc.num_tokens <= 448 for desc in all_descs)
+    assert any(desc.num_tokens == 8 for desc in all_descs)
