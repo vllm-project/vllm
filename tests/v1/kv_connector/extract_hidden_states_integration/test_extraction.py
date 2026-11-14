@@ -75,9 +75,10 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 )
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path, monkeypatch, enforce_eager
 ):
     """Test hidden-state extraction with a predictable dummy model.
 
@@ -92,6 +93,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     3. **Per-request options**: custom hidden_states_path and
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
+
+    Runs eagerly and with CUDA graphs.
     """
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
@@ -122,7 +125,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         },
         max_model_len=1024,
         max_num_batched_tokens=max_num_batched_tokens,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         trust_remote_code=True,
         load_format="dummy",
     )
@@ -302,6 +305,46 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
             len(output.prompt_token_ids),
             len(layer_ids),
             hidden_size,
+        )
+
+
+@create_new_process_for_each_test()
+def test_extract_hidden_states_full_cudagraph_mode(tmp_path):
+    """The cache-only draft layer must not limit the target model's CUDA
+    graph mode, so extraction starts and saves hidden states with
+    `cudagraph_mode=FULL`."""
+    layer_ids = [5, 11, 17]
+    hidden_size = 1024  # Qwen/Qwen3-0.6B hidden_size
+
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        compilation_config={"cudagraph_mode": "FULL"},
+        max_model_len=256,
+        gpu_memory_utilization=0.4,
+        load_format="dummy",
+    )
+
+    prompts = ["Hello world", "Test prompt with several tokens"]
+    sampling_params = SamplingParams(max_tokens=8, temperature=0.0)
+    outputs = llm.generate(prompts, sampling_params)
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert output.prompt_token_ids is not None
+        get_and_check_output(
+            output, (len(output.prompt_token_ids), len(layer_ids), hidden_size)
         )
 
 
