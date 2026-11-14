@@ -37,8 +37,8 @@ Guarantee: no token is returned from a step any of whose launches failed on
 any rank, nor from any later step. There is no host synchronization per step;
 the check is two small kernels a forward (inside the FULL graph when one is
 replayed). The cause (rank, epoch, site) stays in the device word: the worker
-reports only the GPU queue exception. `test_failstop.py` checks that the
-assert traps on the installed torch build.
+reports only the GPU queue exception. `test_model.py` and `test_runtime.py`
+check the specialized decode model and runtime invariants.
 
 ## Toolchain
 
