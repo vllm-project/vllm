@@ -1267,10 +1267,19 @@ class OpenAIServingResponses(GenerateBaseServing):
                 delta_message = DeltaMessage(content=output.text)
 
             if not delta_message:
+                processor.defer_logprobs(output, _get_logprobs)
                 continue
             delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
-            for dm in split_delta(delta_message):
+            deltas = split_delta(delta_message)
+            if all(
+                processor.resolve_target_state(dm)[0] == _StateType.NONE
+                for dm in deltas
+            ):
+                processor.defer_logprobs(output, _get_logprobs)
+                continue
+
+            for dm in deltas:
                 target_state, tool_call = processor.resolve_target_state(dm)
                 if target_state == _StateType.NONE:
                     continue

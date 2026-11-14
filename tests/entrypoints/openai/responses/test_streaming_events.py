@@ -11,6 +11,7 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseStreamEvent,
 )
+from openai.types.responses.response_output_text import Logprob
 from openai_harmony import Message, Role
 from pydantic import TypeAdapter
 
@@ -203,6 +204,61 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+def _token_logprobs(tokens: list[str]) -> list[Logprob]:
+    return [Logprob(token=t, bytes=[], logprob=-1.0, top_logprobs=[]) for t in tokens]
+
+
+def _stream_steps(
+    processor: SimpleStreamingEventProcessor,
+    steps: list[tuple[str, list[str]]],
+) -> list:
+    """Feed (text, tokens) steps the way serving.py does per engine output."""
+    events = []
+    for text, tokens in steps:
+        delta = DeltaMessage(content=text)
+        if processor.resolve_target_state(delta)[0] == _StateType.NONE:
+            processor.defer_logprobs(tokens, _token_logprobs)
+            continue
+        if processor.needs_transition(_StateType.CONTENT, None):
+            events.extend(processor.close_current())
+            events.extend(processor.open(_StateType.CONTENT))
+        events.extend(processor.emit_delta(delta, tokens, _token_logprobs))
+    return events
+
+
+class TestDeferredLogprobs:
+    def test_empty_text_step_logprobs_join_next_content_delta(self):
+        """Regression for #66436: logprobs of tokens with empty text deltas
+        (e.g. a multi-token UTF-8 character) must not be dropped."""
+        processor = SimpleStreamingEventProcessor()
+        events = _stream_steps(
+            processor, [("", ["t1"]), ("", ["t2"]), ("\U0001fabf", ["t3"])]
+        )
+
+        deltas = [e for e in events if e.type == "response.output_text.delta"]
+        assert [d.delta for d in deltas] == ["\U0001fabf"]
+        assert [lp.token for lp in deltas[0].logprobs] == ["t1", "t2", "t3"]
+
+    def test_trailing_empty_text_logprobs_kept_on_content_part(self):
+        processor = SimpleStreamingEventProcessor()
+        _stream_steps(processor, [("hi", ["t1"]), ("", ["eos"])])
+        processor.close_current()
+
+        assert [lp.token for lp in processor.state.accumulated_logprobs] == [
+            "t1",
+            "eos",
+        ]
+
+    def test_empty_step_inside_tool_call_is_not_deferred(self):
+        processor = SimpleStreamingEventProcessor()
+        tc = _make_tool_call(0, name="f", arguments="{}")
+        _run_through_processor(processor, DeltaMessage(tool_calls=[tc]))
+        assert processor.state.current_state == _StateType.TOOL_CALL
+
+        processor.defer_logprobs(["t1"], _token_logprobs)
+        assert processor.pending_logprobs == []
 
 
 class TestSimpleToolCallShapes:
