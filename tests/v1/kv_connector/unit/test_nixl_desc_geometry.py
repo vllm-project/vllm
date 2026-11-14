@@ -75,7 +75,6 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     expand_strided_descs,
-    make_attn_backend,
 )
 
 
@@ -206,10 +205,17 @@ def _make_packed_mla_view_worker(
             DeepseekV32IndexerCache(
                 128, torch.uint8, indexer_layer, config.cache_config
             )
-    backends = [
-        b if isinstance(b, type) else make_attn_backend(b, block_size)
-        for b in backend_names
-    ]
+    backends = []
+    for name in backend_names:
+        # A backend class is used as is.
+        if isinstance(name, type):
+            backends.append(name)
+            continue
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [block_size]
+        backend.get_name.return_value = name
+        backend.full_cls_name.return_value = f"fake.{name}"
+        backends.append(backend)
     with (
         patch.object(bw, "NixlWrapper", _RecordingNixl),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
@@ -430,6 +436,7 @@ def _register_overlaid_mla_worker(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
+    from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheTensor,
@@ -471,7 +478,7 @@ def _register_overlaid_mla_worker(
     worker.use_mla = True
     worker.model_config = MagicMock()
     worker.model_config.get_total_num_kv_heads.return_value = 1
-    worker.attn_backends = [make_attn_backend("FLASHMLA")]
+    worker.attn_backends = [FlashMLABackend]
     worker._has_mamba = False
     worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
@@ -690,7 +697,10 @@ def _make_mla_hybrid_worker(
     # would not be deduplicated. Pin it to the faked device type.
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
-    fake_backend = make_attn_backend("FLASHMLA", kernel_block_size)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -1675,7 +1685,10 @@ def _make_csa_linear_ple_worker(
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-    fake_backend = make_attn_backend("TEST_ATTN", 4)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "TEST_ATTN"
+    fake_backend.full_cls_name.return_value = "test.AttentionBackend"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -1954,7 +1967,10 @@ def _make_ring_worker():
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-    fake_backend = make_attn_backend("TEST_ATTN", 4)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "TEST_ATTN"
+    fake_backend.full_cls_name.return_value = "test.AttentionBackend"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -2068,7 +2084,10 @@ def _make_shared_base_ring_worker():
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-    fake_backend = make_attn_backend("TEST_ATTN", 4)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "TEST_ATTN"
+    fake_backend.full_cls_name.return_value = "test.AttentionBackend"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -2404,7 +2423,9 @@ def _real_model_worker(engine_id, vllm_config, kv_cache_config, caches):
         for g in kv_cache_config.kv_cache_groups
         for spec in g.kv_cache_specs.values()
     )
-    fake_backend = make_attn_backend("FLASHMLA" if use_mla else "FLASH_ATTN")
+    fake_backend = MagicMock()
+    fake_backend.get_name.return_value = "FLASHMLA" if use_mla else "FLASH_ATTN"
+    fake_backend.full_cls_name.return_value = "fake.backend"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -2678,7 +2699,10 @@ def _make_pp_attn_worker(
     config.kv_transfer_config.kv_buffer_device = "cuda"
     if pp_stage:
         config.parallel_config.pipeline_parallel_size = pp_stage[1]
-    backend = make_attn_backend("TEST_ATTN", kernel_block_size)
+    backend = MagicMock()
+    backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
+    backend.get_name.return_value = "TEST_ATTN"
+    backend.full_cls_name.return_value = "fake.TEST_ATTN"
     platform = MagicMock(device_type="cuda")
     platform.get_nixl_memory_type.return_value = "VRAM"
     with (

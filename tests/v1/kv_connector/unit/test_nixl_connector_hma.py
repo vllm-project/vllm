@@ -41,7 +41,6 @@ from .utils import (
     create_request,
     create_vllm_config,
     expand_strided_descs,
-    make_attn_backend,
     make_kv_cache_config,
     make_nixl_scheduler,
     maybe_update_block_size,
@@ -2282,7 +2281,11 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
     vllm_config = create_vllm_config(block_size=16)
     assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-    fake_backend = make_attn_backend("FLASHMLA", kernel_block_size)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
+    fake_backend.get_kv_cache_shape.return_value = (1, kernel_block_size, 1, 1)
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
@@ -2355,7 +2358,10 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
-    fake_backend = make_attn_backend("FLASHMLA", 4)
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
