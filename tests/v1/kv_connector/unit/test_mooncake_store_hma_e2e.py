@@ -49,6 +49,8 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
+    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -404,7 +406,7 @@ _MAMBA = mamba_layer(
     mamba_cache_mode="align",
 )
 # Model shapes as KV cache groups: each group is (layer names, spec).
-_MODELS = {
+_MODELS: dict[str, list[tuple[list[str], KVCacheSpec | KVCacheLayerConfig]]] = {
     "dense": [(["A0", "A1", "A2"], _ATTN)],
     "mla": [
         (
@@ -747,7 +749,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         num_prompt_tokens=13,
         prefill_end_tokens=20,
         completed_token_len=20,
-        boundary_puts=[(1, mamba_cow_block, 12)],
+        boundary_puts=[BoundaryPut(1, mamba_cow_block, 12)],
     )
 
     send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
@@ -825,7 +827,7 @@ def test_offload_syncs_event_before_put():
         num_prompt_tokens=12,
         completed_token_len=12,
         store_job_id=1,
-        boundary_puts=[(1, 7, 8)],
+        boundary_puts=[BoundaryPut(1, 7, 8)],
     )
     req.current_event = event
 
@@ -908,7 +910,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         can_save=True,
         num_prompt_tokens=12,
         completed_token_len=12,
-        boundary_puts=[(1, mamba_cow_block, 8)],
+        boundary_puts=[BoundaryPut(1, mamba_cow_block, 8)],
     )
 
     send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
@@ -1007,7 +1009,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
         can_save=True,
         num_prompt_tokens=prompt_len,
         completed_token_len=prompt_len,
-        boundary_puts=[(1, 7, 8)],
+        boundary_puts=[BoundaryPut(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
@@ -1114,7 +1116,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         can_save=True,
         num_prompt_tokens=12,
         completed_token_len=12,
-        boundary_puts=[(1, 7, 8)],
+        boundary_puts=[BoundaryPut(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
@@ -1483,7 +1485,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
         can_save=True,
         num_prompt_tokens=12,
         completed_token_len=12,
-        boundary_puts=[(1, 7, 8)],
+        boundary_puts=[BoundaryPut(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
     store.lease_calls.clear()

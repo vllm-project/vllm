@@ -151,7 +151,9 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     scheduler.request_finished(request, block_ids)
     output = SchedulerOutput.make_empty()
     output.finished_req_ids = {"r"}
-    plans = list(scheduler.build_connector_meta(output).iter_store_plans())
+    metadata = scheduler.build_connector_meta(output)
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    plans = list(metadata.iter_store_plans())
     if scheduled_compute and not preempted:
         assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
         assert plans[0].token_ids == tuple(range(16, 33))
@@ -507,9 +509,13 @@ def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
     try:
         handshake(scheduler, worker)
 
-        assert scheduler.connector_scheduler.codec.key(b"a") == (
-            worker.connector_worker.codec.key(b"a")
-        )
+        scheduler_impl = scheduler.connector_scheduler
+        worker_impl = worker.connector_worker
+        assert scheduler_impl is not None
+        assert worker_impl is not None
+        assert scheduler_impl.codec is not None
+        assert worker_impl.codec is not None
+        assert scheduler_impl.codec.key(b"a") == worker_impl.codec.key(b"a")
     finally:
         scheduler.shutdown()
         worker.shutdown()
@@ -575,8 +581,12 @@ def test_scheduler_binds_when_ranks_share_a_report_key(monkeypatch):
     scheduler = UMBPStoreConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
     worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
     try:
-        scheduler.set_xfer_handshake_metadata({0: worker.get_handshake_metadata()})
+        worker_metadata = worker.get_handshake_metadata()
+        assert worker_metadata is not None
+        scheduler.set_xfer_handshake_metadata({0: worker_metadata})
 
+        assert scheduler.connector_scheduler is not None
+        assert worker.connector_worker is not None
         assert scheduler.connector_scheduler.codec == worker.connector_worker.codec
     finally:
         scheduler.shutdown()
@@ -882,6 +892,7 @@ def test_scheduler_emits_async_load_without_scheduled_model_tokens():
     )
     metadata = scheduler.build_connector_meta(make_scheduler_output())
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert [plan.block_id for plan in metadata.load_requests["async-load"]] == [7]
     assert scheduler._pending_loads == {}
 
@@ -944,9 +955,11 @@ def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
         )
 
     first = scheduler.build_connector_meta(output(32, ([3],)))
+    assert isinstance(first, UMBPConnectorMetadata)
     assert [plan.block_id for plan in first.iter_store_plans()] == [1, 2]
 
     second = scheduler.build_connector_meta(output(48, ()))
+    assert isinstance(second, UMBPConnectorMetadata)
     second_plans = list(second.iter_store_plans())
     assert [plan.block_id for plan in second_plans] == [3]
     assert second_plans[0].token_ids == tuple(range(32, 48))
@@ -990,6 +1003,7 @@ def test_scheduler_decode_store_skips_unverified_speculative_tokens():
             scheduled_tokens={"spec": 4},
         )
     )
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert [plan.block_id for plan in metadata.iter_store_plans()] == [1, 2]
 
 
@@ -1020,6 +1034,7 @@ def test_scheduler_skips_decode_blocks_without_save_decode_cache():
         )
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert metadata.store_plans == []
 
 
@@ -1046,6 +1061,7 @@ def test_kv_consumer_never_stores(kv_role):
     metadata = scheduler.build_connector_meta(
         make_scheduler_output(new_reqs=[scheduled], scheduled_tokens={"r": 32})
     )
+    assert isinstance(metadata, UMBPConnectorMetadata)
     stored = [plan.block_id for plan in metadata.iter_store_plans()]
     assert stored == ([] if kv_role == "kv_consumer" else [3, 4])
     assert bool(metadata.store_requests) == (kv_role != "kv_consumer")
@@ -1075,6 +1091,7 @@ def test_restored_prefix_skips_resident_blocks(resident):
     )
 
     stored = [b"c"] if resident else [b"a", b"b", b"c"]
+    assert isinstance(meta, UMBPConnectorMetadata)
     assert [plan.key for plan in meta.iter_store_plans()] == [
         codec.key(h, 0) for h in stored
     ]
@@ -1114,6 +1131,7 @@ def test_store_event_owns_refs_until_all_ranks_finish():
     metadata = scheduler.build_connector_meta(
         make_scheduler_output(new_reqs=[request], scheduled_tokens={request.req_id: 16})
     )
+    assert isinstance(metadata, UMBPConnectorMetadata)
     one_rank = SimpleNamespace(
         kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
             store_events={metadata.store_event: StoreEventResult(1)}
@@ -1165,6 +1183,7 @@ def test_store_events_deduplicate_in_flight_shared_prefix_objects():
         metadata = scheduler.build_connector_meta(
             make_scheduler_output(new_reqs=[request], scheduled_tokens={request_id: 16})
         )
+        assert isinstance(metadata, UMBPConnectorMetadata)
         events.append(metadata.store_event)
     assert pinned == [4]
     assert events == [0, -1]
@@ -1217,6 +1236,7 @@ def test_scheduler_resumed_request_replaces_stale_block_table():
 
     tracker = scheduler._request_trackers["resumed"]
     assert tracker.block_ids == ([7, 8],)
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert [plan.block_id for plan in metadata.iter_store_plans()] == [7, 8]
 
 
@@ -1252,6 +1272,7 @@ def test_scheduler_stores_from_cores_current_block_table():
         )
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert [plan.block_id for plan in metadata.iter_store_plans()] == [4]
 
 
@@ -1310,6 +1331,7 @@ def test_scheduler_readmission_after_failed_load_uses_new_blocks():
     )
 
     assert scheduler._request_trackers["readmitted"].block_ids == ([5, 6],)
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert [plan.block_id for plan in metadata.iter_store_plans()] == [5, 6]
 
 
@@ -1363,7 +1385,9 @@ def test_sync_load_finishes_before_forward_without_layer_hooks(
     assert handle.waited == [handle.load_job]
     assert worker.get_finished(set()) == (None, None)
     assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
-    stats = worker.get_kv_connector_stats().reduce()
+    connector_stats = worker.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["load_completed"] == (0 if fail_load else 1)
     assert stats["load_failed"] == (1 if fail_load else 0)
 
@@ -1514,7 +1538,9 @@ def test_async_load_cancellation_preserves_other_requests():
 
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
-    assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["load_completed"] == 1
     assert finished == (None, {"second"})
     worker.wait_for_layer_load("")
     assert worker.get_kv_connector_stats() is None
@@ -1562,7 +1588,9 @@ def test_worker_partial_store_failure_reports_unpublished_objects():
     metadata = worker.build_connector_worker_meta()
     assert metadata.store_events == {9: StoreEventResult(1)}
     assert not hasattr(worker.runtime, "published")
-    assert worker.get_kv_connector_stats().reduce()["store_failed"] == 1
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_failed"] == 1
 
 
 @pytest.mark.parametrize("forward", [False, True])
@@ -1605,7 +1633,9 @@ def test_connector_finalizes_each_store_once_when_forward_hook_is_skipped(
         assert next_step == ({} if forward else expected)
         assert plan.key in runtime.store
 
-    stats = connector.get_kv_connector_stats().reduce()
+    connector_stats = connector.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["store_submitted"] == 2
     assert stats["store_completed"] == 2
 
@@ -1702,6 +1732,7 @@ def test_embedded_runtime_register_store_and_load(monkeypatch):
                 new_reqs=[consumer], scheduled_tokens={consumer.req_id: 1}
             )
         )
+        assert isinstance(load_metadata, UMBPConnectorMetadata)
         assert set(load_metadata.load_requests) == {consumer.req_id}
 
         load_worker.bind_connector_metadata(load_metadata)
@@ -1816,6 +1847,7 @@ def test_embedded_logical_hit_requires_all_tp_dcp_objects(monkeypatch):
     )
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.codec is not None
     for block_hash in request.block_hashes:
         runtime.store.update(
             scheduler.codec.keys_for_topology(block_hash, scheduler.topology, (0,))
@@ -2056,7 +2088,9 @@ def test_worker_submits_stores_once(grouped):
     assert worker.get_finished({"req"}) == (None, None)
     completed = worker.build_connector_worker_meta()
     assert completed.store_events == {19: StoreEventResult(1)}
-    assert worker.get_kv_connector_stats().reduce()["store_num_bytes"] == 32
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce()["store_num_bytes"] == 32
 
 
 def _replicated_kv_cache_config() -> KVCacheConfig:
@@ -2173,7 +2207,10 @@ def test_scheduler_adopts_matching_worker_replicated_groups(monkeypatch):
             {rank: UMBPHandshakeMetadata("ns", (0,)) for rank in range(2)}
         )
 
-        assert scheduler.connector_scheduler.codec.replicated_groups == {0}
+        assert scheduler.connector_scheduler is not None
+        codec = scheduler.connector_scheduler.codec
+        assert isinstance(codec, BlockIdentityCodec)
+        assert codec.replicated_groups == {0}
     finally:
         scheduler.shutdown()
 

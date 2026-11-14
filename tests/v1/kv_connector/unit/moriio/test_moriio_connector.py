@@ -1310,6 +1310,7 @@ def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_ra
     # One TP rank per stage, so stage s sits at offset s.
     assert worker.side_channel_port == 12347 + pp_rank
     assert worker.notify_port == 12348 + pp_rank
+    assert worker.moriio_engine is not None
     assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
 
 

@@ -102,7 +102,9 @@ def test_slow_lookup_returns_miss_and_recovers_without_stale_reply(
             result = requests.submit(_resolve_lookup, client, "slow", mode).result(5)
             assert result.hit_length == 0
             assert client.circuit_breaker.is_open
-            assert client.lookup("skip", 128, []).hit_length == 0
+            result = client.lookup("skip", 128, [])
+            assert result is not None
+            assert result.hit_length == 0
 
             # Recovery must ignore the abandoned request's 32-token reply.
             release_reply.set()
@@ -110,7 +112,9 @@ def test_slow_lookup_returns_miss_and_recovers_without_stale_reply(
             while client.circuit_breaker.is_open:
                 assert time.monotonic() < deadline
                 threading.Event().wait(0.001)
-            assert client.lookup("recovered", 128, []).hit_length == 16
+            result = client.lookup("recovered", 128, [])
+            assert result is not None
+            assert result.hit_length == 16
             assert not client.circuit_breaker.is_open
         finally:
             release_reply.set()
@@ -184,7 +188,9 @@ def test_failed_lookup_counts_once_toward_threshold(
     client, _ = lookup_service
     # The bound peer sends no replies; each request times out once.
     for index in range(3):
-        assert client.lookup(f"failed-{index}", 128, []).hit_length == 0
+        result = client.lookup(f"failed-{index}", 128, [])
+        assert result is not None
+        assert result.hit_length == 0
         assert client.circuit_breaker.is_open == (index == 2)
 
 
@@ -203,10 +209,14 @@ def test_lookup_started_after_deadline_does_not_update_breaker(
     finally:
         release_executor.set()
     client.executor.submit(lambda: None).result(timeout=5)
-    assert client.lookup("queued", 128, [], non_block=True).hit_length == 0
+    result = client.lookup("queued", 128, [], non_block=True)
+    assert result is not None
+    assert result.hit_length == 0
     assert not client.circuit_breaker.is_open
     # Neither a failure nor a success: the earlier failure still counts.
-    assert client.lookup("failed", 128, []).hit_length == 0
+    result = client.lookup("failed", 128, [])
+    assert result is not None
+    assert result.hit_length == 0
     assert client.circuit_breaker.is_open
 
 
@@ -225,10 +235,14 @@ def test_cached_hit_does_not_reset_newer_failures(
     try:
         assert _resolve_lookup(client, "cached", "async").hit_length == 16
         for index in range(3):
-            assert client.lookup(f"failed-{index}", 128, []).hit_length == 0
+            result = client.lookup(f"failed-{index}", 128, [])
+            assert result is not None
+            assert result.hit_length == 0
             assert client.circuit_breaker.is_open == (index == 2)
             if index < 2:
-                assert client.lookup("cached", 128, [], non_block=True).hit_length == 16
+                result = client.lookup("cached", 128, [], non_block=True)
+                assert result is not None
+                assert result.hit_length == 16
     finally:
         server.join(10)
     assert not server.is_alive()
