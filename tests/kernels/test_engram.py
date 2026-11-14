@@ -349,6 +349,27 @@ def _hash_state() -> NgramHashState:
     return state
 
 
+def test_engram_hash_state_uses_tokenizer_revision(monkeypatch):
+    from transformers import AutoTokenizer
+
+    def capture_revision(*args, **kwargs):
+        raise RuntimeError(kwargs["revision"])
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", capture_revision)
+    model_config = SimpleNamespace(
+        tokenizer="engram/tokenizer",
+        trust_remote_code=True,
+        revision="model-revision",
+        tokenizer_revision="tokenizer-revision",
+    )
+    with pytest.raises(RuntimeError, match="tokenizer-revision"):
+        NgramHashState(
+            SimpleNamespace(use_v2_model_runner=True, model_config=model_config),
+            SimpleNamespace(max_ngram_size=2),
+            SimpleNamespace(block_size=16),
+        )
+
+
 @pytest.mark.parametrize("num_tokens", [0, 7])
 def test_engram_dummy_hashes_have_no_valid_rows(num_tokens):
     """Dummy forwards take part in DP lookups without any valid table IDs."""
