@@ -3,21 +3,45 @@
 """Tests for HF3FS KV Connector high-level components:
 - TestHf3fsMockClient      : file-backed mock client I/O correctness
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+- TestHF3FSExternalCacheKeys: keys separate what the engine's block hashes separate
 """
 
 import os
+import socket
+import subprocess
+import sys
+import time
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.utils import create_vllm_config, make_kv_cache_config
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs import hf3fs_connector
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSRequestMetadata,
+    RequestSchedulingState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
 )
+from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.request import Request
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -231,3 +255,172 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# TestHF3FSExternalCacheKeys
+# ===========================================================================
+
+BLOCK_SIZE = 16
+# The lookup covers the full blocks of len(prompt) - 1, so two of these three.
+TOKENS = list(range(1000, 1000 + BLOCK_SIZE * 3))
+
+
+def _make_request(
+    request_id: str,
+    token_ids: list[int] = TOKENS,
+    mm_hash: str | None = None,
+    cache_salt: str | None = None,
+    lora_request: LoRARequest | None = None,
+) -> Request:
+    mm_features = mm_hash and [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            mm_position=PlaceholderRange(offset=0, length=len(token_ids)),
+            identifier=mm_hash,
+            modality="image",
+        )
+    ]
+    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=list(token_ids),
+        mm_features=mm_features or None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        lora_request=lora_request,
+        cache_salt=cache_salt,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
+    )
+
+
+def _worker_keys(request: Request, block_size: int) -> list[str]:
+    state = RequestSchedulingState(request_id=request.request_id, request=request)
+    state.token_ids = list(request.prompt_token_ids)
+    state.allocated_block_ids = list(range(len(state.token_ids) // block_size))
+    metadata = HF3FSRequestMetadata.from_scheduling_state(state, block_size, BLOCK_SIZE)
+    assert metadata is not None
+    return metadata.block_keys
+
+
+@pytest.fixture
+def lookup_keys(monkeypatch):
+    """Keys a scheduler-side connector asks the external metadata service about."""
+    metadata_service = MagicMock()
+    metadata_service.batch_key_exists.side_effect = lambda keys: [False] * len(keys)
+    monkeypatch.setattr(
+        hf3fs_connector, "Hf3fsMetadataClient", lambda: metadata_service
+    )
+    monkeypatch.setattr(hf3fs_connector.atexit, "register", lambda *_: None)
+    monkeypatch.setattr(hf3fs_connector.signal, "signal", lambda *_: None)
+    connector = HF3FSKVConnector(
+        create_vllm_config(block_size=BLOCK_SIZE, kv_connector="HF3FSKVConnector"),
+        KVConnectorRole.SCHEDULER,
+        make_kv_cache_config(block_size=BLOCK_SIZE),
+    )
+
+    def lookup(request: Request) -> list[str]:
+        connector.get_num_new_matched_tokens(request, 0)
+        return metadata_service.batch_key_exists.call_args.args[0]
+
+    return lookup
+
+
+class TestHF3FSExternalCacheKeys:
+    @pytest.fixture(autouse=True)
+    def _none_hash(self):
+        init_none_hash(sha256)
+
+    @pytest.mark.parametrize(
+        "kwargs_a, kwargs_b",
+        [
+            ({"mm_hash": "image-a"}, {"mm_hash": "image-b"}),
+            (
+                {"lora_request": LoRARequest("adapter-a", 1, "/tmp/a")},
+                {"lora_request": LoRARequest("adapter-b", 2, "/tmp/b")},
+            ),
+            ({"cache_salt": "tenant-1"}, {"cache_salt": "tenant-2"}),
+        ],
+        ids=["multimodal", "lora", "cache_salt"],
+    )
+    def test_lookup_keys_partition_requests(self, lookup_keys, kwargs_a, kwargs_b):
+        keys_a = lookup_keys(_make_request("a", **kwargs_a))
+        keys_b = lookup_keys(_make_request("b", **kwargs_b))
+        assert len(keys_a) == len(keys_b) == 2
+        assert keys_a != keys_b
+
+    def test_lookup_keys_chain_on_the_prefix(self, lookup_keys):
+        other_tail = TOKENS[:BLOCK_SIZE] + [t + 1 for t in TOKENS[BLOCK_SIZE:]]
+        keys = lookup_keys(_make_request("a"))
+        assert keys == lookup_keys(_make_request("b"))
+        other_keys = lookup_keys(_make_request("c", token_ids=other_tail))
+        assert other_keys[0] == keys[0]
+        assert other_keys[1] != keys[1]
+
+    def test_worker_keys_extend_lookup_keys(self, lookup_keys):
+        request = _make_request("a", cache_salt="tenant-1")
+        looked_up = lookup_keys(request)
+        assert _worker_keys(request, BLOCK_SIZE)[: len(looked_up)] == looked_up
+
+    def test_worker_keys_use_the_scheduler_block_size(self):
+        request = _make_request("a", token_ids=list(range(BLOCK_SIZE * 4)))
+        fine = _worker_keys(request, BLOCK_SIZE)
+        assert _worker_keys(request, BLOCK_SIZE * 2) == [fine[1], fine[3]]
+
+
+@pytest.fixture
+def hf3fs_metadata_server():
+    server_code = (
+        "from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs."
+        "hf3fs_metadata_server import Hf3fsMetadataServer; "
+        "Hf3fsMetadataServer().run(host='127.0.0.1', port=18000)"
+    )
+    process = subprocess.Popen([sys.executable, "-c", server_code])
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", 18000), timeout=1).close()
+            break
+        except OSError:
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.2)
+    yield
+    process.terminate()
+    process.wait(timeout=30)
+
+
+def test_external_cache_is_not_shared_across_cache_salts(
+    vllm_runner, tmp_path, hf3fs_metadata_server
+):
+    prompt_token_ids = list(range(1000, 1000 + BLOCK_SIZE * 8 + 1))
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True)
+    with vllm_runner(
+        "facebook/opt-125m",
+        block_size=BLOCK_SIZE,
+        enable_prefix_caching=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HF3FSKVConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "hf3fs_storage_path": str(tmp_path),
+                "hf3fs_client_numjobs": 2,
+            },
+        ),
+    ) as runner:
+
+        def cached_tokens(cache_salt: str) -> int:
+            output = runner.llm.generate(
+                [{"prompt_token_ids": prompt_token_ids, "cache_salt": cache_salt}],
+                sampling_params,
+                use_tqdm=False,
+            )[0]
+            return output.num_cached_tokens
+
+        assert cached_tokens("tenant-1") == 0
+        expected = BLOCK_SIZE * 8
+        deadline = time.monotonic() + 60
+        while (cached := cached_tokens("tenant-1")) != expected:
+            assert time.monotonic() < deadline, f"cached {cached} of {expected} tokens"
+            time.sleep(0.5)
+        assert cached_tokens("tenant-2") == 0
