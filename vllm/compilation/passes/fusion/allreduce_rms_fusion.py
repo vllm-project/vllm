@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 from importlib.util import find_spec
 from types import ModuleType
 from typing import Any
@@ -178,7 +177,6 @@ def _select_flashinfer_allreduce_use_oneshot(
 
 if flashinfer_comm is not None:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
-        destroy_fi_ar_workspace,
         get_fi_ar_quant_workspace,
         get_fi_ar_workspace,
     )
@@ -1139,12 +1137,6 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-
-    def __del__(self) -> None:
-        if getattr(self, "disabled", True):
-            return
-        with contextlib.suppress(Exception):
-            destroy_fi_ar_workspace()
 
 
 # TODO: make BasePattern to inherit from VllmPatternReplacement
