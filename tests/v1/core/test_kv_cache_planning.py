@@ -1295,6 +1295,25 @@ def test_get_kv_cache_config_one_worker():
     )
 
 
+@pytest.mark.parametrize("block_size", [64, 127])
+def test_block_size_below_tokens_per_state_is_rejected(block_size):
+    """A block too small to hold one state gave a zero-byte page, and planning
+    divided by it."""
+    with pytest.raises(ValueError, match=r"tokens_per_state \(128\)"):
+        replace(new_mla_spec(block_size=block_size), tokens_per_state=128)
+
+
+def test_block_size_at_least_tokens_per_state_plans():
+    spec = replace(new_mla_spec(block_size=128), tokens_per_state=128)
+    assert spec.num_states == 1
+    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
+    config.cache_config.kv_cache_layout = "LBNHC"
+    configs = get_kv_cache_configs(
+        config, [{"layer_0": full_layer(spec)}], [spec.page_size_bytes * 10]
+    )
+    assert configs[0].num_blocks == 10
+
+
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheLayerConfig] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
