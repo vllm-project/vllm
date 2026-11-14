@@ -2109,7 +2109,8 @@ async fn render_resolves_model_sampling_defaults() {
 
     expect_test::expect![[r#"
         {"temperature":0.6,"top_p":0.5,"top_k":20,"repetition_penalty":1.05,"ignore_eos":false}
-        {"temperature":0.0,"top_p":0.95,"top_k":20,"max_tokens":16,"repetition_penalty":1.05,"ignore_eos":false}"#]].assert_eq(&format!(
+        {"temperature":0.0,"max_tokens":16,"repetition_penalty":1.05,"ignore_eos":false}"#]]
+    .assert_eq(&format!(
         "{}\n{}",
         chat["sampling_params"], completion[0]["sampling_params"]
     ));
