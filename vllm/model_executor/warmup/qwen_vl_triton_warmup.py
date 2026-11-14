@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm Qwen3-VL ViT kernels and M-RoPE for SupportsMRoPE models."""
 
+import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,7 +20,13 @@ _MROPE_TOKEN_COUNTS = (1, 2, 16)
 
 
 def _warm_vision(model: torch.nn.Module, device: torch.device) -> None:
-    from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
+    # Model construction loads this module for Qwen3-VL. Do not import it for
+    # text-only models because doing so also imports optional vision packages.
+    qwen3_vl = sys.modules.get("vllm.model_executor.models.qwen3_vl")
+    if qwen3_vl is None:
+        return
+
+    Qwen3_VisionTransformer = qwen3_vl.Qwen3_VisionTransformer
 
     for visual in model.modules():
         if not isinstance(visual, Qwen3_VisionTransformer):
