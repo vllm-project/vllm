@@ -8,6 +8,8 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from vllm.entrypoints.anthropic.protocol import AnthropicError, AnthropicErrorResponse
+
 GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 
 
@@ -57,6 +59,13 @@ class AuthenticationMiddleware:
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
-            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+            content = {"error": "Unauthorized"}
+            if url_path.rstrip("/") in {"/v1/messages", "/v1/messages/count_tokens"}:
+                content = AnthropicErrorResponse(
+                    error=AnthropicError(
+                        type="authentication_error", message="Unauthorized"
+                    )
+                ).model_dump()
+            response = JSONResponse(content=content, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
