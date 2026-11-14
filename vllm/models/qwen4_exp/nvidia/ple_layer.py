@@ -435,12 +435,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        *,
+        use_sequence_parallel: bool | None = None,
     ) -> torch.Tensor:
+        if use_sequence_parallel is None:
+            use_sequence_parallel = self.use_sequence_parallel
         input_ids = input_ids.reshape(-1)
-        if (
-            not self.use_sequence_parallel
-            and input_ids.shape[0] != hidden_states.shape[0]
-        ):
+        if not use_sequence_parallel and input_ids.shape[0] != hidden_states.shape[0]:
             raise ValueError(
                 "PLE expects input_ids and hidden_states to have the same "
                 f"token length, got {input_ids.shape[0]} and "
@@ -451,6 +452,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             input_ids,
             query_start_loc,
             ngram_context,
+            use_sequence_parallel=use_sequence_parallel,
         )
         assert embeddings.shape[0] == hidden_states.shape[0]
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
@@ -465,7 +467,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             # Only convolution needs full tokens. Add residuals on local shards.
             conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
             # Metadata may omit padding tokens or all tokens during profiling.
