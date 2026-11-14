@@ -43,6 +43,29 @@ class UVAOffloadConfig:
     This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
     """
 
+    cpu_offload_expert_rankings: str | None = None
+    """JSON file of routed-expert rankings, `{"<layer index>": [global expert ids,
+    hottest first], ...}`. When set (XPU, int4 GPTQ experts), `cpu_offload_gb` is
+    spent per routed expert instead of per parameter in module order: every
+    decoder layer keeps its highest-ranked experts in device memory and the same
+    number of the others in pinned host memory. Experts a layer's list omits rank
+    after the listed ones, by id. The budget goes to routed experts only: no
+    other parameter is offloaded while this is set. Needs UVA: it is refused
+    when `VLLM_WEIGHT_OFFLOADING_DISABLE_UVA` is set. The script
+    `examples/features/cpu_offload/record_expert_rankings_offline.py` records
+    a rankings file."""
+
+    cpu_offload_expert_state: str | None = None
+    """JSON file in the `cpu_offload_expert_rankings` format that the server
+    keeps its learned rankings in (XPU, int4 GPTQ experts). Selects per-expert
+    placement like `cpu_offload_expert_rankings`; at boot a layer found in this
+    file is placed by it, ahead of the rankings file, and with neither by expert
+    id. While serving, every placed layer counts its routes per expert on the
+    device, and the order is written to this file every few minutes and at
+    shutdown, once the boot has seen about a minute of traffic. One writer per
+    pipeline stage (tensor-parallel rank 0); stages merge their layers into the
+    same file."""
+
 
 @config
 class PrefetchOffloadConfig:
