@@ -12,6 +12,11 @@ To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
 
 - `prompt_embeds`: A torch tensor representing a sequence of prompt/token embeddings. This has the shape (sequence_length, hidden_size), where sequence length is the number of tokens embeddings and hidden_size is the hidden size (embedding size) of the model.
 
+The offline API also accepts a singleton batch dimension, `(1, sequence_length, hidden_size)`.
+It removes this dimension before applying token limits. For example,
+`LLM.generate(..., tokenization_kwargs={"truncate_prompt_tokens": 128})` truncates
+the sequence to at most 128 embeddings for either input shape.
+
 ### Hugging Face Transformers Inputs
 
 You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
