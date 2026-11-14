@@ -6,6 +6,7 @@ import errno
 import functools
 import mmap
 import os
+import shutil
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
@@ -14,6 +15,7 @@ import numpy as np
 import torch
 
 from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
     check_shm_free_space,
 )
 from vllm.logger import init_logger
@@ -59,7 +61,32 @@ def _libc_mmap() -> Callable[..., int | None]:
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
-    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+    try:
+        mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+    except OSError as e:
+        # A full tmpfs makes MADV_POPULATE_WRITE fail with EFAULT ("Bad
+        # address"), which does not point at the cause. The error stays an
+        # OSError so callers' own handlers still apply (not every mapping is
+        # in /dev/shm). Every other errno is re-raised unchanged; EINVAL
+        # selects the per-page fallback.
+        if e.errno != errno.EFAULT:
+            raise
+        space = ""
+        with contextlib.suppress(OSError):
+            if os.path.isdir(SHM_PATH):
+                usage = shutil.disk_usage(SHM_PATH)
+                space = (
+                    f" (now {usage.free / (1 << 30):.2f} GiB free of "
+                    f"{usage.total / (1 << 30):.2f} GiB)"
+                )
+        raise OSError(
+            errno.EFAULT,
+            "Pre-faulting the mapping failed with EFAULT, most likely because "
+            f"the memory backing it ran out. If it is in {SHM_PATH}{space}, "
+            f"note that {SHM_PATH} is shared by every process that uses it, "
+            "including other data-parallel engines; increase its capacity or "
+            "reduce the host buffer size",
+        ) from e
 
 
 def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:

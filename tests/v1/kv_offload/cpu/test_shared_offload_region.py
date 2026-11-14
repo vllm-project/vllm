@@ -657,6 +657,27 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     assert exc_info.value.errno == errno.EIO
 
 
+def test_madvise_efault_raises_shm_diagnostic():
+    """EFAULT from MADV_POPULATE_WRITE (a full tmpfs) becomes an OSError naming
+    /dev/shm, chained to the original error; EINVAL passes through."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    efault = OSError(errno.EFAULT, "Bad address")
+    with pytest.raises(OSError, match="/dev/shm") as exc_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=efault)), 0, PAGE_SIZE
+        )
+    assert exc_info.value.errno == errno.EFAULT
+    assert exc_info.value.__cause__ is efault
+
+    einval = OSError(errno.EINVAL, "Invalid argument")
+    with pytest.raises(OSError) as einval_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=einval)), 0, PAGE_SIZE
+        )
+    assert einval_info.value is einval
+
+
 def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     """Rows split over three shm files mapped back to back: each worker sees
     the other's writes in every file, and the creator removes every file."""
