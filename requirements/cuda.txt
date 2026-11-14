@@ -31,3 +31,11 @@ tokenspeed-mla==2.0.3; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.19
+# Keep the CUDA compile toolchain consistent with cuda-toolkit 13.0.x.
+# humming-kernels[cu13] declares nvidia-cuda-nvcc/cccl WITHOUT version pins,
+# which otherwise resolve to 13.5.x and break FlashInfer JIT compilation
+# (CCCL header check failure / ptxas "Unsupported .version 9.5").
+nvidia-cuda-nvcc==13.0.88.*
+nvidia-cuda-nvvm==13.0.88.*
+nvidia-cuda-crt==13.0.88.*
+nvidia-cuda-cccl==13.0.85.*
