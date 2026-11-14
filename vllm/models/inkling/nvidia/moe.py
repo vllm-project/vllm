@@ -35,6 +35,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.modelopt import (
+    NVFP4_INPUT_SCALE_DENOMINATOR,
+    ModelOptNvFp4FusedMoE,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -54,7 +58,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
-_NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -456,6 +459,20 @@ class InklingMoE(nn.Module):
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
 
+        # The checkpoint stores each projection's activation amax instead of
+        # its input scale; post-load processing derives the scale from it.
+        routed_experts = self.experts.routed_experts
+        if isinstance(routed_experts.quant_method, ModelOptNvFp4FusedMoE):
+            for projection in ("w13", "w2"):
+                amax = Parameter(
+                    torch.empty(1, dtype=torch.bfloat16), requires_grad=False
+                )
+                # dummy input scale ~1e-2, as for other NVFP4 layers
+                set_weight_attrs(
+                    amax, {"dummy_weight_value": 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR}
+                )
+                routed_experts.register_parameter(f"{projection}_input_amax", amax)
+
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
         sink_experts_cls = (
@@ -564,13 +581,23 @@ class InklingMoE(nn.Module):
             return []
         if key.endswith(".input_amax"):
             projection = "w13" if key.startswith("w13") else "w2"
-            amax = float(weight.max())
-            assert math.isfinite(amax) and amax > 0, (
-                f"bad {projection} input_amax: {amax}"
-            )
-            input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
-            return [f"experts.routed_experts.{projection}_input_scale"]
+            amax = getattr(experts, f"{projection}_input_amax", None)
+            if amax is None:
+                # Online requantization computes its own activation scales.
+                if getattr(experts.quant_method, "requantization_source", None):
+                    return []
+                raise ValueError(
+                    f"{name} needs ModelOpt NVFP4 routed experts, got "
+                    f"{type(experts.quant_method).__name__}"
+                )
+            # Through .data like the other expert loads, which layerwise
+            # reload doesn't track.
+            amax.data.copy_(weight)
+            # Post-load processing derives the input scale from it.
+            return [
+                f"experts.routed_experts.{projection}_input_amax",
+                f"experts.routed_experts.{projection}_input_scale",
+            ]
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
