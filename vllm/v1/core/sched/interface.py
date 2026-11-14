@@ -36,6 +36,10 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    # Whether the last step that admitted prefills left requests waiting, in
+    # which case prefills are not throttled.
+    prefill_capacity_bound: bool = False
+
     @abstractmethod
     def __init__(
         self,
