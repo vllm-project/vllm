@@ -31,6 +31,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
+from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
 from vllm.models.muse_spark.amd.ops import fused_markov
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
@@ -305,6 +306,9 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
+        self.vllm_config = vllm_config
+        # The draft-layer kernels under --monokernel (ROCm), set after loading.
+        self.mono = None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
@@ -344,6 +348,19 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
         ):
             self.sample_sequential = fused_markov.sample_sequential  # type: ignore[assignment]
+
+    def forward(  # type: ignore[override]
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Ahead of the draft model's compiled __call__: the kernels or stock.
+        if self.mono is not None:
+            out = self.mono.try_forward(self.model, input_ids, positions, inputs_embeds)
+            if out is not None:
+                return out
+        return super().forward(input_ids, positions, inputs_embeds)
 
     def apply_output_logit_transform(self, logits: torch.Tensor) -> torch.Tensor:
         logits = logits.float() * self.output_multiplier
@@ -389,6 +406,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
     def process_weights_after_loading(self) -> None:
         super().process_weights_after_loading()
         materialize_residual_path_constants(self.model)
+        maybe_attach_drafter(self)
         if hasattr(self, "sample_sequential"):
             # The fused rounds sample in draft ids, so they need d2t = 0.
             self.d2t_is_identity = not self.draft_id_to_target_id.any().item()
