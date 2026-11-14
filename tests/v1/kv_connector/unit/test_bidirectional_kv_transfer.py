@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnector,
     NixlConnectorMetadata,
+    NixlPushConnector,
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.outputs import (
@@ -58,6 +59,32 @@ pytestmark = pytest.mark.cpu_test
 
 # Common extra config for all bi-directional KV transfer tests.
 BIDIR_KV_EXTRA_CONFIG = {"bidirectional_kv_xfer": True, "kv_recompute_threshold": 0}
+
+
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@pytest.mark.parametrize("connector_role", list(KVConnectorRole))
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_producer_rejects_bidirectional_reads(
+    default_vllm_config, dist_init, connector_cls, connector_role
+):
+    """A PP producer cannot become a receiver on the second turn either."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(
+        kv_role="kv_producer",
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        block_size=block_size,
+    )
+    config.parallel_config.pipeline_parallel_size = 2
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*bidirectional"):
+        connector_cls(
+            config,
+            connector_role,
+            make_kv_cache_config(block_size=block_size),
+        )
 
 
 # Helpers

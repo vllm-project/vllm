@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""Classify KV cache groups by how their state moves across engines."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -8,15 +10,10 @@ from enum import Enum
 
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheSpec,
-    KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-    get_kv_cache_spec_kind_for_class,
-    iter_layer_specs,
 )
 
 
@@ -28,54 +25,20 @@ class TransferClass(Enum):
     OTHER = "other"
 
 
-_KIND_TO_TRANSFER_CLASS: dict[KVCacheSpecKind, TransferClass] = {
-    KVCacheSpecKind.FULL_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.MLA_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.SLIDING_WINDOW: TransferClass.ATTENTION,
-    KVCacheSpecKind.SLIDING_WINDOW_MLA: TransferClass.ATTENTION,
-    KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.SINK_FULL_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.ENCODER_ONLY_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.CROSS_ATTENTION: TransferClass.ATTENTION,
-    KVCacheSpecKind.MAMBA: TransferClass.SSM,
-}
-
-
-def get_representative_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    """Return the spec that stands for a cache group.
-
-    Layers only merge into a group when they share one registered base spec, so
-    every wrapped spec answers the group-level questions the same way.
+def get_representative_spec_type(group: KVCacheGroup) -> type[KVCacheSpec]:
+    """Return the concrete spec type of the group's first layer.
 
     Args:
-        spec: a group spec; ``UniformTypeKVCacheSpecs`` wraps one spec per layer.
+        group: a cache group of the connector's KV cache config.
 
     Returns:
-        The first wrapped spec for a wrapper, ``spec`` itself otherwise.
-
-    Raises:
-        ValueError: If the wrapper carries no layer spec.
+        The type of the group's representative spec.
 
     """
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        if not spec.kv_cache_specs:
-            raise ValueError("UniformTypeKVCacheSpecs carries no layer spec")
-        return spec.first_spec
-    return spec
+    return type(group.distinct_specs[0])
 
 
-def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
-    """Return the concrete spec type behind ``spec``, unwrapping uniform-type groups.
-
-    Only the concrete type of the representative spec is returned, which is the
-    answer a group-level question needs: layers merge into a group only when
-    they share one registered base spec, so any wrapped spec stands for the
-    group. Ask a per-layer question through ``iter_layer_specs`` instead.
-    """
-    return type(get_representative_spec(spec))
-
-
-def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroupSpec]) -> set[int]:
+def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroup]) -> set[int]:
     """Return the MLA groups held whole on every DCP rank.
 
     A draft running at DCP=1 under a DCP target keeps its MLA cache unsharded,
@@ -92,11 +55,8 @@ def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroupSpec]) -> set[int]
     return {
         i
         for i, group in enumerate(groups)
-        if issubclass(
-            get_representative_spec_type(group.kv_cache_spec),
-            (MLAAttentionSpec, SlidingWindowMLASpec),
-        )
-        and not group.kv_cache_spec.dcp_sharded
+        if issubclass(get_representative_spec_type(group), MLAAttentionSpec)
+        and not group.dcp_sharded
     }
 
 
@@ -110,61 +70,53 @@ def _spec_class(spec: type[KVCacheSpec] | KVCacheSpec) -> type[KVCacheSpec]:
         The class itself for a class argument, the class of the given spec
         otherwise.
 
-    Raises:
-        ValueError: If ``spec`` is the wrapper class, which describes no single
-            spec and therefore has no class-level kind.
-
     """
-    if isinstance(spec, type):
-        if issubclass(spec, UniformTypeKVCacheSpecs):
-            raise ValueError(
-                "UniformTypeKVCacheSpecs is a wrapper with no class-level kind; "
-                "pass a wrapped spec or a group instance instead."
-            )
-        return spec
-    return type(spec)
+    return spec if isinstance(spec, type) else type(spec)
 
 
 def _class_transfer_class(spec_cls: type[KVCacheSpec]) -> TransferClass:
     """Return the transfer class of one spec class.
 
-    The class comes from ``get_kv_cache_spec_kind_for_class`` wherever the kind
-    table names the kind. The kinds it reports as ``UNKNOWN`` are decided by the
-    spec hierarchy, so a spec the framework has not named yet transfers like its
-    base class.
+    The spec hierarchy decides: SSM state is a ``MambaSpec``, attention state
+    is an ``AttentionSpec``, and any other spec moves as opaque state.
+
+    Args:
+        spec_cls: a concrete spec class.
+
+    Returns:
+        The matching ``TransferClass``.
+
     """
-    mapped = _KIND_TO_TRANSFER_CLASS.get(get_kv_cache_spec_kind_for_class(spec_cls))
-    if mapped is not None:
-        return mapped
-    if issubclass(spec_cls, AttentionSpec):
-        return TransferClass.ATTENTION
     if issubclass(spec_cls, MambaSpec):
         return TransferClass.SSM
+    if issubclass(spec_cls, AttentionSpec):
+        return TransferClass.ATTENTION
     return TransferClass.OTHER
 
 
-def transfer_class(spec: type[KVCacheSpec] | KVCacheSpec) -> TransferClass:
-    """Return the transfer class of a spec, a group spec or a spec class.
+def transfer_class(
+    spec: type[KVCacheSpec] | KVCacheSpec | KVCacheGroup,
+) -> TransferClass:
+    """Return the transfer class of a spec, a spec class or a cache group.
 
-    A group moves as one unit, so every layer of a ``UniformTypeKVCacheSpecs``
-    has to agree and the answer does not depend on which layer comes first.
+    A group moves as one unit, so every distinct spec of a ``KVCacheGroup`` has
+    to agree.
 
     Args:
-        spec: a spec instance, a group spec, or a spec class.
+        spec: a spec instance, a spec class, or a cache group.
 
     Returns:
         ``TransferClass.ATTENTION``, ``TransferClass.SSM`` or
         ``TransferClass.OTHER``.
 
     Raises:
-        ValueError: If ``spec`` is the wrapper class, or a group whose layers do
-            not share one transfer class.
+        ValueError: If a group's layers do not share one transfer class.
 
     """
-    if isinstance(spec, UniformTypeKVCacheSpecs):
+    if isinstance(spec, KVCacheGroup):
         layer_classes = {
             _class_transfer_class(type(layer_spec))
-            for layer_spec in iter_layer_specs(spec)
+            for layer_spec in spec.distinct_specs
         }
         if len(layer_classes) != 1:
             raise ValueError(
@@ -175,11 +127,11 @@ def transfer_class(spec: type[KVCacheSpec] | KVCacheSpec) -> TransferClass:
     return _class_transfer_class(_spec_class(spec))
 
 
-def is_attention_spec(spec: type[KVCacheSpec] | KVCacheSpec) -> bool:
-    """Whether a spec, group spec or spec class transfers as attention state."""
+def is_attention_spec(spec: type[KVCacheSpec] | KVCacheSpec | KVCacheGroup) -> bool:
+    """Whether a spec, spec class or cache group transfers as attention state."""
     return transfer_class(spec) is TransferClass.ATTENTION
 
 
-def is_ssm_spec(spec: type[KVCacheSpec] | KVCacheSpec) -> bool:
-    """Whether a spec, group spec or spec class transfers as SSM state."""
+def is_ssm_spec(spec: type[KVCacheSpec] | KVCacheSpec | KVCacheGroup) -> bool:
+    """Whether a spec, spec class or cache group transfers as SSM state."""
     return transfer_class(spec) is TransferClass.SSM
