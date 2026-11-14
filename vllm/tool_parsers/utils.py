@@ -8,8 +8,9 @@ import math
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from json import JSONDecodeError, JSONDecoder
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
@@ -32,12 +33,15 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from xgrammar import CompiledGrammar
 
 CUSTOM_TOOL_INPUT_KEY = "input"
 
@@ -58,12 +62,61 @@ def custom_tool_parameters() -> dict[str, Any]:
 
 
 def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
-    return {
+    function: dict[str, Any] = {
         "type": "function",
         "name": tool.name,
         "description": tool.description,
         "parameters": custom_tool_parameters(),
     }
+    if tool.format is not None and tool.format.type == "grammar":
+        function["strict"] = True
+        guidance = (
+            f"The input must follow this {tool.format.syntax} grammar:\n"
+            f"{tool.format.definition}"
+        )
+        function["description"] = (
+            f"{tool.description}\n\n{guidance}" if tool.description else guidance
+        )
+    return function
+
+
+def custom_tools_with_grammar(tools: Sequence[Tool] | None) -> dict[str, CustomTool]:
+    return {
+        tool.name: tool
+        for tool in tools or ()
+        if isinstance(tool, CustomTool)
+        and tool.format is not None
+        and tool.format.type == "grammar"
+    }
+
+
+@lru_cache(maxsize=128)
+def compile_custom_tool_grammar(syntax: str, definition: str) -> "CompiledGrammar":
+    import xgrammar as xgr
+
+    try:
+        grammar = (
+            xgr.Grammar.from_lark(definition)
+            if syntax == "lark"
+            else xgr.Grammar.from_regex(definition)
+        )
+        # This compiler validates decoded text; generation uses the model vocabulary.
+        return xgr.GrammarCompiler(xgr.TokenizerInfo([])).compile_grammar(grammar)
+    except (ValueError, RuntimeError) as error:
+        raise VLLMValidationError(
+            "Invalid custom tool grammar specification.", parameter="tools"
+        ) from error
+
+
+def validate_custom_tool_input(tool: CustomTool, payload: str) -> None:
+    import xgrammar as xgr
+
+    assert tool.format is not None and tool.format.type == "grammar"
+    matcher = xgr.GrammarMatcher(
+        compile_custom_tool_grammar(tool.format.syntax, tool.format.definition)
+    )
+    if not matcher.accept_string(payload) or not matcher.is_completed():
+        raise GenerationError("Generated custom tool input does not match its grammar.")
 
 
 def safe_literal_eval(text: str):

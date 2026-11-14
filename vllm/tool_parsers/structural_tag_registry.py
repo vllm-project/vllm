@@ -41,6 +41,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import (
     custom_tool_parameters,
+    custom_tools_with_grammar,
     get_function_tools,
     require_function_tools,
 )
@@ -88,6 +89,7 @@ VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
+CUSTOM_TOOL_GRAMMAR_MODELS = frozenset({"qwen_3_5", "qwen_3_coder"})
 
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS: set[str] = set()
@@ -209,6 +211,14 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    grammar_tools = custom_tools_with_grammar(tools)
+    if grammar_tools and model not in CUSTOM_TOOL_GRAMMAR_MODELS:
+        from vllm.exceptions import VLLMValidationError
+
+        raise VLLMValidationError(
+            "Custom tool grammars require the qwen3_coder tool parser.",
+            parameter="tools",
+        )
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
         return None
@@ -242,12 +252,26 @@ def get_model_structural_tag(
             f"tokens and cannot apply token_suffix={token_suffix!r}"
         )
 
-    return get_xgrammar_model_structural_tag(
+    tag = get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+    if grammar_tools:
+        from vllm.parser.qwen3 import constrain_custom_tool_inputs
+
+        limit_to_single_tool_call(tag)
+        selected_tools, _, _ = normalize_tool_choice(dumped_tools, dumped_tool_choice)
+        constrain_custom_tool_inputs(
+            tag,
+            {
+                tool.function.name: grammar_tools[tool.function.name]
+                for tool in selected_tools
+                if tool.function.name in grammar_tools
+            },
+        )
+    return tag
 
 
 _TOOL_CALL_LIST_FORMATS = (
