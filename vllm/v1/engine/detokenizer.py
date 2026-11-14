@@ -23,6 +23,9 @@ logger = init_logger(__name__)
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
+# Number of decoded pieces buffered before they are joined into one chunk.
+_OUTPUT_TEXT_CHUNK_PIECES = 64
+
 
 def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
     """Whether the engine detokenizes with `FastIncrementalDetokenizer`."""
@@ -90,10 +93,42 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
+        self._max_stop_len = max((len(s) for s in self.stop), default=0)
         self._last_output_text_offset: int = 0
 
-        # Generation data
-        self.output_text = ""
+        # Generation data. The output text is kept as joined chunks plus recently
+        # decoded pieces, and joined only when read: appending to a str attribute
+        # copies the whole text, which makes each token cost O(output length).
+        self._text_chunks: list[str] = []
+        self._text_pieces: list[str] = []
+        self._text_len = 0
+
+    @property
+    def output_text(self) -> str:
+        if self._text_pieces or len(self._text_chunks) > 1:
+            self._text_chunks = ["".join(self._text_chunks + self._text_pieces)]
+            self._text_pieces = []
+        return self._text_chunks[0] if self._text_chunks else ""
+
+    @output_text.setter
+    def output_text(self, text: str) -> None:
+        self._text_chunks = [text]
+        self._text_pieces = []
+        self._text_len = len(text)
+
+    def _text_tail(self, num_chars: int) -> str:
+        """Return the last `num_chars` characters of the output text."""
+        if num_chars <= 0:
+            return ""
+        parts: list[str] = []
+        size = 0
+        for seq in (self._text_pieces, self._text_chunks):
+            for part in reversed(seq):
+                parts.append(part)
+                size += len(part)
+                if size >= num_chars:
+                    return "".join(reversed(parts))[-num_chars:]
+        return "".join(reversed(parts))
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         """Update RequestState for the request_id by:
@@ -118,33 +153,45 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         num_prev_tokens = self.num_output_tokens()
         first_new_token_index = len(self.token_ids)
         # Output text offsets at the boundaries of the new tokens.
-        token_offsets = [len(self.output_text)] if self.stop else None
+        token_offsets = [self._text_len] if self.stop else None
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
+            if text := self.decode_next(new_token_id):
+                self._text_pieces.append(text)
+                self._text_len += len(text)
+                if len(self._text_pieces) >= _OUTPUT_TEXT_CHUNK_PIECES:
+                    self._text_chunks.append("".join(self._text_pieces))
+                    self._text_pieces = []
             if token_offsets is not None:
-                token_offsets.append(len(self.output_text))
+                token_offsets.append(self._text_len)
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
             if token_offsets is not None:
-                token_offsets.append(len(self.output_text))
+                token_offsets.append(self._text_len)
 
         # 2) Evaluate stop strings.
         stop_string = None
         if token_offsets is not None and self.num_output_tokens() > self.min_tokens:
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             stop_check_offset = token_offsets[max(self.min_tokens - num_prev_tokens, 0)]
+            new_char_count = self._text_len - stop_check_offset
+            # check_stop_strings only searches the last
+            # new_char_count + len(stop_str) - 1 characters.
+            tail = self._text_tail(new_char_count + self._max_stop_len - 1)
+            tail_start = self._text_len - len(tail)
             stop = check_stop_strings(
-                output_text=self.output_text,
-                new_char_count=len(self.output_text) - stop_check_offset,
+                output_text=tail,
+                new_char_count=new_char_count,
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
                 stop_string, truncate_to = stop
-                stop_end = len(self.output_text) if truncate_to == -1 else truncate_to
+                if truncate_to != -1:
+                    truncate_to += tail_start
+                stop_end = self._text_len if truncate_to == -1 else truncate_to
                 if not self.include_stop_str_in_output:
                     stop_end += len(stop_string)
                 # Drop tokens generated after the one completing the stop string
@@ -170,11 +217,12 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 return self.output_text
             return self.output_text[:-buffer_length]
 
-        length = len(self.output_text) - buffer_length
+        length = self._text_len - buffer_length
         last_offset = self._last_output_text_offset
         if last_offset < length:
             self._last_output_text_offset = length
-            return self.output_text[last_offset:length]
+            new_text = self._text_tail(self._text_len - last_offset)
+            return new_text[: length - last_offset]
         return ""
 
 
