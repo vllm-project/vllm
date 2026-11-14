@@ -31,11 +31,7 @@
                 {%- set tool = tool.function %}
                 {{- '{"type": "function", "function": {' }}
                 {%- for key, val in tool.items() if key != "return" %}
-                    {%- if val is string %}
-                        {{- '"' + key + '": "' + val + '"' }}
-                    {%- else %}
-                        {{- '"' + key + '": ' + val|tojson }}
-                    {%- endif %}
+                    {{- '"' + key + '": ' + val|tojson }}
                     {%- if not loop.last %}
                         {{- ", " }}
                     {%- endif %}
