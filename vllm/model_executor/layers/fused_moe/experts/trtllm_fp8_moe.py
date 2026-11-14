@@ -218,10 +218,6 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # EPLB is supported: unlike the monolithic kernel, this one takes the
-        # router's EPLB-mapped physical ids (num_experts / local_expert_offset in
-        # physical units), and the BlockMajorK weights / block scales stay
-        # expert-major, so EPLB's per-expert dim-0 moves are valid.
         return (
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
