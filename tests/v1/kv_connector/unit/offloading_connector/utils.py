@@ -262,13 +262,13 @@ class MockOffloadingSpec(OffloadingSpec):
         return specs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GPUBlock:
     group_idx: int
     request_block_offset: int
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferSummary:
     gpu_blocks: list[GPUBlock]
     offload_addresses: list[Any]

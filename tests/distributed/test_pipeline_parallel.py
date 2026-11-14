@@ -44,7 +44,7 @@ class PPTestOptions(NamedTuple):
     text_overrides: dict[str, int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]

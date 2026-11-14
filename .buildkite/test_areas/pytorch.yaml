@@ -303,9 +303,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) PyTorch Nightly Dependency Override Check"
+      label: ":amd: (MI300 DPX) PyTorch Nightly Dependency Override Check"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd

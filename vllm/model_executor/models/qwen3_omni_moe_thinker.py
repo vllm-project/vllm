@@ -55,6 +55,10 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -767,6 +771,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -787,6 +792,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             in_channels=vision_config.in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         # vit pos embedding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
@@ -974,7 +980,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.input_norm(x.to(device=self.device), self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         if self.apply_vit_abs_pos_embed:
@@ -1623,6 +1629,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsTranscription,
 ):
     is_3d_moe_weight: ClassVar[bool] = True
+    supports_mm_device_do_normalize = True
     supports_tower_connector_lora: ClassVar[bool] = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1688,6 +1695,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

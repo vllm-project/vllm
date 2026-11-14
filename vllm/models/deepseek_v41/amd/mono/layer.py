@@ -79,7 +79,7 @@ K2_SEAM_POINT = mb_back.BACK_POINTS
 K2_POINTS = K2_SEAM_POINT + 3 + len(moe.TL_STAGES) + len(moe.TL_UG_POINTS)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoBuild:
     tokens: int
     tp: int
