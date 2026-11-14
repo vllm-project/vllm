@@ -30,6 +30,9 @@ class SnapshotSecurityError(RuntimeError):
 
 
 _MAX_PID = 2**31 - 1
+# Manifest fields _backfill_legacy_fields fills in for artifacts written
+# before the work-dir abstraction existed.
+_WORK_DIR_FIELDS = frozenset({"portable", "work_dir", "cleanup_work_dir"})
 _PositivePid = Annotated[int, Field(gt=0, le=_MAX_PID)]
 _OracleTokenId = Annotated[int, Field(ge=0)]
 
@@ -51,11 +54,41 @@ class SnapshotRuntimeIdentity(BaseModel):
     environment: tuple[tuple[str, str], ...]
 
 
+class SnapshotAttachment(BaseModel):
+    """One generated file the artifact reproduces before CRIU reopens it.
+
+    ``digest`` is the sha256 of the captured bytes, or ``"cache"`` for warm
+    state the restore never verifies: a target that already has its own is
+    left alone, and only a missing one is written back. ``size`` is the byte
+    count of the copy the artifact holds, checked before a restore installs
+    it, so a copy truncated in transit fails the restore and not the engine.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    path: str
+    digest: str
+    size: Annotated[int, Field(ge=0)]
+
+    @field_validator("path")
+    @classmethod
+    def _require_absolute_path(cls, value: str) -> str:
+        if not os.path.isabs(value) or os.path.normpath(value) != value:
+            raise ValueError("attachment path must be absolute and normalized")
+        return value
+
+
 class SnapshotManifest(SnapshotRuntimeIdentity):
     schema_version: Literal[1]
     boundary: Literal["post-engine-init-reloadable-state-released"]
     created_at: str
     artifact_bytes: Annotated[int, Field(ge=0)]
+    portable: Literal[True, False] = False
+    work_dir: StrictStr
+    # True if work_dir is removed when its owning run ends.
+    # Always False for in-place artifacts because work_dir is also
+    # the artifact directory.
+    cleanup_work_dir: Literal[True, False]
     model: str
     served_model_name: str
     model_revision: str
@@ -64,6 +97,7 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     process_tree: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     cuda_holders: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     external_cache_files: tuple[tuple[str, str], ...] = ()
+    attachments: tuple[SnapshotAttachment, ...] = ()
     oracle_token_ids: Annotated[
         tuple[_OracleTokenId, ...], Field(min_length=1, max_length=1)
     ]
@@ -92,6 +126,14 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
             raise ValueError("cuda_holders contains duplicate PIDs")
         if not set(self.cuda_holders).issubset(self.process_tree):
             raise ValueError("cuda_holders must be a subset of process_tree")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_work_dir(self) -> Self:
+        if not self.portable and self.cleanup_work_dir:
+            raise ValueError("an in-place artifact's work dir is the artifact itself")
+        if not os.path.isabs(self.work_dir):
+            raise ValueError("work_dir must be an absolute path")
         return self
 
 
@@ -154,6 +196,23 @@ def _is_trusted_sticky_directory(path_stat: os.stat_result) -> bool:
     )
 
 
+def _require_trusted_path_chain(path: Path, *, what: str) -> None:
+    """Reject paths whose components can be replaced by untrusted users."""
+    effective_uid = os.geteuid()
+    for component in _existing_path_chain(path):
+        component_stat = component.lstat()
+        if stat.S_ISLNK(component_stat.st_mode):
+            raise SnapshotSecurityError(f"{what} contains a symlink: {component}")
+        if component_stat.st_uid not in (0, effective_uid):
+            raise SnapshotSecurityError(f"{what} has an untrusted owner: {component}")
+        if component_stat.st_mode & (
+            stat.S_IWGRP | stat.S_IWOTH
+        ) and not _is_trusted_sticky_directory(component_stat):
+            raise SnapshotSecurityError(
+                f"{what} has a group- or world-writable ancestor: {component}"
+            )
+
+
 def validate_artifact_root(path: Path, *, creating: bool) -> None:
     """Validate that an artifact path cannot be replaced by another user."""
     path = Path(os.path.abspath(path))
@@ -163,22 +222,7 @@ def validate_artifact_root(path: Path, *, creating: bool) -> None:
         raise SnapshotSecurityError(f"snapshot path does not exist: {path}")
 
     effective_uid = os.geteuid()
-    for component in _existing_path_chain(path):
-        component_stat = component.lstat()
-        if stat.S_ISLNK(component_stat.st_mode):
-            raise SnapshotSecurityError(
-                f"snapshot path contains a symlink: {component}"
-            )
-        if component_stat.st_uid not in (0, effective_uid):
-            raise SnapshotSecurityError(
-                f"snapshot path has an untrusted owner: {component}"
-            )
-        if component_stat.st_mode & (
-            stat.S_IWGRP | stat.S_IWOTH
-        ) and not _is_trusted_sticky_directory(component_stat):
-            raise SnapshotSecurityError(
-                f"snapshot path has a group- or world-writable ancestor: {component}"
-            )
+    _require_trusted_path_chain(path, what="snapshot path")
 
     if path.exists():
         path_stat = path.lstat()
@@ -245,6 +289,20 @@ def write_manifest_atomic(path: Path, manifest: SnapshotManifest) -> None:
         ) from error
 
 
+def _backfill_legacy_fields(payload: object, path: Path) -> dict[str, Any] | None:
+    """Fill in manifest fields an artifact's era predates, or return None.
+
+    An artifact from before the work-dir fields existed kept its control
+    files in the artifact itself. A payload carrying some but not all of
+    the fields is no format the feature ever wrote and returns None.
+    """
+    if not (isinstance(payload, dict) and not _WORK_DIR_FIELDS & payload.keys()):
+        return None
+    payload["work_dir"] = os.path.abspath(path)
+    payload["cleanup_work_dir"] = False
+    return payload
+
+
 def read_manifest(path: Path) -> SnapshotManifest:
     """Read a snapshot published by atomically installing its manifest."""
     path = Path(path)
@@ -261,11 +319,18 @@ def read_manifest(path: Path) -> SnapshotManifest:
         ) from error
     try:
         with os.fdopen(file_descriptor, encoding="utf-8") as manifest_file:
-            payload = manifest_file.read()
+            raw = manifest_file.read()
     except UnicodeDecodeError as error:
         raise SnapshotCompatibilityError("invalid snapshot manifest: JSON") from error
     try:
-        return SnapshotManifest.model_validate_json(payload, strict=True)
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SnapshotCompatibilityError("invalid snapshot manifest: JSON") from error
+    backfilled = _backfill_legacy_fields(payload, path)
+    if backfilled is not None:
+        raw = json.dumps(backfilled)
+    try:
+        return SnapshotManifest.model_validate_json(raw, strict=True)
     except ValidationError as error:
         raise SnapshotCompatibilityError(
             f"invalid snapshot manifest: {_validation_path(error)}"
