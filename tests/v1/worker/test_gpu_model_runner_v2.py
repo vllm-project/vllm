@@ -618,7 +618,7 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
 def test_standalone_draft_kv_dtype_override(
     monkeypatch, draft_dtype, expected_dtype, data_parallel_index, draft_moe, draft_attn
 ):
-    @dataclass
+    @dataclass(slots=True)
     class Config:
         cache_config: CacheConfig
         parallel_config: ParallelConfig

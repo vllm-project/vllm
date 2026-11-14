@@ -88,7 +88,7 @@ def _make_connector():
     return AuxOutputSchedulerConnector(_kv_cache_manager({}))
 
 
-@dataclass
+@dataclass(slots=True)
 class _Execution:
     request_id: str
     token_start: int
@@ -97,13 +97,13 @@ class _Execution:
     block_hashes: list[bytes] | PackedBlockHashes
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerStep:
     metadata: AuxOutputConnectorMetadata
     executions: list[_Execution]
 
 
-@dataclass
+@dataclass(slots=True)
 class _SchedulerRequest:
     request_id: str
     block_hashes: list[bytes]
