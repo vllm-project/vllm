@@ -358,9 +358,58 @@ class EngineCoreOutputs(
     # Weight version used for this step.
     weight_version: str | None = None
 
+    # Per-output sample logprobs batched for transport (see pack_for_transport):
+    # the outputs' rows concatenated in output order, and the row count per
+    # output (-1 for none).
+    packed_logprobs: LogprobsLists | None = None
+    packed_logprobs_rows: list[int] | None = None
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
+
+    def pack_for_transport(self) -> None:
+        """Batch the outputs' sample logprobs before serialization.
+
+        Sent per output, sample logprobs cost three small arrays per request
+        per step to encode, send and decode, which dominates the front end's
+        output handling at high concurrency. Batched, they are three arrays per
+        step. If the arrays differ in dtype or trailing shape within the
+        message, they are sent per output as before.
+        """
+        lps = [o.new_logprobs for o in self.outputs if o.new_logprobs is not None]
+        if len(lps) >= 2 and all(
+            p.cu_num_generated_tokens is None
+            and all(
+                a.dtype == b.dtype and a.shape[1:] == b.shape[1:]
+                for a, b in zip(p[:3], lps[0][:3])
+            )
+            for p in lps
+        ):
+            self.packed_logprobs = LogprobsLists(
+                *(np.concatenate([p[i] for p in lps]) for i in range(3))
+            )
+            self.packed_logprobs_rows = [
+                -1 if o.new_logprobs is None else len(o.new_logprobs.logprobs)
+                for o in self.outputs
+            ]
+            for o in self.outputs:
+                o.new_logprobs = None
+
+    def unpack_after_transport(self) -> None:
+        """Give each output its rows of the batched logprobs back, as views."""
+        if self.packed_logprobs is not None and self.packed_logprobs_rows is not None:
+            token_ids, logprobs, ranks = self.packed_logprobs[:3]
+            start = 0
+            for output, n in zip(self.outputs, self.packed_logprobs_rows):
+                if n >= 0:
+                    end = start + n
+                    output.new_logprobs = LogprobsLists(
+                        token_ids[start:end], logprobs[start:end], ranks[start:end]
+                    )
+                    start = end
+        self.packed_logprobs = None
+        self.packed_logprobs_rows = None
 
 
 class EngineCoreRequestType(enum.Enum):
