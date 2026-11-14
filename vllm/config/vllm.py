@@ -1997,6 +1997,14 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        if self.model_config is not None and self.model_config.is_hybrid:
+            from vllm.model_executor.models.config import (
+                HybridAttentionMambaModelConfig,
+            )
+
+            # Derive Mamba defaults from the platform's final cache settings.
+            HybridAttentionMambaModelConfig.verify_and_update_config(self)
+
         # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
@@ -2857,7 +2865,6 @@ class VllmConfig:
         from vllm.model_executor.models import ModelRegistry
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
-            HybridAttentionMambaModelConfig,
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
@@ -2871,9 +2878,6 @@ class VllmConfig:
             cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
-
-        if self.model_config.is_hybrid:
-            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
