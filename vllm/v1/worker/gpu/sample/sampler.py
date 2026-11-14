@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import torch
@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -35,8 +36,37 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
+from vllm.v1.worker.gpu.sample.tp_consistency import (
+    all_tp_ranks_agree,
+    check_sampling_config,
+)
 from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
+
+logger = init_logger(__name__)
+
+
+def _agreed_support(eligible: bool, supported: Callable[[], bool], name: str) -> bool:
+    """Whether every TP rank can use a fused sampler. Local errors (an explicit
+    opt-in that cannot be honored) are raised after the collective, so the other
+    ranks do not wait on a rank that has already failed."""
+    local, error = False, None
+    if eligible:
+        try:
+            local = supported()
+        except RuntimeError as e:
+            error = e
+    agreed = all_tp_ranks_agree(local)
+    if error is not None:
+        raise error
+    if local and not agreed:
+        logger.warning(
+            "%s top-p/top-k sampling is unavailable on another tensor-parallel "
+            "rank; every rank uses the fallback sampler so they draw the same "
+            "tokens.",
+            name,
+        )
+    return agreed
 
 
 class Sampler:
@@ -88,12 +118,26 @@ class Sampler:
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
-        self.use_flashinfer = (
-            not return_sampling_mask and flashinfer_sampler_supported()
+        # TP ranks feed their own sampled tokens into the next step, so they must
+        # pick the same backend: use a fused sampler only if every rank can.
+        self.use_flashinfer = _agreed_support(
+            not return_sampling_mask, flashinfer_sampler_supported, "FlashInfer"
         )
         # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
-        self.use_xpu_sampler = (
-            not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
+        self.use_xpu_sampler = _agreed_support(
+            not return_sampling_mask and not use_fp64_gumbel,
+            xpu_sampler_supported,
+            "XPU",
+        )
+        check_sampling_config(
+            lambda: {
+                "seed": vllm_config.model_config.seed,
+                "data_parallel_index": vllm_config.parallel_config.data_parallel_index,
+                "logprobs_mode": logprobs_mode,
+                "use_fp64_gumbel": use_fp64_gumbel,
+                "use_flashinfer": self.use_flashinfer,
+                "use_xpu_sampler": self.use_xpu_sampler,
+            }
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
