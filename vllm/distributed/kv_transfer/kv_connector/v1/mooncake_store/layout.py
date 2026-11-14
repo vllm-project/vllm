@@ -206,8 +206,7 @@ class LayerRangeObjects:
 
     `metadata[i]` keys the object of range `i`. `layers` maps each layer name
     to the index of the range whose object holds it and to its position in the
-    Store object order, so every KV cache layout serializes an object the same
-    way.
+    Store object order, which is the same for every KV cache layout.
     """
 
     metadata: tuple[KeyMetadata, ...]
@@ -238,8 +237,9 @@ class RankLocalStoreLayout(StoreLayout):
 
     With `range_objects`, each block is stored as one object per layer range
     instead of one object holding all of this rank's layers. An object holds
-    its layers' bytes in Store object order whatever the KV cache layout, so
-    instances whose PP stages split the layers at the same points share it.
+    its layers' bytes in Store object order, so instances whose PP stages
+    split the layers at the same points share it if their KV cache layouts
+    order a layer's block the same way.
     """
 
     def __init__(
@@ -303,9 +303,9 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> None:
         """Build descriptors from the local KV cache tensors. With layer
         ranges, every region must hold layers of a single range, and a range's
-        object is its layers' bytes in Store object order whatever the buffer
-        layout; in a block-outermost buffer, adjacent layers share one
-        segment."""
+        object is its layers' bytes in Store object order, in a layer-first or
+        a block-outermost buffer; in a block-outermost buffer, adjacent layers
+        share one segment."""
         order = _object_order(self.range_objects, len(kv_caches), layer_names)
         if order is None:
             order = [(index, 0) for index in range(len(kv_caches))]

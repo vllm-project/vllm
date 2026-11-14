@@ -2115,8 +2115,9 @@ class MooncakeStoreWorker:
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
         # Rank-local keys naming a layer range always hold that range's layers
-        # in Store object order, so the same key holds the same bytes with or
-        # without pp_sizes and for every KV cache layout.
+        # in Store object order, with or without pp_sizes. Within a layer the
+        # bytes follow the KV cache layout, so the same key holds the same bytes
+        # for layouts with the same order inside a layer (e.g. BLHNC and LBHNC).
         rank_local_ranges = layer_ranges
         if (
             rank_local_ranges is None
