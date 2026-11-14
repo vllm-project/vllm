@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from typing import Protocol
 
 import torch
 
@@ -20,6 +21,20 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 
 logger = init_logger(__name__)
+
+
+class CopyEvent(Protocol):
+    """Completion signal for one block transfer, either backend.
+
+    The worker submits transfers without waiting and learns they are done
+    by polling these events in get_finished(): DmaCopyBackend posts real
+    torch events that flip when the DMA stream reaches them; the
+    synchronous backend posts a _CompletedEvent that is already done, so
+    the same poll loop serves both backends.
+    """
+
+    def query(self) -> bool: ...
+    def synchronize(self) -> None: ...
 
 
 class DmaCopyBackend:
@@ -74,7 +89,7 @@ class DmaCopyBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[tuple[int, CopyEvent]],
         wait_event: torch.Event | None = None,
     ) -> None:
         params = self._store_params if is_store else self._load_params
@@ -128,3 +143,74 @@ class DmaCopyBackend:
             event = torch.Event()
             event.record(stream)
             events_list.append((event_idx, event))
+
+
+class _CompletedEvent:
+    """Completed-event stand-in for a copy that already finished."""
+
+    def query(self) -> bool:
+        return True
+
+    def synchronize(self) -> None:
+        return None
+
+
+class TorchCopyBackend:
+    """Generic tensor-copy backend for platforms without CUDA DMA.
+
+    Used where host pages stay pageable and there is no cuMemcpyBatchAsync
+    engine: transfers are plain block-indexed copies on the caller's
+    thread.
+    """
+
+    def __init__(self) -> None:
+        self._gpu_caches: dict[str, torch.Tensor] = {}
+        self._cpu_caches: dict[str, torch.Tensor] = {}
+
+    def init(
+        self,
+        gpu_caches: dict[str, torch.Tensor],
+        cpu_caches: dict[str, torch.Tensor],
+        # Unused: kept for signature parity with DmaCopyBackend.init, so
+        # the worker can construct either backend the same way.
+        device: torch.device,
+    ) -> None:
+        assert list(gpu_caches.keys()) == list(cpu_caches.keys())
+        self._gpu_caches = gpu_caches
+        self._cpu_caches = cpu_caches
+
+    def launch_copy(
+        self,
+        src_blocks: list[int],
+        dst_blocks: list[int],
+        is_store: bool,
+        event_idx: int,
+        events_list: list[tuple[int, CopyEvent]],
+        wait_event: torch.Event | None = None,
+    ) -> None:
+        if wait_event is not None:
+            # Stores read the live KV cache; the compute stream may still be
+            # writing it. The copy runs on this thread, so block until then --
+            # a host stall of one compute step per store.
+            wait_event.synchronize()
+        if is_store:
+            src, dst = self._gpu_caches, self._cpu_caches
+        else:
+            src, dst = self._cpu_caches, self._gpu_caches
+        for name, src_tensor in src.items():
+            dst_tensor = dst[name]
+            # Gather, move, then write: torch only moves the source to the
+            # destination device on its own for scalar values, so a block copy
+            # across devices has to do it explicitly.
+            src_idx = torch.as_tensor(
+                src_blocks, dtype=torch.long, device=src_tensor.device
+            )
+            dst_idx = torch.as_tensor(
+                dst_blocks, dtype=torch.long, device=dst_tensor.device
+            )
+            gathered = src_tensor.index_select(0, src_idx)
+            dst_tensor.index_copy_(0, dst_idx, gathered.to(dst_tensor.device))
+        events_list.append((event_idx, _CompletedEvent()))
+
+    def shutdown(self) -> None:
+        return None
