@@ -27,6 +27,7 @@ QuantizationMethods = Literal[
     "gptq",
     "gptq_marlin",
     "awq_marlin",
+    "bitnet",
     "humming",
     "compressed-tensors",
     "experts_int8",
@@ -135,6 +136,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
+    from .bitnet import BitNetConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
@@ -171,6 +173,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
+        "bitnet": BitNetConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
