@@ -162,54 +162,19 @@ vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
 
-For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` selects online MXFP4
-for both linear and MoE layers while retaining the ModelOpt checkpoint loader.
-Checkpoint-quantized layers are re-quantized; eligible BF16/FP16 layers are also
-quantized, including attention projections and router gates unless ignored.
-
-```bash
-vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
-    --quantization mxfp4
-```
-
-This shorthand is resolved after detecting the ModelOpt NVFP4 checkpoint,
-preserving the checkpoint loader while selecting the online MXFP4 backend.
-
-The following configuration rules apply to ModelOpt NVFP4 checkpoints.
-Configuration fragments are passed to `--quantization-config`.
-
-| `--quantization` | Configuration | Effective selection |
-| ---------------- | ------------- | ------------------- |
-| `mxfp4` | Omitted or `{}` | MXFP4 for eligible linear and MoE layers |
-| `mxfp4` | `{"linear":"mxfp8"}` | MXFP8 for linear layers; the MoE MXFP4 default remains |
-| `mxfp4` or omitted | `{"targets":{"*mlp*":"mxfp4"}}` | Only matching MLP layers; no global linear/MoE defaults are added |
-| `mxfp4` or omitted | `{"targets":{"*":"mxfp4"}}` | All eligible linear and MoE layers; embeddings and LM head retain their checkpoint methods |
-| Omitted | `{"linear":"mxfp4"}` | Linear MXFP4 only; no MoE default is added |
-| `mxfp4` | `{"targets":{}}` | No layers selected; does not restore the shorthand defaults |
-
-Explicit `linear`/`moe` fields override the corresponding shorthand fields;
-unspecified fields retain their defaults. `ignore` excludes matching layers
-from online conversion, not from checkpoint loading.
-
-To convert only selected layers, use `targets`. For example, the following
-converts the NVFP4 MLP layers of Ripple to MXFP4 while leaving its BF16 attention
-projections unchanged:
+For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` retains the checkpoint
+loader and, by default, converts eligible linear and MoE layers, including
+attention projections and router gates. Use `targets` to select specific layers
+instead, for example:
 
 ```bash
 vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
-    --quantization-config '{"targets":{"*mlp*":"mxfp4"}}'
+  --quantization mxfp4 --quantization-config '{"targets":{"*mlp*":"mxfp4"}}'
 ```
 
-Note that NVFP4-to-MXFP4 conversion can reduce accuracy. Prefer MXFP8 for NVFP4 dense
-and attention linears, or validate MXFP4 per model. On supported ROCm hardware,
-enable AITER with `VLLM_ROCM_USE_AITER=1` for MXFP4 MoE experts:
-
-```bash
-VLLM_ROCM_USE_AITER=1 vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
-    --quantization-config '{"targets":{"*mlp.experts*":"mxfp4","*self_attn.qkv_proj":"mxfp8","*self_attn.o_proj":"mxfp8"}}'
-```
-
-This example uses Qwen3 layer names; adapt target patterns for other models.
+Unconverted checkpoint-quantized layers require native support for their
+checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
+per model or consider MXFP8 for dense and attention linears.
 
 !!! info
 

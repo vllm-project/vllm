@@ -1428,9 +1428,13 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         from vllm.config.quantization import (
+            _DEFERRED_ONLINE_SHORTHANDS,
             _ONLINE_SHORTHANDS,
             merge_quantization_config,
             resolve_quantization_config,
+        )
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
         )
 
         requested_quantization = self.quantization
@@ -1538,30 +1542,27 @@ class ModelConfig:
             online_args = resolve_quantization_config(
                 self.quantization, self.quantization_config
             )
-            execution_quantization = self.quantization
-            if (
-                self.quantization == "modelopt_fp4"
-                and online_args is not None
-                and (
-                    (
-                        online_args.linear is not None
-                        and online_args.linear.weight is not None
-                        and online_args.moe is not None
-                        and online_args.moe.weight is not None
-                        and not online_args.ignore
-                    )
-                    or (
-                        online_args.targets is not None
-                        and any(
-                            isinstance(target, str) or target.weight is not None
-                            for target in online_args.targets.values()
-                        )
-                    )
+            online_weights = online_args is not None and (
+                any(
+                    spec is not None and spec.weight is not None
+                    for spec in (online_args.linear, online_args.moe)
                 )
-            ):
-                # Untargeted checkpoint layers still require a supported kernel.
-                execution_quantization = "online"
-            current_platform.verify_quantization(execution_quantization)
+                or any(
+                    isinstance(target, str) or target.weight is not None
+                    for target in (online_args.targets or {}).values()
+                )
+            )
+            quant_cls = me_quant.get_quantization_config(self.quantization)
+            defer_to_layers = (
+                online_weights
+                and not issubclass(quant_cls, OnlineQuantizationConfig)
+                and (
+                    quant_cfg is not None
+                    or self.quantization not in _DEFERRED_ONLINE_SHORTHANDS
+                )
+            )
+            if not defer_to_layers:
+                current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
             if self.allow_deprecated_quantization:

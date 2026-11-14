@@ -321,6 +321,7 @@ def resolve_quant_method(
         LinearBase,
         UnquantizedLinearMethod,
     )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -352,6 +353,11 @@ def resolve_quant_method(
             )
             target_spec = target[3] if target is not None else None
 
+    if online_target is not None:
+        from vllm.platforms import current_platform
+
+        current_platform.verify_quantization("online")
+
     # With an online target, the checkpoint method is never used for compute: it
     # is either a dequantization source or discarded in favour of the online
     # method (all paths below return the online method or raise). It therefore
@@ -367,6 +373,25 @@ def resolve_quant_method(
         # A `targets` spec without a weight key overrides the activation of the
         # checkpoint method.
         base_quant_method = quant_config.get_quant_method(layer, prefix)
+    # An online target does not execute the checkpoint method; require native
+    # checkpoint support only for retained quantized layers.
+    if (
+        online_config is not None
+        and online_target is None
+        and base_quant_method is not None
+        and not isinstance(
+            base_quant_method,
+            (
+                UnquantizedLinearMethod,
+                UnquantizedFusedMoEMethod,
+                UnquantizedEmbeddingMethod,
+                BaseKVCacheMethod,
+            ),
+        )
+    ):
+        from vllm.platforms import current_platform
+
+        current_platform.verify_quantization(quant_config.get_name())
     if online_config is None:
         # No online configuration: retain the checkpoint method.
         return base_quant_method

@@ -1815,6 +1815,35 @@ def test_modelopt_nvfp4_targets_preserve_checkpoint_and_selection(
     )
 
 
+@pytest.mark.skip_global_cleanup
+def test_checkpoint_platform_validation_applies_to_untargeted_layers(
+    tmp_path, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """A converted layer cannot make an unsupported native layer valid."""
+    monkeypatch.setattr(type(current_platform), "supported_quantization", ["online"])
+    _write_minimal_llama_config(
+        tmp_path, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization_config=quant_config_args(targets={"*mlp*": "fp8_per_channel"}),
+    )
+    default_vllm_config.model_config = model_config
+    config = weight_utils.get_quant_config(model_config, LoadConfig())
+    kwargs = dict(
+        input_size=128,
+        output_size=64,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        disable_tp=True,
+    )
+    targeted = ColumnParallelLinear(prefix="model.layers.0.mlp.proj", **kwargs)
+    assert isinstance(targeted.quant_method, Fp8PtpcOnlineLinearMethod)
+    with pytest.raises(ValueError, match="modelopt_fp4.*not supported"):
+        ColumnParallelLinear(prefix="model.layers.0.self_attn.proj", **kwargs)
+
+
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
     """Composable configs log their nested online quantization results."""
     online_config = OnlineQuantizationConfig(quant_config_args(linear="mxfp8"))
