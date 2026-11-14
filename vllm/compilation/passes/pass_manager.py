@@ -57,6 +57,7 @@ if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+    from .fusion.moe_flashinfer_fusion import MoEFlashInferFusionPass
 
 if current_platform.is_xpu():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
@@ -177,6 +178,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:
                     self.passes += [AllReduceFusionPass(config)]
+                    # MoE FlashInfer fusion (MoE finalize + AR + residual + RMSNorm)
+                    self.passes += [MoEFlashInferFusionPass(config)]
 
             if enable_transformers_norm_canonicalization:
                 # Let AR+RMS match before moving output reshapes ahead of the
