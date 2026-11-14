@@ -48,6 +48,10 @@ class IncrementalDetokenizer:
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
 
+    def add_prompt_tokens(self, prompt_token_ids: list[int]) -> None:
+        """Decode the prompt of a later streaming-input chunk, so the output
+        tokens that follow it are decoded after it. Its text is not output."""
+
     @classmethod
     def from_new_request(
         cls,
@@ -159,6 +163,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     @abstractmethod
     def decode_next(self, next_token_id: int) -> str:
         raise NotImplementedError
+
+    def add_prompt_tokens(self, prompt_token_ids: list[int]) -> None:
+        for token_id in prompt_token_ids:
+            self.decode_next(token_id)
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
@@ -307,7 +315,8 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def decode_next(self, next_token_id: int) -> str:
         new_tokens, decoded_text, prefix_offset, read_offset = detokenize_incrementally(
             tokenizer=self.tokenizer,
-            all_input_ids=self.token_ids,
+            # Given prev_tokens, only the last id (the new token) is read.
+            all_input_ids=[next_token_id],
             prev_tokens=self.tokens,
             prefix_offset=self.prefix_offset,
             read_offset=self.read_offset,
