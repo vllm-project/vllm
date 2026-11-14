@@ -14,9 +14,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="rms_norm requires a CUDA/ROCm device",
+    not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
+    reason="rms_norm requires a CUDA/ROCm device or the CPU backend",
 )
+
+DEVICE = "cpu" if current_platform.is_cpu() else "cuda"
 
 
 @pytest.mark.parametrize(
@@ -25,7 +27,13 @@ pytestmark = pytest.mark.skipif(
         (28, 17, 128),  # 3D: [num_rows, tokens, hidden]
         (1, 5, 2, 128),  # 4D: single row (edge case)
         (28, 13, 8, 128),  # 4D: [L, num_ctx, nkv, hd] (DFlash K-norm)
-        (6, 3, 4, 769),  # 4D: non-power-of-two hidden size
+        pytest.param(
+            (6, 3, 4, 769),  # 4D: non-power-of-two hidden size
+            marks=pytest.mark.skipif(
+                current_platform.is_cpu(),
+                reason="CPU rms_norm needs hidden_size % vector width == 0",
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
@@ -35,7 +43,7 @@ def test_rms_norm_matches_loop(
     shape: tuple[int, ...], dtype: torch.dtype, seed: int
 ) -> None:
     set_random_seed(seed)
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE)
 
     num_rows, hidden = shape[0], shape[-1]
     eps = 1e-6
@@ -58,7 +66,7 @@ def test_rms_norm_matches_loop(
 
 @torch.inference_mode()
 def test_rms_norm_validates_shapes() -> None:
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE)
 
     x = torch.randn(4, 8, 128, dtype=torch.float)
     out = torch.empty_like(x)
