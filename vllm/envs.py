@@ -236,7 +236,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
     VLLM_K3_KDA_FB_STRIDED: bool = True
     VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
-    VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER: bool = True
+    VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER: bool = False
     VLLM_K3_DSA_FUSED_NORM_GATE: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
@@ -1836,7 +1836,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (key store, top-k reset, query quantize, head weights), leaving
     # kimi_fp4_indexer its scoring and top-k. Needs VLLM_K3_FUSED_INDEXER_PREP.
     "VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER": lambda: bool(
-        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER", "1"))
+        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER", "0"))
     ),
     # Kimi-K3.1 DSA layers on ROCm: run the q_a/kv_a RMSNorms as one Triton
     # launch and the output gate (attn_out * sigmoid(g_proj)) as one fused
