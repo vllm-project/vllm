@@ -72,8 +72,8 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -5209,7 +5209,10 @@ def test_mla_broadcast_notif_uses_remote_request_id(
         assert read_call.args[0] == "READ"
         assert read_call.args[1] == worker.src_xfer_handles_by_block_size[block_size]
         np.testing.assert_array_equal(read_call.args[2], [0, 1, 2])
-        assert read_call.args[3] == worker._remote_stages[remote_engine_id][0].xfer_side_handles[0]
+        assert (
+            read_call.args[3]
+            == worker._remote_stages[remote_engine_id][0].xfer_side_handles[0]
+        )
         np.testing.assert_array_equal(read_call.args[4], [10, 11, 12])
 
         # Exactly one notification per non-read rank; none to rank 0.

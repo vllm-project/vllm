@@ -826,7 +826,7 @@ def test_active_push_refreshes_engine_last_active(monkeypatch: pytest.MonkeyPatc
     """The base `_ensure_handshake` refreshes liveness only on a new
     handshake, so an active push to an already-connected engine must refresh
     `_engine_last_active` itself or it is reaped mid-stream (S1)."""
-    w = _eviction_worker(engine_ttl=3600.0)
+    w = _eviction_worker(engine_ttl=3600.0, monkeypatch=monkeypatch)
     # Already-connected D -> _ensure_handshake returns None, WRITE runs inline.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
     stale = time.perf_counter() - 5.0

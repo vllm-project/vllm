@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
+from vllm.v1.attention.backends.mla.flashinfer_mla import FlashInferMLABackend
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -1022,7 +1023,7 @@ def test_hetero_ppl_pull_without_remote_num_tokens_fails():
 
     worker = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
-    )
+    ).worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=8,
@@ -1048,6 +1049,7 @@ def test_hetero_ppl_pull_without_remote_num_tokens_fails():
     meta = metadata.reqs_to_recv["req-b"]
     worker._recving_metadata["req-b"] = meta
 
+    assert isinstance(worker, NixlPullConnectorWorker)
     worker._read_blocks_for_req("req-b", meta)
 
     assert not worker.nixl_wrapper.xfers
@@ -1466,7 +1468,7 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
 def test_dcp_rejects_different_logical_block_sizes():
     worker = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=False
-    )
+    ).worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=8,
@@ -1491,7 +1493,7 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 
     worker = _make_mla_hybrid_worker(
         local_block_size=8, kernel_block_size=8, num_logical_blocks=8, mamba=False
-    )
+    ).worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=8,
@@ -1528,6 +1530,7 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
     )
     worker._recving_metadata["req-b"] = meta
 
+    assert isinstance(worker, NixlPullConnectorWorker)
     worker._read_blocks_for_req("req-b", meta)
 
     _assert_local_writes_within(worker, _owned_byte_ranges(worker, local_ids))
@@ -2126,15 +2129,10 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
     from vllm.distributed.kv_transfer.kv_connector import utils as kv_utils
     from vllm.v1.worker.utils import select_common_block_size
 
-    class _DraftBackend:
-        @staticmethod
-        def get_supported_kernel_block_sizes(_spec):
-            return [32, 64]
-
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.uint8
     )
-    layer = SimpleNamespace(get_attn_backend=lambda: _DraftBackend)
+    layer = SimpleNamespace(get_attn_backend=lambda: FlashInferMLABackend)
     monkeypatch.setattr(
         kv_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
     )
@@ -2146,7 +2144,7 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
     )
 
     backends, specs, _ = kv_utils.get_current_attn_backends_and_specs(
-        vllm_config, kv_cache_config, [_DraftBackend]
+        vllm_config, kv_cache_config, [FlashInferMLABackend]
     )
 
     assert select_common_block_size(1024, backends, specs) == transfer_block_size
@@ -2673,6 +2671,7 @@ def _make_pp_attn_worker(
     )
     config.cache_config.kv_cache_layout = layout.name
     config.scheduler_config.disable_hybrid_kv_cache_manager = not hma
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_buffer_device = "cuda"
     if pp_stage:
         config.parallel_config.pipeline_parallel_size = pp_stage[1]
@@ -2930,6 +2929,7 @@ def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
     """
     p_config = create_vllm_config(block_size=16, kv_role="kv_producer")
     p_config.parallel_config = ParallelConfig(pipeline_parallel_size=2)
+    assert p_config.kv_transfer_config is not None
     p_config.kv_transfer_config.engine_id = "prefill"
     prefill = create_scheduler(p_config, num_blocks=16)
     decode = create_scheduler(
@@ -3022,6 +3022,7 @@ def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
     decode.update_from_output(d_step, create_model_runner_output([]))
     now = 121.0
     d_step = decode.schedule()
+    assert isinstance(d_step.kv_connector_metadata, NixlConnectorMetadata)
     assert d_step.kv_connector_metadata.heartbeat_by_engine["prefill"].req_ids == {
         p_req.request_id
     }
@@ -3031,6 +3032,7 @@ def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
         decode.finish_requests(d_req.request_id, RequestStatus.FINISHED_ABORTED)
         now = 127.0
         d_step = decode.schedule()
+        assert isinstance(d_step.kv_connector_metadata, NixlConnectorMetadata)
         assert not d_step.kv_connector_metadata.heartbeat_by_engine
         assert d_req.request_id in decode.requests
         assert d_pool.get_num_free_blocks() == d_reserved
@@ -3055,12 +3057,14 @@ def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
     # Past the initial lease, but before the last heartbeat's extended deadline.
     now = 132.0
     d_step = decode.schedule()
+    assert isinstance(d_step.kv_connector_metadata, NixlConnectorMetadata)
     assert not d_step.kv_connector_metadata.heartbeat_by_engine
     assert not d_step.kv_connector_metadata.reqs_to_recv
     worker.start_load_kv(d_step.kv_connector_metadata)
     assert len(nixl.reads) == 2
     if policy == "recompute":
         assert not d_req.is_finished()
+        assert d_req.kv_transfer_params is not None
         assert not d_req.kv_transfer_params["do_remote_prefill"]
         assert d_step.num_scheduled_tokens[d_req.request_id] > 0
     elif failure != "notification":
@@ -3129,6 +3133,7 @@ def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read(
             for report in reports
         ]
     )
+    assert output is not None and output.kv_connector_output is not None
     assert output.kv_connector_output.finished_sending == (
         {"prefill-req"} if full_hit else None
     )
@@ -3157,6 +3162,7 @@ def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read(
             for stage in stages
         ]
     )
+    assert output is not None and output.kv_connector_output is not None
     assert output.kv_connector_output.finished_sending == {"prefill-req"}
 
 
