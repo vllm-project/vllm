@@ -318,6 +318,7 @@ def _hc_combine_norm_kernel(
     EPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
+    launch_dependents_early: tl.constexpr,
 ) -> None:
     HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
     NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
@@ -338,6 +339,8 @@ def _hc_combine_norm_kernel(
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+    if launch_pdl and launch_dependents_early:
+        tl.extra.cuda.gdc_launch_dependents()
 
     # Start the uncached residual load first, then issue the other combine
     # loads before consuming any of them.
@@ -363,7 +366,7 @@ def _hc_combine_norm_kernel(
     sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
     rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
 
-    if launch_pdl:
+    if launch_pdl and not launch_dependents_early:
         tl.extra.cuda.gdc_launch_dependents()
 
     if inj_ptr is not None:
@@ -382,7 +385,16 @@ def hc_combine_norm(
     norm_weight: torch.Tensor,
     eps: float,
     hc_count: int,
+    launch_dependents_early: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Combine `block_output` into the `residual` streams and normalize
+    each stream; returns the combined and the normalized streams.
+
+    With programmatic dependent launch, the dependent kernel launches once
+    every program has its norm statistics, or, with
+    `launch_dependents_early`, right after each program's grid-dependency
+    wait: for a dependent that only loads weights before its own wait.
+    """
     N, DIM = residual.shape
     assert DIM % hc_count == 0
     hc_dim = DIM // hc_count
@@ -418,6 +430,7 @@ def hc_combine_norm(
         EPS=eps,
         BLOCK_SIZE=BLOCK_SIZE,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        launch_dependents_early=launch_dependents_early,
     )
     return out, y
 

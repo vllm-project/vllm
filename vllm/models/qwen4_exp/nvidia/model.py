@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -89,6 +90,15 @@ from .mega_moe import Qwen4ExpMegaMoeBlock
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+from .specialized_decode import specialized_decode_config
+from .specialized_decode.logits import (
+    SpecializedDecodeLogitsProcessor,
+    bind_logits_gather,
+)
+
+if TYPE_CHECKING:
+    from .model_state import Qwen4ExpModelState
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
@@ -546,6 +556,7 @@ class Qwen4ExpModel(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -571,6 +582,18 @@ class Qwen4ExpModel(nn.Module):
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
+
+        if decode_step is not None:
+            # decode_backend=latency_specialized: the executor runs the layers
+            # and the final mixer of a planned FULL-graph decode step.
+            return decode_step.run(
+                hidden_states,
+                positions,
+                input_ids,
+                query_start_loc,
+                ngram_context,
+                deepstack_input_embeds,
+            )
 
         full_num_tokens = positions.shape[-1]
         block_output = None
@@ -753,6 +776,10 @@ class Qwen4ExpForCausalLM(
         self.quant_config = vllm_config.quant_config
         self.config = config
         self.scheduler_config = vllm_config.scheduler_config
+        # decode_backend=latency_specialized: a decode executor over self.model,
+        # built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -765,7 +792,13 @@ class Qwen4ExpForCausalLM(
             )
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        # With the specialized decode, a processor whose logits gather the
+        # executor binds (build_specialized_decode).
+        self.logits_processor = (
+            LogitsProcessor(config.vocab_size)
+            if self.specialized_decode_config is None
+            else SpecializedDecodeLogitsProcessor(config.vocab_size)
+        )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -782,11 +815,48 @@ class Qwen4ExpForCausalLM(
                 self.config.hidden_size * self.config.hc_count,
             )
 
-    @staticmethod
-    def get_model_state_cls():
+    def get_model_state_cls(self) -> "type[Qwen4ExpModelState]":
+        """The model-runner state; with the specialized decode, the state that
+        builds its executor once the weights are loaded."""
+        if self.specialized_decode_config is not None:
+            from .specialized_decode.runtime.model_state import (
+                Qwen4ExpSpecializedDecodeModelState,
+            )
+
+            return Qwen4ExpSpecializedDecodeModelState
         from .model_state import Qwen4ExpModelState
 
         return Qwen4ExpModelState
+
+    def build_specialized_decode(self) -> "SpecializedDecode":
+        """Build the decode executor over `self.model`. The specialized
+        decode model state calls it once the weights are loaded; from then on
+        every forward asks it for a decode step."""
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+        # Collective over the TP group, as the executor's build.
+        bind_logits_gather(
+            self.logits_processor,
+            self.lm_head,
+            self.specialized_decode_config.max_rows,
+        )
+        return self.specialized_decode
+
+    def plan_decode(
+        self,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> "DecodeStep | None":
+        """The specialized decode step of this forward, or None to run the
+        stock layers (always None without the executor)."""
+        decode = self.specialized_decode
+        if decode is None:
+            return None
+        return decode.plan(positions, intermediate_tensors)
 
     def forward(
         self,
@@ -803,6 +873,7 @@ class Qwen4ExpForCausalLM(
             positions,
             intermediate_tensors,
             inputs_embeds,
+            decode_step=self.plan_decode(positions, intermediate_tensors),
             **kwargs,
         )
 
@@ -987,11 +1058,9 @@ class Qwen4ExpForConditionalGeneration(
         ],
     }
 
-    @staticmethod
-    def get_model_state_cls():
-        from .model_state import Qwen4ExpModelState
-
-        return Qwen4ExpModelState
+    def get_model_state_cls(self) -> "type[Qwen4ExpModelState]":
+        """The language model's model-runner state."""
+        return self.language_model.get_model_state_cls()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
@@ -1140,6 +1209,9 @@ class Qwen4ExpForConditionalGeneration(
             query_start_loc=kwargs.get("query_start_loc"),
             ngram_context=kwargs.get("ngram_context"),
             deepstack_input_embeds=deepstack_input_embeds,
+            decode_step=self.language_model.plan_decode(
+                positions, intermediate_tensors
+            ),
         )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             self._clear_deepstack_input_embeds(inputs_embeds.size(0))
