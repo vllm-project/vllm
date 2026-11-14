@@ -83,7 +83,14 @@ def _finish(spec, req_states, slot_by_id):
     spec.on_requests_finished(list(slot_by_id))
 
 
-def _propose(spec, req_states, slots, num_sampled=None, num_rejected=None):
+def _propose(
+    spec,
+    req_states,
+    slots,
+    num_sampled=None,
+    num_rejected=None,
+    num_speculative_tokens=None,
+):
     n = len(slots)
     max_reqs = req_states.total_len.gpu.shape[0]
     last_sampled = torch.zeros(max_reqs, 1, dtype=torch.int64, device=DEVICE)
@@ -111,6 +118,7 @@ def _propose(spec, req_states, slots, num_sampled=None, num_rejected=None):
         None,
         None,
         None,
+        num_speculative_tokens=num_speculative_tokens,
     )
     return drafts.cpu().numpy(), spec.num_valid[:n].cpu().numpy()
 
@@ -355,6 +363,92 @@ def test_propose_signature_matches_base_speculator():
     base = inspect.signature(BaseSpeculator.propose).parameters
     ours = inspect.signature(SuffixSpeculator.propose).parameters
     assert list(ours) == list(base)
+
+
+def test_dynamic_speculative_tokens_limits_drafts():
+    """Dynamic SD (num_speculative_tokens_per_batch_size) passes a per-batch
+    K smaller than the configured max across multiple requests, corpus
+    matching, adaptive verification, and K=0."""
+    max_k, depth, max_reqs, max_len = 8, 8, 3, 64
+
+    # Local match across non-contiguous batch slots: step 1 fills all 8 slots,
+    # step 2 shrinks to k=3 and must keep row strides at max_k.
+    spec, rs = _make(max_k, depth, max_reqs, max_len, corpus_tokens=0)
+    seq0 = [1, 2, 3, 4, 5, 6, 7, 1, 2, 3]
+    seq1 = [10, 20, 30, 40, 50, 60, 10, 20, 30]
+    _set(rs, 0, [], seq0)
+    _set(rs, 2, [], seq1)
+    drafts_full, nv_full = _propose(spec, rs, [2, 0])
+    assert nv_full.tolist() == [6, 7]
+    assert drafts_full[0, :6].tolist() == [40, 50, 60, 10, 20, 30]
+    assert drafts_full[1, :7].tolist() == [4, 5, 6, 7, 1, 2, 3]
+
+    drafts_k3, nv_k3 = _propose(spec, rs, [2, 0], num_speculative_tokens=3)
+    assert nv_k3.tolist() == [3, 3]
+    assert drafts_k3[0, :3].tolist() == [40, 50, 60]
+    assert drafts_k3[1, :3].tolist() == [4, 5, 6]
+    assert (drafts_k3[0, 3:] == seq1[-1]).all()
+    assert (drafts_k3[1, 3:] == seq0[-1]).all()
+
+    # Corpus match across 2 requests with k=3 < max_k.
+    spec_c, rs_c = _make(max_k, depth, max_reqs, max_len, corpus_tokens=1024)
+    _set(rs_c, 0, [], [1, 2, 3, 4, 70, 71, 72, 73, 74])
+    _set(rs_c, 1, [], [5, 6, 7, 8, 80, 81, 82, 83, 84])
+    _finish(spec_c, rs_c, {"d0": 0, "d1": 1})
+    _set(rs_c, 0, [], [1, 2, 3, 4])
+    _set(rs_c, 2, [], [5, 6, 7, 8])
+    drafts_c, nv_c = _propose(spec_c, rs_c, [2, 0], num_speculative_tokens=3)
+    assert nv_c.tolist() == [3, 3]
+    assert drafts_c[0, :3].tolist() == [80, 81, 82]
+    assert drafts_c[1, :3].tolist() == [70, 71, 72]
+    assert (drafts_c[0, 3:] == 8).all()
+    assert (drafts_c[1, 3:] == 4).all()
+
+
+def test_dynamic_speculative_tokens_adaptive_and_zero():
+    """Adaptive confidences use max_k stride, observe folds full prior
+    max_k verdicts across K transitions, and K=0 still observes verdicts."""
+    max_k, depth, max_reqs, max_len = 8, 8, 3, 64
+    spec, rs = _make(max_k, depth, max_reqs, max_len, corpus_tokens=0, adaptive=True)
+
+    # Multi-request confidence probs at k=3 stay row-aligned with zeroed tails.
+    _set(rs, 0, [], [1, 2, 3, 4, 5, 1, 2, 3])
+    _set(rs, 1, [], [10, 20, 30, 40, 50, 10, 20, 30])
+    _propose(spec, rs, [0, 1], num_speculative_tokens=3)
+    assert spec.draft_token_confidence_probs[0].cpu().tolist() == pytest.approx(
+        [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    assert spec.draft_token_confidence_probs[1].cpu().tolist() == pytest.approx(
+        [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+
+    # Reset and verify cross-K observation: step 1 drafts 6 tokens at k=8
+    # (match_len=6 -> bucket 5), step 2 drops to k=2 with 4 accepted + 1 rejected.
+    spec.reset_state()
+    _set(rs, 0, [], [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6])
+    _, nv = _propose(spec, rs, [0], num_speculative_tokens=8)
+    assert nv[0] == 6
+    _set(rs, 0, [], [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 99, 1])
+    _, nv_k2 = _propose(
+        spec, rs, [0], num_sampled=[5], num_rejected=[1], num_speculative_tokens=2
+    )
+    assert nv_k2.tolist() == [2]
+    # Match len 6 belongs to bucket 5 (_NUM_LEN_BUCKETS-based, index match_len-1).
+    bucket5 = spec.accept_stats[5].cpu().tolist()
+    assert bucket5 == [[1, 1], [1, 1], [1, 1], [1, 1], [0, 1], [0, 0], [0, 0], [0, 0]]
+    assert spec.accept_stats[:5].sum().item() == 0
+
+    # K=0: still observes the k=2 step's verdict (bucket 0), clears adaptive
+    # state, and emits zero valid drafts with last-sampled filler.
+    _set(rs, 0, [], [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 99, 1, 2, 77])
+    drafts_k0, nv_k0 = _propose(
+        spec, rs, [0], num_sampled=[2], num_rejected=[1], num_speculative_tokens=0
+    )
+    assert nv_k0.tolist() == [0]
+    assert (drafts_k0[0] == 77).all()
+    assert (spec.draft_token_confidence_probs[0] == 0).all()
+    assert int(spec.last_bucket[0]) == -1
+    assert spec.accept_stats[0, :2].cpu().tolist() == [[1, 1], [0, 1]]
 
 
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)

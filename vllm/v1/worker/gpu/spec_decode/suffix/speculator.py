@@ -265,12 +265,12 @@ def _suffix_finalize_kernel(
     corpus_ptr,  # *int32  [corpus_len]
     corpus_len,
     table_ptr,  # *int64  [2, NUM_BUCKETS, SLOTS]
-    drafts_ptr,  # *int64  [B, K]  (output)
+    drafts_ptr,  # *int64  [B, MAX_K]  (output)
     num_valid_ptr,  # *int32  [B]  (output)
-    stats_ptr,  # *int64  [2 * _NUM_LEN_BUCKETS, K, 2]  (accepted, observed)
+    stats_ptr,  # *int64  [2 * _NUM_LEN_BUCKETS, MAX_K, 2]  (accepted, observed)
     last_bucket_ptr,  # *int32  [max_num_reqs]  (output)
     last_valid_ptr,  # *int32  [max_num_reqs]  (output)
-    conf_ptr,  # *fp32  [B, K]  (output)
+    conf_ptr,  # *fp32  [B, MAX_K]  (output)
     HAS_CORPUS: tl.constexpr,
     ADAPTIVE: tl.constexpr,
     HASH_MUL: tl.constexpr,
@@ -280,6 +280,8 @@ def _suffix_finalize_kernel(
     DEPTH_PO2: tl.constexpr,
     K: tl.constexpr,
     K_PO2: tl.constexpr,
+    MAX_K: tl.constexpr,
+    MAX_K_PO2: tl.constexpr,
     NB_PO2: tl.constexpr,
 ):
     b = tl.program_id(0).to(tl.int64)
@@ -334,7 +336,11 @@ def _suffix_finalize_kernel(
     # Invalid slots fall back to the last sampled token; they are verified as
     # ordinary (rejectable) drafts, so the fill value only affects efficiency.
     out = tl.where(draft_ok, draft, last_tok)
-    tl.store(drafts_ptr + b * K + k_iota, out, mask=k_mask)
+    tl.store(drafts_ptr + b * MAX_K + k_iota, out, mask=k_mask)
+    if K < MAX_K:
+        max_k_iota = tl.arange(0, MAX_K_PO2).to(tl.int64)
+        tail_mask = (max_k_iota >= K) & (max_k_iota < MAX_K)
+        tl.store(drafts_ptr + b * MAX_K + max_k_iota, last_tok, mask=tail_mask)
     tl.store(num_valid_ptr + b, num_valid)
 
     if ADAPTIVE:
@@ -342,11 +348,15 @@ def _suffix_finalize_kernel(
         # acceptance rate for drafts like this one (Laplace-smoothed); filler
         # slots get 0 so they are trimmed first.
         bucket = source * _NUM_LEN_BUCKETS + _len_bucket(tl.maximum(match_len, 1))
-        stat = stats_ptr + (bucket * K + k_iota) * 2
+        stat = stats_ptr + (bucket * MAX_K + k_iota) * 2
         accepted = tl.load(stat, mask=k_mask, other=0).to(tl.float32)
         observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
         conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
-        tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
+        tl.store(conf_ptr + b * MAX_K + k_iota, conf, mask=k_mask)
+        if K < MAX_K:
+            max_k_iota = tl.arange(0, MAX_K_PO2).to(tl.int64)
+            tail_mask = (max_k_iota >= K) & (max_k_iota < MAX_K)
+            tl.store(conf_ptr + b * MAX_K + max_k_iota, 0.0, mask=tail_mask)
         tl.store(
             last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32)
         )
@@ -706,13 +716,32 @@ class SuffixSpeculator(BaseSpeculator):
         token_ids = self.req_states.all_token_ids.gpu
         total_len = self.req_states.total_len.gpu
         idx_mapping = input_batch.idx_mapping
-        k_po2 = max(1, triton.next_power_of_2(self.num_speculative_steps))
+
+        # Dynamic speculative decoding (num_speculative_tokens_per_batch_size)
+        # schedules a per-batch-size K that can be smaller than the configured
+        # max. Honor it instead of always drafting the full max K: the kernels
+        # mask by K and the model runner fills unused draft slots with -1, so
+        # only the first k slots are consumed. Without this the speculator pays
+        # full-K compute (corpus voting chains, adaptive-verification stats)
+        # on steps where the schedule picked a smaller K.
+        max_k = self.num_speculative_steps
+        max_k_po2 = max(1, triton.next_power_of_2(max_k))
+        k = max_k
+        if num_speculative_tokens is not None:
+            assert 0 <= num_speculative_tokens <= max_k, (
+                f"num_speculative_tokens={num_speculative_tokens} must be in "
+                f"[0, {max_k}]"
+            )
+            k = num_speculative_tokens
+        k_po2 = max(1, triton.next_power_of_2(k))
 
         if self.enable_adaptive_verification:
             if self.new_slots:
                 slots = async_tensor_h2d(self.new_slots, self.device, torch.int64)
                 self.last_bucket.index_fill_(0, slots, -1)
                 self.new_slots.clear()
+            # Observe folds the previous step's verdict, which may have drafted
+            # up to max_k tokens regardless of the current batch's k.
             _suffix_observe_kernel[(num_reqs,)](
                 idx_mapping,
                 num_sampled,
@@ -720,13 +749,23 @@ class SuffixSpeculator(BaseSpeculator):
                 self.accept_stats,
                 self.last_bucket,
                 self.last_valid,
-                K=self.num_speculative_steps,
-                K_PO2=k_po2,
+                K=max_k,
+                K_PO2=max_k_po2,
                 num_warps=1,
             )
             self.num_steps += 1
             if self.num_steps % _STATS_HALF_LIFE == 0:
                 self.accept_stats.bitwise_right_shift_(1)
+
+        if k == 0:
+            self.num_valid[:num_reqs].zero_()
+            self.drafts[:num_reqs].copy_(last_sampled.view(-1)[idx_mapping, None])
+            if self.enable_adaptive_verification:
+                self.draft_token_confidence_probs[:num_reqs].zero_()
+                slots_long = idx_mapping.long()
+                self.last_bucket.index_fill_(0, slots_long, -1)
+                self.last_valid.index_fill_(0, slots_long, 0)
+            return self.drafts[:num_reqs]
 
         _suffix_local_scan_kernel[(num_reqs, self.n_blocks)](
             token_ids,
@@ -768,8 +807,10 @@ class SuffixSpeculator(BaseSpeculator):
             SLOTS=_BUCKET_SLOTS,
             MAX_DEPTH=self.max_depth,
             DEPTH_PO2=triton.next_power_of_2(self.max_depth),
-            K=self.num_speculative_steps,
+            K=k,
             K_PO2=k_po2,
+            MAX_K=max_k,
+            MAX_K_PO2=max_k_po2,
             NB_PO2=max(1, triton.next_power_of_2(self.n_blocks)),
             num_warps=4,
         )
