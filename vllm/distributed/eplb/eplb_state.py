@@ -317,8 +317,16 @@ class EplbState:
         """
         self.async_worker_error: Exception | None = None
         """
-        Exception that stopped the async worker thread, if any.
+        Exception raised by the async worker, if any. Under fault tolerance
+        the thread keeps running and FT recovery clears it.
         """
+        self.async_cycles_pending = 0
+        """
+        Transfer cycles signalled to the async worker and not yet finished.
+        FT recovery waits for zero before it resets this state and rebuilds
+        the groups. Guarded by `async_cycle_done`.
+        """
+        self.async_cycle_done = threading.Condition()
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
@@ -1055,7 +1063,9 @@ class EplbState:
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
-            self.rearrange_event.record()
+            with self.async_cycle_done:
+                self.rearrange_event.record()
+                self.async_cycles_pending += 1
         return None
 
     def start_async_loop(
