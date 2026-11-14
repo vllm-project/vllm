@@ -394,6 +394,15 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            observability_config = self.engine_client.vllm_config.observability_config
+            metrics_labels = (
+                None
+                if raw_request is None
+                else self._get_metrics_labels(
+                    raw_request.headers,
+                    observability_config.prometheus_request_labels,
+                )
+            )
             session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
@@ -403,6 +412,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    metrics_labels=metrics_labels,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
                 )
@@ -413,6 +423,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    metrics_labels=metrics_labels,
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,

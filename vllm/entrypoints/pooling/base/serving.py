@@ -153,6 +153,15 @@ class PoolingBaseServing(ABC, BaseServing):
             if ctx.raw_request is None
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
+        observability_config = self.engine_client.vllm_config.observability_config
+        metrics_labels = (
+            None
+            if ctx.raw_request is None
+            else self._get_metrics_labels(
+                ctx.raw_request.headers,
+                observability_config.prometheus_request_labels,
+            )
+        )
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
@@ -179,6 +188,7 @@ class PoolingBaseServing(ABC, BaseServing):
                 lora_request=engine_input["lora_requests"],
                 priority=engine_input["priorities"],
                 trace_headers=trace_headers,
+                metrics_labels=metrics_labels,
             )
 
             generators.append(generator)

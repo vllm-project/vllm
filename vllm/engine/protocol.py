@@ -110,6 +110,7 @@ class EngineClient(ABC):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -125,6 +126,7 @@ class EngineClient(ABC):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        metrics_labels: dict[str, str] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...

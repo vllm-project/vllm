@@ -37,6 +37,7 @@ class BeamSearchOnlineMixin(ABC):
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        metrics_labels: dict[str, str] | None = None,
         session_id: str | None = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -106,6 +107,7 @@ class BeamSearchOnlineMixin(ABC):
                             request_id_item,
                             lora_request=lora_request_item,
                             trace_headers=trace_headers,
+                            metrics_labels=metrics_labels,
                             session_id=session_id,
                             priority=priority,
                         )
