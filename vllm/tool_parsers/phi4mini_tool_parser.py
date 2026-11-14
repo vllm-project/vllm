@@ -99,11 +99,16 @@ class Phi4MiniJsonToolParser(ToolParser):
                 for raw_function_call in function_call_arr
             ]
 
-            # get any content before the tool call
-            ret = ExtractedToolCallInformation(
+            # Marker present but nothing parsed: no call was made, so keep the
+            # output as content rather than dropping it.
+            if not tool_calls:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
+
+            return ExtractedToolCallInformation(
                 tools_called=True, tool_calls=tool_calls, content=None
             )
-            return ret
 
         except Exception:
             return ExtractedToolCallInformation(
