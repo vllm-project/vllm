@@ -210,6 +210,10 @@ void rms_norm_static_fp8_quant(
     torch::stable::Tensor& scale,   // [1]
     double epsilon) {
   STD_TORCH_CHECK(out.is_contiguous());
+  // The kernel indexes input as input_stride * token + feature
+  if (input.stride(-1) != 1) {
+    input = torch::stable::contiguous(input);
+  }
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
@@ -272,6 +276,10 @@ void fused_add_rms_norm_static_fp8_quant(
   STD_TORCH_CHECK(residual.is_contiguous());
   STD_TORCH_CHECK(residual.scalar_type() == input.scalar_type());
   STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  // input is only read, so a contiguous copy is enough for the indexing below
+  if (input.stride(-1) != 1) {
+    input = torch::stable::contiguous(input);
+  }
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
