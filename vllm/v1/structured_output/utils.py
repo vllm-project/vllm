@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import TYPE_CHECKING, TypeVar
 
 import regex as re
+import torch
 from cachetools import LRUCache
 
 import vllm.envs as envs
@@ -39,6 +40,37 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 CACHE = None
+
+
+def allocate_token_bitmask(num_rows: int, vocab_size: int) -> torch.Tensor:
+    """Allocate a CPU token bitmask for structured output grammars.
+
+    Args:
+        num_rows: Number of grammar-mask rows to allocate.
+        vocab_size: Model/logit vocabulary width.
+
+    Returns:
+        A contiguous, int32 CPU tensor initialized to allow every token.
+
+    """
+    from vllm.utils.torch_utils import PIN_MEMORY
+
+    shape = (num_rows, (vocab_size + 31) // 32)
+    try:
+        return torch.full(
+            shape,
+            -1,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
+        )
+    except RuntimeError as e:
+        if not PIN_MEMORY:
+            raise
+        logger.warning(
+            "Failed to pin memory: %s. Falling back to non-pinned memory.", e
+        )
+        return torch.full(shape, -1, dtype=torch.int32, device="cpu")
 
 
 def strip_speculative_padding(token_ids: list[int]) -> list[int]:

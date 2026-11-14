@@ -23,6 +23,7 @@ from transformers import AutoTokenizer
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 TOKENIZER = "openai-community/gpt2"
 VOCAB_SIZE = 50257
@@ -69,8 +70,8 @@ def test_request_stop_tokens_gated_to_grammar_terminal(backend: XgrammarBackend)
     for grammar in (default, override):
         assert grammar.accept_tokens("req", [QUOTE])
 
-    bm_default = backend.allocate_token_bitmask(1)
-    bm_override = backend.allocate_token_bitmask(1)
+    bm_default = allocate_token_bitmask(1, VOCAB_SIZE)
+    bm_override = allocate_token_bitmask(1, VOCAB_SIZE)
     default.fill_bitmask(bm_default, 0)
     override.fill_bitmask(bm_override, 0)
 
@@ -126,7 +127,7 @@ def test_special_tokens_masked_until_grammar_ends(
     grammar = qwen_backend.compile_grammar(
         request_type, grammar_spec, stop_token_ids={IM_END, ENDOFTEXT}
     )
-    bitmask = qwen_backend.allocate_token_bitmask(1)
+    bitmask = allocate_token_bitmask(1, QWEN_VOCAB_SIZE)
 
     text = qwen_tokenizer.encode('"The company is', add_special_tokens=False)
     assert grammar.accept_tokens("req", text)
@@ -169,7 +170,7 @@ def test_token_naming_grammars_can_emit_special_tokens(
     qwen_backend: XgrammarBackend, request_type, grammar_spec
 ):
     grammar = qwen_backend.compile_grammar(request_type, grammar_spec)
-    bitmask = qwen_backend.allocate_token_bitmask(1)
+    bitmask = allocate_token_bitmask(1, QWEN_VOCAB_SIZE)
     grammar.fill_bitmask(bitmask, 0)
     assert _token_allowed(bitmask[0], IM_START)
     assert grammar.accept_tokens("req", [IM_START])

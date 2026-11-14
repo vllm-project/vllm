@@ -21,6 +21,7 @@ from vllm.sampling_params import (
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 from .utils import (
     BeamSearchInstance,
@@ -450,7 +451,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 
         structured_output_key = get_structured_output_key(structured_outputs)
-        bitmask = backend.allocate_token_bitmask(1)
+        bitmask = allocate_token_bitmask(1, vocab_size)
 
         return backend, structured_output_key, bitmask
 

@@ -14,7 +14,6 @@ from regex import escape as regex_escape
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -84,14 +83,6 @@ class OutlinesBackend(StructuredOutputBackend):
             vocab_size=self.vocab_size,
             eos_token_id=self.vocabulary.inner.get_eos_token_id(),
             guide=oc.Guide(index, max_rollback=max_rollback_tokens),
-        )
-
-    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
-        return torch.full(
-            (max_num_seqs, (self.vocab_size + 31) // 32),
-            -1,
-            dtype=torch.int32,
-            pin_memory=PIN_MEMORY,
         )
 
     def destroy(self):

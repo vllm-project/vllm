@@ -11,7 +11,6 @@ from transformers import PreTrainedTokenizerBase
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -140,14 +139,6 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             parser=character_level_parser,
         )
         return LMFormatEnforcerGrammar(token_enforcer)
-
-    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
-        return torch.full(
-            (max_num_seqs, (self.vocab_size + 31) // 32),
-            -1,
-            dtype=torch.int32,
-            pin_memory=PIN_MEMORY,
-        )
 
     def destroy(self):
         pass
