@@ -1169,6 +1169,18 @@ class GLMGAVideoBackend(VideoBackend):
         return frames, metadata
 
 
+def snap_ntsc_fps(fps: float) -> float:
+    """Return the integer rate for NTSC-style frame rates, else ``fps``.
+
+    NTSC rates are ``n * 1000 / 1001`` (23.976, 29.97, 59.94, ...) and are
+    often stored rounded, so rates within 0.2% of an integer snap to it.
+    """
+    nearest = round(fps)
+    if nearest > 0 and abs(fps - nearest) <= 2e-3 * nearest:
+        return float(nearest)
+    return fps
+
+
 @VIDEO_LOADER_REGISTRY.register(
     "molmo2",
     video_processor="Molmo2VideoProcessor",
@@ -1182,7 +1194,8 @@ class Molmo2VideoBackend(VideoLoader):
         max_fps: float = 8.0,
     ) -> list[float]:
         """Return the subset of `video_fps` factors that remain multiples
-        of `sampling_fps`.
+        of `sampling_fps`. NTSC rates are treated as the integer rate they
+        approximate (29.97 -> 30, see `snap_ntsc_fps`).
 
         Examples:
             >>> get_candidate_target_fps(video_fps=6, sampling_fps=2)
@@ -1191,6 +1204,8 @@ class Molmo2VideoBackend(VideoLoader):
             [1, 5]
             >>> get_candidate_target_fps(video_fps=2, sampling_fps=2)
             [2]
+            >>> get_candidate_target_fps(video_fps=29.97, sampling_fps=2)
+            [2, 6]
             >>> get_candidate_target_fps(video_fps=5, sampling_fps=2)
             Traceback (most recent call last):
                 ...
@@ -1201,7 +1216,7 @@ class Molmo2VideoBackend(VideoLoader):
         if sampling_fps is None:
             raise ValueError("sampling_fps must be provided")
 
-        video_fps = int(video_fps)
+        video_fps = int(snap_ntsc_fps(video_fps))
         sampling_fps = int(sampling_fps)
         max_fps = int(max_fps)
 
@@ -1236,6 +1251,7 @@ class Molmo2VideoBackend(VideoLoader):
         """Get the target fps that best spans the video and samples the most
         frames.
         """
+        video_fps = snap_ntsc_fps(video_fps)
         num_frames_sampled = 0
         selected_target_fps = None
         for target_fps in candidate_target_fps:
@@ -1277,6 +1293,7 @@ class Molmo2VideoBackend(VideoLoader):
                 0, total_frames, max_frames, endpoint=False, dtype=int
             )
         else:
+            video_fps = snap_ntsc_fps(video_fps)
             step_size = max(int(video_fps / selected_target_fps), 1)
             frame_indices = np.arange(0, total_frames, step_size)
         if len(frame_indices) > max_frames:
