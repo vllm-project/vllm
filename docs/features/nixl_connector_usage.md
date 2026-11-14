@@ -63,6 +63,10 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+#### NIXL backend threads
+
+`kv_connector_extra_config.num_threads` is passed to NIXL, which forwards it to the configured backends that take a thread count, e.g. UCX (worker threads) and LIBFABRIC (descriptor post thread pool). If it is not set, vLLM passes `4` when UCX is the only backend; otherwise it passes `0`, which NIXL treats as unset, so each backend keeps its NIXL default (for LIBFABRIC, no post thread pool).
+
 #### UCX backend parameters
 
 `kv_connector_extra_config.ucx_backend_params` passes extra init parameters to NIXL's UCX backend. Values are strings. For example, NIXL creates UCX with `ucx_error_handling_mode=peer` by default; UCX then uses only transports that can detect peer failure, which can exclude intra-node GPU transports such as `rocm_ipc`. To trade that error handling for those transports:
