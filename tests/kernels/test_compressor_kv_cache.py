@@ -151,11 +151,23 @@ def test_pipeline_cache_relay_matches_direct_insert(
 )
 @pytest.mark.parametrize("num_tokens", [1, 17, 1023, 1024])
 @pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "dspark_module",
+    [
+        "vllm.models.deepseek_v41.nvidia.dspark",
+        "vllm.models.deepseek_v4.nvidia.dspark",
+    ],
+    ids=["v41", "v4"],
+)
 def test_dspark_context_kv_matches_query_insert(
-    cache_dtype, kv_mxfp8, num_tokens, use_graph
+    cache_dtype, kv_mxfp8, num_tokens, use_graph, dspark_module
 ):
     """KV-only insertion must preserve every cache byte, including graph replay."""
-    from vllm.models.deepseek_v41.nvidia.dspark import _insert_context_kv
+    import importlib
+
+    if kv_mxfp8 and "deepseek_v4." in dspark_module:
+        pytest.skip("DeepSeek-V4 has no MXFP8 KV record")
+    _insert_context_kv = importlib.import_module(dspark_module)._insert_context_kv
 
     torch.manual_seed(42)
     block_size = 256
