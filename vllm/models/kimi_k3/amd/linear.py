@@ -171,13 +171,15 @@ class KimiRoutedInputLinear(ReplicatedLinear):
             or config.lora_config is not None
             or parallel.use_ubatching
             or parallel.tensor_parallel_size != 8
-            or parallel.decode_context_parallel_size != 8
+            or parallel.decode_context_parallel_size not in (1, 8)
             or self.input_size != 7168
             or self.output_size != 3584
         ):
             return
         tp, dcp = get_tp_group(), get_dcp_group()
-        if tp.ranks == dcp.ranks and tp.rank_in_group == dcp.rank_in_group:
+        if parallel.decode_context_parallel_size == 1:
+            self._token_group = tp  # DCP1: the TP group is the same 8 ranks
+        elif tp.ranks == dcp.ranks and tp.rank_in_group == dcp.rank_in_group:
             self._token_group = dcp
 
     def forward(self, x: torch.Tensor):
