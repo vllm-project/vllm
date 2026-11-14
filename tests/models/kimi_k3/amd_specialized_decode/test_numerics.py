@@ -278,7 +278,10 @@ def test_k1_matches_vllm_ops(
 def test_k1_stream_states_bit_exact(S: int, L: int, dim_first: bool, nacc: int) -> None:
     """VLLM_K31_BEAT_KDAK1's K1 (non-temporal per-token state snapshots) only
     changes the stores' cache policy: every output and state matches the
-    default build bit for bit."""
+    default build bit for bit. An equivalence check only: it cannot see the
+    cache policy itself (a build that dropped the NT store would pass too);
+    that is an ISA check (FLYDSL_DUMP_IR=1: the snapshot buffer_store carries
+    nt sc1 in the _ns kernel only)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
