@@ -3203,6 +3203,12 @@ class VllmConfig:
         if self.lora_config and self.lora_config.enable_tower_connector_lora:
             unsupported.append("multimodal tower and connector LoRA")
 
+        if (
+            self.reasoning_config is not None
+            and self.reasoning_config.loop_break_max_pattern_size > 0
+        ):
+            unsupported.append("reasoning loop breaking")
+
         return unsupported
 
     def _resolve_extensible_kv_cache(self) -> None:

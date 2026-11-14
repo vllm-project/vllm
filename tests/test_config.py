@@ -1244,6 +1244,39 @@ def test_model_runner_supports_custom_logits_processors():
     assert config._get_model_runner_unsupported_features() == []
 
 
+def _loop_break_reasoning_config():
+    from vllm.config.reasoning import ReasoningConfig
+
+    return ReasoningConfig(
+        reasoning_start_str="<think>",
+        reasoning_end_str="</think>",
+        loop_break_max_pattern_size=64,
+        loop_break_min_pattern_size=4,
+        loop_break_min_count=3,
+    )
+
+
+def test_cpu_model_runner_without_triton_rejects_reasoning_loop_breaking(
+    monkeypatch,
+):
+    """Loop detection runs only in the Triton ThinkingBudgetState, so the CPU
+    model runner without Triton must reject the config rather than accept it
+    and never break a loop."""
+    monkeypatch.setattr(
+        current_platform, "uses_standalone_cpu_model_runner", lambda: False
+    )
+    VllmConfig(reasoning_config=_loop_break_reasoning_config())
+
+    monkeypatch.setattr(
+        current_platform, "uses_standalone_cpu_model_runner", lambda: True
+    )
+    VllmConfig()
+    with pytest.raises(
+        ValueError, match="does not yet support: reasoning loop breaking"
+    ):
+        VllmConfig(reasoning_config=_loop_break_reasoning_config())
+
+
 def test_resolve_cudagraph_mode_keeps_spec_decode_sizes():
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
