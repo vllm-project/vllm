@@ -274,29 +274,33 @@ class ShardedStateLoader(BaseModelLoader):
     ) -> None:
         from safetensors.torch import save_file
 
-        part_idx = 0
         total_size = 0
         state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
+        state_dict_parts: list[dict[str, torch.Tensor]] = []
         state_dict_part: dict[str, torch.Tensor] = {}
         for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
-                filename = ShardedStateLoader._render_default_pattern(
-                    pattern, part=part_idx
-                )
-                save_file(
-                    state_dict_part,
-                    os.path.join(path, filename),
-                )
-                part_idx += 1
+                state_dict_parts.append(state_dict_part)
                 total_size = 0
                 state_dict_part = {}
             state_dict_part[key] = tensor
             total_size += param_size
         if len(state_dict_part) > 0:
-            filename = ShardedStateLoader._render_default_pattern(
-                pattern, part=part_idx
+            state_dict_parts.append(state_dict_part)
+
+        filenames = [
+            ShardedStateLoader._render_default_pattern(pattern, part=part_idx)
+            for part_idx in range(len(state_dict_parts))
+        ]
+        if len(set(filenames)) != len(filenames):
+            raise ValueError(
+                f"Pattern {pattern!r} must produce a distinct filename for each "
+                "checkpoint part. Include an unescaped {part} field without "
+                "truncating its value."
             )
+
+        for filename, state_dict_part in zip(filenames, state_dict_parts):
             save_file(
                 state_dict_part,
                 os.path.join(path, filename),
