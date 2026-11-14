@@ -19,6 +19,7 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
+from vllm.model_executor.models.mistral import MistralDecoderLayer
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -263,6 +264,23 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
         self.n_delay_tokens = audio_config.get_num_delay_tokens()
 
+    def process_weights_after_loading(self) -> None:
+        # n_delay_tokens is fixed, so each layer's AdaRMSNorm scale is constant.
+        # The fp32 sinusoid matches what the compiled forward computed.
+        time_tensor = torch.full(
+            (1,),
+            fill_value=self.n_delay_tokens,
+            device=self.time_embedding.inv_freq.device,
+            dtype=torch.float32,
+        )
+        t_cond = self.time_embedding(time_tensor).to(self.whisper_encoder.dtype)
+        for layer in self.language_model.model.layers:
+            if (
+                isinstance(layer, MistralDecoderLayer)
+                and layer.ada_rms_norm_t_cond is not None
+            ):
+                layer.fold_t_cond(t_cond)
+
     # for realtime transcription
     @classmethod
     async def buffer_realtime_audio(
@@ -401,20 +419,11 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         # sum pool text and audio embeddings
         inputs_embeds = audio_text_embeds + text_embeds
 
-        time_tensor = torch.full(
-            (1,),
-            fill_value=self.n_delay_tokens,
-            device=inputs_embeds.device,
-            dtype=inputs_embeds.dtype,
-        )
-        t_cond = self.time_embedding(time_tensor)
-
         hidden_states = self.language_model.model(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
-            t_cond=t_cond,
         )
 
         return hidden_states

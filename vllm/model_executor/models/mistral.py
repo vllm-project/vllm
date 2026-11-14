@@ -23,6 +23,7 @@ from vllm.model_executor.models.llama import (
     LlamaForCausalLM,
     LlamaModel,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -176,6 +177,14 @@ class MistralDecoderLayer(LlamaDecoderLayer):
             )
         else:
             self.ada_rms_norm_t_cond = None
+        self._t_cond_scale: torch.Tensor | None = None
+
+    @torch.no_grad()
+    def fold_t_cond(self, t_cond: torch.Tensor) -> None:
+        """Cache `1 + ada_rms_norm_t_cond(t_cond)` in fp32 for a constant `t_cond`."""
+        assert self.ada_rms_norm_t_cond is not None
+        scale = 1 + self.ada_rms_norm_t_cond(t_cond).float()
+        refill_derived(self, "_t_cond_scale", scale)
 
     def forward(
         self,
@@ -196,8 +205,13 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if self.ada_rms_norm_t_cond is not None:
-            assert t_cond is not None
-            hidden_states = hidden_states * (1 + self.ada_rms_norm_t_cond(t_cond))
+            if t_cond is not None:
+                hidden_states = hidden_states * (1 + self.ada_rms_norm_t_cond(t_cond))
+            else:
+                assert self._t_cond_scale is not None, "call fold_t_cond first"
+                hidden_states = (hidden_states * self._t_cond_scale).to(
+                    hidden_states.dtype
+                )
 
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
