@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import typing
 import weakref
 from collections.abc import Callable, Iterable
@@ -11,7 +10,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -32,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -80,18 +75,12 @@ from vllm.model_executor.utils import (
     refill_derived,
     replace_parameter,
 )
-from vllm.models.deepseek_v4.amd.mega_moe import (
-    DeepseekV4AiterMegaMoEExperts,
-    finalize_mega_moe_weights,
-)
 from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
 from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
@@ -549,40 +538,6 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         return routed + shared_out
 
 
-def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
-    parallel_config = vllm_config.parallel_config
-    if not rocm_aiter_ops.is_fused_moe_enabled():
-        raise ValueError(
-            "--moe-backend aiter_mega_moe requires VLLM_ROCM_USE_AITER=1 "
-            " and VLLM_ROCM_USE_AITER_MOE=1."
-        )
-    if not on_gfx950():
-        raise NotImplementedError("AITER MegaMoE requires gfx950.")
-    if (
-        not parallel_config.enable_expert_parallel
-        or parallel_config.tensor_parallel_size != 1
-        or parallel_config.pipeline_parallel_size != 1
-    ):
-        raise NotImplementedError(
-            "AITER MegaMoE requires data parallel attention with expert "
-            "parallel MoE: --data-parallel-size N --enable-expert-parallel "
-            "with TP=1 and PP=1."
-        )
-    if parallel_config.all2all_backend not in (
-        "mori_high_throughput",
-        "mori_low_latency",
-        "mori",
-    ) or (parallel_config.all2all_backend == "mori" and parallel_config.mori_ep_v2):
-        raise ValueError(
-            "AITER MegaMoE runs on MoRI EPv1 shmem; add --all2all-backend mori "
-            "(without VLLM_MORI_EP_V2=1)."
-        )
-    if parallel_config.enable_eplb:
-        raise NotImplementedError("AITER MegaMoE does not support EPLB.")
-    if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
-        raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
-
-
 class DeepseekV4MoE(nn.Module):
     # None: use the padding vLLM added.
     experts_intermediate_pad: int | None = None
@@ -684,20 +639,13 @@ class DeepseekV4MoE(nn.Module):
                 quant_config, prefix, disable_under_ep=True
             )
 
-        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
-        fuse_mega_moe_shared_expert = (
-            self.use_mega_moe
+        if (
+            vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
             and config.n_shared_experts == 1
-            and resolve_layer_fused_shared_expert(
+        ):
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix, moe_backend="aiter_mega_moe"
             )
-        )
-        shared_quant_config = quant_config
-        if fuse_mega_moe_shared_expert:
-            # MegaMoE requantizes the checkpoint weights itself.
-            assert quant_config is not None
-            shared_quant_config = copy.copy(quant_config)
-            shared_quant_config.online_quantization_config = None
 
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
@@ -709,7 +657,7 @@ class DeepseekV4MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 swiglu_limit=self.swiglu_limit,
-                quant_config=shared_quant_config,
+                quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -720,32 +668,6 @@ class DeepseekV4MoE(nn.Module):
         self.n_local_experts = config.n_routed_experts // self.tp_size
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
-
-        if self.use_mega_moe:
-            _validate_aiter_mega_moe_config(vllm_config)
-            self.experts = DeepseekV4AiterMegaMoEExperts(
-                vllm_config,
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                swiglu_limit=self.swiglu_limit,
-                fuse_shared_expert=fuse_mega_moe_shared_expert,
-                prefix=f"{prefix}.experts",
-            )
-            self.shared_experts_stream = (
-                aux_stream()
-                if self.shared_experts is not None
-                and not self.experts.fuse_shared_expert
-                and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
-                else None
-            )
-            self.shared_experts_events = (
-                (torch.cuda.Event(), torch.cuda.Event())
-                if self.shared_experts_stream is not None
-                else None
-            )
-            return
 
         fuse_shared_into_routed = (
             self.is_fused_shared_expert_enabled or self.fuse_heterogeneous_shared_expert
@@ -765,6 +687,7 @@ class DeepseekV4MoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            shared_expert_prefix=f"{prefix}.shared_experts",
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
@@ -797,8 +720,6 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError("DeepSeek V4 vision MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
-        if self.use_mega_moe:
-            return self._forward_mega_moe(hidden_states, input_ids).view(org_shape)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=hidden_states,
@@ -806,49 +727,6 @@ class DeepseekV4MoE(nn.Module):
         )
 
         return final_hidden_states.view(org_shape)
-
-    def _forward_mega_moe(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
-    ) -> torch.Tensor:
-        shared_experts = self.shared_experts
-        if shared_experts is None:
-            return self._forward_mega_moe_routed(hidden_states, input_ids)
-        events = self.shared_experts_events
-        if (
-            events is None
-            or hidden_states.shape[0] > envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-        ):
-            return self._forward_mega_moe_routed(
-                hidden_states, input_ids
-            ) + shared_experts(hidden_states)
-        # The unfused shared expert overlaps router + MegaMoE in small steps.
-        routed, shared = maybe_execute_in_parallel(
-            fn0=lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
-            fn1=lambda: shared_experts(hidden_states),
-            event0=events[0],
-            event1=events[1],
-            aux_stream=self.shared_experts_stream,
-        )
-        return routed + shared
-
-    def _forward_mega_moe_routed(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
-    ) -> torch.Tensor:
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            topk=self.n_activated_experts,
-            renormalize=self.renormalize,
-            input_tokens=input_ids,
-            hash_indices_table=self.gate.tid2eid,
-            routed_scaling_factor=self.routed_scaling_factor,
-            bias_vl=self.gate.bias_vl,
-            image_sentinel_lo=self.image_sentinel_lo,
-        )
-        return self.experts(hidden_states, topk_weights, topk_ids)
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
@@ -1149,7 +1027,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.fuse_heterogeneous_shared_expert = _heterogeneous_shared_expert_enabled(
             vllm_config
         )
-        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV4DecoderLayer(
@@ -1449,7 +1326,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=num_experts,
-            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
+            routed_experts_prefix="routed_experts",
         )
 
 
@@ -1465,10 +1342,13 @@ def _redirect_shared_expert_name(
     if ".ffn.shared_experts.w" not in name:
         return name
     if extract_layer_index(name) in fuse_by_layer:
-        return name.replace(
-            ".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w"
-        )
+        return redirect_fused_shared_expert_name(name, n_routed_experts)
     return name.replace(".ffn.shared_experts.w2", ".ffn.shared_experts.down_proj")
+
+
+def redirect_fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
+    """Route a DSV4 shared-expert checkpoint name to its routed-expert slot."""
+    return name.replace(".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w")
 
 
 def _make_deepseek_v4_weights_mapper(
@@ -1484,8 +1364,14 @@ def _make_deepseek_v4_weights_mapper(
         #
         #  - DeepSeek native ``.scale``: expert scales -> ``.weight_scale``,
         #    everything else -> ``.weight_scale_inv``.
+        # Fused shared experts load into the MXFP4 routed expert slots.
+        experts = (
+            r"(?:experts\.\d+|shared_experts)"
+            if fuse_shared_experts
+            else r"experts\.\d+"
+        )
         scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+            re.compile(rf"(\.{experts}\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
     else:
@@ -1597,8 +1483,6 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        # Must precede the gate_up preshuffle of the fused shared experts.
-        finalize_mega_moe_weights(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
         for module in self.modules():

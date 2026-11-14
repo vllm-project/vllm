@@ -61,7 +61,6 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
@@ -155,9 +154,8 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
                 requires_grad=False,
             )
             self.image_sentinel_lo = IMAGE_SENTINEL_BASE_ID
-            if not self.use_mega_moe:
-                self.experts.router.bias_vl = self.gate.bias_vl
-                self.experts.router.image_sentinel_lo = self.image_sentinel_lo
+            self.experts.router.bias_vl = self.gate.bias_vl
+            self.experts.router.image_sentinel_lo = self.image_sentinel_lo
         # Expose the MixtureOfExperts protocol fields expected by the V4.1
         # outer model.  The current ROCm runner has no redundant EPLB copies,
         # so logical and physical expert counts are identical.
@@ -548,14 +546,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
-        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
-            raise NotImplementedError(
-                "DeepSeek V4 MegaMoE currently requires expert parallel. "
-                "Enable it with --enable-expert-parallel, or pick a different "
-                "moe backend."
-            )
         self.vocab_size = config.vocab_size
         self.hc_eps = config.hc_eps
         self.hc_mult = config.hc_mult
@@ -1235,12 +1226,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
-            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
-
-    def finalize_mega_moe_weights(self) -> None:
-        if self.use_mega_moe:
-            finalize_mega_moe_weights(self)
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1518,7 +1504,6 @@ class DeepseekV41LLMForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
