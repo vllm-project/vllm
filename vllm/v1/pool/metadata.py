@@ -10,7 +10,7 @@ from vllm.tasks import PoolingTask
 from vllm.utils.torch_utils import PIN_MEMORY
 
 
-@dataclass
+@dataclass(slots=True)
 class PoolingCursor:
     first_token_indices_gpu: torch.Tensor
     last_token_indices_gpu: torch.Tensor
