@@ -295,7 +295,6 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
     llm = LLM(
         model=model_path,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
         limit_mm_per_prompt={"video": 1},
     )
@@ -378,6 +377,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
+
+You can also pass a one-dimensional `torch.Tensor` directly. vLLM detaches
+the tensor, moves it to CPU, and converts it to a NumPy array before audio
+processing, so tensors on CUDA devices and tensors with `requires_grad=True`
+are supported.
 
 Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
@@ -644,6 +648,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
+### Media Download Cache
+
+Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
+This cache is disabled by default. If another request evicts an entry while it
+is being read, vLLM downloads the media again. The source URL must still be
+accessible when this happens.
+
 ### Image Inputs
 
 Image input is supported according to [OpenAI Vision API](https://platform.openai.com/docs/guides/vision).
@@ -891,11 +902,23 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   Because vLLM reserves GPU memory for these slots at startup, this value cannot
   be overridden per request. Benchmark before increasing it because each
   additional slot increases the GPU memory reservation.
+- `keyframe_sampling`: Unset by default, which keeps uniform sampling. Set it
+  to `"nearest"` to replace each uniform frame position with the closest
+  keyframe, keeping distinct frames in chronological order; if a video has too
+  few keyframes, it falls back to uniform positions for that video.
 
 ```bash
 # Example: explicitly use the recommended 2 hardware decoders
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
+```
+
+To sample the keyframes nearest to the uniform frame positions:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "keyframe_sampling": "nearest"}}' \
+  --mm-ipc-gpu-memory-gb 1
 ```
 
 #### Video Frame Recovery
@@ -1260,6 +1283,8 @@ You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
 #### Image Embedding Inputs
 

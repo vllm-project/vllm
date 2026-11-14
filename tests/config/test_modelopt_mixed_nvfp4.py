@@ -3,7 +3,7 @@
 """NVFP4 detection for ModelOpt MIXED_PRECISION checkpoints.
 
 A checkpoint that quantizes some layers to NVFP4 and others to FP8 declares
-``quant_algo: MIXED_PRECISION`` and resolves to ``modelopt_mixed``, so NVFP4
+`quant_algo: MIXED_PRECISION` and resolves to `modelopt_mixed`, so NVFP4
 has to be detected from the per-layer algorithms.
 """
 

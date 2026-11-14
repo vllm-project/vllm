@@ -171,7 +171,7 @@ __device__ void exact_topk_rescan(const InT* __restrict__ scores,
     const uint32_t warp_total = smem->warp_sum[lane];
     uint32_t count_above =
         warp_reduce_sum_full(lane > warp ? warp_total : 0) +
-        __shfl_sync(0xFFFFFFFFu, warp_inclusive, kWarpSize - 1) -
+        VLLM_SHFL_SYNC_WIDTH(warp_inclusive, kWarpSize - 1, kWarpSize) -
         warp_inclusive;
 #pragma unroll
     for (int i = static_cast<int>(kBinsPerThread) - 1; i >= 0; --i) {
@@ -290,7 +290,7 @@ __device__ __forceinline__ uint32_t warp_reduce_min_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = min(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = min(v, VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize));
   }
   return v;
 #endif
@@ -302,7 +302,7 @@ __device__ __forceinline__ uint32_t warp_reduce_max_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = max(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = max(v, VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize));
   }
   return v;
 #endif
@@ -335,9 +335,10 @@ __device__ __forceinline__ void select_coarse_refine_digit(
 // values, so two radix-2048 passes select the exact pivot. A bin holding a
 // single key (e.g. all-equal scores) needs no refinement: that key is the
 // pivot, so the first pass also tracks the bin's min and max key.
-template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
+template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread,
+          typename Vec>
 __device__ __forceinline__ bool exact_topk_refine_registers(
-    const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
+    const Vec (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem) {
   constexpr uint32_t kBins = kCoarseRefineBins;
   constexpr uint32_t kDigitBits = kCoarseRefineDigitBits;
@@ -373,14 +374,14 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
     bool done = false;
 #pragma unroll
     for (uint32_t v = 0; v < VecsPerThread && !done; ++v) {
-      const float* values = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
       for (uint32_t e = 0; e < 4 && !done; ++e) {
         const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+        const float value = vec_score(vecs[v], e);
         if (idx >= length) {
           done = true;
-        } else if (extract_coarse_bin_N<HistBits>(values[e]) == coarse_bin) {
-          const uint32_t key = convert_to_uint32_v2(values[e]);
+        } else if (extract_coarse_bin_N<HistBits>(value) == coarse_bin) {
+          const uint32_t key = convert_to_uint32_v2(value);
           const uint32_t delta = key - base_key;
           if (round == 0) {
             key_min = min(key_min, key);
@@ -427,14 +428,13 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
   bool done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VecsPerThread && !done; ++v) {
-    const float* values = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; ++e) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        const uint32_t key = convert_to_uint32_v2(values[e]);
+        const uint32_t key = convert_to_uint32_v2(vec_score(vecs[v], e));
         if (key > pivot) {
           const uint32_t pos = atomicAdd(&smem->output_counter, 1);
           output[pos] = static_cast<int32_t>(idx);

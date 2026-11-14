@@ -29,6 +29,7 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     get_block_hash,
     get_group_id,
+    is_mamba_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -36,13 +37,11 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    SlidingWindowManager,
+    get_kv_cache_kind,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
@@ -125,8 +124,8 @@ class BoundaryStoreStats:
     simply not offloaded and a later request misses. Without counters the only
     symptom is a lower cache hit rate with nothing in the logs, so each decline
     reason is counted and exposed through
-    ``SimpleCPUOffloadConnector.get_boundary_store_stats()``. Reset by
-    ``reset()``, which carries any not-yet-drained deltas; not otherwise
+    `SimpleCPUOffloadConnector.get_boundary_store_stats()`. Reset by
+    `reset()`, which carries any not-yet-drained deltas; not otherwise
     cleared.
     """
 
@@ -191,7 +190,7 @@ class SimpleCPUOffloadScheduler:
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
         for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
-            if isinstance(g.kv_cache_spec, FullAttentionSpec):
+            if issubclass(g.manager_cls, FullAttentionManager):
                 self.fa_gidx = g_idx
                 break
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
@@ -255,8 +254,6 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
-        self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -297,8 +294,8 @@ class SimpleCPUOffloadScheduler:
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
 
-        An explicit ``num_cpu_blocks`` is checked against local capacity.
-        ``aligned_num_cpu_blocks`` comes from the live worker allocations and
+        An explicit `num_cpu_blocks` is checked against local capacity.
+        `aligned_num_cpu_blocks` comes from the live worker allocations and
         is used as-is when no explicit count is configured."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -350,17 +347,16 @@ class SimpleCPUOffloadScheduler:
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
         for g in kv_cache_config.kv_cache_groups:
-            spec = g.kv_cache_spec
-            block_size = resolve_dcp_kv_block_size(spec, cp_world_size)
-            if not spec.prefix_cacheable:
+            block_size = resolve_dcp_kv_block_size(g, cp_world_size)
+            if not g.prefix_cacheable:
                 # Bounded-replay SWA (DSV4.1) is never offloaded, but its blocks for
                 # each scheduled token come from the same free queue.
-                if isinstance(spec, SlidingWindowSpec):
+                if isinstance(g.manager_config.params, SlidingWindowManager.Params):
                     target += cdiv(max_num_batched_tokens, block_size)
-            elif isinstance(spec, MambaSpec):
+            elif is_mamba_group(g):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
+            elif isinstance(p := g.manager_config.params, SlidingWindowManager.Params):
+                target += cdiv(p.sliding_window, block_size) + 1
             else:
                 target += cdiv(max_num_batched_tokens, block_size)
         return int(target * (1 + WATERMARK_RATIO))
@@ -406,10 +402,10 @@ class SimpleCPUOffloadScheduler:
 
         # Suffix-relative chunk boundaries must match absolute token positions.
         for group_id in self.prefix_cacheable_group_ids:
-            spec = self.cpu_kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            config = self.cpu_kv_cache_config.kv_cache_groups[group_id].manager_config
             if (
-                isinstance(spec, ChunkedLocalAttentionSpec)
-                and num_computed_tokens % spec.attention_chunk_size
+                isinstance(config.params, ChunkedLocalAttentionManager.Params)
+                and num_computed_tokens % config.params.attention_chunk_size
             ):
                 return 0, False
 
@@ -651,9 +647,9 @@ class SimpleCPUOffloadScheduler:
         list[str],
         list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
     ]:
-        """Single-pass cursor walk: offload cached GPU blocks near eviction.
+        """Offload cached GPU blocks near eviction.
 
-        Walks the GPU free queue from the cursor, counting blocks that are
+        Walks the GPU free queue from its head, counting blocks that are
         free-or-offloaded (safe for the allocator to evict). Stops when
         target_free blocks are covered or CPU capacity is reached.
         """
@@ -665,18 +661,12 @@ class SimpleCPUOffloadScheduler:
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
-        # Validate cursor: stale if block was removed from free queue.
-        if self._cursor is not None and self._cursor.ref_cnt > 0:
-            self._cursor = None
-
         gpu_ids: list[int] = []
-        last_visited = self._cursor
 
-        for covered, node in enumerate(free_queue.iter_blocks_after(self._cursor)):
+        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
-            last_visited = node
             bhash = node.block_hash
 
             if (
@@ -685,8 +675,6 @@ class SimpleCPUOffloadScheduler:
                 and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
             ):
                 gpu_ids.append(node.block_id)
-
-        self._cursor = last_visited
 
         # Batch-allocate CPU blocks.
         if gpu_ids:
@@ -715,7 +703,7 @@ class SimpleCPUOffloadScheduler:
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids, block_meta) for the store
-            event. ``block_meta`` is None when kv cache events are disabled.
+            event. `block_meta` is None when kv cache events are disabled.
 
         """
         merged_gpu_block_ids: list[int] = []
@@ -800,7 +788,7 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
 
         # Preemption frees the request's blocks. It resumes with a full new
-        # block table (MRV1 resumed-cached, MRV2 NewRequestData).
+        # block table in its NewRequestData.
         for req_id in preempted_req_ids:
             state = self._reqs_to_store.get(req_id)
             if state is not None:
@@ -1005,7 +993,7 @@ class SimpleCPUOffloadScheduler:
                             )
                         )
                         meta_by_hash[block_hash] = BlockStoreMeta(
-                            token_ids=list(request.all_token_ids[hash_start:hash_end]),
+                            token_ids=request.all_token_ids[hash_start:hash_end],
                             parent_block_hash=(
                                 None
                                 if hash_idx == 0
@@ -1201,9 +1189,7 @@ class SimpleCPUOffloadScheduler:
 
                 for block_hash, meta, event_block_size in events_to_emit:
                     group_idx = get_group_id(block_hash)
-                    spec = self.cpu_kv_cache_config.kv_cache_groups[
-                        group_idx
-                    ].kv_cache_spec
+                    group = self.cpu_kv_cache_config.kv_cache_groups[group_idx]
                     if meta is not None and len(meta.token_ids) != event_block_size:
                         # token_ids were sliced with a different g_block_size
                         # (e.g. Mamba+DCP where capture uses spec.block_size *
@@ -1229,9 +1215,11 @@ class SimpleCPUOffloadScheduler:
                             lora_name=meta.lora_name if meta else None,
                             extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
-                            kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
-                            kv_cache_spec_sliding_window=(
-                                get_kv_cache_spec_sliding_window(spec)
+                            kv_cache_spec_kind=get_kv_cache_kind(
+                                group.manager_config, group.distinct_specs
+                            ).value,
+                            kv_cache_spec_sliding_window=getattr(
+                                group.manager_config.params, "sliding_window", None
                             ),
                             locality="LOCAL",
                             lookahead_token_ids=(
@@ -1244,10 +1232,12 @@ class SimpleCPUOffloadScheduler:
                         )
                     )
 
-        # Free CPU and GPU blocks' ref counts to turn them into prefix cache
+        # Free CPU and GPU blocks' ref counts to turn them into prefix cache.
+        # Lazy stores come from the GPU eviction end; return them there.
         self.cpu_block_pool.free_blocks(cpu_blocks)
         self._gpu_block_pool.free_blocks(
-            self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
+            evict_first=self._lazy_mode,
         )
 
     def _release_transfer_refs(self, transfer: TransferMeta) -> None:
@@ -1348,7 +1338,7 @@ class SimpleCPUOffloadScheduler:
     ) -> int | None:
         """Locate the full-attention prompt-tail block for a fine-grained hit.
 
-        Mirrors ``FullAttentionManager._cache_partial_tail_block``: only the
+        Mirrors `FullAttentionManager._cache_partial_tail_block`: only the
         final prompt hash boundary is eligible, and boundaries that land on a
         physical block edge are already covered by the positional scan.
 
@@ -1519,7 +1509,6 @@ class SimpleCPUOffloadScheduler:
             for event_idx, count in self._store_event_pending_counts.items()
             if event_idx in self._abandoned_store_event_to_blocks
         }
-        self._cursor = None
         # Seed the fresh counters with outcomes since the last drain so a
         # mid-interval reset() does not drop them from the next report.
         undrained = BoundaryStoreStats(

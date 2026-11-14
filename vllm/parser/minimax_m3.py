@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 parser for namespace-delimited XML-style tool calls.
 
-MiniMax M3 prefixes every structural tag with the ``]<]minimax[>[`` marker::
+MiniMax M3 prefixes every structural tag with the `]<]minimax[>[` marker::
 
     ]<]minimax[>[<tool_call>
     ]<]minimax[>[<invoke name="create_order">
@@ -13,11 +13,11 @@ MiniMax M3 prefixes every structural tag with the ``]<]minimax[>[`` marker::
     ]<]minimax[>[</invoke>
     ]<]minimax[>[</tool_call>
 
-Each ``<invoke>`` becomes one tool call. Parameters are elements named after
+Each `<invoke>` becomes one tool call. Parameters are elements named after
 the argument and may nest: an element holding child elements becomes an
 object, or an array when its schema says so (the chat template renders list
-items as ``<item>``). Arguments are emitted once the whole ``<invoke>`` is
-parsed. Reasoning is handled by ``MiniMaxM3ReasoningParser``.
+items as `<item>`). Arguments are emitted once the whole `<invoke>` is
+parsed. Reasoning is handled by `MiniMaxM3ReasoningParser`.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ _Element = str | list[tuple[str, "_Element"]]
 
 
 def _parse_element(text: str, pos: int, depth: int) -> tuple[str, _Element, int] | None:
-    """Parse the element starting at ``pos``; ``None`` if malformed."""
+    """Parse the element starting at `pos`; `None` if malformed."""
     if depth > MAX_ELEMENT_DEPTH:
         return None
     name_start = pos + len(ELEMENT_START)
@@ -111,7 +111,7 @@ def _parse_element(text: str, pos: int, depth: int) -> tuple[str, _Element, int]
 
 
 def _parse_invoke_params(raw_args: str) -> list[tuple[str, _Element]]:
-    """Parse the parameter elements of one ``<invoke>`` body.
+    """Parse the parameter elements of one `<invoke>` body.
 
     Parsing stops at the first malformed or unterminated element, keeping the
     parameters before it.
@@ -131,7 +131,7 @@ def _parse_invoke_params(raw_args: str) -> list[tuple[str, _Element]]:
 
 
 def _container_schema(schema: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    """Return the first ``array`` or ``object`` alternative of ``schema``."""
+    """Return the first `array` or `object` alternative of `schema`."""
     types = schema.get("type")
     for kind in ("array", "object"):
         if types == kind or (isinstance(types, list) and kind in types):

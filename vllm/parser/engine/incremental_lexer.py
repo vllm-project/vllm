@@ -31,8 +31,8 @@ class LexToken:
 class LexerShape:
     """Immutable pre-computed data derived from terminal definitions.
 
-    Created once per :class:`ParserEngineConfig` and shared across all
-    :class:`IncrementalLexer` instances that use the same config.
+    Created once per `ParserEngineConfig` and shared across all
+    `IncrementalLexer` instances that use the same config.
     """
 
     __slots__ = (
@@ -84,7 +84,7 @@ class IncrementalLexer:
 
     The key feature is **prefix-match buffering**: when the text in the
     buffer could be the start of a multi-character terminal (e.g.
-    ``"<tool_"`` that could become ``"<tool_call>"``), the lexer holds
+    `"<tool_"` that could become `"<tool_call>"`), the lexer holds
     the text rather than emitting it.  When the next chunk arrives, it
     either completes the terminal or flushes the buffered text as
     content.

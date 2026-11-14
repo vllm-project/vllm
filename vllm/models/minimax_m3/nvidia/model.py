@@ -4,15 +4,16 @@
 
 The MiniMax-M3-preview config selects a single set of branches:
     * qk_norm_type == "per_head"
-    * hidden_act == "swigluoai"
+    * SwiGLU-OAI MLPs (Transformers reports hidden_act as "silu")
     * use_gemma_norm == True  -> Gemma-style RMSNorm everywhere
     * attention_output_gate == False
     * scoring_func == "sigmoid" with a routing-bias correction term
-    * sparse_attention_config present -> a subset of layers run the extra
+    * "minimax_m3_sparse" layer_types -> a subset of layers run the extra
       "index" attention branch.
 """
 
 from collections.abc import Iterable
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -85,10 +86,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MultiModalEmbeddings,
@@ -102,7 +99,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     init_vllm_registered_model,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -127,6 +123,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    minimax_m3_use_flashinfer_msa,
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -135,9 +132,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 
@@ -190,27 +188,18 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
-    cfg = getattr(config, "sparse_attention_config", None)
-    if not cfg:
-        return set()
-    freq = cfg.get("sparse_attention_freq")
-    if freq is None:
-        return set()
-    return {i for i, f in enumerate(freq) if f != 0}
+    return {i for i, t in enumerate(config.layer_types) if t == "minimax_m3_sparse"}
 
 
 def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
-    moe_layer_freq = getattr(config, "moe_layer_freq", None)
-    if moe_layer_freq is None:
-        return True
-    return moe_layer_freq[layer_id] != 0
+    return config.mlp_layer_types[layer_id] == "sparse"
 
 
 def _use_mega_moe(vllm_config: VllmConfig) -> bool:
     """Whether MoE layers run the DeepGEMM NVFP4 MegaMoE kernel.
 
-    Opt in with ``--kernel-config '{"moe_backend": "deep_gemm_mega_moe"}'``. Only
+    Opt in with `--kernel-config '{"moe_backend": "deep_gemm_mega_moe"}'`. Only
     checkpoints with NVFP4 routed experts (MiniMax-M3.1) are supported.
     """
     if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
@@ -241,8 +230,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         return False
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
 
@@ -288,7 +276,7 @@ def _row_parallel_reduce_scatter(
     linear: RowParallelLinear,
     gemm_rs: "GemmRsAr | None",
 ) -> torch.Tensor:
-    """``linear`` followed by a reduce-scatter to this rank's token shard."""
+    """`linear` followed by a reduce-scatter to this rank's token shard."""
     num_tokens = x.orig_shape[0] if isinstance(x, QuantizedActivation) else x.shape[0]
     if gemm_rs is not None and num_tokens >= _GEMM_RS_MIN_TOKENS:
         return gemm_rs.apply(x, linear)
@@ -304,7 +292,7 @@ MEGA_MOE_FC2_INPUT_SCALE = 1.0 / 16.0
 def _mega_moe_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
-    """Map ``experts.{e}.w{1,2,3}.*`` to the MegaMoE ``w13_*``/``w2_*`` params."""
+    """Map `experts.{e}.w{1,2,3}.*` to the MegaMoE `w13_*`/`w2_*` params."""
     return [
         (
             "experts.w2_" if shard_id == "w2" else "experts.w13_",
@@ -317,31 +305,22 @@ def _mega_moe_expert_params_mapping(
     ]
 
 
-def _mega_moe_expert_weight(
-    name: str, weight: torch.Tensor
-) -> tuple[str, torch.Tensor] | None:
-    """Convert a compressed-tensors NVFP4 routed-expert tensor to the ModelOpt
-    convention ``DeepGemmMegaMoEExperts`` loads, or None to drop it.
-
-    The global scales become dequantization scales. The FC1 input is quantized
-    per token, so its input scale is dropped, and the FC2 input scale is the
-    fixed QAT scale whatever the checkpoint says.
-    """
-    prefix, _, suffix = name.rpartition(".")
-    if suffix == "weight_packed":
-        return f"{prefix}.weight", weight
-    if suffix == "weight_global_scale":
-        return f"{prefix}.weight_scale_2", 1.0 / weight.float()
-    if suffix == "input_global_scale":
-        if not prefix.endswith(".w2"):
-            return None
-        scale = torch.full_like(weight, MEGA_MOE_FC2_INPUT_SCALE, dtype=torch.float32)
-        return f"{prefix}.input_scale", scale
-    return name, weight
+def _redirect_fused_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Send shared experts that MegaMoE fuses to `DeepGemmMegaMoEExperts`."""
+    for name, weight in weights:
+        if ".shared_experts." in name:
+            layer = model.layers[extract_layer_index(name)]
+            moe = getattr(layer, "block_sparse_moe", None)
+            if moe is not None and moe.experts.has_fused_shared_experts:
+                name = name.replace(".shared_experts.", ".experts.shared_experts.")
+                name = name.replace(".gate_proj.", ".w1.").replace(".up_proj.", ".w3.")
+        yield name, weight
 
 
 def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
-    """Whether ``linear`` takes a pre-quantized MXFP8 activation whose UE8M0
+    """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0
     scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
     kernels write)."""
     if get_input_quant_key(linear) != kMxfp8Dynamic:
@@ -361,13 +340,13 @@ def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
 class MiniMAXGemmaRMSNorm(nn.Module):
     """Gemma-style RMS normalization.
 
-    2-D inputs run the Triton kernel in ``ops/norm_mxfp8.py``; with
-    ``mxfp8=True`` the normed activation is emitted as MXFP8 (a
-    ``QuantizedActivation``) for a consumer linear instead of BF16. Other
+    2-D inputs run the Triton kernel in `ops/norm_mxfp8.py`; with
+    `mxfp8=True` the normed activation is emitted as MXFP8 (a
+    `QuantizedActivation`) for a consumer linear instead of BF16. Other
     shapes (the dspark drafter's per-head norms) keep the FlashInfer kernels.
 
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
+    When `residual` is given, the fused add + norm runs in place and the
+    updated `(x, residual)` pair is returned.
     """
 
     def __init__(
@@ -449,7 +428,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
@@ -458,16 +438,11 @@ class MiniMaxM3MLP(nn.Module):
             if use_sequence_parallel and run_gemm_rs
             else None
         )
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only swigluoai is supported."
-            )
-        # gate * sigmoid(alpha * gate) * (up + beta), with both halves clamped.
+        # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
         self.act_fn = SiluAndMulWithClamp(
             swiglu_limit=config.swiglu_limit,
             alpha=config.swiglu_alpha,
-            beta=config.swiglu_beta,
+            beta=1.0,
         )
         from vllm.models.minimax_m3.nvidia.ops import dense_gemm1_mxfp8
 
@@ -518,11 +493,11 @@ class MiniMaxM3MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         use_mega_moe: bool = False,
-        input_is_sequence_sharded: bool = False,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_is_sequence_sharded = input_is_sequence_sharded
+        self.use_sequence_parallel = use_sequence_parallel
         if self.tp_size > config.num_local_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -531,22 +506,14 @@ class MiniMaxM3MoE(nn.Module):
 
         self.use_mega_moe = use_mega_moe
         self.reduce_results = reduce_results
-        self.scoring_func = config.scoring_func
         self.top_k = config.num_experts_per_tok
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
 
         # Sigmoid routing uses a per-expert score-correction bias for selection.
-        self.use_routing_bias = getattr(config, "use_routing_bias", False)
-        if self.use_routing_bias:
-            self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_local_experts, dtype=torch.float32)
-            )
-            self.e_score_correction_bias.weight_loader = (
-                MiniMaxM3MoE.ebias_weight_loader
-            )
-        else:
-            self.e_score_correction_bias = None
+        self.e_score_correction_bias = nn.Parameter(
+            torch.zeros(config.num_local_experts, dtype=torch.float32)
+        )
+        self.e_score_correction_bias.weight_loader = MiniMaxM3MoE.ebias_weight_loader
 
         # Router weights are stored in fp32; GateLinear upcasts the bf16
         # activations and computes the gate in fp32 (fp32 router logits).
@@ -564,21 +531,20 @@ class MiniMaxM3MoE(nn.Module):
             self._init_mega_moe_experts(config, quant_config, prefix)
             return
 
-        if self.n_shared_experts:
-            self.shared_experts = MiniMaxM3MLP(
-                config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
-            )
+        self.shared_experts = MiniMaxM3MLP(
+            config=config,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            reduce_results=False,
+            prefix=f"{prefix}.shared_experts",
+        )
 
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
             # w13 (gate_up_proj) is loaded packed via MergedColumnParallelLinear
@@ -587,7 +553,7 @@ class MiniMaxM3MoE(nn.Module):
             activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
             swiglu_alpha=config.swiglu_alpha,
-            swiglu_beta=config.swiglu_beta,
+            swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
             router_logits_dtype=self.gate.out_dtype,
             # The NVFP4 routed experts are QAT'd with a per-token FC1 input
@@ -597,6 +563,7 @@ class MiniMaxM3MoE(nn.Module):
             shared_experts=self.shared_experts,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            ckpt_names=("w1", "w2", "w3"),
             prefix=f"{prefix}.experts",
         )
 
@@ -606,32 +573,26 @@ class MiniMaxM3MoE(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"MiniMax M3 MegaMoE requires swigluoai, got {config.hidden_act}."
-            )
         # Replicated hidden states are sharded here, so each rank routes only
         # its own tokens through the EP-wide kernel.
         self.shard_replicated_input = (
-            self.tp_size > 1 and not self.input_is_sequence_sharded
+            self.tp_size > 1 and not self.use_sequence_parallel
         )
 
         def replicated_shared_experts() -> MiniMaxM3MLP:
             # Replicated, so the kernel can fuse it.
             return MiniMaxM3MLP(
                 config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
+                intermediate_size=config.intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
                 disable_tp=True,
                 prefix=f"{prefix}.shared_experts",
             )
 
-        shared_experts = None
-        if self.n_shared_experts:
-            # Only describes the weights: a fused layer allocates its own.
-            with torch.device("meta"):
-                shared_experts = replicated_shared_experts()
+        # Only describes the weights: a fused layer allocates its own.
+        with torch.device("meta"):
+            shared_experts = replicated_shared_experts()
         ep_group = get_ep_group()
         num_experts = config.num_local_experts
         if num_experts % ep_group.world_size != 0:
@@ -652,13 +613,14 @@ class MiniMaxM3MoE(nn.Module):
                 "swiglu",
                 clamp=config.swiglu_limit,
                 alpha=config.swiglu_alpha,
-                beta=config.swiglu_beta,
+                beta=1.0,
             ),
             weight_format=MEGA_MOE_NVFP4,
+            l2_input_scale=MEGA_MOE_FC2_INPUT_SCALE,
             shared_experts=shared_experts,
             prefix=f"{prefix}.experts",
         )
-        if shared_experts is not None and not self.experts.has_fused_shared_experts:
+        if not self.experts.has_fused_shared_experts:
             self.shared_experts = replicated_shared_experts()
 
     @staticmethod
@@ -673,7 +635,7 @@ class MiniMaxM3MoE(nn.Module):
         return self.experts.moe_config.skip_final_all_reduce
 
     def defer_finalize(self, max_num_tokens: int) -> bool:
-        """Leave the routed top-k reduction of calls up to ``max_num_tokens``
+        """Leave the routed top-k reduction of calls up to `max_num_tokens`
         to the consumer; return whether the experts accepted.
 
         Only the TRTLLM-Gen NVFP4 experts can stop after GEMM2.
@@ -696,7 +658,7 @@ class MiniMaxM3MoE(nn.Module):
         )
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
-        """``forward`` with the routed top-k reduction and all-reduce left open."""
+        """`forward` with the routed top-k reduction and all-reduce left open."""
         router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
@@ -756,10 +718,8 @@ class MiniMaxM3MoE(nn.Module):
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias.data
-            if self.e_score_correction_bias is not None
-            else None,
+            scoring_func="sigmoid",
+            e_score_correction_bias=self.e_score_correction_bias.data,
             topk=self.top_k,
             renormalize=True,
             routed_scaling_factor=self.routed_scaling_factor,
@@ -835,10 +795,7 @@ class MiniMaxM3Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
-            },
+            rope_parameters=config.rope_parameters,
         )
 
         self.attn = Attention(
@@ -884,15 +841,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     This is a merged attention layer: it owns the projections (qkv + index
     q/k), per-head QK norms and RoPE, *and* the attention-backend wiring that a
-    generic ``Attention`` layer would normally provide — it binds the
-    ``MiniMaxM3SparseBackend`` + main impl, registers the main paged K/V cache,
-    and owns the lightning indexer (``MiniMaxM3Indexer``), which holds the
+    generic `Attention` layer would normally provide — it binds the
+    `MiniMaxM3SparseBackend` + main impl, registers the main paged K/V cache,
+    and owns the lightning indexer (`MiniMaxM3Indexer`), which holds the
     index-key side cache.
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
     top-k block selection. M3 always disables the index value/output
-    projections (``sparse_disable_index_value`` set for every sparse layer), so
-    ``index_{v,o}_proj`` are never created.
+    projections (`sparse_disable_index_value` set for every sparse layer), so
+    `index_{v,o}_proj` are never created.
     """
 
     def __init__(
@@ -925,12 +882,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.scaling = self.head_dim**-0.5
 
         # Sparse "index" branch dims. index_q has the same head count as the KV
-        # heads (sparse_num_index_heads == num_key_value_heads), so it shards
+        # heads (index_n_heads == num_key_value_heads), so it shards
         # identically -- including replication when tp_size > num_key_value_heads.
-        sparse_cfg = config.sparse_attention_config
-        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.total_idx_heads = config.index_n_heads
         self.num_idx_heads = self.num_kv_heads
-        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        self.idx_head_dim = config.index_head_dim
         self.index_q_size = self.num_idx_heads * self.idx_head_dim
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
@@ -971,10 +927,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters={
-                "rope_theta": config.rope_theta,
-                "partial_rotary_factor": config.partial_rotary_factor,
-            },
+            rope_parameters=config.rope_parameters,
         )
 
         self.index_q_norm = MiniMAXGemmaRMSNorm(
@@ -1011,12 +964,22 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
         # Indexer (top-k selection) and main attention are separate impls, each
-        # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
+        # picking Triton vs MSA off its cache dtype; the FlashInfer verdict is
+        # computed once so both selectors agree. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
+        use_flashinfer_msa = minimax_m3_use_flashinfer_msa(
+            topk_blocks=config.index_topk_blocks,
+            kv_cache_dtype=self.kv_cache_dtype,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            indexer_kv_dtype=self.indexer_kv_dtype,
+            model_dtype=vllm_config.model_config.dtype,
+        )
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
@@ -1024,8 +987,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.scaling,
             self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             msa_decode_backend=(
                 vllm_config.attention_config.minimax_m3_msa_decode_backend
             ),
@@ -1034,17 +997,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.indexer = MiniMaxM3Indexer(
             num_kv_heads=self.num_kv_heads,
             scale=self.scaling,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
             prefix=self.layer_name,
-            init_blocks=sparse_cfg.get("sparse_init_block", 0),
-            local_blocks=sparse_cfg.get("sparse_local_block", 0),
-            score_type=sparse_cfg.get("sparse_score_type", "max"),
+            local_blocks=config.index_local_blocks,
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -1077,9 +1039,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -1087,6 +1049,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _qkv_proj_fused_epilogue(
         self,
@@ -1342,7 +1305,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_mega_moe=use_mega_moe,
-                input_is_sequence_sharded=self.use_sequence_parallel,
+                use_sequence_parallel=self.use_sequence_parallel,
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -1482,10 +1445,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # top-k output survives cudagraph capture/replay. Token-major
         # [total_q, num_index_heads, topk] so the indexer writes its native
         # [token, head, topk] top-k; the attend transposes to [H, tokens, topk].
-        sparse_cfg = getattr(config, "sparse_attention_config", None)
-        if sparse_cfg is not None:
+        if _sparse_attention_layer_ids(config):
             tp_size = get_tensor_model_parallel_world_size()
-            num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            num_index_heads = max(1, config.index_n_heads // tp_size)
             # Pad tokens to a multiple of 4 so the buffer head stride stays
             # int4-aligned for build_k2q_csr's vectorised int4 loads.
             max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -1493,7 +1455,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.topk_indices_buffer = torch.empty(
                 padded_num_tokens,
                 num_index_heads,
-                sparse_cfg["sparse_topk_blocks"],
+                config.index_topk_blocks,
                 dtype=torch.int32,
             )
         else:
@@ -1535,7 +1497,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         the normed rows to the MXFP8 its qkv_proj reads.
 
         Each MoE whose successor can take the output gets the hint here, and
-        ``defers_finalize`` decides per call. The final norm feeds the LM head
+        `defers_finalize` decides per call. The final norm feeds the LM head
         in BF16, so the last layer keeps its own finalize. Builds a collective
         kernel: every TP rank decides alike.
         """
@@ -1609,8 +1571,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
-
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            if residual is not None:
+                residual = sp_shard(residual)
 
         # Aux hidden state k is the residual stream entering layer k. Under TP
         # it is only complete after layer k's input norm (or the final norm)
@@ -1637,6 +1599,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
+            if self.use_sequence_parallel:
+                # PP transport expects tensors replicated across TP ranks.
+                hidden_size = hidden_states.shape[-1]
+                packed = torch.cat([hidden_states, residual, *aux_hidden_states], -1)
+                packed = sp_all_gather(packed)[:num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    hidden_size, dim=-1
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -1663,7 +1633,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         elif self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:num_tokens]
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1680,120 +1649,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             num_experts=self.config.num_local_experts,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
-        # (dense MLP and shared expert). On sparse layers the indexer
-        # index_q/index_k_proj fold into the same fused qkv_proj
-        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
-        # dense layers, whose checkpoints have no index_*_proj weights. Leading
-        # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
-        # (preceded by `_`, not `.`).
-        stacked_params_mapping: list[tuple[str, str, int | str]] = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".qkv_proj", ".index_q_proj", "index_q"),
-            (".qkv_proj", ".index_k_proj", "index_k"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.get_expert_mapping()
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # The MTP module is not modeled yet.
-            if "mtp." in name:
-                continue
-
-            # The checkpoint stores block scales as ``weight_scale_inv``; the
-            # ModelOpt MXFP8 layers expose them as ``weight_scale``.
-            if "weight_scale_inv" in name:
-                name = name.replace("weight_scale_inv", "weight_scale")
-
-            if self.use_mega_moe and ".block_sparse_moe.experts." in name:
-                converted = _mega_moe_expert_weight(name, loaded_weight)
-                if converted is None:
-                    continue
-                name, loaded_weight = converted
-            if self.use_mega_moe and ".shared_experts." in name:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                moe = self.layers[extract_layer_index(name)].block_sparse_moe
-                if moe.experts.has_fused_shared_experts:
-                    name = name.replace(".gate_proj.", ".w1.")
-                    name = name.replace(".up_proj.", ".w3.")
-                    loaded_params.add(
-                        moe.experts.load_shared_expert_weight(name, loaded_weight)
-                    )
-                    continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Routed experts (w1/w2/w3) are handled below; don't let the
-                # stacked mapping rewrite them.
-                if ("block_sparse_moe.experts." in name) and name not in params_dict:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped is None:
-                        continue
-                    name = remapped
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Modules not modeled yet (e.g. attention) are skipped until
-                    # they are ported.
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -1802,6 +1657,23 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "mtp.": None,
+            # ModelOpt MXFP8 layers name the checkpoint's block scales this way.
+            "weight_scale_inv": "weight_scale",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".index_q_proj": (".qkv_proj", "index_q"),
+            ".index_k_proj": (".qkv_proj", "index_k"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1821,6 +1693,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             )
         else:
             self.lm_head = PPMissingLayer()
+        if self.model.use_mega_moe:
+            redirect = partial(_redirect_fused_shared_experts, model=self.model)
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
@@ -1850,7 +1726,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1868,8 +1744,8 @@ class MiniMaxM3SparseForConditionalGeneration(
     """Top-level (VL) entry point for MiniMax M3.
 
     The vision tower is not modeled yet; this wrapper routes the text
-    backbone by constructing ``MiniMaxM3SparseForCausalLM`` from the nested
-    ``text_config`` and delegating generation to it.
+    backbone by constructing `MiniMaxM3SparseForCausalLM` from the nested
+    `text_config` and delegating generation to it.
     """
 
     # The vision tower runs replicated per rank under ``--mm-encoder-tp-mode
@@ -1915,9 +1791,8 @@ class MiniMaxM3SparseForConditionalGeneration(
         projector_hidden_size = getattr(config, "projector_hidden_size", None)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PreTrainedConfig.from_dict(vision_config),
+                config=config.vision_config,
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,

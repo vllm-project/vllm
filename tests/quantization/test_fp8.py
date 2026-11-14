@@ -104,7 +104,7 @@ def test_humming_fp8_matches_checkpoint_forward(
 
         layer = create("humming.oracle")
         reference = create("humming.checkpoint")
-        for name, parameter in layer.named_parameters():
+        for parameter in layer.parameters():
             parameter.data.fill_(1.0)
         scale_name = "weight_scale_inv" if block_quant else "weight_scale"
         scale = getattr(layer, f"w13_{scale_name}")
@@ -143,7 +143,9 @@ def test_humming_fp8_matches_checkpoint_forward(
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 def test_deepseek_v41_mxfp8_scale_loading(
@@ -287,7 +289,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "weight_block_size,expert_dtype,scale_name",
     [
@@ -299,9 +303,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
 def test_deepseek_v41_vl_mapper_routes_linear_scales(
     weight_block_size, expert_dtype, scale_name
 ):
-    """The VL wrapper must map ``.scale`` keys to the parameter the linear
+    """The VL wrapper must map `.scale` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
-    ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
+    `weight_scale_inv` raised KeyError for native MXFP8 checkpoints."""
     from vllm.models.deepseek_v41.nvidia import model as model_module
     from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 
@@ -329,9 +333,9 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
 
 
 def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
-    """``configure_quant_config`` reads both mappings off the class, before
-    ``__init__`` builds the instance mapper. Without them a Quark config's
-    per-layer keys never match this wrapper's ``language_model.``-rooted
+    """`configure_quant_config` reads both mappings off the class, before
+    `__init__` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's `language_model.`-rooted
     prefixes and every attention shard falls back to the global spec."""
     from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
 
@@ -343,8 +347,8 @@ def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
 
 
 def test_deepseek_v41_engram_scale_accepts_quark_name():
-    """Quark exports name the engram scale ``embed.weight_scale``; the
-    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    """Quark exports name the engram scale `embed.weight_scale`; the
+    `\\.scale$` rules only match a literal `.scale` suffix, so without an
     explicit rule the tensor is never routed and loading fails."""
     from vllm.models.deepseek_v41.amd import model as model_module
 
@@ -366,7 +370,7 @@ def test_deepseek_v41_engram_scale_accepts_quark_name():
 
 
 def test_deepseek_v41_declines_quark_configs():
-    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    """`from_config` rewrites a Quark config into a single global FP8 scheme,
     which would discard the per-layer specs of a mixed-precision export (MXFP4
     experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
     knows how to dispatch each scheme, so it must handle every Quark export."""
@@ -451,10 +455,10 @@ _DSV4_NVFP4_DSPARK = {
 def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
     monkeypatch, ckpt_quant_cfg, prefix, expected
 ):
-    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
-    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    """NVFP4 exports keep the routed experts they `ignore` in MXFP4, e.g. the
+    bundled DSpark draft (`mtp.*`, built as `layers.{40 + k}`) of
     DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
-    passed to ``from_config``: the current hf_config below carries none."""
+    passed to `from_config`: the current hf_config below carries none."""
     import vllm.model_executor.layers.quantization.modelopt as modelopt
     import vllm.models.deepseek_v41.quant_config as dsv41_qc
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -863,11 +867,20 @@ def test_scaled_fp8_quant(dtype) -> None:
     )
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="FP8 e4m3fn weight reloading is not supported on e4m3fnuz platforms",
+@pytest.mark.parametrize(
+    "method_cls",
+    [
+        Fp8LinearMethod,
+        pytest.param(
+            Fp8MoEMethod,
+            marks=pytest.mark.skipif(
+                current_platform.is_fp8_fnuz(),
+                reason="Fp8MoEMethod weight reloading is not supported on "
+                "e4m3fnuz platforms",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking

@@ -11,13 +11,16 @@ use vllm_engine_core_client::protocol::utility::PauseMode;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PauseParams {
     #[serde(default)]
     mode: PauseMode,
-    #[serde(default = "default_clear_cache")]
+    #[serde(
+        default = "default_clear_cache",
+        deserialize_with = "deserialize_query_bool"
+    )]
     clear_cache: bool,
 }
 
@@ -35,16 +38,12 @@ const fn default_clear_cache() -> bool {
     true
 }
 
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), Some("mode"))
-}
-
 /// Pause the scheduler so generation can be halted (e.g. for weight updates).
 pub async fn pause(
     State(state): State<Arc<AppState>>,
     params: Result<Query<PauseParams>, QueryRejection>,
 ) -> Result<Json<StatusResponse>, ApiError> {
-    let Query(params) = params.map_err(invalid_query)?;
+    let Query(params) = params?;
 
     state
         .engine_core_client()
