@@ -1020,3 +1020,49 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool"]
     Worker.discard(worker, ("weights",))
     assert log == ["release", "pool", "pool"]
+
+
+def test_release_and_recapture_cuda_graphs(monkeypatch):
+    """The worker's graph release and re-capture: the elastic-EP sequence, generalized."""
+    calls = []
+    old_pool, new_pool = object(), object()
+    manager = SimpleNamespace(
+        release_graphs=lambda: calls.append("release"), pool=old_pool
+    )
+    runner = SimpleNamespace(
+        cudagraph_manager=manager,
+        speculator=None,
+        get_model=lambda: object(),
+        max_num_tokens=8,
+        _dummy_run=lambda *a, **k: calls.append("warm"),
+    )
+    fake = SimpleNamespace(
+        model_runner=runner,
+        vllm_config=SimpleNamespace(),
+        randomize_dummy_inputs=False,
+        compile_or_warm_up_model=lambda: calls.append("capture"),
+    )
+    monkeypatch.setattr(
+        gpu_worker.torch.compiler, "reset", lambda: calls.append("reset")
+    )
+    monkeypatch.setattr(
+        gpu_worker, "reset_compile_wrapper", lambda model: calls.append("reset_wrapper")
+    )
+    monkeypatch.setattr(gpu_worker.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(gpu_worker.torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker, "preserve_serving_state", lambda runner: nullcontext()
+    )
+    platform_cls = type(gpu_worker.current_platform)
+    monkeypatch.setattr(platform_cls, "_global_graph_pool", old_pool)
+    monkeypatch.setattr(
+        gpu_worker.current_platform, "graph_pool_handle", lambda: new_pool
+    )
+
+    gpu_worker.Worker.release_cuda_graphs(fake)
+    assert calls == ["release", "reset", "reset_wrapper"]
+    assert manager.pool is new_pool  # re-capture goes into the fresh pool
+
+    calls.clear()
+    gpu_worker.Worker.recapture_cuda_graphs(fake)
+    assert calls == ["warm", "capture"]

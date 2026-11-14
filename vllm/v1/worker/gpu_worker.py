@@ -19,6 +19,9 @@ import torch.nn as nn
 from torch.distributed import ReduceOp
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -126,6 +129,8 @@ from vllm.v1.worker.extensible_kv_cache import (
     pad_kv_cache_segments,
     registers_kv_cache_memory,
 )
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+from vllm.v1.worker.gpu.eplb_utils import preserve_serving_state
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -1042,6 +1047,66 @@ class Worker(WorkerBase):
             self.model_runner.profile_adaptive_verification()
 
     @instrument(span_name="Warmup (GPU)")
+    def release_cuda_graphs(self) -> None:
+        """Release every captured CUDA graph and compiled artifact.
+
+        A runtime change that invalidates captured graphs — a kernel swap, an
+        elastic-EP reshuffle — starts here; ``recapture_cuda_graphs`` re-records
+        them. Generalized from the elastic-EP executor, which calls this.
+        """
+        runner = self.model_runner
+        manager = runner.cudagraph_manager
+        if manager is not None:
+            manager.release_graphs()
+        speculator = runner.speculator
+        for attr in vars(speculator).values() if speculator else ():
+            if isinstance(attr, CudaGraphManager):
+                attr.release_graphs()
+
+        torch.compiler.reset()
+        with set_current_vllm_config(self.vllm_config):
+            reset_compile_wrapper(runner.get_model())
+            if draft_model := getattr(speculator, "model", None):
+                reset_compile_wrapper(draft_model)
+
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
+        # Libraries may keep capture-time tensors alive after their graphs are
+        # released (e.g. FlyDSL retains the last launch's DLPack arguments), so
+        # the old pool cannot be erased. Re-capturing into that pool trips the
+        # allocator's "use_count > 0" assert; capture into a fresh one instead.
+        platform_cls = type(current_platform)
+        if platform_cls._global_graph_pool is None:
+            return
+        new_pool = current_platform.graph_pool_handle()
+        platform_cls._global_graph_pool = new_pool
+        managers = [manager] + [
+            attr
+            for attr in (vars(speculator).values() if speculator else ())
+            if isinstance(attr, CudaGraphManager)
+        ]
+        for m in managers:
+            if m is not None and m.pool is not None:
+                m.pool = new_pool
+        for wrapper in (
+            *CUDAGraphWrapper._all_instances,
+            *BreakableCUDAGraphWrapper._all_instances,
+        ):
+            wrapper.graph_pool = new_pool
+
+    def recapture_cuda_graphs(self) -> None:
+        """Warm eagerly and re-capture the graphs a ``release_cuda_graphs`` dropped."""
+        with preserve_serving_state(self.model_runner):
+            self.model_runner._dummy_run(
+                self.model_runner.max_num_tokens,
+                is_profile=True,
+                skip_eplb=True,
+                randomize_inputs=self.randomize_dummy_inputs,
+            )
+            self.compile_or_warm_up_model()
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Warmup forwards record expert load like real ones.
         with self.model_runner.eplb.suppress():
