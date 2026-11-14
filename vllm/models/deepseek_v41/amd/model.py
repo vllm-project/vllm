@@ -69,9 +69,13 @@ from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    MHC_SEAM_MIN_TOKENS,
     MHCOverlapStream,
     mhc_pre_delayed_overlap,
+    mhc_pre_delayed_seam,
     supports_mhc_overlap,
+    supports_mhc_seam,
+    warmup_mhc_seam,
 )
 from vllm.models.deepseek_v41.amd.mono_decode import (
     MonoDecodeLayer,
@@ -304,6 +308,19 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        # On gfx942, seams with a post block run as one AITER call
+        # from MHC_SEAM_MIN_TOKENS tokens.
+        self.mhc_seam = (
+            partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)
+            if not self.fuse_seam_norm
+            and supports_mhc_seam(self.hidden_size, self.hc_mult)
+            else None
+        )
+        if self.mhc_seam is not None:
+            logger.info_once(
+                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
+                MHC_SEAM_MIN_TOKENS,
+            )
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -314,6 +331,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
+        if self.mhc_seam is not None and self.hc_attn_fn.is_cuda:
+            warmup_mhc_seam(self.hidden_size, self.hc_mult, self.hc_attn_fn.device)
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -360,11 +379,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Fork only inside FULL graph capture, where the joins become graph
             # edges; HIP event waits at runtime are unreliable here.
             mhc_overlap = None
-        mhc_pre = (
-            partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
-            if mhc_overlap is not None
-            else self.mhc_pre_delayed
-        )
+        if mhc_overlap is not None:
+            mhc_pre = partial(
+                mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap
+            )
+        else:
+            mhc_pre = self.mhc_seam or self.mhc_pre_delayed
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -515,7 +535,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
         fuse_attn_norm = self.fuse_seam_norm
-        residual, post_mix, res_mix, x, _attn_pre = self.mhc_pre_delayed(
+        mhc_pre = self.mhc_seam or self.mhc_pre_delayed
+        residual, post_mix, res_mix, x, _attn_pre = mhc_pre(
             residual,
             self.hc_attn_fn,
             self.hc_attn_scale,
