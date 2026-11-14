@@ -30,6 +30,23 @@ In most cases, this should lead to higher quality responses, because the model c
 
 You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
 
+## Check which backends a model runs on
+
+After loading a model, vLLM logs a table of the attention backend and the linear and MoE kernels its layers selected, with the layers that run each. It is on by default and logged once per model:
+
+```text
+Backends selected for Qwen3MoeForCausalLM:
+  layer     | count | backend                                                       | modules
+  attention |    48 | FLASHINFER                                                    | model.layers.[0-47].self_attn.attn
+  linear    |    50 | unquantized [bfloat16]                                        | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
+  linear    |    96 | DeepGemmFp8BlockScaledMMKernel                                | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
+  moe       |    48 | TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
+```
+
+Each row is one backend: the kind of layer, how many layers run it, the kernel or attention backend selected, and the layer names with index ranges collapsed. Unquantized linear layers show their weight dtype instead of a kernel. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
+
+For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
+
 ## Enable more logging
 
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:

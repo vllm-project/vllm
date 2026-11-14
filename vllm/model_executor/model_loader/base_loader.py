@@ -121,11 +121,31 @@ class BaseModelLoader(ABC):
 
             process_weights_after_loading(model, model_config, target_device)
             log_online_quantization_time(vllm_config)
+            log_backend_summary(model)
 
             gc.collect()
             torch.accelerator.empty_cache()
 
         return model.eval()
+
+
+def log_backend_summary(model: nn.Module) -> None:
+    """Log which backend each kind of layer selected."""
+    from vllm.model_inspection import format_backend_summary
+
+    try:
+        summary = format_backend_summary(model)
+    except Exception:
+        # Only a log: a layer it cannot describe must not fail the load.
+        logger.debug("Could not summarize model backends", exc_info=True)
+        return
+    if summary is not None:
+        logger.info_once(
+            "Backends selected for %s:\n%s",
+            type(model).__name__,
+            summary,
+            scope="global",
+        )
 
 
 def log_model_inspection(model: nn.Module) -> None:
