@@ -2547,6 +2547,7 @@ def recv_worker():
     worker._remote_agents = {}
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
+    worker._disconnected_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
@@ -3611,6 +3612,28 @@ class TestPeerReplacement:
         assert self.worker.get_block_ids_with_load_errors() == {1}
         assert ("old" not in self.worker._remote_agents) is (missing is True)
         assert self.transport.release_dlist_handle.call_count == (missing is True)
+
+    @pytest.mark.parametrize("disconnected", [False, True])
+    def test_lost_connection_invalidates_peer_with_metadata(self, disconnected):
+        # NIXL keeps a peer's metadata after its connection is gone, so the
+        # metadata probe cannot see it; the transfer error has to.
+        class nixlRemoteDisconnectError(RuntimeError):  # noqa: N801
+            pass
+
+        error = (
+            nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+            if disconnected
+            else RuntimeError("transient")
+        )
+        self.worker.start_load_kv(self._request("old"))
+        self.transport.check_xfer_state.side_effect = error
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        assert ("old" not in self.worker._remote_agents) is disconnected
+        assert self.transport.release_dlist_handle.call_count == disconnected
+        if disconnected:
+            self.transport.remove_remote_agent.assert_called_once_with("old")
 
     @pytest.mark.parametrize("handshake_fails", [False, True])
     def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
@@ -5320,3 +5343,48 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends
     assert wrapper.created_backends == created_backends
+
+
+@pytest.mark.parametrize("transfer_mode", ["pull", "push"])
+def test_push_agent_is_synchronized_without_thread_pool(dist_init, transfer_mode):
+    """Push calls the NIXL agent from several threads and posts from its writer
+    thread: it gets a locking agent and no UCX thread pool, whose posting waits
+    on the pool's threads."""
+    configs: list[dict[str, Any]] = []
+    rw = object()
+
+    def agent_config(**kwargs):
+        configs.append(kwargs)
+        return SimpleNamespace(backends=kwargs.get("backends", ["UCX"]))
+
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(block_size=block_size)
+    connector_cls = NixlPushConnector if transfer_mode == "push" else NixlConnector
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+            _BackendRecordingNixlWrapper,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_agent_config",
+            agent_config,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_thread_sync_t",
+            SimpleNamespace(NIXL_THREAD_SYNC_RW=rw),
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        connector = connector_cls(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=block_size),
+        )
+        connector.shutdown()
+    [config] = configs
+    if transfer_mode == "push":
+        assert config["num_threads"] == 0
+        assert config["sync_mode"] is rw
+    else:
+        assert config["num_threads"] == 4
+        assert "sync_mode" not in config

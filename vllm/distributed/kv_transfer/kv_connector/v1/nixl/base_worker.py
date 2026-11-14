@@ -72,6 +72,7 @@ from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
     nixl_agent_config,
+    nixl_thread_sync_t,
 )
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -806,16 +807,26 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", 0 if self._TRANSFER_MODE == "push" else 4
+        )
+        # Push calls the agent from the writer, engine and handshake threads.
+        sync_params = (
+            {"sync_mode": nixl_thread_sync_t.NIXL_THREAD_SYNC_RW}
+            if self._TRANSFER_MODE == "push" and nixl_thread_sync_t is not None
+            else {}
         )
         if nixl_agent_config is None:
             config = None
         else:
             # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
+                nixl_agent_config(
+                    backends=self.nixl_backends, capture_telemetry=True, **sync_params
+                )
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
+                else nixl_agent_config(
+                    num_threads=num_threads, capture_telemetry=True, **sync_params
+                )
             )
 
         # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
@@ -827,7 +838,9 @@ class NixlBaseConnectorWorker:
             bool(ucx_backend_params) and "UCX" in self.nixl_backends
         )
         if sleep_mode or explicit_backends:
-            config = nixl_agent_config(backends=[], capture_telemetry=True)
+            config = nixl_agent_config(
+                backends=[], capture_telemetry=True, **sync_params
+            )
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
@@ -854,6 +867,9 @@ class NixlBaseConnectorWorker:
         )
         # Failed reads need a local metadata probe; invalid peers wait for drain.
         self._failed_remote_engines: set[EngineId] = set()
+        # Failed reads that NIXL reported as a lost connection. Their metadata
+        # can still be loaded, so they are invalidated without the probe.
+        self._disconnected_remote_engines: set[EngineId] = set()
         self._invalid_remote_engines: set[EngineId] = set()
         # Invalid engine -> (backoff, earliest release time). Kept across release
         # so that repeat invalidations back off.
@@ -3550,8 +3566,11 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        # Blocks still being sent stay leased until their transfer ends.
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires and not self._has_inflight_send(req_id)
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
@@ -3566,6 +3585,10 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        """Whether this worker is still sending the request's KV blocks."""
+        return False
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -3631,7 +3654,9 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    if not self._handle_failed_transfer(req_id, handle, failed_req_ids):
+                    if not self._handle_failed_transfer(
+                        req_id, handle, failed_req_ids, error=e
+                    ):
                         in_progress.append(handle)
 
             if not in_progress:
@@ -3662,6 +3687,7 @@ class NixlBaseConnectorWorker:
         handle: int | None,
         failed_req_ids: set[str] | None = None,
         record_failed_transfer: bool = True,
+        error: BaseException | None = None,
     ) -> bool:
         """Record a failure and release its handle, returning False to retain it.
 
@@ -3674,6 +3700,8 @@ class NixlBaseConnectorWorker:
                 transport-failure metric. Callers that already recorded a more
                 specific metric (eg KV expiry, reported separately from
                 transport failures) pass False.
+            error: The exception that failed the transfer, if any. A lost
+                connection invalidates the remote engine.
 
         """
         if record_failed_transfer:
@@ -3684,6 +3712,11 @@ class NixlBaseConnectorWorker:
                 and meta.remote is not None
             ):
                 self._failed_remote_engines.add(meta.remote.engine_id)
+                if error is not None and (
+                    type(error).__name__ == "nixlRemoteDisconnectError"
+                    or "NIXL_ERR_REMOTE_DISCONNECT" in str(error)
+                ):
+                    self._disconnected_remote_engines.add(meta.remote.engine_id)
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -4137,7 +4170,8 @@ class NixlBaseConnectorWorker:
         # of remote engines is registered all at once (adding a background cleanup
         # thread wouldnt help either).
         # If that scenario is plausible, we can follow up with an LRU eviction policy.
-        if self._engine_ttl <= 0:
+        # Push does not track its WRITEs per peer, so a peer is never idle here.
+        if self._engine_ttl <= 0 or self._TRANSFER_MODE == "push":
             return
 
         now = time.perf_counter()
@@ -4192,6 +4226,13 @@ class NixlBaseConnectorWorker:
             replaced = self._remote_agents.keys() - self._engine_by_address.values()
         now = time.perf_counter()
         for engine_id in self._failed_remote_engines - self._invalid_remote_engines:
+            if engine_id in self._disconnected_remote_engines:
+                # The metadata may still be loaded; the connection is not.
+                logger.warning(
+                    "NIXL lost the connection to remote engine %s.", engine_id
+                )
+                self._mark_remote_engine_invalid(engine_id, now)
+                continue
             agents = self._remote_agents.get(engine_id, {}).values()
             try:
                 # No descriptors: query local existence, not peer health.
@@ -4204,6 +4245,7 @@ class NixlBaseConnectorWorker:
                     exc_info=True,
                 )
         self._failed_remote_engines.clear()
+        self._disconnected_remote_engines.clear()
         # Invalid peers keep rejecting new reads until their backoff has elapsed.
         invalid = {
             engine_id
@@ -4280,6 +4322,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self._failed_remote_engines.discard(engine_id)
+        self._disconnected_remote_engines.discard(engine_id)
         self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)
