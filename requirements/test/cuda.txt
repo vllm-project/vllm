@@ -185,7 +185,6 @@ aiohttp==3.14.5 \
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   aiohttp-cors
-    #   datasets
     #   fsspec
     #   gpt-oss
     #   lm-eval
@@ -1321,9 +1320,9 @@ dataproperty==1.0.1 \
     # via
     #   pytablewriter
     #   tabledata
-datasets==3.3.0 \
-    --hash=sha256:22312d09626f8fc3aa0a237b0c164997f5903bddd4c4c9e27dbaf563754c681b \
-    --hash=sha256:54c607b06f6eaa1572e21e200d2870d89d50e3bcc622dc2021a53a6ce4f684c2
+datasets==5.2.0 \
+    --hash=sha256:4be9e2882caaf5db13eadc39e93f3da2a995187b99acebac1595bf6c58dfa927 \
+    --hash=sha256:f4290d4704dfbc99631a578b56912d66b22def53d3f61d246f6ccc129675490e
     # via
     #   -r requirements/test/cuda.in
     #   evaluate
@@ -1354,9 +1353,9 @@ detect-installer==0.1.0 \
     --hash=sha256:00ad7ba0a36e3cf7d08a40d3643011746dbc112597c7d475cc91c416710ca4e7 \
     --hash=sha256:034fb20fd665c36e6ba52b8821525ea07fb4f7f938cac459df889fb33801528a
     # via fastapi-cloud-cli
-dill==0.3.8 \
-    --hash=sha256:3ebe3c479ad625c4553aca177444d89b486b1d84982eeacded644afc0cf797ca \
-    --hash=sha256:c36ca9ffb54365bdd2f8eb3eff7d2a21237f8452b57ace88b1ac615b7e815bd7
+dill==0.4.1 \
+    --hash=sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d \
+    --hash=sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa
     # via
     #   datasets
     #   depyf
@@ -3797,19 +3796,23 @@ multidict==7.1.0 \
     #   -r requirements/test/../common.txt
     #   aiohttp
     #   yarl
-multiprocess==0.70.16 \
-    --hash=sha256:0dfd078c306e08d46d7a8d06fb120313d87aa43af60d66da43ffff40b44d2f41 \
-    --hash=sha256:161af703d4652a0e1410be6abccecde4a7ddffd19341be0a7011b94aeb171ac1 \
-    --hash=sha256:37b55f71c07e2d741374998c043b9520b626a8dddc8b3129222ca4f1a06ef67a \
-    --hash=sha256:476887be10e2f59ff183c006af746cb6f1fd0eadcfd4ef49e605cbe2659920ee \
-    --hash=sha256:a0bafd3ae1b732eac64be2e72038231c1ba97724b60b09400d68f229fcc2fbf3 \
-    --hash=sha256:a71d82033454891091a226dfc319d0cfa8019a4e888ef9ca910372a446de4435 \
-    --hash=sha256:af4cabb0dac72abfb1e794fa7855c325fd2b55a10a44628a3c1ad3311c04127a \
-    --hash=sha256:ba8c31889abf4511c7308a8c52bb4a30b9d590e7f58523302ba00237702ca054 \
-    --hash=sha256:c4a9944c67bd49f823687463660a2d6daae94c289adff97e0f9d696ba6371d02 \
-    --hash=sha256:d951bed82c8f73929ac82c61f01a7b5ce8f3e5ef40f5b52553b4f547ce2b08ec \
-    --hash=sha256:e7b9d0f307cd9bd50851afaac0dba2cb6c44449efff697df7c7645f7d3f2be3a \
-    --hash=sha256:fc0544c531920dde3b00c29863377f87e1632601092ea2daca74e4beb40faa2e
+multiprocess==0.70.19 \
+    --hash=sha256:02e5c35d7d6cd2bdc89c1858867f7bde4012837411023a4696c148c1bdd7c80e \
+    --hash=sha256:0d4b4397ed669d371c81dcd1ef33fd384a44d6c3de1bd0ca7ac06d837720d3c5 \
+    --hash=sha256:1bbf1b69af1cf64cd05f65337d9215b88079ec819cd0ea7bac4dab84e162efe7 \
+    --hash=sha256:1c3dce098845a0db43b32a0b76a228ca059a668071cfeaa0f40c36c0b1585d45 \
+    --hash=sha256:3a56c0e85dd5025161bac5ce138dcac1e49174c7d8e74596537e729fd5c53c28 \
+    --hash=sha256:5be9ec7f0c1c49a4f4a6fd20d5dda4aeabc2d39a50f4ad53720f1cd02b3a7c2e \
+    --hash=sha256:79576c02d1207ec405b00cabf2c643c36070800cca433860e14539df7818b2aa \
+    --hash=sha256:8d5eb4ec5017ba2fab4e34a747c6d2c2b6fecfe9e7236e77988db91580ada952 \
+    --hash=sha256:928851ae7973aea4ce0eaf330bbdafb2e01398a91518d5c8818802845564f45c \
+    --hash=sha256:952021e0e6c55a4a9fe4cd787895b86e239a40e76802a789d6305398d3975897 \
+    --hash=sha256:97404393419dcb2a8385910864eedf47a3cadf82c66345b44f036420eb0b5d87 \
+    --hash=sha256:c6b6d78d43a03b68014ca1f0b7937d965393a670c5de7c29026beb2258f2f896 \
+    --hash=sha256:d6db91ca6391eebc139c352f34578cea382df6bfa03d3b4146ed12b18b01cc14 \
+    --hash=sha256:e5e7dc3e3e1732e88c07aaec17eeb9917f9ed1107d9e60d5ab985cdc14bac43a \
+    --hash=sha256:e6c0674d34b8adac22533f6786576b3de4e396aaeda9e0c15378af9b8ada2702 \
+    --hash=sha256:e8cc7fbdff15c0613f0a1f1f8744bef961b0a164c0ca29bdff53e9d2d93c5e5f
     # via
     #   datasets
     #   evaluate
@@ -6238,7 +6241,6 @@ requests==2.34.2 \
     #   azure-core
     #   buildkite-test-collector
     #   cohere
-    #   datasets
     #   docker
     #   evaluate
     #   google-api-core
