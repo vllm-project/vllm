@@ -178,7 +178,7 @@ Ensure the PR makes clear, concise claims about the accomplishment:
 
 For the stated claims, ensure the PR provides sufficient evidence, examples, or references to support them, making it easy for reviewers to verify the correctness and impact of the changes.
 
-Present main and PR results with full commands (including server startup), commit IDs, and model/hardware configuration. Paste or attach raw reproducer, accuracy, and benchmark output; AI-generated summary tables are not a substitute. For repeated benchmarks, report run count and variability. For kernel performance changes, include before/after profile visualizations/timelines when they help explain the measured gains. Link relevant CI failures or regressing PRs when they motivate the change.
+Present main and PR results with full commands (including server startup), commit IDs, and model/hardware configuration. Paste or attach raw reproducer, accuracy, and benchmark output;  summary tables are not a substitute. For repeated benchmarks, report run count and variability. For kernel performance changes, include before/after profile visualizations/timelines when they help explain the measured gains. Link relevant CI failures or regressing PRs when they motivate the change. Use detail tags to organize and contain long sections.
 
 - For bug fixes, show the same command failing on main and passing on the PR, with raw error and success logs.
 - For new features, ensure that usage examples are included and validated to confirm that the feature works as intended.
