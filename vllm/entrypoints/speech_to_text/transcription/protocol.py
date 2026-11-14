@@ -296,19 +296,6 @@ class TranscriptionRequest(OpenAIBaseModel):
                 detail="Expected 'file' to be a file-like object, not 'str'.",
             )
 
-        stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
-        stream = data.get("stream", False)
-        if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
-            # Find which specific stream option was set
-            invalid_param = next(
-                (so for so in stream_opts if data.get(so, False)),
-                "stream_include_usage",
-            )
-            raise VLLMValidationError(
-                "Stream options can only be defined when `stream=True`.",
-                parameter=invalid_param,
-            )
-
         # Parse vllm_xargs from JSON string (form data sends it as a string)
         xargs = data.get("vllm_xargs")
         if isinstance(xargs, str):
@@ -321,6 +308,18 @@ class TranscriptionRequest(OpenAIBaseModel):
                 ) from e
 
         return data
+
+    @model_validator(mode="after")
+    def validate_stream_options(self):
+        # Checked after validation: form fields arrive as strings like "false".
+        if not self.stream:
+            for option in ("stream_include_usage", "stream_continuous_usage_stats"):
+                if getattr(self, option):
+                    raise VLLMValidationError(
+                        "Stream options can only be defined when `stream=True`.",
+                        parameter=option,
+                    )
+        return self
 
 
 # Transcription response objects
