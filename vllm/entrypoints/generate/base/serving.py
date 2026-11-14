@@ -146,6 +146,30 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
 
+    def _check_bidirectional_spans_set(
+        self, spans_set: bool | None
+    ) -> ErrorResponse | None:
+        """Refuse a request without spans on a checkpoint that declares
+        bidirectional attention spans, before a response starts, as the engine
+        would refuse it. `spans_set` is None for requests that cannot set them.
+        """
+        if not self.model_config.declares_bidirectional_spans or spans_set:
+            return None
+        model = self.model_config.model
+        if spans_set is None:
+            message = (
+                f"The model {model!r} declares bidirectional attention spans, "
+                "which this request cannot set; send a token-id prompt to a "
+                "completion endpoint."
+            )
+        else:
+            message = (
+                f"The model {model!r} declares bidirectional attention spans, "
+                "so every request must set bidirectional_spans (an empty list "
+                "for a causal request)."
+            )
+        return self.create_error_response(message, param="bidirectional_spans")
+
     def _preflight(self, n: int = 1) -> None:
         """Engine checks that must run before a response is started.
 

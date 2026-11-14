@@ -72,6 +72,13 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    if request.bidirectional_spans.is_some() {
+        bail_invalid_request!(
+            param = "bidirectional_spans",
+            "bidirectional_spans is not supported for chat requests."
+        );
+    }
+
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
@@ -126,6 +133,7 @@ mod tests {
     use validator::Validate as _;
 
     use super::validate_request_compat;
+    use crate::error::ApiError;
     use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
@@ -422,5 +430,34 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("tool_choice=none is ok");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_bidirectional_spans() {
+        let served = served(&["Qwen/Qwen1.5-0.5B-Chat"]);
+        let request = ChatCompletionRequest {
+            bidirectional_spans: Some(json!([[0, 2]])),
+            ..base_request()
+        };
+        let error = validate_request_compat(&request, &served).expect_err("spans are refused");
+        assert!(matches!(
+            error,
+            ApiError::InvalidRequest {
+                param: Some("bidirectional_spans"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_null_bidirectional_spans() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "bidirectional_spans": null,
+        }))
+        .expect("parse request");
+        assert!(request.bidirectional_spans.is_none());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
     }
 }

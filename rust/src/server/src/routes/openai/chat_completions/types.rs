@@ -269,6 +269,10 @@ pub struct ChatCompletionRequest {
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
+    /// Refused: bidirectional attention spans index prompt tokens, which a
+    /// chat client cannot know.
+    pub bidirectional_spans: Option<Value>,
+
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
@@ -361,6 +365,7 @@ impl Default for ChatCompletionRequest {
             return_weight_versions: None,
             routed_experts_prompt_start: None,
             cache_salt: None,
+            bidirectional_spans: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
             vllm_xargs: None,

@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
+    StrictInt,
     model_serializer,
 )
 
@@ -22,6 +23,11 @@ from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.sampling_params import StructuredOutputsParams
 
 logger = init_logger(__name__)
+
+BidirectionalSpansParam: TypeAlias = (
+    list[tuple[StrictInt, StrictInt]] | list[list[tuple[StrictInt, StrictInt]]] | None
+)
+"""Spans of one token-id prompt, or one list of spans per prompt."""
 
 StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
@@ -60,6 +66,22 @@ def validate_cache_salt(cache_salt: object) -> None:
             "Parameter 'cache_salt' must be at most 128 characters and must "
             "not contain '@', '/', '\\\\', or NUL.",
             parameter="cache_salt",
+        )
+
+
+def reject_bidirectional_spans(model_extra: dict[str, Any] | None) -> None:
+    """Refuse `bidirectional_spans` on a validated chat request, rather than
+    ignore it: spans index prompt tokens, which a chat client cannot know.
+
+    Call it from a `mode="after"` validator. Chat and completion request models
+    share smart-mode unions, and a `VLLMValidationError` raised before a member
+    is matched leaves the union for completion requests too.
+    """
+    if model_extra and model_extra.get("bidirectional_spans") is not None:
+        raise VLLMValidationError(
+            "bidirectional_spans is not supported for chat requests; send a "
+            "token-id prompt to a completion endpoint.",
+            parameter="bidirectional_spans",
         )
 
 

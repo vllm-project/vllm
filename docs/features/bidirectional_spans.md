@@ -47,6 +47,32 @@ Spans index prompt tokens. A `TokensPrompt` with spans therefore cannot also car
 
 [examples/features/bidirectional_spans/bidirectional_spans_offline.py](../../examples/features/bidirectional_spans/bidirectional_spans_offline.py) serves a prompt and a grown version of it, and shows the grown prompt reusing the cached spans.
 
+## Online serving
+
+The Completions API (`/v1/completions`) and the completion-style pooling APIs (`/classify`, `/pooling`, `/v1/embeddings`) take `bidirectional_spans` with token-id prompts. For a list of token-id prompts, give one list of spans per prompt:
+
+```bash
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "path/to/checkpoint",
+        "prompt": [2, 105, 2364, 107, 818, 6524],
+        "bidirectional_spans": [[0, 4]],
+        "max_tokens": 1
+    }'
+```
+
+Chat requests refuse the field, since a chat client cannot know the token positions of the rendered prompt. On a checkpoint that declares spans, a completion without spans and every Chat Completions, Responses or Messages request get a 400 before any stream starts. Other span errors found by the engine arrive as an error event of the stream.
+
+These do not take spans, so a checkpoint that declares them cannot serve them:
+
+- the Chat Completions, Responses and Messages APIs,
+- scoring and reranking,
+- `/v1/completions/render`, which refuses the field, and `/inference/v1/generate`, whose requests carry no spans,
+- `echo` with `logprobs`, which asks for prompt logprobs,
+- embeddings with chunked processing, which refuse the field,
+- the Rust frontend, which refuses the field and whose requests the engine then refuses for lack of it.
+
 ## Spans over multimodal prompts
 
 Placeholder expansion decides where an image's tokens are, so spans over a multimodal prompt are set on the rendered engine input, after expansion, by the code that renders the prompt:

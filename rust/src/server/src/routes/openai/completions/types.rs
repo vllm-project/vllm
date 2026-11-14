@@ -244,6 +244,9 @@ pub struct CompletionRequest {
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
+    /// Bidirectional attention spans over token-id prompts. Not supported yet.
+    pub bidirectional_spans: Option<Value>,
+
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 

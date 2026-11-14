@@ -875,6 +875,7 @@ class TestInitializeToolSessions:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.declares_bidirectional_spans = False
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
@@ -1258,6 +1259,7 @@ class TestValidateGeneratorInput:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.declares_bidirectional_spans = False
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
@@ -1319,6 +1321,7 @@ class _Qwen3FakeTokenizer:
 def _make_qwen3_serving() -> tuple[OpenAIServingResponses, _Qwen3FakeTokenizer]:
     engine_client = MagicMock()
     model_config = MagicMock()
+    model_config.declares_bidirectional_spans = False
     model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
@@ -1710,6 +1713,7 @@ def _make_serving_instance(
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
+    model_config.declares_bidirectional_spans = False
     model_config.max_model_len = 100
     model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()

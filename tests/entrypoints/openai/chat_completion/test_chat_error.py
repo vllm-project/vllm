@@ -66,6 +66,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     supports_multimodal_inputs: bool = False
+    declares_bidirectional_spans: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):

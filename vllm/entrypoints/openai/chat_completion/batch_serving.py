@@ -141,6 +141,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
             return render_result
+        if (error := self._check_bidirectional_spans_set(None)) is not None:
+            return error
         single_requests, all_conversations, engine_prompts = render_result
 
         request_id = (

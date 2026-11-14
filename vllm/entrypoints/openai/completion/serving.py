@@ -144,7 +144,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         """Validate the model and preprocess a completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
-        engine-aware checks (LoRA model validation, engine health).
+        engine-aware checks (LoRA model validation, engine health, and the
+        bidirectional spans a checkpoint requires).
 
         Returns:
             A list of engine_inputs on success, or an ErrorResponse on failure.
@@ -155,6 +156,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return error_check_ret
 
         self._preflight(request.n or 1)
+
+        if (
+            error := self._check_bidirectional_spans_set(
+                request.bidirectional_spans is not None
+            )
+        ) is not None:
+            return error
 
         return await self.online_renderer.render_completion(request)
 

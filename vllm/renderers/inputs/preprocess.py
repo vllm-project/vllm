@@ -5,6 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EmbedsPrompt,
     EngineInput,
@@ -52,6 +53,43 @@ def prompt_to_seq(
         return [prompt_or_prompts]  # type: ignore[list-item]
 
     return prompt_or_prompts  # type: ignore[return-value]
+
+
+def pair_bidirectional_spans(
+    prompt_input: object, spans: Sequence[object]
+) -> list[TokensPrompt]:
+    """Pair the `bidirectional_spans` of an API request with the token-id
+    prompts they index: a list of spans for one prompt, or one list of spans per
+    prompt for a list of prompts."""
+    prompts: Sequence[list[int]]
+    spans_per_prompt: Sequence[Sequence[object]]
+    if (
+        isinstance(prompt_input, list)
+        and prompt_input
+        and is_list_of(prompt_input, int)
+    ):
+        prompts, spans_per_prompt = [prompt_input], [spans]
+    elif (
+        isinstance(prompt_input, list)
+        and prompt_input
+        and all(isinstance(p, list) and is_list_of(p, int) for p in prompt_input)
+    ):
+        if len(spans) != len(prompt_input) or not is_list_of(spans, list, check="all"):
+            raise VLLMValidationError(
+                "For a list of token-id prompts, bidirectional_spans must hold "
+                "one list of spans per prompt.",
+                parameter="bidirectional_spans",
+            )
+        prompts, spans_per_prompt = prompt_input, spans
+    else:
+        raise VLLMValidationError(
+            "bidirectional_spans requires token-id prompts.",
+            parameter="bidirectional_spans",
+        )
+    return [
+        TokensPrompt(prompt_token_ids=ids, bidirectional_spans=list(prompt_spans))  # type: ignore[arg-type]
+        for ids, prompt_spans in zip(prompts, spans_per_prompt)
+    ]
 
 
 def conversation_to_seq(

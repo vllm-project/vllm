@@ -144,6 +144,17 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 "Chunked embedding processing does not support multimodal inputs. "
                 "Disable enable_chunked_processing to use multimodal inputs."
             )
+        if any(
+            "bidirectional_spans" in engine_input["prompts"]
+            for engine_input in ctx.engine_inputs
+        ):
+            # Chunks would cut the spans, which index the whole prompt.
+            raise VLLMValidationError(
+                "Chunked embedding processing does not support "
+                "bidirectional_spans. Disable enable_chunked_processing to use "
+                "them.",
+                parameter="bidirectional_spans",
+            )
 
         ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id

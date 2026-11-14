@@ -330,6 +330,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        if (error := self._check_bidirectional_spans_set(None)) is not None:
+            return error
         maybe_validation_error = self._validate_create_responses_input(request)
         if maybe_validation_error is not None:
             return maybe_validation_error

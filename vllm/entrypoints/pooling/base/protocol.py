@@ -6,7 +6,11 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import validate_cache_salt
+from vllm.entrypoints.generate.base.protocol import (
+    BidirectionalSpansParam,
+    reject_bidirectional_spans,
+    validate_cache_salt,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -217,6 +221,15 @@ class CompletionRequestMixin(OpenAIBaseModel):
             "some multimodal models is `False` to avoid a duplicate BOS."
         ),
     )
+    bidirectional_spans: BidirectionalSpansParam = Field(
+        default=None,
+        description=(
+            "Half-open [start, end) ranges of a token-id input whose tokens "
+            "attend to each other in both directions, for a model whose "
+            "checkpoint declares bidirectional attention spans. For a list "
+            "of token-id inputs, one list of spans per input."
+        ),
+    )
     # --8<-- [end:completion-extra-params]
 
 
@@ -296,6 +309,11 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
         # to `False` for the chat path.
         if self.add_special_tokens is None:
             self.add_special_tokens = False
+        return self
+
+    @model_validator(mode="after")
+    def check_no_bidirectional_spans(self) -> "ChatRequestOptionsMixin":
+        reject_bidirectional_spans(self.model_extra)
         return self
 
     def build_chat_params(
