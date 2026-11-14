@@ -6,8 +6,10 @@ from dataclasses import dataclass
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseDecodeMetadata,
@@ -23,6 +25,16 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+logger = init_logger(__name__)
+
+# Opt-in dense MSA prefill: see MiniMaxM3SparseAiterPAImpl._dense_prefill.
+_DENSE_PREFILL_MAX = envs.VLLM_MINIMAX_M3_MSA_DENSE_PREFILL
+_DENSE_PREFILL_CHECK = envs.VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK
+# Positions below this see every causal block: top-k blocks x SPARSE_BLOCK_SIZE
+# (16 x 128 for MiniMax-M3). The builder's tail list uses it; the impl asserts it
+# against the layer's top-k width.
+_DENSE_TOPK_TOKENS = 2048
+
 
 class MiniMaxM3SparseAiterPABackend(MiniMaxM3SparseBackend):
     """MiniMax M3 backend carrying the AITER page-16 block-table rebase."""
@@ -37,6 +49,17 @@ class MiniMaxM3SparseAiterPAPrefillMetadata(MiniMaxM3SparsePrefillMetadata):
     # ``block_table`` rebased onto AITER's page-16 numbering; see
     # ``MiniMaxM3SparseAiterPAMetadataBuilder.build``.
     page16_block_table: torch.Tensor | None = None
+    # Dense prefill path: set when every prefill request of the step fits it
+    dense_page_table: torch.Tensor | None = (
+        None  # [num_prefills, pages] page ids of the K view
+    )
+    dense_max_seq_len: int = 0
+    dense_tail_idx: torch.Tensor | None = (
+        None  # prefill-relative rows at positions >= topk tokens
+    )
+    dense_num_tail: int = 0
+    # 16-byte aligned copy of seq_lens for the dense call (one kernel specialization)
+    dense_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -73,6 +96,30 @@ class MiniMaxM3SparseAiterPAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             dtype=torch.int32,
             device=device,
         )
+        # Opt-in dense MSA prefill
+        self._dense_prefill_on = _DENSE_PREFILL_MAX > 0
+        if self._dense_prefill_on:
+            from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+                PAGE16_SIDES_PER_BLOCK,
+                PAGES_PER_SPARSE_BLOCK,
+            )
+
+            # Same page ids the sparse kernels read: a block-table entry is one
+            # SPARSE_BLOCK_SIZE block whose K and V sides interleave, so its j-th K
+            # page is entry * (pages of both sides) + j and V sits at the same id in
+            # the V view (the impl checks the cache is laid out that way).
+            self._dense_page_stride = PAGES_PER_SPARSE_BLOCK * PAGE16_SIDES_PER_BLOCK
+            self._dense_pages_per_block = PAGES_PER_SPARSE_BLOCK
+            self._dense_page_offsets = torch.arange(
+                PAGES_PER_SPARSE_BLOCK, dtype=torch.int32, device=device
+            )
+            logger.info(
+                "MiniMax-M3 MSA prefill: dense attention for steps whose prefill "
+                "requests are all <= %d tokens (queries at positions >= %d "
+                "recomputed sparse)",
+                _DENSE_PREFILL_MAX,
+                _DENSE_TOPK_TOKENS,
+            )
 
     def build(
         self,
@@ -113,7 +160,64 @@ class MiniMaxM3SparseAiterPAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
                 **vars(metadata.prefill),
                 page16_block_table=page16[nd:],
             )
+            if self._dense_prefill_on:
+                self._dense_prefill_metadata(
+                    metadata, common_attn_metadata, block_table
+                )
         return metadata
+
+    def _dense_prefill_metadata(
+        self, metadata, common_attn_metadata, block_table
+    ) -> None:
+        """Per-page table and tail rows for the dense prefill path (CPU lengths)."""
+        seq_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        if seq_cpu is None or qsl_cpu is None:
+            return
+        nd = metadata.num_decodes
+        p_seq = seq_cpu[nd : metadata.num_decodes + metadata.num_prefills].to(
+            torch.int64
+        )
+        if p_seq.numel() == 0:
+            return
+        pmax = int(p_seq.max())
+        if pmax > _DENSE_PREFILL_MAX:
+            return
+        from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
+
+        p = metadata.prefill
+        ncols = cdiv(pmax, SPARSE_BLOCK_SIZE)
+        # Even block count, so the page-table row stride (ncols x 8 pages) is a
+        # multiple of 16 and the attention kernel keeps one specialization.
+        ncols += ncols & 1
+        bt = block_table[nd : nd + metadata.num_prefills, :ncols]
+        p.dense_page_table = (
+            bt.unsqueeze(-1) * self._dense_page_stride + self._dense_page_offsets
+        ).reshape(bt.shape[0], ncols * self._dense_pages_per_block)
+        p.dense_max_seq_len = pmax
+        # seq_lens[num_decodes:] is 16-byte aligned only when num_decodes % 4 == 0.
+        p.dense_seq_lens = p.seq_lens.clone()
+        if pmax > _DENSE_TOPK_TOKENS:
+            q_lo = qsl_cpu[nd : metadata.num_decodes + metadata.num_prefills].to(
+                torch.int64
+            )
+            q_hi = qsl_cpu[
+                nd + 1 : metadata.num_decodes + metadata.num_prefills + 1
+            ].to(torch.int64)
+            ctx = p_seq - (q_hi - q_lo)
+            start = q_lo + torch.clamp(_DENSE_TOPK_TOKENS - ctx, min=0)
+            base = metadata.num_decode_tokens
+            parts = [
+                torch.arange(int(s) - base, int(e) - base)
+                for s, e in zip(start, q_hi)
+                if int(s) < int(e)
+            ]
+            if parts:
+                tail = torch.cat(parts)  # int64: index_select / index_copy_ indices
+                p.dense_tail_idx = tail.pin_memory().to(
+                    block_table.device, non_blocking=True
+                )
+                p.dense_num_tail = int(tail.numel())
 
 
 class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
@@ -215,7 +319,29 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 ),
             )
 
-        if main_md.num_prefills > 0:
+        if (
+            main_md.num_prefills > 0
+            and getattr(main_md.prefill, "dense_page_table", None) is not None
+        ):
+            p = main_md.prefill
+            self._dense_prefill(
+                layer,
+                q[nd:num_tokens],
+                out[nd:num_tokens],
+                k_cache,
+                v_cache,
+                k_scale,
+                v_scale,
+                p,
+                topk[:, nd:num_tokens, :],
+                None
+                if sparse_bt_buf is None
+                else sparse_bt_buf[nd * kvh : num_tokens * kvh],
+                None
+                if sparse_ctx_buf is None
+                else sparse_ctx_buf[nd * kvh : num_tokens * kvh],
+            )
+        elif main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None
             assert p.query_req_id is not None and p.query_abs_pos is not None
@@ -244,3 +370,192 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 ),
             )
         return output
+
+    # Dense MSA prefill state
+    _dense_q_descale: torch.Tensor | None = None
+    # Dense calls left to compare with the sparse kernel, per process:
+    # [steps without tail rows, steps with them]
+    _dense_checks_left: list[int] = [_DENSE_PREFILL_CHECK, _DENSE_PREFILL_CHECK]
+
+    def _sparse_prefill_rows(
+        self,
+        q_p,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        p,
+        topk_p,
+        sparse_bt,
+        sparse_ctx,
+        out_p,
+    ):
+        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+            minimax_m3_sparse_attn_prefill_aiter,
+        )
+
+        minimax_m3_sparse_attn_prefill_aiter(
+            q_p,
+            k_cache,
+            v_cache,
+            topk_p,
+            p.block_table,
+            p.query_req_id,
+            p.query_abs_pos,
+            self.num_kv_heads,
+            self.scale,
+            out_p,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            sparse_bt=sparse_bt,
+            sparse_ctx=sparse_ctx,
+        )
+
+    def _dense_prefill(
+        self,
+        layer,
+        q_p,
+        out_p,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        p,
+        topk_p,
+        sparse_bt,
+        sparse_ctx,
+    ) -> None:
+        """Dense causal attention for the prefill rows (all of them see every causal
+        block below top-k tokens), then the rows at positions >= top-k tokens
+        recomputed by the sparse kernel."""
+        from aiter.ops.triton.unified_attention import unified_attention
+
+        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+            PAGE16_SIDES_PER_BLOCK,
+            PAGES_PER_SPARSE_BLOCK,
+            _run_gluon_decode,
+            _sides_are_packed,
+            minimax_m3_build_sparse_block_table_prefill,
+            minimax_m3_sparse_block_page_stride,
+        )
+        from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
+
+        assert topk_p.shape[-1] * SPARSE_BLOCK_SIZE == _DENSE_TOPK_TOKENS, (
+            "dense MSA prefill assumes top-"
+            f"{_DENSE_TOPK_TOKENS // SPARSE_BLOCK_SIZE} blocks, "
+            f"the layer selects {topk_p.shape[-1]}"
+        )
+        assert (
+            minimax_m3_sparse_block_page_stride(k_cache, v_cache)
+            == PAGES_PER_SPARSE_BLOCK * PAGE16_SIDES_PER_BLOCK
+        ), "dense MSA prefill builds its page table for K/V sides sharing a block"
+        kvh = self.num_kv_heads
+        k_d = (
+            k_cache[: v_cache.shape[0]]
+            if _sides_are_packed(k_cache, v_cache)
+            else k_cache
+        )
+        if self._dense_q_descale is None or self._dense_q_descale.device != q_p.device:
+            self._dense_q_descale = torch.ones(
+                1, dtype=torch.float32, device=q_p.device
+            )
+        q8 = q_p.to(k_cache.dtype) if self.use_fp8_kv else q_p
+        unified_attention(
+            q=q8,
+            k=k_d,
+            v=v_cache,
+            out=out_p,
+            cu_seqlens_q=p.cu_seqlens_q,
+            max_seqlen_q=p.max_query_len,
+            seqused_k=p.dense_seq_lens,
+            max_seqlen_k=p.dense_max_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=p.dense_page_table,
+            softcap=0,
+            q_descale=self._dense_q_descale if self.use_fp8_kv else None,
+            k_descale=k_scale,
+            v_descale=v_scale,
+            shuffled_kv_cache=True,
+        )
+        kind = int(p.dense_num_tail > 0)
+        check = self._dense_checks_left[kind] > 0
+        if p.dense_num_tail == 0 and not check:
+            return
+        if sparse_bt is None:
+            sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
+                topk_p,
+                p.block_table,
+                p.query_req_id,
+                p.query_abs_pos,
+                minimax_m3_sparse_block_page_stride(k_cache, v_cache),
+            )
+        if check:
+            ref = torch.empty_like(out_p)
+            self._sparse_prefill_rows(
+                q_p,
+                k_cache,
+                v_cache,
+                k_scale,
+                v_scale,
+                p,
+                topk_p,
+                sparse_bt,
+                sparse_ctx,
+                ref,
+            )
+            head = torch.ones(out_p.shape[0], dtype=torch.bool, device=out_p.device)
+            if p.dense_num_tail:
+                head[p.dense_tail_idx] = False
+            # Startup dummy runs (all-zero inputs, requests of <= 16 tokens)
+            # compare nothing: keep the budget.
+            if p.dense_max_seq_len <= 16 or not bool(ref.abs().amax().ne(0)):
+                if p.dense_num_tail:
+                    out_p.index_copy_(
+                        0, p.dense_tail_idx, ref.index_select(0, p.dense_tail_idx)
+                    )
+                return
+            d = (out_p.float() - ref.float()).abs()
+            dh = d[head]
+            self._dense_checks_left[kind] -= 1
+            logger.info(
+                "MSA dense prefill check (%s): %d prefill rows, %d tail rows, "
+                "max seq %d; head rows |dense - sparse| max %.4g mean %.3g "
+                "(|sparse| max %.3g mean %.3g)",
+                getattr(layer, "layer_name", "?"),
+                out_p.shape[0],
+                p.dense_num_tail,
+                p.dense_max_seq_len,
+                float(dh.max()) if dh.numel() else 0.0,
+                float(dh.mean()) if dh.numel() else 0.0,
+                float(ref.abs().max()),
+                float(ref.float().abs().mean()),
+            )
+            if p.dense_num_tail:
+                idx = p.dense_tail_idx
+                out_p.index_copy_(0, idx, ref.index_select(0, idx))
+            return
+        idx = p.dense_tail_idx
+        rows = (
+            idx
+            if kvh == 1
+            else (
+                idx.unsqueeze(1) * kvh + torch.arange(kvh, device=idx.device)
+            ).reshape(-1)
+        )
+        q_t = q_p.index_select(0, idx)
+        o_t = torch.empty_like(q_t)
+        _run_gluon_decode(
+            q_t,
+            k_cache,
+            v_cache,
+            sparse_bt.index_select(0, rows),
+            sparse_ctx.index_select(0, rows),
+            kvh,
+            self.scale,
+            o_t,
+            k_scale,
+            v_scale,
+        )
+        out_p.index_copy_(0, idx, o_t)
