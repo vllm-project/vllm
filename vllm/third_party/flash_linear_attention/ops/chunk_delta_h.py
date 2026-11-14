@@ -11,36 +11,59 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, compile_on_first_launch, is_cdna3, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 
+_FWD_H_STOCK = [
+    triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+    for num_warps in [2, 4]
+    # num_stages=3 needs more LDS than a gfx942 CU has.
+    for num_stages in ([2] if is_cdna3 else _CHUNK_DELTA_H_NUM_STAGES)
+    for BV in [32, 64]
+]
 
-@triton.heuristics(
-    {
-        "USE_G": lambda args: args["g"] is not None,
-        "USE_GK": lambda args: args["gk"] is not None,
-        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
-        "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-        "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+_FWD_H_CDNA3 = triton.Config(
+    {"BV": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 2}, num_warps=8, num_stages=2
 )
+_FWD_H_PICK: dict[tuple, triton.Config] = {}
+
+
+def _fwd_h_cdna3_config(
+    V: int, num_seq_heads: int, device: int, key: tuple
+) -> triton.Config | None:
+    # None on the first call per key, which tunes the stock autotuner as on main.
+    pick = _FWD_H_PICK.get(key)
+    if pick is None:
+        return None
+    # Never slower than a stock BV=32 pick, whatever the grid size.
+    if pick.kwargs["BV"] == _FWD_H_CDNA3.kwargs["BV"]:
+        return _FWD_H_CDNA3
+    programs = triton.cdiv(V, _FWD_H_CDNA3.kwargs["BV"]) * num_seq_heads
+    return _FWD_H_CDNA3 if programs <= num_compute_units(device) else pick
+
+
+_FWD_H_HEURISTICS = {
+    "USE_G": lambda args: args["g"] is not None,
+    "USE_GK": lambda args: args["gk"] is not None,
+    "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+    "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+    "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+}
+
+
+@triton.heuristics(_FWD_H_HEURISTICS)
 @triton.autotune(
-    configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
-    ],
-    key=["H", "K", "V", "BT"],
-    use_cuda_graph=use_cuda_graph,
+    configs=_FWD_H_STOCK, key=["H", "K", "V", "BT"], use_cuda_graph=use_cuda_graph
 )
+@compile_on_first_launch([_FWD_H_CDNA3])
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
@@ -278,6 +301,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), mask=m_ht)
 
 
+_FWD_H_TUNER = chunk_gated_delta_rule_fwd_kernel_h_blockdim64.fn
+# The autotuner's JIT function, launched directly with a known config.
+_fwd_h_kernel_cdna3 = triton.heuristics(_FWD_H_HEURISTICS)(_FWD_H_TUNER.fn)
+
+
 def chunk_gated_delta_rule_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -320,7 +348,13 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+    kernel, launch, cfg = chunk_gated_delta_rule_fwd_kernel_h_blockdim64, {}, None
+    if is_cdna3:
+        key = (H, K, V, BT, k.dtype, gk is None, initial_state is None)
+        cfg = _fwd_h_cdna3_config(V, N * H, k.device.index, key)
+        if cfg is not None:
+            kernel, launch = _fwd_h_kernel_cdna3, cfg.all_kwargs()
+    kernel[grid](
         k=k,
         v=u,
         w=w,
@@ -339,5 +373,8 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        **launch,
     )
+    if is_cdna3 and cfg is None:
+        _FWD_H_PICK[key] = _FWD_H_TUNER.best_config
     return h, v_new, final_state

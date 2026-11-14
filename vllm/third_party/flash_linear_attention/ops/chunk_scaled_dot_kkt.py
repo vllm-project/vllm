@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE
+from .utils import FLA_CHUNK_SIZE, autotune_unless_cdna3, is_cdna3
 
 # On RDNA (gfx11xx/gfx12xx) WMMA only
 # accepts 16-bit/int inputs, so a widened (e.g. fp32) tl.dot is lowered to a
@@ -27,6 +27,31 @@ if current_platform.is_rocm():
 
     _CAST_DOT_TO_K_DTYPE = on_gfx1x()
 
+_KKT_STOCK = [
+    triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+    for BK in [32, 64, 128]
+    for num_warps in [2, 4, 8]
+    for num_stages in [2, 3, 4]
+]
+
+_KKT_CDNA3 = (
+    triton.Config(
+        {"BK": 32, "matrix_instr_nonkdim": 16, "waves_per_eu": 0},
+        num_warps=4,
+        num_stages=2,
+    ),
+    triton.Config(
+        {"BK": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 0},
+        num_warps=4,
+        num_stages=1,
+    ),
+)
+
+
+def _kkt_cdna3_config(tokens_heads: int) -> triton.Config:
+    small, large = _KKT_CDNA3
+    return small if tokens_heads <= 65536 else large
+
 
 @triton.heuristics(
     {
@@ -34,14 +59,8 @@ if current_platform.is_rocm():
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "BT", "IS_VARLEN"],
+@autotune_unless_cdna3(
+    configs=_KKT_STOCK, key=["H", "K", "BT", "IS_VARLEN"], cdna3_configs=_KKT_CDNA3
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -154,6 +173,9 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
+    launch = {}
+    if is_cdna3:
+        launch = _kkt_cdna3_config(B * T * H).all_kwargs()
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
         k=k,
         g=g,
@@ -167,5 +189,6 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
         CAST_DOT_TO_K_DTYPE=_CAST_DOT_TO_K_DTYPE,
+        **launch,
     )
     return A

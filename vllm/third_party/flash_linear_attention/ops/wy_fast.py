@@ -12,18 +12,37 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices
+from .utils import autotune_unless_cdna3, is_cdna3
+
+_WU_STOCK = [
+    triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+    for num_warps in [2, 4, 8]
+    for num_stages in [2, 3, 4]
+]
+
+_WU_CDNA3 = (
+    triton.Config(
+        {"matrix_instr_nonkdim": 16, "waves_per_eu": 2}, num_warps=4, num_stages=2
+    ),
+    triton.Config(
+        {"matrix_instr_nonkdim": 16, "waves_per_eu": 2}, num_warps=2, num_stages=2
+    ),
+)
+
+
+def _wu_cdna3_config(programs: int, device: int) -> triton.Config:
+    small, large = _WU_CDNA3
+    return small if programs < 2 * num_compute_units(device) else large
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
+@autotune_unless_cdna3(
+    configs=_WU_STOCK,
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    cdna3_configs=_WU_CDNA3,
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
@@ -117,6 +136,9 @@ def recompute_w_u_fwd(
     BV = 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
+    launch = {}
+    if is_cdna3:
+        launch = _wu_cdna3_config(NT * B * H, k.device.index).all_kwargs()
     recompute_w_u_fwd_kernel[(NT, B * H)](
         k=k,
         v=v,
@@ -135,5 +157,6 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        **launch,
     )
     return w, u

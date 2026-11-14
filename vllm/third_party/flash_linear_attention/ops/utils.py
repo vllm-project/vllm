@@ -159,6 +159,11 @@ is_nvidia_hopper = is_nvidia and (
     "NVIDIA H" in current_platform.get_device_name(0)
     or current_platform.get_device_capability(0).major >= 9
 )
+is_cdna3 = False
+if is_amd:
+    from vllm.platforms.rocm import get_cdna_version
+
+    is_cdna3 = get_cdna_version() == 3
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
 is_tma_supported = (
@@ -169,6 +174,51 @@ is_tma_supported = (
         or hasattr(triton.language, "make_tensor_descriptor")
     )
 )
+
+
+class _CompileAllOnFirstLaunch:
+    """Launches like `fn`; the first launch also compiles each of `cdna3_configs`."""
+
+    def __init__(self, fn, cdna3_configs):
+        self.fn, self.cdna3_configs, self.arg_names = fn, cdna3_configs, fn.arg_names
+        self.config_keys = {k for c in cdna3_configs for k in c.all_kwargs()}
+
+    def __getitem__(self, grid):
+        return lambda *args, **kwargs: self.run(
+            *args, grid=grid, warmup=False, **kwargs
+        )
+
+    def warmup(self, *args, grid, **kwargs):
+        return self.run(*args, grid=grid, warmup=True, **kwargs)
+
+    def run(self, *args, grid, warmup, **kwargs):
+        base = {k: v for k, v in kwargs.items() if k not in self.config_keys}
+        for c in self.cdna3_configs:
+            self.fn.run(*args, grid=grid, warmup=True, **base, **c.all_kwargs())
+        # Later launches go straight to the JIT function.
+        self.run = self.fn.run
+        return self.fn.run(*args, grid=grid, warmup=warmup, **kwargs)
+
+
+def compile_on_first_launch(cdna3_configs: list):
+    """On gfx942, the first launch also compiles each of `cdna3_configs`."""
+
+    def wrap(fn):
+        # Compile all up front, as the autotuner does, so a new size doesn't stall.
+        return _CompileAllOnFirstLaunch(fn, cdna3_configs) if is_cdna3 else fn
+
+    return wrap
+
+
+def autotune_unless_cdna3(configs: list, key: list[str], cdna3_configs=(), **kwargs):
+    """triton.autotune; on gfx942 the caller launches one of `cdna3_configs`."""
+
+    def wrap(fn):
+        if is_cdna3:
+            return compile_on_first_launch(cdna3_configs)(fn)
+        return triton.autotune(configs=configs, key=key, **kwargs)(fn)
+
+    return wrap
 
 
 def get_all_max_shared_mem():

@@ -13,13 +13,47 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
+from .utils import (
+    FLA_CHUNK_SIZE,
+    autotune_unless_cdna3,
+    check_shared_mem,
+    is_cdna3,
+    is_nvidia_hopper,
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+
+_FWD_O_STOCK = [
+    triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
+    for BK in BKV_LIST
+    for BV in BKV_LIST
+    for num_warps in NUM_WARPS
+    for num_stages in [2, 3, 4]
+]
+
+_FWD_O_CDNA3 = (
+    triton.Config(
+        {"BK": 64, "BV": 64, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+        num_warps=4,
+        num_stages=1,
+    ),
+    triton.Config(
+        {"BK": 64, "BV": 128, "matrix_instr_nonkdim": 16, "waves_per_eu": 2},
+        num_warps=4,
+        num_stages=1,
+    ),
+)
+
+
+def _fwd_o_cdna3_config(V: int, chunk_heads: int, device: int) -> triton.Config:
+    small, large = _FWD_O_CDNA3
+    programs = triton.cdiv(V, large.kwargs["BV"]) * chunk_heads
+    return small if programs < num_compute_units(device) else large
 
 
 @triton.heuristics(
@@ -28,15 +62,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
-    configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT"],
+@autotune_unless_cdna3(
+    configs=_FWD_O_STOCK, key=["H", "K", "V", "BT"], cdna3_configs=_FWD_O_CDNA3
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
@@ -167,6 +194,9 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
+    launch = {}
+    if is_cdna3:
+        launch = _fwd_o_cdna3_config(V, NT * B * H, q.device.index).all_kwargs()
     chunk_fwd_kernel_o[grid](
         q,
         k,
@@ -183,5 +213,6 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        **launch,
     )
     return o
