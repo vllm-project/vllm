@@ -21,17 +21,32 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     class _DeepseekV32Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
             self,
-            messages: list["ChatCompletionMessageParam"],
+            messages: list["ChatCompletionMessageParam"] | None = None,
             tools: list[dict[str, Any]] | None = None,
             **kwargs,
         ) -> str | list[int]:
+            conversation = kwargs.pop("conversation", None)
+            if conversation is None:
+                conversation = messages
+            if conversation is None:
+                raise TypeError(
+                    "apply_chat_template() missing required argument: 'conversation'"
+                )
+
+            if kwargs.get("chat_template") is not None:
+                # An explicitly requested chat template takes precedence over the
+                # built-in DeepSeek V3.2 encoding. This lets model variants that
+                # reuse the DeepSeek V3.2 tokenizer ship their own template (for
+                # example one with a different tool-calling format), which is
+                # otherwise silently ignored, e.g. `--chat-template`.
+                return super().apply_chat_template(conversation, tools=tools, **kwargs)
+
             thinking = kwargs.get("thinking", False)
             enable_thinking = kwargs.get("enable_thinking", False)
             thinking = thinking or enable_thinking
             thinking_mode = "thinking"
             if not thinking:
                 thinking_mode = "chat"
-            conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
             if tools is not None and len(tools) > 0:
                 messages.insert(0, {"role": "system"})
