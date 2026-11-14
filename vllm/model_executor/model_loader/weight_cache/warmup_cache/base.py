@@ -4,11 +4,11 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.model_loader.weight_cache.seed import Seedable
+from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
 
 
 class WarmupCache(Seedable):

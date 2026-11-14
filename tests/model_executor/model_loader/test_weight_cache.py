@@ -10,6 +10,7 @@ identical outputs.
 import json
 import multiprocessing
 import os
+import select
 import shutil
 import signal
 import socket
@@ -28,7 +29,7 @@ import psutil
 import pytest
 import regex as re
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
@@ -40,6 +41,7 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autot
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_mooncake
 from vllm.utils.network_utils import get_open_port
 
 pytestmark = pytest.mark.skipif(
@@ -142,6 +144,28 @@ class WeightCacheDaemon:
                         f"vllm preload exited before ready: {self.logs}"
                     ) from None
                 time.sleep(2)
+
+    def wait_for_log(self, message: str, timeout_s: float = 60) -> None:
+        deadline = time.monotonic() + timeout_s
+        while message not in self.logs:
+            if self._proc is not None and self._proc.poll() is not None:
+                raise AssertionError(
+                    f"vllm preload exited before logging {message!r}: {self.logs}"
+                )
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"Timed out waiting for {message!r} in daemon logs: {self.logs}"
+                )
+            time.sleep(0.1)
+
+    def wait_for_exit(self, timeout_s: float = 300) -> int:
+        assert self._proc is not None
+        try:
+            return self._proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"vllm preload did not exit within {timeout_s}s: {self.logs}"
+            ) from None
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -648,6 +672,7 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
     if not (has_flashinfer() and current_platform.has_device_capability(90)):
         pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
 
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     # tp=2 for the v1 per-rank path; small token budget keeps the sweep short.
     case = replace(
         K3_CASE,
@@ -890,7 +915,7 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     from types import SimpleNamespace
 
     from vllm.config import ParallelConfig
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         get_engine_dp_placement,
     )
 
@@ -1075,6 +1100,7 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server.cache_key = WeightCacheKey.from_model_config(
         model_config, 1, 0, cache_config=default_vllm_config.cache_config
     )
@@ -1178,6 +1204,7 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
 
     server = object.__new__(daemon.WeightCacheDaemon)
+    server._state_lock = threading.RLock()
     server._watchers = []
     connect, server_threads = _serve_one(server._handle_connection)
     load_config = LoadConfig(
@@ -1401,7 +1428,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
         return WeightCacheState(entries={}, aliases={}, attrs={})
 
     monkeypatch.setattr(loader, "_request_state", request_state)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     model = loader.load_model(config, model_config)
@@ -1475,7 +1504,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
 
@@ -1511,7 +1542,7 @@ def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
 def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
     from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
         FlashInferWarmupCache,
     )
@@ -1570,7 +1601,7 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
@@ -1616,12 +1647,12 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
     import socket
     import time
 
-    import vllm.model_executor.model_loader.weight_cache.seed as seed_mod
+    import vllm.model_executor.model_loader.weight_cache.transport as seed_mod
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
@@ -1662,6 +1693,274 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     kind.install(None, {"autotune_configs_dp0_rank0.json": table})
     target = tmp_path / config_hash / "autotune_configs_dp0_rank0.json"
     assert json.loads(target.read_text()) == table
+
+
+def _wait_for_previous_engines() -> None:
+    import torch
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(torch.accelerator.device_count())),
+        threshold_ratio=0.7,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
+    )
+
+
+def _visibility_env(value: str) -> dict[str, str]:
+    env = {current_platform.device_control_env_var: value}
+    if current_platform.is_rocm():
+        env["HIP_VISIBLE_DEVICES"] = value
+    return env
+
+
+def _set_visible_devices(monkeypatch, value: str) -> None:
+    for name, env_value in _visibility_env(value).items():
+        monkeypatch.setenv(name, env_value)
+
+
+def _daemon_socket(daemon: WeightCacheDaemon, *, is_draft: bool = False) -> str:
+    paths = sorted(
+        os.path.join(daemon.socket_dir, name)
+        for name in os.listdir(daemon.socket_dir)
+        if name.endswith(".sock") and name.endswith("_draft.sock") == is_draft
+    )
+    assert len(paths) == 1
+    return paths[0]
+
+
+def _exercise_lease_release(
+    source: WeightCacheDaemon,
+    source_address: str | tuple[str, int],
+    control_socket: str,
+    backend,
+    token: str | None = None,
+    shutdown: bool = False,
+) -> dict:
+    """Hold a real copy lease open while the source handles a real release."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+    from vllm.model_executor.model_loader.weight_cache.transport import (
+        SeedConfig,
+        SeedTransport,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
+        acknowledge_lease,
+        get_mover,
+    )
+
+    transport = SeedTransport(
+        seed_config=SeedConfig(source=source_address, token=token)
+    )
+    response = transport.request({"kind": "weights", "seed_backend": backend})
+    assert response is not None and response["status"] == "ok", response
+    payload = response["payload"]
+    manifest = payload["manifest"]
+    assert len(manifest["storages"]) > 1
+
+    if shutdown:
+        assert source._proc is not None
+        source._proc.terminate()
+    else:
+        release_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        release_sock.settimeout(300)
+        release_sock.connect(control_socket)
+        send_msg(release_sock, {"cmd": "release"})
+    source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
+    if shutdown:
+        assert source._proc is not None
+        assert source._proc.poll() is None, "source exited before the copy ack"
+    else:
+        assert not select.select([release_sock], [], [], 0)[0], (
+            "source released before the copy ack"
+        )
+
+    mover = get_mover(backend)
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
+    tensors = mover.fill(manifest, payload["seed"], device)
+    assert len(tensors) == len(manifest["tensors"])
+    acknowledge_lease(transport)
+    if shutdown:
+        assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
+    else:
+        release_sock.settimeout(30)
+        assert recv_msg(release_sock)["status"] == "ok"
+        release_sock.close()
+        source.wait_for_log("released cached weights")
+        response = transport.request({"kind": "weights", "seed_backend": backend})
+        assert response is not None and response["status"] == "error", response
+        assert "Weights were released" in response["message"]
+    return payload
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
+    case = QWEN_MTP_CASE
+    """Seed target and draft shards over IPC despite different visible ordinals.
+
+    The source sees only physical GPU 1 as ordinal 0. The mirror and the test
+    process see both GPUs, so UUID resolution must reopen the source on local
+    ordinal 1 while the mirror and engines use physical GPU 0. Graceful source
+    shutdown waits for a second, manually driven mover copy and its Unix-socket
+    ack; identical mirror outputs prove every target and draft storage was copied.
+    """
+    _set_visible_devices(monkeypatch, "0,1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    _wait_for_previous_engines()
+
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    source_env = {**_visibility_env("1"), "VLLM_BATCH_INVARIANT": "0"}
+    mirror_env = {**_visibility_env("0,1"), "VLLM_BATCH_INVARIANT": "0"}
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+        env_extra=source_env,
+    ) as source:
+        source.wait_until_ready()
+        source_sock = _daemon_socket(source)
+        _daemon_socket(source, is_draft=True)
+
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=1,
+            extra_args=[
+                *case.daemon_args,
+                "--dtype",
+                "float16",
+                "--weight-cache-seed",
+                source_sock,
+            ],
+            env_extra=mirror_env,
+        ) as rejected:
+            assert rejected.wait_for_exit() != 0
+            assert "'dtype'" in rejected.logs
+            assert "refusing to mirror a different weight shard" in rejected.logs
+            assert "Mirrored " not in rejected.logs
+
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=1,
+            extra_args=[*case.daemon_args, "--weight-cache-seed", source_sock],
+            env_extra=mirror_env,
+        ) as mirror:
+            mirror.wait_until_ready()
+            _daemon_socket(mirror)
+            _daemon_socket(mirror, is_draft=True)
+            expected_copies = 2
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over peer_ipc in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == expected_copies, mirror.logs
+            assert all(int(storages) > 1 for storages, _ in transfers)
+            assert all(float(seconds) < 10.0 for _, seconds in transfers)
+
+            payload = _exercise_lease_release(
+                source, source_sock, source_sock, "peer_ipc", shutdown=True
+            )
+            assert payload["seed"]["source_device_index"] == 0
+            source_uuid = payload["seed"]["source_gpu_uuid"]
+            assert source_uuid == current_platform.get_device_uuid(1)
+            assert source_uuid != current_platform.get_device_uuid(0)
+
+            mirror_outputs = generate(
+                vllm_runner, case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not has_mooncake(),
+    reason="Cross-host weight seeding requires Mooncake TransferEngine",
+)
+def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
+    """Pull and release remote-copy leases over the JSON control plane.
+
+    Both daemons run on this host, but the exchange uses the token-authenticated
+    TCP listener exactly as a cross-host seed would. The source uses GPU 0 and
+    the mirror and engines use GPU 1. A non-empty per-quant backend tuple must
+    survive the JSON fingerprint round trip. The data plane uses TCP so the
+    test does not require RDMA hardware or GPUDirect support.
+    """
+    monkeypatch.setenv("MC_FORCE_TCP", "1")
+    _wait_for_previous_engines()
+    _set_visible_devices(monkeypatch, "1")
+
+    kernel_config = {"linear_backend_per_quant": {"fp8": "cutlass"}}
+    engine_case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "kernel_config": kernel_config},
+    )
+    baseline_outputs = generate(vllm_runner, engine_case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-rdma-test-token"
+    base_port = get_open_port()
+    kernel_args = ["--kernel-config", json.dumps(kernel_config)]
+    with WeightCacheDaemon(
+        QWEN_CASE.model,
+        tp_size=1,
+        extra_args=[
+            *QWEN_CASE.daemon_args,
+            *kernel_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+        env_extra=_visibility_env("0"),
+    ) as source:
+        source.wait_until_ready()
+        source_sock = _daemon_socket(source)
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=[
+                *QWEN_CASE.daemon_args,
+                *kernel_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+            env_extra=_visibility_env("1"),
+        ) as mirror:
+            mirror.wait_until_ready()
+            transfers = re.findall(
+                r"Mirrored .* in (\d+) storage\(s\) over \w+ in ([\d.]+)s",
+                mirror.logs,
+            )
+            assert len(transfers) == 1, mirror.logs
+            assert int(transfers[0][0]) > 1
+            # Remote copies are latency-dominated; bound stalls, not bandwidth.
+            assert float(transfers[0][1]) < 10.0
+
+            _exercise_lease_release(
+                source,
+                ("127.0.0.1", base_port),
+                source_sock,
+                "mooncake",
+                token,
+            )
+            mirror_outputs = generate(
+                vllm_runner, engine_case, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
 
 
 def test_compile_cache_bundle_round_trip(tmp_path):
