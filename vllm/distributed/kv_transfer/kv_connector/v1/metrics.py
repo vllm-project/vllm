@@ -51,6 +51,13 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Accumulate connector statistics and periodically log interval summaries.
+
+    The whole pipeline: observe() -> transfer_stats_accumulator.aggregate()
+    -> transfer_stats_accumulator.reduce() -> log()
+    This class receives statistics pre-aggregated across workers.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
@@ -63,6 +70,7 @@ class KVConnectorLogging:
         self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        """Accumulate a pre-aggregated worker payload for the logging interval."""
         # Should not be called when a KVConnector is not configured.
         assert self.connector_cls is not None
         # Called periodically when connector syncs with the scheduler.
