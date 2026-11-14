@@ -19,6 +19,7 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsMxfp4
 from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
     activation_quant_dtype,
 )
@@ -2443,6 +2444,41 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
     )
 
     assert backend.name == expected
+
+
+@pytest.mark.skipif(
+    not CutlassExpertsMxfp4._supports_current_device(),
+    reason="CUTLASS W4A4 MXFP4 MoE not supported",
+)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_select_mxfp4_moe_backend_w4a4_expert_bias(has_bias: bool):
+    """CutlassExpertsMxfp4 cannot apply expert biases, so W4A4 layers with
+    biases (gpt-oss) must not select it. Which backend they get instead depends
+    on the environment (EMULATION needs amd-quark)."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        select_mxfp4_moe_backend,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
+    )
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=8,
+            experts_per_token=2,
+            hidden_dim=256,
+            intermediate_size=256,
+            activation=MoEActivation.SWIGLUOAI,
+        ),
+        has_bias=has_bias,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        backend, _ = select_mxfp4_moe_backend(moe_config, activation_key=kMxfp4Dynamic)
+
+    assert (backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4) != has_bias
 
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
