@@ -52,11 +52,12 @@ from .interfaces import (
     SupportsTranscription,
     _require_is_multimodal,
 )
-from .qwen3 import Qwen3ForCausalLM, use_qwen2_attention
+from .qwen3 import Qwen3ForCausalLM
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    init_vllm_registered_model,
     maybe_prefix,
 )
 
@@ -144,9 +145,10 @@ class FireRedASR2Model(nn.Module):
             vllm_config.model_config.hf_config.encoder_downsample_rate,
         )
 
-        use_qwen2_attention(vllm_config.model_config.hf_config)
-        self.decoder = Qwen3ForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "decoder")
+        self.decoder = init_vllm_registered_model(
+            vllm_config,
+            prefix=maybe_prefix(prefix, "decoder"),
+            architectures=["Qwen2ForCausalLM"],
         )
 
     def forward(

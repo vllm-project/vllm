@@ -58,7 +58,7 @@ from vllm.model_executor.layers.resampler import (
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM, use_qwen2_attention
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -115,7 +115,13 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -2145,8 +2151,9 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        use_qwen2_attention(vllm_config.model_config.hf_config.get_text_config())
-        return Qwen3ForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        return init_vllm_registered_model(
+            vllm_config, prefix=prefix, architectures=["Qwen2ForCausalLM"]
+        )
 
     def init_vision_module(
         self,
