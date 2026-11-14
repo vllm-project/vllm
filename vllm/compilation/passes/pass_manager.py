@@ -7,7 +7,7 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import act_mxfp4_pass_registered, rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -24,6 +24,7 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
+        RocmAiterActMulMxfp4GemmFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -200,6 +201,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     or rocm_aiter_ops.is_rdna_aiter_enabled()
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+                # The asm MXFP4 GEMM it fuses into needs gfx950, so RDNA AITER
+                # (gfx12) never registers this pass.
+                if act_mxfp4_pass_registered(self.pass_config.fuse_act_quant):
+                    self.passes += [RocmAiterActMulMxfp4GemmFusionPass(config)]
 
             muse_sandwich_norm = (
                 current_platform.is_rocm()

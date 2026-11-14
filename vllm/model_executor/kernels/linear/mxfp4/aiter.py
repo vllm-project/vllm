@@ -4,7 +4,11 @@
 import torch
 
 import vllm.envs as envs
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import (
+    MXFP4_PRESHUFFLE_MAX_M,
+    is_aiter_found_and_supported,
+    rocm_aiter_ops,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
@@ -41,6 +45,27 @@ def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
 if is_aiter_found_and_supported():
     from vllm.utils.torch_utils import direct_register_custom_op
 
+    def _act_and_mul(x: torch.Tensor, activation: str) -> torch.Tensor:
+        # One fused vLLM kernel per call instead of an eager activation and multiply.
+        # The kernel reads x as dense [tokens, 2d]; contiguous() is a no-op when it is.
+        x = x.contiguous()
+        d = x.shape[-1] // 2
+        out = x.new_empty((*x.shape[:-1], d))
+        # The _C ops are registered by the vllm._custom_ops import that
+        # vllm/_aiter_ops.py performs, which this module imports at the top.
+        # Same activation-to-kernel mapping as apply_moe_activation in
+        # vllm/model_executor/layers/fused_moe/activation.py. The direct calls skip its
+        # per-call shape checks, which this hot path does not need.
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(out, x)
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(out, x)
+        elif activation == "gelu_tanh":
+            torch.ops._C.gelu_tanh_and_mul(out, x)
+        else:
+            raise ValueError(f"unsupported activation {activation!r}")
+        return out
+
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -48,7 +73,15 @@ if is_aiter_found_and_supported():
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
+        activation: str | None = None,
     ) -> torch.Tensor:
+        """MXFP4 GEMM with dynamic activation quantization.
+
+        With ``activation`` set, ``x`` holds the concatenated gate and up
+        projections and the op computes ``act(gate) * up`` first. On the ASM
+        path that product is quantized by one fused aiter kernel instead of an
+        activation kernel plus a separate quant kernel.
+        """
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
             gemm_afp4wfp4_preshuffle,
@@ -61,10 +94,24 @@ if is_aiter_found_and_supported():
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
+        if activation is not None:
+            assert x_scales is None, "activation and x_scales are exclusive"
+            if rocm_use_aiter_fp4_asm_gemm and not (
+                M <= MXFP4_PRESHUFFLE_MAX_M
+                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+            ):
+                import aiter
+                from aiter.ops.triton.fusions.activation import act_mul_and_mxfp4_quant
+
+                x_q, x_s = act_mul_and_mxfp4_quant(x, activation, shuffle=True)
+                x = x_q.view(aiter.dtypes.fp4x2)
+                x_scales = x_s.view(aiter.dtypes.fp8_e8m0)
+            else:
+                x = _act_and_mul(x, activation)
         if rocm_use_aiter_fp4_asm_gemm:
             # The preshuffle kernel's tuned configs split K in some M buckets.
             if (
-                M <= 64
+                M <= MXFP4_PRESHUFFLE_MAX_M
                 and not envs.VLLM_BATCH_INVARIANT
                 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
             ):
@@ -137,9 +184,10 @@ if is_aiter_found_and_supported():
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+        activation: str | None = None,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
