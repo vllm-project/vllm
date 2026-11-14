@@ -86,8 +86,15 @@ impl OutputSender {
         // its remaining work from the consumer until the next token arrives.
         let progress_only =
             output.output.prefill_progress.is_some() && output.output.new_token_ids.is_empty();
+        // Progress must not take the first-output credit: the first token is
+        // still owed an immediate delivery of its own.
+        if progress_only {
+            self.flush();
+            self.deliver(Delivery::One(output));
+            return;
+        }
         if self.buffered.is_empty()
-            && (finished || progress_only || !self.delivered_first || self.stream_interval == 1)
+            && (finished || !self.delivered_first || self.stream_interval == 1)
         {
             self.delivered_first = true;
             self.deliver(Delivery::One(output));
@@ -96,7 +103,7 @@ impl OutputSender {
 
         self.buffered_tokens += output.new_token_ids.len();
         self.buffered.push(output);
-        if finished || progress_only || self.buffered_tokens >= self.stream_interval {
+        if finished || self.buffered_tokens >= self.stream_interval {
             self.flush();
         }
     }
@@ -211,6 +218,15 @@ mod tests {
         sender.send(progress(500));
         // The progress frame arrives now instead of with the eighth token.
         assert_eq!(deliveries(&mut receiver), vec![vec![vec![1]], vec![vec![]]]);
+    }
+
+    #[test]
+    fn progress_before_the_first_token_does_not_delay_it() {
+        let (mut sender, mut receiver) = channel(8);
+        sender.send(progress(500));
+        sender.send(output(&[1]));
+        // Progress first, then the first token on its own, not eight tokens later.
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![]], vec![vec![1]]]);
     }
 
     #[test]
