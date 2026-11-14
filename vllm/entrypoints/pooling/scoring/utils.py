@@ -19,7 +19,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from .typing import (
+from .types import (
     ScoreContentPartParam,
     ScoreData,
     ScoreInput,

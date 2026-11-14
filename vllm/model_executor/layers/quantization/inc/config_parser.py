@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .inc import INCConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class INCLayerConfig:
     bits: int
     group_size: int | tuple[int, int]

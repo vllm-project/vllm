@@ -37,15 +37,13 @@ GROUPS = SimpleNamespace(
     kv_cache_groups=[
         SimpleNamespace(
             layer_names=["swa"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=WINDOW
-            ),
+            prefix_cacheable=False,
+            prefix_replay_tokens=WINDOW,
         ),
         SimpleNamespace(
             layer_names=["mla"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=True, prefix_replay_tokens=0
-            ),
+            prefix_cacheable=True,
+            prefix_replay_tokens=0,
         ),
     ]
 )
@@ -151,6 +149,25 @@ def _prepare(state, batch, cg_mode):
     )
     replay = state.decoder_replay_layers.replay_batch
     return (None, None) if replay is None else (replay, state.builds[-2])
+
+
+def test_replay_builders_built_before_first_trimmed_step(state, monkeypatch):
+    """Builder init uploads to the device, so an untrimmed warmup batch must
+    build the replay builders before any step trims."""
+    copies: list = []
+
+    def copy_attn_groups(groups, kv_cache_config, prefixes):
+        copies.append(prefixes)
+        return []
+
+    monkeypatch.setattr(state, "_copy_attn_groups", copy_attn_groups)
+    replay, _ = _prepare(
+        state, _input_batch([1, 1], [10, 20], [False, False]), CUDAGraphMode.NONE
+    )
+    assert replay is None and len(copies) == 2
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None and len(copies) == 2
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -502,21 +519,24 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW,
+        replay_batch=None,
+        metadata_prefixes=set(),
+        first_swa_prefix="swa",
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(
                 layer_names=["swa"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=False, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=False,
+                prefix_replay_tokens=0,
             ),
             SimpleNamespace(
                 layer_names=["mla"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=True, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=True,
+                prefix_replay_tokens=0,
             ),
         ]
     )

@@ -103,7 +103,7 @@ WOA_SPLIT_K = WAVES * ROWS // WOA_ROWS
 BACK_POINTS = 16  # start, stage ends, split internals, GEMV internals
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BackBuild:
     tokens: int
     tp: int

@@ -1163,7 +1163,9 @@ def _make_ple_from_checkpoint(
     group = SimpleNamespace(world_size=1)
     vllm_config = SimpleNamespace(
         load_config=SimpleNamespace(load_format="auto"),
-        engram_config=SimpleNamespace(disk_offload=disk_offload, cpu_offload=False),
+        engram_config=SimpleNamespace(
+            disk_offload=disk_offload, cpu_offload=False, dp_shared_memory=False
+        ),
     )
     for name, value in (
         ("get_current_vllm_config", vllm_config),
@@ -2094,7 +2096,7 @@ def _make_conv_case(
     return rng, state_reference, conv_state, weights
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ConvBatchCase:
     spec_query_lens: tuple[int, ...] = ()
     num_accepted: tuple[int, ...] = ()

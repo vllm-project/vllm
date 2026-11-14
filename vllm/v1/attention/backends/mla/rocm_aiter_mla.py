@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -60,6 +61,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
     warmup_decode_attention_fwd_verify,
 )
 from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
     AttentionSpec,
     KVCacheSpec,
     is_quantized_kv_cache,
@@ -73,6 +75,25 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
+
+
+def _flat_mla_kv_view(cache: torch.Tensor) -> torch.Tensor:
+    """Flat view of a KV cache whose pages may sit inside a wider block row.
+
+    Rows of this view overlap. Index it only with `_flat_mla_index_steps`.
+    """
+    page_stride, row_stride, inner_stride = cache.stride()
+    assert inner_stride == 1
+    stride = math.gcd(page_stride, row_stride)
+    last_row = (cache.shape[0] - 1) * page_stride + (cache.shape[1] - 1) * row_stride
+    return cache.as_strided((last_row // stride + 1, cache.shape[-1]), (stride, 1))
+
+
+def _flat_mla_index_steps(cache: torch.Tensor) -> tuple[int, int]:
+    """Page step and row step in the units that `_flat_mla_kv_view` indexes."""
+    page_stride, row_stride, _ = cache.stride()
+    unit = math.gcd(page_stride, row_stride)
+    return page_stride // unit, row_stride // unit
 
 
 def _supports_fused_dcp_prefill_config(
@@ -775,6 +796,7 @@ class AiterMLABackend(MLACommonBackend):
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
         use_rswa: bool = False,
+        use_hisparse: bool = False,
     ) -> list[str]:
         invalid_reasons = super().validate_configuration(
             head_size=head_size,
@@ -796,6 +818,7 @@ class AiterMLABackend(MLACommonBackend):
             use_adaptive_verification=use_adaptive_verification,
             use_dcp=use_dcp,
             use_rswa=use_rswa,
+            use_hisparse=use_hisparse,
         )
         # Arch/signature cannot express this: the backend still advertises
         # fp16, so a DSpark draft with kv_cache_dtype="auto" would select
@@ -831,7 +854,7 @@ class AiterMLABackend(MLACommonBackend):
         return AiterMLAMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterMLADCPVerifyMetadata:
     """One paged-KV row per verify token for causal DCP verification.
 
@@ -883,6 +906,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     cp_rank: int = 0
     # Padded head count cprr runs at; 0 when this batch is not on cprr.
     asm_decode_num_heads: int = 0
+    padded_num_heads: int = 0
     # Must equal the split cap the reduce scratch was sized with, or the kernel
     # writes past it and faults.
     mla_num_kv_splits: int = 0
@@ -1146,6 +1170,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # (e.g. 16 with Eagle3), we expand block-level indices into per-token
         # flat indices since the aiter kernel always uses page_size=1 internally.
         self.kernel_block_size = kv_cache_spec.block_size
+        self._flat_index_layer = layer_names[0]
+        self._flat_index_steps: tuple[int, int] | None = None
         # Generic Triton indexes physical KV blocks; segmented MLA indexes
         # TILE subpages of them.
         self._dcp_verify_page_size = (
@@ -1211,6 +1237,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if self._asm_dcp_verify:
             self._num_attention_heads = self._asm_dcp_verify_heads
         kv_cache_dtype_str = kv_cache_dtype
+        if kv_cache_dtype_str in DS_MLA_STATE_CONTENT_BYTES:
+            # A dense MLA draft of a DSA target keeps its own fp8 cache.
+            layer = self.compilation_config.static_forward_context[layer_names[0]]
+            kv_cache_dtype_str = layer.kv_cache_dtype
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
             kv_dtype = dtypes.fp8
@@ -1243,6 +1273,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_q_dtype = q_dtype
         self._mla_kv_dtype = kv_dtype
+        self._padded_decode_num_heads = AiterMLAHelper.resolve_padded_mla_num_heads(
+            self._decode_num_heads,
+            self._mtp_decode_qlen,
+            dcp=self.dcp_world_size > 1,
+            non_causal=self.non_causal_multi_token_decode,
+            q_dtype=cast(torch.dtype, q_dtype),
+            kv_dtype=kv_dtype,
+            v_head_dim=self.mla_dims.kv_lora_rank,
+        )
+        metadata_num_heads = {self._num_attention_heads, self._padded_decode_num_heads}
         # The metadata is built for every qlen up to _mtp_decode_qlen, and
         # aiter's buffer needs are not monotonic in qlen: on gfx950 a bf16
         # block of fewer than 128 packed rows is tiled by 64 instead of 128.
@@ -1257,7 +1297,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             get_mla_metadata_info_v1(
                 max_num_reqs,
                 qlen,
-                self._num_attention_heads,
+                num_heads,
                 q_dtype,
                 kv_dtype,
                 is_sparse=False,
@@ -1270,6 +1310,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     else {}
                 ),
             )
+            for num_heads in sorted(metadata_num_heads)
             for qlen in range(1, self._mtp_decode_qlen + 1)
         )
         self._mla_work_meta_data = torch.empty(
@@ -1343,6 +1384,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._graph_seq_lens = torch.zeros(
                 max_num_reqs, dtype=torch.int32, device=device
             )
+            self._decode_indptr_block = triton.next_power_of_2(max_num_reqs + 1)
 
             if (
                 self._supports_segmented_dcp_verify or self._use_triton_dcp_verify
@@ -1814,6 +1856,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             per_req_page_table.unsqueeze(1)
         )
 
+    def _flat_page_index_steps(self) -> tuple[int, int]:
+        """Page and row steps for this layer's expanded page indices.
+
+        The KV cache is bound only after the builder is made.
+        """
+        if self._flat_index_steps is None:
+            layer = self.compilation_config.static_forward_context[
+                self._flat_index_layer
+            ]
+            cache = getattr(layer, "kv_cache", None)
+            if not isinstance(cache, torch.Tensor) or cache.dim() != 3:
+                return self.kernel_block_size, 1
+            self._flat_index_steps = _flat_mla_index_steps(cache)
+        return self._flat_index_steps
+
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
@@ -1855,6 +1912,48 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 query_start_loc_device[1 : num_reqs + 1]
                 - query_start_loc_device[:num_reqs]
             ).to(torch.int32)
+
+        # Full graphs read the kernel lengths and both indptrs from persistent
+        # buffers. Fill all three in one launch rather than ~20 eager ops.
+        fused_indptr = (
+            self._graph_seq_lens is not None
+            and self.dcp_world_size == 1
+            and g_tot_seq_lens is None
+            and num_kernel_reqs > 0
+        )
+        if fused_indptr:
+            assert self._graph_seq_lens is not None
+            assert num_kernel_reqs <= self._graph_seq_lens.shape[0], (
+                f"{num_kernel_reqs} decode requests exceed the "
+                f"{self._graph_seq_lens.shape[0]}-request graph buffers"
+            )
+            # Unused (never dereferenced) unless VARLEN.
+            varlen_rows = (
+                (self._varlen_q_rows, self._varlen_o_rows)
+                if varlen_decode
+                else (self.qo_indptr, self.qo_indptr)
+            )
+            _build_decode_indptr_kernel[(1,)](
+                seq_lens_device,
+                query_start_loc_device,
+                self._graph_seq_lens,
+                self.paged_kv_indptr,
+                self.qo_indptr,
+                num_kernel_reqs,
+                self.paged_kv_indptr.shape[0],
+                int(max_qo_len) if pad_uniform_mtp else 0,
+                varlen_rows[0],
+                varlen_rows[1],
+                varlen_rows[1].shape[0],
+                PAD=pad_uniform_mtp,
+                VARLEN=varlen_decode,
+                BLOCK=self._decode_indptr_block,
+                ROW_W=max(self._varlen_decode_qlen, 1),
+                ROW_P2=triton.next_power_of_2(max(self._varlen_decode_qlen, 1)),
+            )
+            seq_lens_for_kernel = self._graph_seq_lens[:num_kernel_reqs]
+            paged_kv_indptr = self.paged_kv_indptr[: 1 + num_kernel_reqs]
+        elif pad_uniform_mtp:
             seq_lens_for_kernel = torch.where(
                 qo_lens_device > 0,
                 seq_lens_for_kernel,
@@ -1876,14 +1975,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         varlen_q_rows = varlen_o_rows = None
         varlen_left_align = varlen_decode and not self._varlen_right_align
-        if varlen_left_align:
-            seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
-        if varlen_decode:
+        if varlen_decode and fused_indptr:
+            # The fused build only runs without DCP, whose varlen rows are
+            # always left-aligned.
+            assert varlen_left_align
+            varlen_q_rows = self._varlen_q_rows[: num_reqs * self._varlen_decode_qlen]
+            varlen_o_rows = self._varlen_o_rows
+        elif varlen_decode:
+            if varlen_left_align:
+                seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
             varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
                 query_start_loc_device, qo_lens_device, num_reqs
             )
 
-        if self._graph_seq_lens is not None:
+        if self._graph_seq_lens is not None and not fused_indptr:
             self._graph_seq_lens[:num_kernel_reqs].copy_(
                 seq_lens_for_kernel, non_blocking=True
             )
@@ -1894,12 +1999,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         paged_kv_last_page_len = self.paged_kv_last_page_len[:num_kernel_reqs]
 
         # indptr: cumsum of seq_lens (one page per token in the flat view)
-        paged_kv_indptr = torch.cat(
-            [
-                torch.zeros(1, dtype=torch.int32, device=device),
-                seq_lens_for_kernel.cumsum(dim=0, dtype=torch.int32),
-            ]
-        )
+        if not fused_indptr:
+            paged_kv_indptr = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.int32, device=device),
+                    seq_lens_for_kernel.cumsum(dim=0, dtype=torch.int32),
+                ]
+            )
         use_gluon_decode = AiterMLAHelper.use_gluon_decode(
             self._decode_num_heads,
             int(max_qo_len),
@@ -1975,6 +2081,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if varlen_left_align:
                 max_tokens_per_req += max_qo_len - 1
             num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
+            page_stride, row_stride = self._flat_page_index_steps()
             _expand_page_indices_kernel[(num_reqs, num_chunks)](
                 self.paged_kv_indices,
                 block_table_tensor,
@@ -1983,12 +2090,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 paged_kv_indptr,
                 seq_lens_device,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
+                PAGE_STRIDE=page_stride,
+                ROW_STRIDE=row_stride,
                 BLOCK_SIZE=1024,
                 CLAMP_TAIL=varlen_left_align,
             )
             paged_kv_indices = self.paged_kv_indices
 
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if fused_indptr:
+            qo_indptr = self.qo_indptr[: 1 + num_kernel_reqs]
+        elif self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr[: 1 + num_kernel_reqs].copy_(
                 paged_kv_indptr, non_blocking=True
             )
@@ -2067,7 +2178,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             and max_qo_len == 2
             and is_quantized_kv_cache(self._kv_cache_dtype_str)
             and not AiterMLAHelper.has_fp8_non_causal_qlen2_kernel(
-                self._decode_num_heads
+                self._padded_decode_num_heads
+                if use_persistent_metadata
+                else self._decode_num_heads
             )
         ):
             # AITER's fp8 dispatch folds (gqa 16, qlen 3 or 4) onto the
@@ -2099,7 +2212,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             metadata_num_heads = (
                 self._asm_dcp_verify_heads
                 if dcp_route is _DCPDecodeRoute.CPRR
-                else AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+                else self._padded_decode_num_heads
             )
             get_mla_metadata_v1(
                 qo_indptr,
@@ -2171,6 +2284,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             cp_rank=self.dcp_rank,
             asm_decode_num_heads=(
                 self._asm_dcp_verify_heads if dcp_route is _DCPDecodeRoute.CPRR else 0
+            ),
+            padded_num_heads=(
+                self._padded_decode_num_heads
+                if has_persistent_metadata and dcp_route is not _DCPDecodeRoute.CPRR
+                else 0
             ),
             mla_num_kv_splits=(
                 self._mla_max_split_per_batch
@@ -2322,6 +2440,8 @@ def _expand_page_indices_kernel(
     CLAMP_TAIL: tl.constexpr = False,
     HAS_START_OFFSETS: tl.constexpr = False,
     start_offsets=None,
+    PAGE_STRIDE: tl.constexpr = 0,
+    ROW_STRIDE: tl.constexpr = 1,
 ):
     """Expand block table entries into per-token flat page indices.
 
@@ -2335,6 +2455,8 @@ def _expand_page_indices_kernel(
 
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
+
+    PAGE_STRIDE and ROW_STRIDE replace K and 1 for a packed cache; 0 keeps both.
 
     With CLAMP_TAIL, entries past num_real_tokens[req] (padding a request's
     page list out to its kernel length) repeat the request's first page, so
@@ -2383,13 +2505,94 @@ def _expand_page_indices_kernel(
     block_ids = tl.load(row_ptr + block_idx * block_table_stride_1, mask=mask)
 
     # Compute flat index in the flattened kv_buffer
-    flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
+    page_stride = PAGE_STRIDE if PAGE_STRIDE else KERNEL_BLOCK_SIZE
+    flat_indices = block_ids * page_stride + offset_in_block * ROW_STRIDE
 
     tl.store(
         page_indices + start_idx + token_offsets,
         flat_indices,
         mask=mask,
     )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def _build_decode_indptr_kernel(
+    seq_lens,
+    query_start_loc,
+    graph_seq_lens,
+    kv_indptr,
+    qo_indptr,
+    num_reqs,
+    buf_len,
+    pad_qo_len,
+    varlen_q_rows,
+    varlen_o_rows,
+    varlen_o_rows_len,
+    PAD: tl.constexpr,
+    VARLEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ROW_W: tl.constexpr,
+    ROW_P2: tl.constexpr,
+):
+    """Single-program form of the eager full-graph decode indptr build.
+
+    Writes the per-request kernel KV lengths to graph_seq_lens[:num_reqs],
+    their zero-prefixed cumsum to kv_indptr and the query indptr to qo_indptr.
+    Both indptr tails, up to buf_len, repeat the last live entry.
+
+    With PAD the query indptr is uniform at pad_qo_len, and a request with no
+    query tokens is a dummy row whose KV length is pad_qo_len. VARLEN instead
+    extends every request's KV length by the query rows it is short of
+    pad_qo_len, and also fills the varlen row maps: varlen_q_rows[r] is the
+    packed query row of slot r = req * ROW_W + pos (0 for a padding slot), and
+    varlen_o_rows maps each packed row back to its slot, 0 past the live
+    tokens. The last varlen_o_rows entry is a dump slot nothing reads.
+    """
+    offs = tl.arange(0, BLOCK)
+    req_mask = offs < num_reqs
+    seq = tl.load(seq_lens + offs, mask=req_mask, other=0).to(tl.int32)
+    q_start = tl.load(query_start_loc + offs, mask=offs <= num_reqs, other=0)
+    q_start = q_start.to(tl.int32)
+    if PAD:
+        q_end = tl.load(query_start_loc + offs + 1, mask=req_mask, other=0)
+        q_len = q_end.to(tl.int32) - q_start
+        if VARLEN:
+            seq = seq + (pad_qo_len - q_len)
+        else:
+            seq = tl.where(q_len > 0, seq, pad_qo_len)
+        seq = tl.where(req_mask, seq, 0)
+    tl.store(graph_seq_lens + offs, seq, mask=req_mask)
+
+    # Lanes past num_reqs hold 0, so their cumsum is already the tail value.
+    kv = tl.cumsum(seq, axis=0)
+    tl.store(kv_indptr + offs + 1, kv, mask=offs + 1 < buf_len)
+    tl.store(kv_indptr + offs, tl.zeros_like(kv), mask=offs == 0)
+
+    if PAD:
+        qo = tl.minimum(offs, num_reqs) * pad_qo_len
+    else:
+        q_last = tl.load(query_start_loc + num_reqs).to(tl.int32)
+        qo = tl.where(offs <= num_reqs, q_start, q_last)
+    tl.store(qo_indptr + offs, qo, mask=offs < buf_len)
+
+    if VARLEN:
+        pos = tl.arange(0, ROW_P2)
+        slot_mask = req_mask[:, None] & (pos[None, :] < ROW_W)
+        slot = (offs[:, None] * ROW_W + pos[None, :]).to(tl.int64)
+        is_real = pos[None, :] < q_len[:, None]
+        packed = (q_start[:, None] + pos[None, :]).to(tl.int64)
+        tl.store(varlen_q_rows + slot, tl.where(is_real, packed, 0), mask=slot_mask)
+        tl.store(varlen_o_rows + packed, slot, mask=slot_mask & is_real)
+        # Disjoint from the packed rows just written, so no ordering is needed.
+        total = tl.load(query_start_loc + num_reqs).to(tl.int32)
+        zero_offs = tl.arange(0, BLOCK * ROW_P2)
+        for start in range(total, varlen_o_rows_len - 1, BLOCK * ROW_P2):
+            o = start + zero_offs
+            tl.store(
+                varlen_o_rows + o,
+                tl.zeros_like(o).to(tl.int64),
+                mask=o < varlen_o_rows_len - 1,
+            )
 
 
 class AiterMLAHelper:
@@ -2482,6 +2685,61 @@ class AiterMLAHelper:
         return -(-num_heads // m) * m
 
     @staticmethod
+    def resolve_padded_mla_num_heads(
+        num_heads: int,
+        max_qlen: int,
+        *,
+        dcp: bool,
+        non_causal: bool,
+        q_dtype: torch.dtype,
+        kv_dtype: torch.dtype,
+        v_head_dim: int,
+    ) -> int:
+        aligned = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
+        if aligned <= m:
+            return aligned
+        from aiter import get_mla_decode_shape_support
+
+        qlens = range(1, max_qlen + 1)
+        shapes = [(qlen, dcp, True) for qlen in ((1,) if dcp else qlens)]
+        if non_causal:
+            shapes += [(qlen, dcp, False) for qlen in qlens]
+        limit = min(AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS, 2 * aligned)
+        for heads in (aligned, *range((aligned // m + 1) * m, limit + 1, m)):
+            try:
+                support = [
+                    get_mla_decode_shape_support(
+                        heads,
+                        qlen,
+                        q_dtype,
+                        kv_dtype,
+                        v_head_dim=v_head_dim,
+                        return_lse=return_lse,
+                        causal=causal,
+                    )
+                    for qlen, return_lse, causal in shapes
+                ]
+            except (RuntimeError, ValueError) as e:
+                logger.info_once(
+                    "ROCM_AITER_MLA: AITER does not support %d decode heads at "
+                    "this decode shape (%s).",
+                    heads,
+                    e,
+                )
+                continue
+            if all(s.native and s.supported is True for s in support):
+                if heads != aligned:
+                    logger.info_once(
+                        "ROCM_AITER_MLA: padding %d decode heads to %d, which "
+                        "AITER runs natively.",
+                        num_heads,
+                        heads,
+                    )
+                return heads
+        return aligned
+
+    @staticmethod
     def get_fp8_prefill_num_heads(num_heads: int) -> int:
         """Head count the FP8 PS asm prefill runs at: the next multiple of 16.
 
@@ -2533,12 +2791,20 @@ class AiterMLAHelper:
         return q.repeat(1, reps, 1)[:, :m, :].contiguous()
 
     @staticmethod
-    def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, o)
+    def get_mla_unpadded_o(
+        num_heads: int, o: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, o, target_heads)
 
     @staticmethod
-    def _get_mla_unpadded_heads(num_heads: int, tensor: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    def _get_mla_unpadded_heads(
+        num_heads: int, tensor: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        m = (
+            target_heads
+            if target_heads is not None
+            else AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        )
         if num_heads == m:
             return tensor
         if m % num_heads == 0:
@@ -2548,8 +2814,10 @@ class AiterMLAHelper:
         return tensor[:, :num_heads, ...]
 
     @staticmethod
-    def get_mla_unpadded_lse(num_heads: int, lse: torch.Tensor) -> torch.Tensor:
-        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse)
+    def get_mla_unpadded_lse(
+        num_heads: int, lse: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse, target_heads)
 
     @staticmethod
     def use_gluon_decode(
@@ -2739,6 +3007,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.qk_nope_head_dim == 128
             and self.qk_rope_head_dim == 64
         )
+
+    def decode_query_padded_num_heads(
+        self, attn_metadata: AiterMLAMetadata
+    ) -> int | None:
+        """The asm decode's head count when this step pads the query with
+        get_mla_padded_q's head repeat. Gluon decode/verify and the DCP routes
+        read the unpadded query; non-divisor counts are tiled, not repeated."""
+        decode = attn_metadata.decode
+        if (
+            decode is None
+            or decode.use_gluon_decode
+            or decode.use_gluon_verify
+            or decode.dcp_route is not _DCPDecodeRoute.PLAIN
+            or self.dcp_world_size > 1
+        ):
+            return None
+        num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+        return None if num_heads % self._decode_num_heads else num_heads
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -3462,7 +3748,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 dtype=decode.attn_out_dtype,
                 device=q_nope.device,
             )
-            kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
+            kv_buffer = _flat_mla_kv_view(kv_c_and_k_pe_cache)
             mla_gluon = _get_mla_gluon()
             mla_gluon(
                 q_nope=q_nope,
@@ -3505,7 +3791,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 dtype=decode.attn_out_dtype,
                 device=q_nope.device,
             )
-            kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
+            kv_buffer = _flat_mla_kv_view(kv_c_and_k_pe_cache)
             assert attn_metadata.causal, (
                 "AITER MLA small-head verify MTP is causal-only"
             )
@@ -3604,9 +3890,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert decode.paged_kv_indices is not None
         B = q.shape[0]
 
-        assert q.shape[1] == self._decode_num_heads, (
+        assert q.shape[1] in (
+            self._decode_num_heads,
+            self.decode_query_padded_num_heads(attn_metadata),
+        ), (
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
-            f"{self._decode_num_heads}, got {q.shape[1]}"
+            f"{self._decode_num_heads} or its padded count, got {q.shape[1]}"
         )
         # cprr has kernels only at native head counts, so pad q up (e.g. 96 ->
         # 128). Heads are independent in MLA; the extras are sliced off below.
@@ -3617,9 +3906,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 self._decode_num_heads, q, target_heads=mla_num_heads
             )
         else:
-            mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
-            mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(
-                self._decode_num_heads
+            mla_num_heads = (
+                decode.padded_num_heads
+                or AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+            )
+            mla_padded_q = AiterMLAHelper.get_mla_padded_q(
+                self._decode_num_heads, q, target_heads=mla_num_heads
             )
         o = torch.empty(
             B,
@@ -3634,7 +3926,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # zero-fill so unwritten lanes cannot leak into logits.
             o.zero_()
 
-        kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
+        kv_buffer = _flat_mla_kv_view(kv_c_and_k_pe_cache).view(
+            -1, 1, 1, kv_c_and_k_pe_cache.shape[-1]
+        )
 
         # Build kwargs for mla_decode_fwd. Pass persistent metadata only
         # when it was successfully computed.
@@ -3708,7 +4002,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             if lse is not None:
                 lse = lse[:, : self._decode_num_heads, ...]
         else:
-            output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
+            output = AiterMLAHelper.get_mla_unpadded_o(
+                self._decode_num_heads, o, mla_num_heads
+            )
             if lse is not None:
-                lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
+                lse = AiterMLAHelper.get_mla_unpadded_lse(
+                    self._decode_num_heads, lse, mla_num_heads
+                )
         return output, lse
