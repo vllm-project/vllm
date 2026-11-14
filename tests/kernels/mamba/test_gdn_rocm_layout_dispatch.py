@@ -65,6 +65,7 @@ def _make_layer(gqa_interleaved_layout: bool):
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
     layer.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
+    layer.gdn_prefill_backend = "triton"
 
     layer.calls = []
     layer._forward_core_decode_aiter = lambda **kw: layer.calls.append("aiter")
@@ -342,3 +343,117 @@ def test_hip_prefill_backend_without_kernel():
     )
     with pytest.raises(RuntimeError, match="'hip'"):
         _resolve_prefill_backend(_make_backend_config("hip"), available=False)
+
+
+@torch.inference_mode()
+def test_forward_core_rocm_mixed_batch_numerics():
+    """A mixed batch into an uninitialized `core_attn_out` matches main's path.
+
+    FlyDSL skips the zero fill and AITER writes the decode rows in place; the
+    reference runs FSG + `torch.cat` into a zeroed buffer.
+    """
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        ChunkGatedDeltaRule,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateShapeCalculator,
+    )
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    if not (
+        qwen_gdn_linear_attn.GDN_AITER_TRITON_AVAILABLE
+        and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
+    ):
+        pytest.skip("needs the AITER Triton GDN and FlyDSL prefill kernels")
+    torch.manual_seed(0)
+    heads, v_heads, dim, padding = 4, 8, 128, 7
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=16,
+        hf_config_override={"linear_key_head_dim": dim},
+    )
+    config.additional_config = {"gdn_prefill_backend": "aiter_flydsl"}
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(
+            block_size=16, shapes=((16, 64),), dtypes=(torch.float16,)
+        ),
+        layer_names=[PREFIX],
+        vllm_config=config,
+        device=torch.device("cuda"),
+    )
+    batch = BatchSpec(seq_lens=[64, 64, 64, 549, 5], query_lens=[1, 1, 1, 512, 5])
+    common = create_common_attn_metadata(batch, 16, "cuda", arange_block_indices=True)
+    common.block_table_tensor.add_(1)
+    with set_current_vllm_config(config):
+        meta = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert meta.num_decodes == 3 and meta.num_prefills == 2
+
+    pool_size = int(common.block_table_tensor.max()) + 1
+    conv_shape, ssm_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        1, heads, v_heads, dim, dim, 4
+    )
+    conv_state = 0.05 * torch.randn(pool_size, *conv_shape, device="cuda").bfloat16()
+    ssm_state = 0.05 * torch.randn(pool_size, *ssm_shape, device="cuda").bfloat16()
+    qkv_dim = (2 * heads + v_heads) * dim
+    num_tokens = meta.num_actual_tokens + padding
+    qkvz = (0.1 * torch.randn(num_tokens, qkv_dim + v_heads * dim)).bfloat16().cuda()
+    ba = (0.1 * torch.randn(num_tokens, 2 * v_heads)).bfloat16().cuda()
+    layer = types.SimpleNamespace(
+        prefix=PREFIX,
+        gqa_interleaved_layout=False,
+        enable_packed_recurrent_decode=False,
+        tp_size=1,
+        num_k_heads=heads,
+        num_v_heads=v_heads,
+        head_k_dim=dim,
+        head_v_dim=dim,
+        key_dim=heads * dim,
+        value_dim=v_heads * dim,
+        activation="silu",
+        A_log=0.1 * torch.randn(v_heads, device="cuda"),
+        dt_bias=0.1 * torch.randn(v_heads, device="cuda"),
+        conv1d=types.SimpleNamespace(
+            weight=(0.1 * torch.randn(qkv_dim, 1, 4)).bfloat16().cuda(), bias=None
+        ),
+        out_proj=types.SimpleNamespace(quant_method=UnquantizedLinearMethod()),
+    )
+    with set_current_vllm_config(config):
+        layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
+    for name in (
+        "_forward_core_rocm",
+        "_forward_core",
+        "prepare_gdn_attention_core_inputs",
+        "rearrange_mixed_qkv",
+    ):
+        method = getattr(QwenGatedDeltaNetAttention, name)
+        setattr(layer, name, types.MethodType(method, layer))
+
+    results = []
+    for aiter_decode, fill in ((True, float("nan")), (False, 0.0)):
+        layer.kv_cache = (conv_state.clone(), ssm_state.clone())
+        out = torch.full((num_tokens, v_heads, dim), fill, device="cuda").bfloat16()
+        ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
+        with (
+            patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx),
+            patch.object(
+                qwen_gdn_linear_attn, "GDN_AITER_TRITON_AVAILABLE", aiter_decode
+            ),
+        ):
+            layer._forward_core_rocm(
+                qkvz=qkvz, ba=ba, z_out=torch.empty_like(out), core_attn_out=out
+            )
+        results.append((out[: meta.num_actual_tokens], layer.kv_cache[1]))
+
+    (out, state), (ref_out, ref_state) = results
+    torch.testing.assert_close(out, ref_out)
+    torch.testing.assert_close(state, ref_state)
