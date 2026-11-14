@@ -193,6 +193,10 @@ def _make_packed_mla_view_worker(
     config.cache_config.kv_cache_layout = "BLHNC"
     backends = []
     for name in backend_names:
+        # A backend class is used as is.
+        if isinstance(name, type):
+            backends.append(name)
+            continue
         backend = MagicMock()
         backend.get_supported_kernel_block_sizes.return_value = [block_size]
         backend.get_name.return_value = name
@@ -289,6 +293,35 @@ def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
         {"L0": (0, 128)}, 128, backend_names=remote_backends
     )
     assert (producer.compat_hash == consumer.compat_hash) is compatible
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
+)
+def test_compatibility_hash_ignores_indexer_backends(worker_cls):
+    """GLM-5.x builds an indexer on some layers only, so a PP stage starting
+    on a layer without one lists the sparse MLA backend first, or holds no
+    indexer at all, while its PP=1 peer starts with the indexer. All must
+    hash alike."""
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+
+    class Indexer(DeepseekV32IndexerBackend):
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+            return [16]
+
+    hashes = {
+        _make_packed_mla_view_worker(
+            {"L0": (0, 128)}, 128, backend_names=backends, worker_cls=worker_cls
+        )[0].compat_hash
+        for backends in (
+            (Indexer, "FLASHMLA_SPARSE"),
+            ("FLASHMLA_SPARSE", Indexer),
+            ("FLASHMLA_SPARSE",),
+        )
+    }
+    assert len(hashes) == 1
 
 
 @pytest.mark.cpu_test
