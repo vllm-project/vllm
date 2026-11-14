@@ -1,0 +1,38 @@
+# int8_per_token_head KV cache benchmark configuration
+# Decode, speculative verify and prefill on the per-token-head cache, whose
+# pages pack an fp32 scale after each head's K and V data. Head counts are
+# per GPU (after TP sharding).
+model:
+  num_layers: 8
+  num_q_heads: 32 # Base value, overridden by sweep
+  num_kv_heads: 8 # Base value, overridden by sweep
+  head_dim: 128
+  block_size: 16
+
+model_parameter_sweep:
+  values:
+    - { num_q_heads: 32, num_kv_heads: 8, head_dim: 128 } # Llama 3 8B TP1
+    - { num_q_heads: 12, num_kv_heads: 2, head_dim: 256 } # head_dim 256, GQA 6:1
+  label_format: "{backend}_q{num_q_heads}kv{num_kv_heads}d{head_dim}"
+
+batch_specs:
+  # Decode
+  - "q1s8k"
+  - "q1s32k"
+  - "q1s128k"
+  - "2q1s128k"
+  # Speculative verify (4 tokens per request)
+  - "q4s32k"
+  - "q4s128k"
+  - "2q4s128k"
+  # Prefill and chunked prefill
+  - "q8k"
+  - "q8ks32k"
+
+kv_cache_dtype: "int8_per_token_head"
+
+backends:
+  - TRITON_ATTN
+
+device: "cuda:0"
+profile_memory: false

@@ -396,6 +396,35 @@ def _create_kv_cache(
     )
 
 
+def _fill_kv_cache(
+    config: BenchmarkConfig,
+    impls: list,
+    layer,
+    cache_list: list,
+    kv_lens: list[int],
+    max_blocks_per_request: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> None:
+    """Write random K/V for every cached token through the backend's own
+    cache-update path, as the attention layer does before forward()."""
+    v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
+    request_slots = max_blocks_per_request * config.block_size
+    for i, kv_len in enumerate(kv_lens):
+        # Request i owns blocks [i * max_blocks_per_request, ...) of the table.
+        slot_mapping = torch.arange(kv_len, device=device) + i * request_slots
+        key = torch.randn(
+            kv_len, config.num_kv_heads, config.head_dim, device=device, dtype=dtype
+        )
+        value = torch.randn(
+            kv_len, config.num_kv_heads, v_dim, device=device, dtype=dtype
+        )
+        for impl, kv_cache in zip(impls, cache_list):
+            impl.do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+    # The timed calls run on a side stream that does not wait for this one.
+    torch.accelerator.synchronize()
+
+
 # ============================================================================
 # Benchmark Execution
 # ============================================================================
@@ -403,7 +432,7 @@ def _create_kv_cache(
 
 def _run_single_benchmark(
     config: BenchmarkConfig,
-    impl,
+    impls: list,
     layer,
     q_list: list,
     k_list: list,
@@ -426,7 +455,7 @@ def _run_single_benchmark(
 
     def benchmark_fn():
         for i in range(config.num_layers):
-            impl.forward(
+            impls[i].forward(
                 layer,
                 q_list[i],
                 k_list[i],
@@ -483,6 +512,13 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     torch.accelerator.set_device_index(device)
 
     backend_cfg = _get_backend_config(config.backend)
+    kv_cache_dtype = config.kv_cache_dtype
+    if get_kv_quant_mode(kv_cache_dtype).is_per_token_head and (
+        not backend_cfg["backend_class"].supports_kv_cache_dtype(kv_cache_dtype)
+    ):
+        raise ValueError(
+            f"{config.backend} does not support --kv-cache-dtype {kv_cache_dtype}"
+        )
 
     requests = parse_batch_spec(config.batch_spec)
 
@@ -511,6 +547,12 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
+            # One impl per layer, as in a model: an impl may bind state to its
+            # layer's cache (TRITON_ATTN's per-token-head scale views).
+            impls = [impl] + [
+                _create_backend_impl(backend_cfg, config, device, dtype)[1]
+                for _ in range(config.num_layers - 1)
+            ]
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
             supported = get_supported_kv_cache_layouts([backend_class])
@@ -548,10 +590,21 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             cache_list = _create_kv_cache(
                 config, max_num_blocks, backend_class, device, dtype, layout
             )
+            if not backend_class.forward_includes_kv_cache_update:
+                _fill_kv_cache(
+                    config,
+                    impls,
+                    layer,
+                    cache_list,
+                    kv_lens,
+                    max_blocks_per_request,
+                    device,
+                    dtype,
+                )
 
             timing_stats, mem_stats = _run_single_benchmark(
                 config,
-                impl,
+                impls,
                 layer,
                 q_list,
                 k_list,
