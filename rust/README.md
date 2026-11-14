@@ -208,7 +208,8 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
 ```
 
 Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
-`Render.RenderChat` renders a chat request into prompt token IDs plus the
+`Render.RenderChat` renders a typed chat request and `Render.Render` renders
+a raw JSON request (such as `Api::Chat`) into prompt token IDs plus the
 settings rendering decides (structured-output constraint, reasoning gate,
 preprocessed media), which the client copies into its `vllm.GenerateRequest`
 for `Inference.Generate`. See [`render.proto`](proto/render.proto).

@@ -3614,6 +3614,311 @@ async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
 }
 
+async fn render_raw(
+    service: &RenderServiceImpl<RenderState>,
+    request: pb::RenderRequest,
+) -> Result<pb::RenderResponse, tonic::Status> {
+    service
+        .render(tonic::Request::new(request))
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_rendered_prompt_token_ids_and_reasoning_gate() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+    assert_eq!(rendered.structured_output, None);
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(
+        gate.chat_template_kwargs,
+        json_to_proto_struct(&serde_json::json!({"enable_thinking": true}))
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_parity_with_typed_render_chat() {
+    let service = render_service();
+
+    let typed_rendered = render_chat(&service, weather_chat_request()).await;
+
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let raw_request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let raw_rendered = render_raw(&service, raw_request).await.expect("render raw chat");
+
+    assert_eq!(
+        raw_rendered.prompt_token_ids,
+        typed_rendered.prompt_token_ids
+    );
+    assert_eq!(
+        raw_rendered.engine_reasoning_gate,
+        typed_rendered.engine_reasoning_gate
+    );
+    assert_eq!(
+        raw_rendered.structured_output,
+        typed_rendered.structured_output
+    );
+    assert_eq!(raw_rendered.media, typed_rendered.media);
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_malformed_json() {
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: b"{ invalid json ".to_vec(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("malformed json should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("failed to parse chat completion request"));
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unsupported_api() {
+    let service = render_service();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    }))
+    .unwrap();
+
+    let test_cases = [
+        (pb::Api::Unspecified as i32, "api is required"),
+        (
+            pb::Api::Completions as i32,
+            "api `API_COMPLETIONS` is not supported",
+        ),
+        (
+            pb::Api::AnthropicMessages as i32,
+            "api `API_ANTHROPIC_MESSAGES` is not supported",
+        ),
+        (
+            pb::Api::Responses as i32,
+            "api `API_RESPONSES` is not supported",
+        ),
+        (999, "unknown api value 999"),
+    ];
+
+    for (api, expected_msg) in test_cases {
+        let request = pb::RenderRequest {
+            api,
+            body: body.clone(),
+            ..Default::default()
+        };
+        let status = render_raw(&service, request)
+            .await
+            .expect_err(&format!("api {api} should fail"));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "case: {api}");
+        assert!(
+            status.message().contains(expected_msg),
+            "case: {api}, got: {}",
+            status.message()
+        );
+    }
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_unknown_model() {
+    let body = serde_json::json!({
+        "model": "non-existent-model",
+        "messages": [{"role": "user", "content": "Hi"}]
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("unknown model should fail");
+
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert!(status.message().contains("The model `non-existent-model` does not exist."));
+}
+
+#[tokio::test]
+async fn render_raw_chat_enforces_validation_parity() {
+    let body = serde_json::json!({
+        "model": "model",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": false,
+        "stream_options": {"include_usage": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("stream_options without stream should fail validation");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stream_options"));
+}
+
+#[tokio::test]
+async fn render_raw_chat_accepts_lora_adapter_model() {
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..render_state()
+    }));
+    let body = serde_json::json!({
+        "model": "adapter-a",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&service, request).await.expect("render raw chat lora");
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+}
+
+#[tokio::test]
+async fn render_raw_chat_returns_parser_grammar_for_required_tool_choice() {
+    let body = serde_json::json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }],
+        "tool_choice": "required",
+        "chat_template_kwargs": {"enable_thinking": true}
+    });
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body).unwrap(),
+        ..Default::default()
+    };
+    let rendered = render_raw(&render_service(), request).await.expect("render raw chat tools");
+
+    let Some(pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::StructuralTag(structural_tag)),
+    }) = rendered.structured_output
+    else {
+        panic!(
+            "expected a structural tag: {:?}",
+            rendered.structured_output
+        );
+    };
+    assert!(structural_tag.contains("get_weather"), "{structural_tag}");
+}
+
+#[tokio::test]
+async fn render_raw_chat_supports_omit_media_kwargs() {
+    let service = multimodal_render_service();
+    let body_json = serde_json::json!({
+        "model": "render-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}},
+                {"type": "text", "text": "Describe"}
+            ]
+        }]
+    });
+
+    // 1. Omit via pb::RenderRequest::omit_media_kwargs = true
+    let req1 = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body_json).unwrap(),
+        omit_media_kwargs: true,
+    };
+    let rendered1 = render_raw(&service, req1).await.expect("render req1");
+    let Some(pb::media_item::Source::Features(features1)) = &rendered1.media[0].source else {
+        panic!("expected preprocessed features");
+    };
+    assert_eq!(features1.kwargs, None);
+    assert!(features1.mm_hash.is_some());
+
+    // 2. Omit via JSON body "mm_payload": "none"
+    let mut body2 = body_json.clone();
+    body2["mm_payload"] = serde_json::json!("none");
+    let req2 = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body2).unwrap(),
+        omit_media_kwargs: false,
+    };
+    let rendered2 = render_raw(&service, req2).await.expect("render req2");
+    let Some(pb::media_item::Source::Features(features2)) = &rendered2.media[0].source else {
+        panic!("expected preprocessed features");
+    };
+    assert_eq!(features2.kwargs, None);
+
+    // 3. Omit via deprecated JSON body "return_mm_kwargs": false
+    let mut body3 = body_json.clone();
+    body3["return_mm_kwargs"] = serde_json::json!(false);
+    let req3 = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: serde_json::to_vec(&body3).unwrap(),
+        omit_media_kwargs: false,
+    };
+    let rendered3 = render_raw(&service, req3).await.expect("render req3");
+    let Some(pb::media_item::Source::Features(features3)) = &rendered3.media[0].source else {
+        panic!("expected preprocessed features");
+    };
+    assert_eq!(features3.kwargs, None);
+}
+
+#[tokio::test]
+async fn render_raw_chat_rejects_payload_exceeding_body_limit() {
+    let large_body = vec![b'a'; crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1];
+    let request = pb::RenderRequest {
+        api: pb::Api::Chat as i32,
+        body: large_body,
+        ..Default::default()
+    };
+    let status = render_raw(&render_service(), request)
+        .await
+        .expect_err("oversized payload should fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("exceeds limit"));
+}
+
 /// Shutdown ends open health watches, including one on the overall server
 /// status, so the render gRPC server's drain finishes.
 #[tokio::test]
