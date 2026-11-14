@@ -108,6 +108,7 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/entrypoints/serve/
   - vllm/v1/engine/
+  - vllm/v1/structured_output/
   - tests/utils.py
   - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
   - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
@@ -160,6 +161,7 @@ steps:
       - vllm/entrypoints/openai/
       - vllm/entrypoints/serve/
       - vllm/v1/engine/
+      - vllm/v1/structured_output/
       - tests/utils.py
       - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
       - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py

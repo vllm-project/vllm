@@ -466,6 +466,7 @@ class TestValidateStructuredOutputs:
                 model_config=SimpleNamespace(get_vocab_size=lambda: 128)
             )
             manager.tokenizer = object()
+            manager.enable_in_reasoning = True
             manager._use_async_grammar_compilation = False
 
             def make_request(backend):

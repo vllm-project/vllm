@@ -122,7 +122,7 @@ class StructuredOutputManager:
             return None
 
         if structured_req.reasoner is None:
-            # Lazily build the request-local parser so the structured-output
+            # Cache the request-local parser so the structured-output
             # gate observes the same template kwargs used by the frontend.
             parser_kwargs = structured_req.reasoning_parser_kwargs or {}
             structured_req.reasoner = self.reasoner_cls(
@@ -132,7 +132,21 @@ class StructuredOutputManager:
         return structured_req.reasoner
 
     def grammar_init(self, request: "Request") -> None:
-        if request.structured_output_request is None:
+        structured_req = request.structured_output_request
+        if structured_req is None:
+            return
+
+        try:
+            if (
+                not self.enable_in_reasoning
+                and structured_req.reasoning_ended is not True
+            ):
+                self._get_reasoner(request)
+        except Exception as exc:
+            # Fail through the grammar error path before the request is scheduled.
+            failed_grammar: Future[StructuredOutputGrammar] = Future()
+            failed_grammar.set_exception(exc)
+            structured_req.grammar = failed_grammar
             return
 
         sampling_params = request.sampling_params
@@ -202,7 +216,7 @@ class StructuredOutputManager:
             except Exception as e:
                 grammar = Future()
                 grammar.set_exception(e)
-        request.structured_output_request.grammar = grammar
+        structured_req.grammar = grammar
 
     def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
         struct_request = request.structured_output_request

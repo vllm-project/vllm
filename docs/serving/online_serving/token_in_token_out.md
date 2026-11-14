@@ -25,6 +25,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | --- | --- |
 | `token_ids` | Required `list[int]`: the already-templated prompt. Non-empty, no negative IDs. |
 | `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. |
+| `reasoning_parser_kwargs` | Optional parser settings carried from render, such as `{"chat_template_kwargs": {"reasoning_effort": "high"}}`. Values must be supported by the configured reasoning parser. |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
@@ -126,6 +127,12 @@ The server returns a 400 for:
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
+
+For structured-output requests, invalid `reasoning_parser_kwargs` values that
+prevent the reasoning parser from initializing fail only that request. A
+non-streaming request returns 400; a streaming request receives an error event
+with code 400 followed by `data: [DONE]`. The engine continues serving other
+requests.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
