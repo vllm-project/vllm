@@ -449,23 +449,20 @@ class NixlBaseConnectorWorker:
     def _compat_backend_name(self) -> str:
         """Attention backend name folded into the compatibility hash.
 
-        A PP stage may hold no indexer layer (GLM-5.x builds an indexer on some
-        layers only), so indexer backends do not count.
+        Indexer backends do not count: GLM-5.x builds an indexer on some layers
+        only, so a PP stage may start on, or hold only, layers without one.
         """
         from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 
         backends = [
             backend
             for backend in self.attn_backends
-            if not (
-                isinstance(backend, type)
-                and issubclass(backend, DeepseekV32IndexerBackend)
-            )
-        ] or self.attn_backends
+            if not issubclass(backend, DeepseekV32IndexerBackend)
+        ]
         if self._supports_pp_hma and self._has_packed_cache:
             # PP can reorder the same backends across stages of a packed model.
             return ",".join(sorted({backend.get_name() for backend in backends}))
-        return backends[0].get_name() if backends else self.backend_name
+        return backends[0].get_name()
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers

@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
+from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -764,6 +765,26 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def make_attn_backend(
+    name: str, kernel_block_size: int | None = None
+) -> type[AttentionBackend]:
+    """Attention backend that supports only `kernel_block_size`, or any kernel
+    block size when it is None."""
+
+    class Backend(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return name
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ) -> list[int | MultipleOf]:
+            return [kernel_block_size or MultipleOf(1)]
+
+    return Backend
 
 
 def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
