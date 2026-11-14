@@ -397,10 +397,21 @@ def _concat_logprob_stashes(
     def pad(t: torch.Tensor, value: float) -> torch.Tensor:
         return F.pad(t, (0, width - t.shape[1]), value=value)
 
+    def pad_ranks(ranks: torch.Tensor) -> torch.Tensor:
+        # Columns past the ranked ones are topk positions.
+        if ranks.dim() == 1:
+            ranks = ranks.unsqueeze(1)
+        positions = torch.arange(ranks.shape[1], width, device=ranks.device)
+        return torch.cat((ranks, positions.expand(ranks.shape[0], -1)), dim=1)
+
+    ranks = [p.selected_token_ranks for p in parts]
+    if any(r.dim() == 2 for r in ranks):
+        ranks = [pad_ranks(r) for r in ranks]
+
     return LogprobsTensors(
         logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
         logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
-        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        selected_token_ranks=torch.cat(ranks),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
 
@@ -420,7 +431,11 @@ def _masked_stash_write(
     pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
     ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
     lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
-    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
+    ranks = new.selected_token_ranks.to(torch.int64)
+    if ranks.dim() == 2:
+        # The stash holds the sampled token's rank, as stash_converged_logprobs.
+        ranks = ranks[:, 0]
+    ranks = ranks.view(n, -1)
     W = ranks.shape[1]
     for buf, rows in (
         (stash.logprob_token_ids, ids.view(n, W, -1)),
