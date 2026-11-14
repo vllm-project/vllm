@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import ctypes
 import itertools
 import json
 import logging
@@ -55,6 +56,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     PoolKey,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.mamba_snapshot import (  # noqa: E501
+    MambaSnapshotConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.metrics import (
     MooncakeStoreConnectorStats,
@@ -1168,6 +1172,411 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
         thread.coord, req, [db.store_layout.block_size for db in thread.token_databases]
     )
     return req
+
+
+@pytest.fixture
+def snapshot_sender():
+    def make(
+        config,
+        *,
+        shards=1,
+        eagle=False,
+        lookahead=0,
+        partial=True,
+        put_step=1,
+        tp_rank=0,
+        tp_size=1,
+        pp_rank=0,
+        pp_size=1,
+        dcp_size=1,
+        stored=None,
+    ):
+        from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+        conv_shape = (24, 3) if get_conv_state_layout() == "DS" else (3, 24)
+        state_layer = mamba_layer(
+            block_size=16,
+            shapes=(conv_shape, (4, 2, 2)),
+            dtypes=(torch.uint8, torch.uint8),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            mamba_cache_mode="align",
+        )
+        state = state_layer.spec
+        full = AttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8
+        )
+        coord = mooncake_store_worker.MooncakeStoreCoordinator(
+            [make_kv_cache_group(["full"], full)]
+            + [make_kv_cache_group([f"mamba{g}"], state_layer) for g in (1, 2)],
+            scheduler_block_size=16,
+            hash_block_size=4,
+            use_eagle=eagle,
+            num_hash_lookahead_tokens=lookahead,
+            enable_partial_hash_hits=partial,
+        )
+        databases, buffers = [], []
+        for group in range(3):
+            metadata = KeyMetadata(
+                "snapshot-test", tp_rank, 0, tp_rank % dcp_size, pp_rank, group_id=group
+            )
+            if group == 0:
+                tensor = torch.zeros((16, 1, 16, 2), dtype=torch.uint8)
+                layout = HeadMajorStoreLayout(
+                    metadata, 16, 4, 1, 1, 0, [full], store_chunk_size=4
+                )
+                layout.register_kv_caches([tensor], 16)
+                db = ChunkedTokenDatabase(metadata, 4, 4, layout)
+            else:
+                tensor = torch.empty(
+                    (16, 1, 1, state.state_content_size_bytes), dtype=torch.uint8
+                )
+                for block in range(16):
+                    tensor[block].fill_(group * 32 + block)
+                layout = (
+                    RankLocalStoreLayout(metadata, 16, 4)
+                    if dcp_size > 1
+                    else MambaStoreLayout(
+                        metadata, 16, 4, tp_size, tp_size * shards, tp_rank, [state]
+                    )
+                )
+                layout.register_kv_caches([tensor], 16)
+                db = ChunkedTokenDatabase(metadata, 16, 4, layout)
+            databases.append(db)
+            buffers.append(tensor)
+        stored = {} if stored is None else stored
+        store = MagicMock()
+        store.batch_is_exist.side_effect = lambda keys: [int(k in stored) for k in keys]
+
+        def put(keys, addrs, sizes, replicate_config):
+            for key, addresses, lengths in zip(keys, addrs, sizes, strict=True):
+                stored[key] = b"".join(
+                    ctypes.string_at(addr, size)
+                    for addr, size in zip(addresses, lengths, strict=True)
+                )
+            return [sum(lengths) for lengths in sizes]
+
+        store.batch_put_from_multi_buffers.side_effect = put
+        sender = mooncake_store_worker.KVCacheStoreSendingThread(
+            store,
+            coord,
+            databases,
+            16,
+            tp_rank,
+            [put_step] * 3,
+            "kv_producer",
+            threading.Event(),
+            mamba_snapshot_config=config,
+            mamba_snapshot_key_prefixes=[
+                db.store_layout.lookup_key_prefixes(
+                    [
+                        (rank, 0, rank % dcp_size, stage)
+                        for rank in range(tp_size)
+                        for stage in range(pp_size)
+                    ]
+                )
+                for db in databases
+            ],
+        )
+        return sender, store, stored, buffers
+
+    return make
+
+
+def _snapshot_req(entries, *, prompt=257, job=None):
+    return ReqMeta(
+        req_id="snapshot",
+        token_len_chunk=0,
+        block_ids=([], [], []),
+        block_hashes=[BlockHash(i.to_bytes(4, "little")) for i in range(1, 65)],
+        can_save=True,
+        num_prompt_tokens=prompt,
+        store_job_id=job,
+        boundary_puts=[BoundaryPut(*entry) for entry in entries],
+    )
+
+
+def _snapshot_keys(sender, req, group, positions):
+    layout = sender.token_databases[group].store_layout
+    return {
+        layout.key_for(shard, req.block_hashes[position // 4 - 1])
+        for position in positions
+        for shard in layout.local_shard_ids
+    }
+
+
+@pytest.mark.parametrize(
+    "interval, positions", [(1, list(range(16, 129, 16))), (4, [64, 128])]
+)
+@pytest.mark.parametrize("shards", [1, 2])
+def test_mamba_snapshot_interval_preserves_attention_and_complete_states(
+    snapshot_sender, interval, positions, shards
+):
+    sender, store, stored, buffers = snapshot_sender(
+        MambaSnapshotConfig(interval), shards=shards
+    )
+    req = _snapshot_req([(g, n // 16, n) for n in range(16, 129, 16) for g in (0, 1)])
+    _run_store_req(sender, req)
+    expected = _snapshot_keys(sender, req, 0, range(4, 129, 4))
+    expected |= _snapshot_keys(sender, req, 1, positions)
+    assert set(stored) == expected
+    assert len(store.batch_put_from_multi_buffers.call_args.args[0]) == len(expected)
+    for position in positions:
+        values = [stored[key] for key in _snapshot_keys(sender, req, 1, [position])]
+        assert sum(map(len, values)) == buffers[1].shape[-1]
+        assert all(set(value) == {32 + position // 16} for value in values)
+
+
+def test_mamba_snapshot_interval_crossings_and_groups_are_independent(snapshot_sender):
+    sender, _, stored, buffers = snapshot_sender(MambaSnapshotConfig(2))
+    req = _snapshot_req([(1, 1, 16), (1, 2, 48), (1, 3, 52), (1, 4, 80), (2, 5, 48)])
+    _run_store_req(sender, req)
+    assert set(stored) == (
+        _snapshot_keys(sender, req, 1, [48, 80]) | _snapshot_keys(sender, req, 2, [48])
+    )
+
+
+def test_mamba_snapshot_interval_unowned_state_does_not_advance(snapshot_sender):
+    sender, _, stored, buffers = snapshot_sender(MambaSnapshotConfig(2), put_step=2)
+    req = _snapshot_req([(1, 2, 48), (1, 3, 52)])
+    _run_store_req(sender, req)
+    assert set(stored) == _snapshot_keys(sender, req, 1, [52])
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize(
+    "eagle,lookahead,partial,prompt,boundary",
+    [
+        (False, 0, True, 57, 56),
+        (True, 0, True, 56, 52),
+        (True, 8, True, 56, 48),
+        (False, 0, False, 53, 48),
+    ],
+)
+def test_mamba_snapshot_interval_keeps_safe_prompt_checkpoint(
+    snapshot_sender, keep, eagle, lookahead, partial, prompt, boundary
+):
+    sender, _, stored, buffers = snapshot_sender(
+        MambaSnapshotConfig(8, keep), eagle=eagle, lookahead=lookahead, partial=partial
+    )
+    req = _snapshot_req([(1, 3, boundary)], prompt=prompt)
+    _run_store_req(sender, req)
+    assert set(stored) == (
+        _snapshot_keys(sender, req, 1, [boundary]) if keep else set()
+    )
+
+
+@pytest.mark.parametrize("failure", ["exists", "put", "partial", "pressure"])
+def test_mamba_snapshot_interval_failed_shards_remain_retryable(
+    snapshot_sender, failure
+):
+    sender, store, stored, buffers = snapshot_sender(MambaSnapshotConfig(4), shards=2)
+    write = store.batch_put_from_multi_buffers.side_effect
+    exists = store.batch_is_exist.side_effect
+    if failure == "exists":
+        store.batch_is_exist.side_effect = RuntimeError("exists failed")
+    elif failure == "put":
+        store.batch_put_from_multi_buffers.side_effect = RuntimeError("put failed")
+    else:
+
+        def partial(keys, addrs, sizes, config):
+            code = -200 if failure == "pressure" else -1
+            return write(keys[:-1], addrs[:-1], sizes[:-1], config) + [code]
+
+        store.batch_put_from_multi_buffers.side_effect = partial
+    req = _snapshot_req([(1, 5, 80)])
+    _run_store_req(sender, req)
+    store.batch_is_exist.side_effect = exists
+    store.batch_put_from_multi_buffers.side_effect = write
+    if failure == "pressure":
+        recovery = _snapshot_req([(1, 5, 80)])
+        recovery.req_id = "pressure-recovery"
+        _run_store_req(sender, recovery)
+    _run_store_req(sender, _snapshot_req([(1, 5, 80)]))
+    assert set(stored) == _snapshot_keys(sender, req, 1, [80])
+    calls = store.batch_put_from_multi_buffers.call_count
+    _run_store_req(sender, _snapshot_req([(1, 6, 84)]))
+    assert store.batch_put_from_multi_buffers.call_count == calls
+    assert set(stored) == _snapshot_keys(sender, req, 1, [80])
+
+
+def test_mamba_snapshot_interval_existing_keys_advance_without_put(snapshot_sender):
+    sender, store, stored, buffers = snapshot_sender(MambaSnapshotConfig(4), shards=2)
+    req = _snapshot_req([(1, 5, 80)])
+    stored.update(
+        dict.fromkeys(_snapshot_keys(sender, req, 1, [80]), b"already durable")
+    )
+    _run_store_req(sender, req)
+    _run_store_req(sender, _snapshot_req([(1, 6, 84)]))
+    assert set(stored) == _snapshot_keys(sender, req, 1, [80])
+    store.batch_put_from_multi_buffers.assert_not_called()
+    assert store.batch_is_exist.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "tp_size,pp_size,shards,dcp_size",
+    [(2, 1, 1, 1), (1, 2, 1, 1), (2, 2, 2, 1), (2, 1, 1, 2)],
+)
+@pytest.mark.parametrize("failure", ["exists", "put", "partial", "confirm"])
+def test_mamba_snapshot_interval_rank_failure_recovers_at_next_state(
+    snapshot_sender, tp_size, pp_size, shards, dcp_size, failure
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(
+            MambaSnapshotConfig(4),
+            tp_rank=rank,
+            tp_size=tp_size,
+            pp_rank=stage,
+            pp_size=pp_size,
+            dcp_size=dcp_size,
+            shards=shards,
+            stored=stored,
+        )
+        for stage in range(pp_size)
+        for rank in range(tp_size)
+    ]
+    _, failing_store, _, _ = ranks[-1]
+    exists = failing_store.batch_is_exist.side_effect
+    put = failing_store.batch_put_from_multi_buffers.side_effect
+    if failure == "exists":
+        failing_store.batch_is_exist.side_effect = RuntimeError(
+            "one rank exists failed"
+        )
+    elif failure == "partial":
+
+        def partial(keys, addrs, sizes, config):
+            return put(keys[:-1], addrs[:-1], sizes[:-1], config) + [-1]
+
+        failing_store.batch_put_from_multi_buffers.side_effect = partial
+    else:
+        failing_store.batch_put_from_multi_buffers.side_effect = RuntimeError(
+            "one rank put failed"
+        )
+
+    def send(position):
+        job = next(_TEST_SAVE_SEQ)
+        for sender, _, _, _ in ranks:
+            _run_store_req(
+                sender,
+                _snapshot_req(
+                    [(group, position // 16, position) for group in (1, 2)], job=job
+                ),
+            )
+
+    send(64)
+    failing_store.batch_is_exist.side_effect = exists
+    failing_store.batch_put_from_multi_buffers.side_effect = put
+    if failure == "confirm":
+        first_store = ranks[0][1]
+        first_exists = first_store.batch_is_exist.side_effect
+
+        def failed_confirmation(keys):
+            first_store.batch_is_exist.side_effect = first_exists
+            raise RuntimeError("peer confirmation failed")
+
+        first_store.batch_is_exist.side_effect = failed_confirmation
+    send(80)
+    for sender, _, _, buffers in ranks:
+        for group in (1, 2):
+            keys = _snapshot_keys(sender, _snapshot_req([]), group, [80])
+            assert sum(len(stored[key]) for key in keys) == buffers[group].shape[-1]
+            for key in keys:
+                assert set(stored[key]) == {group * 32 + 5}
+    put_counts = [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ]
+    send(96)
+    confirmed_counts = [store.batch_is_exist.call_count for _, store, _, _ in ranks]
+    send(112)
+    assert [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ] == put_counts
+    assert [
+        store.batch_is_exist.call_count for _, store, _, _ in ranks
+    ] == confirmed_counts
+
+
+def test_mamba_snapshot_interval_lagging_rank_confirms_earlier_candidate(
+    snapshot_sender,
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(MambaSnapshotConfig(4), tp_rank=rank, tp_size=2, stored=stored)
+        for rank in range(2)
+    ]
+
+    def send(sender, position):
+        _run_store_req(
+            sender,
+            _snapshot_req([(group, position // 16, position) for group in (1, 2)]),
+        )
+
+    for sender, _, _, _ in ranks:
+        send(sender, 64)
+        send(sender, 80)
+    counts = [store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks]
+    for sender, store, _, _buffers in ranks:
+        for group in (1, 2):
+            assert (
+                _snapshot_keys(sender, _snapshot_req([]), group, [64]) <= stored.keys()
+            )
+        send(sender, 96)
+        calls = store.batch_is_exist.call_count
+        send(sender, 112)
+        assert store.batch_is_exist.call_count == calls
+    assert [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ] == counts
+
+
+def test_mamba_snapshot_interval_stale_confirmation_cannot_mark_reused_id(
+    snapshot_sender,
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(MambaSnapshotConfig(4), tp_rank=rank, tp_size=2, stored=stored)
+        for rank in range(2)
+    ]
+    for sender, _, _, _ in ranks:
+        _run_store_req(sender, _snapshot_req([(group, 4, 64) for group in (1, 2)]))
+    sender, store, _, buffers = ranks[0]
+    exists = store.batch_is_exist.side_effect
+    newer = _snapshot_req(
+        [(group, 6, 96) for group in (1, 2)], job=next(_TEST_SAVE_SEQ)
+    )
+
+    def retire_while_confirming(keys):
+        sender.delete_finished_stored_request("snapshot")
+        sender.add_request(newer)
+        return exists(keys)
+
+    store.batch_is_exist.side_effect = retire_while_confirming
+    _run_store_req(sender, _snapshot_req([(group, 5, 80) for group in (1, 2)]))
+    store.batch_is_exist.side_effect = exists
+    sender._handle_request(sender.request_queue.get())
+    for group in (1, 2):
+        assert _snapshot_keys(sender, newer, group, [96]) <= stored.keys()
+
+
+def test_mamba_snapshot_interval_old_job_cannot_mark_reused_id(snapshot_sender):
+    sender, store, stored, buffers = snapshot_sender(MambaSnapshotConfig(4))
+    write = store.batch_put_from_multi_buffers.side_effect
+    newer = _snapshot_req([(1, 6, 84)], job=next(_TEST_SAVE_SEQ))
+
+    def retire_while_putting(*args):
+        sender.delete_finished_stored_request("snapshot")
+        sender.add_request(newer)
+        return write(*args)
+
+    store.batch_put_from_multi_buffers.side_effect = retire_while_putting
+    old = _snapshot_req([(1, 5, 80)])
+    _run_store_req(sender, old)
+    store.batch_put_from_multi_buffers.side_effect = write
+    sender._handle_request(sender.request_queue.get())
+    assert set(stored) == _snapshot_keys(sender, old, 1, [80, 84])
+    sender.delete_finished_stored_request("snapshot")
+    _run_store_req(sender, _snapshot_req([(1, 7, 88)]))
+    assert set(stored) == _snapshot_keys(sender, old, 1, [80, 84, 88])
 
 
 def _make_partial_tail_send_thread(
@@ -4594,6 +5003,7 @@ def _make_bare_worker(
     """
     worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
     worker.cache_config = MagicMock()
+    worker.mamba_snapshot_config = MambaSnapshotConfig()
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
     worker.store = MagicMock()
     worker.store.register_buffer.return_value = 0
