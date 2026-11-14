@@ -159,6 +159,11 @@ When batch invariance is enabled, vLLM:
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
+For `Qwen/Qwen2.5-1.5B-Instruct` in bf16 with tensor parallel size 1, the
+Blackwell matmul table covers its attention and MLP projections. These
+configs were benchmarked on B200; performance on other SM10 devices
+and model settings may differ.
+
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
 
