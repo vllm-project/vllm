@@ -49,11 +49,11 @@ static const bool kRegistered = register_${_KERNEL}<
 endfunction()
 
 # The object libraries, in OUT, of the GPU families with an arch in
-# VLLM_GPU_ARCHES: Gfx1151 (gfx1151), Gfx1150 (gfx1150, gfx1152, gfx1153) and
-# Gfx1201 (gfx1200, gfx1201).
+# VLLM_GPU_ARCHES: Gfx1151 (gfx1151; RDNA3: gfx1100), Gfx1150 (gfx1150,
+# gfx1152, gfx1153) and Gfx1201 (gfx1200, gfx1201).
 function(rdna_attn_targets OUT)
   set(_TARGETS "")
-  foreach(_FAMILY_ARCHES "Gfx1151 gfx1151" "Gfx1150 gfx1150 gfx1152 gfx1153"
+  foreach(_FAMILY_ARCHES "Gfx1151 gfx1151 gfx1100" "Gfx1150 gfx1150 gfx1152 gfx1153"
                          "Gfx1201 gfx1200 gfx1201")
     separate_arguments(_FAMILY_ARCHES)
     list(POP_FRONT _FAMILY_ARCHES _FAMILY)

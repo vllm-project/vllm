@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention for gfx1150..gfx1153, and RDNA4 (opt-in there).
+"""Attention for gfx1150..gfx1153, and gfx1100 and RDNA4 (opt-in there).
 
 Decodes of up to MAX_M query tokens per sequence run
 csrc/rocm/rdna_decode_attn.cu, other batches
@@ -58,12 +58,12 @@ logger = init_logger(__name__)
 
 
 def _on_supported_gpu() -> bool:
-    """gfx1150..gfx1153, or RDNA4 (opt-in only there)."""
+    """gfx1150..gfx1153, or gfx1100 and RDNA4 (opt-in only there)."""
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx115x, on_rdna4
+    from vllm.platforms.rocm import on_gfx115x, on_gfx1100, on_rdna4
 
-    return on_gfx115x() or on_rdna4()
+    return on_gfx115x() or on_gfx1100() or on_rdna4()
 
 
 # A kernel and its scratch buffers.

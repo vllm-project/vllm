@@ -102,6 +102,9 @@ Table device_table() {
 #ifdef VLLM_RDNA_ATTN_GFX1151
   if (is("gfx1151")) return table_of(Arch::kGfx1151);
 #endif
+#ifdef VLLM_RDNA_ATTN_GFX1100
+  if (is("gfx1100")) return table_of(Arch::kGfx1151);
+#endif
 #ifdef VLLM_RDNA_ATTN_GFX1152
   if (is("gfx1152")) return table_of(Arch::kGfx1150);
 #endif

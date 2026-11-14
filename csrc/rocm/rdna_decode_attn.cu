@@ -1305,18 +1305,21 @@ void launch_decode(const LaunchArgs& a) {
                                 device);
     (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
         &perWgp, decode_attn<C, kBatched, elem_t, A>, K::kThreads, 0);
-    // The runtime assumes 64 KiB of LDS per WGP; gfx1150..gfx1153 and gfx12
-    // have 128 KiB (64 KiB at most per workgroup).  VGPRs a SIMD lane: 1536 in
-    // blocks of 24 on gfx1151 and gfx12, 1024 in blocks of 16 on the others.
+    // The runtime assumes 64 KiB of LDS per WGP; gfx1100, gfx1150..gfx1153 and
+    // gfx12 have 128 KiB (64 KiB at most per workgroup).  VGPRs a SIMD lane:
+    // 1536 in blocks of 24 on gfx1100, gfx1151 and gfx12, 1024 in blocks of 16
+    // on the others.
     hipFuncAttributes attrs;
     hipDeviceProp_t prop;
     if (hipFuncGetAttributes(
             &attrs, reinterpret_cast<const void*>(
                         decode_attn<C, kBatched, elem_t, A>)) == hipSuccess &&
         hipGetDeviceProperties(&prop, device) == hipSuccess &&
-        (strstr(prop.gcnArchName, "gfx115") ||
+        (strstr(prop.gcnArchName, "gfx1100") ||
+         strstr(prop.gcnArchName, "gfx115") ||
          strstr(prop.gcnArchName, "gfx120"))) {
-      const bool bigVgprs = strstr(prop.gcnArchName, "gfx1151") ||
+      const bool bigVgprs = strstr(prop.gcnArchName, "gfx1100") ||
+                            strstr(prop.gcnArchName, "gfx1151") ||
                             strstr(prop.gcnArchName, "gfx120");
       const int vgprs = bigVgprs ? 1536 : 1024, block = bigVgprs ? 24 : 16;
       const int wavesPerSimd =
