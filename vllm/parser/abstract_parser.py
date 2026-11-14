@@ -459,7 +459,11 @@ class DelegatingParser(Parser):
                 content if content is not None else "",
                 request=request,
             )
-            if tool_call_info is not None and tool_call_info.tools_called:
+            if (
+                tool_call_info is not None
+                and tool_call_info.tools_called
+                and tool_call_info.tool_calls
+            ):
                 tool_calls.extend(
                     FunctionCall(
                         id=tc.id,
