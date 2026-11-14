@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The closed-form bs=1 MLA planner (VLLM_K31_BEAT_DRAFTMETA) against aiter's
 serial planner: identical schedules, identical attention output, and a
-graph-captured plan that follows the KV length on replay."""
+graph-captured plan that follows the KV length on replay. Plus the CPU-only
+parts of VLLM_K31_BEAT_DRAFTMETA: when the builder uses the planner, and which
+attention groups the target step drops."""
 
 from types import SimpleNamespace
 
@@ -11,7 +13,9 @@ import torch
 
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
+# Only the planner tests need aiter; the gating and group-dropping tests are
+# pure Python and run anywhere.
+rocm_only = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="aiter MLA planner is ROCm-only"
 )
 
@@ -58,6 +62,7 @@ def _aiter_plan(bufs, kv_indptr, qlen, causal, dtype):
     )
 
 
+@rocm_only
 @pytest.mark.parametrize("qlen", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize("causal", [True, False])
 def test_bs1_planner_matches_aiter(qlen, causal):
@@ -74,6 +79,7 @@ def test_bs1_planner_matches_aiter(qlen, causal):
     assert planner.is_verified(qlen, H, causal, fp8, fp8)
 
 
+@rocm_only
 @pytest.mark.parametrize("max_num_seqs", [1, 8, 64, 256, 1024])
 @pytest.mark.parametrize("qlen", [7, 8])
 @pytest.mark.parametrize("causal", [True, False])
@@ -90,6 +96,7 @@ def test_bs1_planner_verifies_on_builder_sized_buffers(max_num_seqs, qlen, causa
     assert planner.verify(qlen, H, causal, fp8, fp8)
 
 
+@rocm_only
 @pytest.mark.parametrize("kv_len", [7, 23, 1000, 4000, 65537, 360000])
 def test_bs1_planner_attention_output_identical(kv_len):
     from aiter import dtypes
@@ -138,6 +145,7 @@ def test_bs1_planner_attention_output_identical(kv_len):
     assert torch.equal(out, ref)
 
 
+@rocm_only
 def test_bs1_planner_graph_replay_tracks_kv_len():
     from aiter import dtypes
 
@@ -200,3 +208,85 @@ def test_drop_draft_only_attn_groups():
     # Other speculators keep every group (they may reuse target metadata).
     runner.speculator = SimpleNamespace(draft_attn_layer_names={"draft.0.attn"})
     assert GPUModelRunner._drop_draft_only_attn_groups(runner, groups) is groups
+
+
+class _MockPlanner:
+    def __init__(self, verify_ok=True):
+        self.verify_ok = verify_ok
+        self.verified: set[tuple] = set()
+        self.verify_calls: list[tuple] = []
+
+    def is_verified(self, *key):
+        return key in self.verified
+
+    def verify(self, *key):
+        self.verify_calls.append(key)
+        if self.verify_ok:
+            self.verified.add(key)
+        return self.verify_ok
+
+
+def test_use_bs1_planner_gating(monkeypatch):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+        AiterMLAMetadataBuilder,
+        _DCPDecodeRoute,
+    )
+
+    capturing = [False]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing[0])
+    q_dtype, kv_dtype = torch.float8_e4m3fn, torch.float8_e4m3fn
+    planner = _MockPlanner()
+    builder = SimpleNamespace(
+        _bs1_planner=planner, _mla_q_dtype=q_dtype, _mla_kv_dtype=kv_dtype
+    )
+    ok = dict(
+        num_kernel_reqs=1,
+        max_qo_len=8,
+        uni_qo_len=8,
+        num_heads=H,
+        is_causal=False,
+        dcp_route=_DCPDecodeRoute.PLAIN,
+        cprr_kwargs={},
+    )
+
+    def use(**kw):
+        return AiterMLAMetadataBuilder._use_bs1_planner(builder, **{**ok, **kw})
+
+    # Anything but one uniform-qo multi-token request on the plain route keeps
+    # aiter's planner, without running the verify.
+    for kw in (
+        dict(num_kernel_reqs=2),
+        dict(max_qo_len=1, uni_qo_len=1),
+        dict(uni_qo_len=-1),
+        dict(is_causal=torch.tensor(True)),
+        dict(dcp_route=_DCPDecodeRoute.CPRR),
+        dict(dcp_route=_DCPDecodeRoute.SEGMENTED),
+        dict(cprr_kwargs=dict(max_split_per_batch=4)),
+    ):
+        assert not use(**kw), kw
+    assert planner.verify_calls == []
+
+    # An unverified shape is never verified inside graph capture.
+    capturing[0] = True
+    assert not use()
+    assert planner.verify_calls == []
+
+    # Outside capture it verifies once, then the cached result is reused
+    # (also during capture).
+    capturing[0] = False
+    assert use()
+    capturing[0] = True
+    assert use()
+    assert planner.verify_calls == [(8, H, False, q_dtype, kv_dtype)]
+    # A new shape (causal) is its own verify.
+    capturing[0] = False
+    assert use(is_causal=True)
+    assert len(planner.verify_calls) == 2
+
+    # A failed verify keeps aiter's planner.
+    builder._bs1_planner = _MockPlanner(verify_ok=False)
+    assert not use()
+
+    # Flag off: the builder has no planner.
+    builder._bs1_planner = None
+    assert not use()
