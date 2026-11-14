@@ -504,3 +504,504 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
 
 if __name__ == "__main__":
     test_download_weights_from_hf()
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_streaming_weights_match_lazy_and_survive_close(tmp_path, workers):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        safetensors_weights_iterator,
+        streaming_safetensors_weights_iterator,
+    )
+
+    paths = []
+    for i in range(5):
+        path = str(tmp_path / f"shard-{i}.safetensors")
+        save_file({f"weight_{i}": torch.arange(37) + i}, path)
+        paths.append(path)
+    expected = dict(safetensors_weights_iterator(paths, False, "lazy"))
+    actual = dict(
+        streaming_safetensors_weights_iterator(
+            paths,
+            False,
+            prefetch_file_window=workers,
+            io_threads_per_file=2,
+            block_size=31,
+        )
+    )
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        assert torch.equal(actual[name], expected[name])
+
+
+def test_streaming_prefetch_respects_input_file_order(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        streaming_safetensors_weights_iterator,
+    )
+
+    first = str(tmp_path / "z.safetensors")
+    second = str(tmp_path / "a.safetensors")
+    save_file({"first": torch.ones(1)}, first)
+    save_file({"second": torch.ones(1)}, second)
+
+    weights = streaming_safetensors_weights_iterator(
+        [first, second], False, prefetch_file_window=1
+    )
+    assert [name for name, _ in weights] == ["first", "second"]
+
+
+def test_streaming_reads_at_most_the_prefetch_window_concurrently(
+    tmp_path, monkeypatch
+):
+    """The prefetch window bounds how many shards are read at once.
+
+    The shards are read ahead of the consumer: the next shard is read
+    while the current one is still being handed out, so the storage is
+    busy while the loader copies the weights to the device.
+    """
+    import threading
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(6):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file({"weight": torch.arange(9)}, path)
+        paths.append(path)
+
+    real_read_shard = wu.read_shard
+    lock = threading.Lock()
+    second_started = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+
+    def counting_read_shard(path, **kwargs):
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        if path == paths[1]:
+            second_started.set()
+        try:
+            if path == paths[0]:
+                # Hold the first shard until the second one has started,
+                # so the two reads overlap no matter how fast the disk
+                # is.
+                assert second_started.wait(10), "The next shard was not read ahead"
+            return real_read_shard(path, **kwargs)
+        finally:
+            with lock:
+                in_flight -= 1
+
+    monkeypatch.setattr(wu, "read_shard", counting_read_shard)
+    weights = list(
+        wu.streaming_safetensors_weights_iterator(paths, False, prefetch_file_window=2)
+    )
+    assert [name for name, _ in weights] == ["weight"] * 6
+    assert max_in_flight == 2
+
+
+def test_streaming_closes_its_handles_when_the_consumer_stops_early(
+    tmp_path, monkeypatch
+):
+    """The reader owns the file handles, so it closes them when the
+    consumer walks away from the iterator.
+    """
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import threaded_buffer_reader as tbr
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(4):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file({"weight": torch.arange(9)}, path)
+        paths.append(path)
+
+    real_open = open
+    handles = []
+
+    def track_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(tbr, "open", track_open, raising=False)
+    iterator = wu.streaming_safetensors_weights_iterator(
+        paths, False, prefetch_file_window=2
+    )
+    name, tensor = next(iterator)
+    assert name == "weight"
+    assert torch.equal(tensor, torch.arange(9))
+    iterator.close()
+    assert all(handle.closed for handle in handles)
+
+
+@pytest.mark.parametrize("failure", ["empty", "missing", "truncated", "io"])
+@pytest.mark.parametrize("prefetch_only", [False, True])
+def test_streaming_read_failures_propagate_before_mapping(
+    tmp_path, monkeypatch, failure, prefetch_only
+):
+    from unittest.mock import patch
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    path = tmp_path / "broken.safetensors"
+    expected: type[Exception] = EOFError
+    if failure != "missing":
+        path.write_bytes(b"" if failure == "empty" else b"data")
+    else:
+        expected = FileNotFoundError
+    # Exercise the portable pread fallback, including EOF and OS errors.
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+    if failure == "truncated":
+        monkeypatch.setattr(wu.os, "pread", lambda *args: b"")
+    elif failure == "io":
+        expected = OSError
+
+        def fail(*args):
+            raise OSError("read failed")
+
+        monkeypatch.setattr(wu.os, "pread", fail)
+    if prefetch_only:
+        # The prefetch path parses and maps the shard, so the failure
+        # must arrive before it does either.
+        with patch.object(wu, "BufferSafeTensors") as mapped:
+            with pytest.raises(expected):
+                wu.prefetch_checkpoints([str(path)])
+            mapped.assert_not_called()
+    else:
+        with pytest.raises(expected):
+            list(wu.streaming_safetensors_weights_iterator([str(path)], False))
+
+
+@pytest.mark.parametrize("use_preadv", [False, True])
+def test_streaming_retries_short_reads_and_filters_experts(
+    tmp_path, monkeypatch, use_preadv
+):
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    path = str(tmp_path / "weights.safetensors")
+    weights = {
+        f"model.layers.0.mlp.experts.{i}.weight": torch.arange(7) for i in range(2)
+    }
+    save_file(weights, path)
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+    real_read = wu.os.pread
+    monkeypatch.setattr(
+        wu.os, "pread", lambda fd, n, off: real_read(fd, min(n, 3), off)
+    )
+    if use_preadv:
+
+        def short_preadv(fd, buffers, offset):
+            data = real_read(fd, min(len(buffers[0]), 3), offset)
+            buffers[0][: len(data)] = data
+            return len(data)
+
+        monkeypatch.setattr(wu.os, "preadv", short_preadv, raising=False)
+    result = dict(
+        wu.safetensors_weights_iterator(
+            [path],
+            False,
+            "streaming",
+            local_expert_ids={1},
+            safetensors_prefetch_block_size=19,
+        )
+    )
+    assert set(result) == {"model.layers.0.mlp.experts.1.weight"}
+    assert torch.equal(next(iter(result.values())), torch.arange(7))
+
+
+def test_streaming_consumes_shards_in_input_order(tmp_path, monkeypatch):
+    import threading
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    slow = str(tmp_path / "0.safetensors")
+    fast = str(tmp_path / "1.safetensors")
+    save_file({"slow": torch.zeros(11)}, slow)
+    save_file({"fast": torch.ones(3)}, fast)
+    fast_read = threading.Event()
+    real_read_shard = wu.read_shard
+
+    def gated_read_shard(path, **kwargs):
+        if path == fast:
+            result = real_read_shard(path, **kwargs)
+            fast_read.set()
+            return result
+        # The first shard is held until the second one has been read, so
+        # a reader that consumed in completion order would hand out the
+        # second shard first.
+        assert fast_read.wait(10), "The second shard was not read first"
+        return real_read_shard(path, **kwargs)
+
+    monkeypatch.setattr(wu, "read_shard", gated_read_shard)
+    weights = wu.streaming_safetensors_weights_iterator(
+        [slow, fast],
+        False,
+        prefetch_file_window=2,
+    )
+    try:
+        name, tensor = next(weights)
+        assert name == "slow"
+        assert torch.equal(tensor, torch.zeros(11))
+        assert [name for name, _ in weights] == ["fast"]
+    finally:
+        weights.close()
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "prefetch_file_window",
+        "io_threads_per_file",
+        "block_size",
+    ],
+)
+def test_streaming_rejects_invalid_limits(option):
+    from vllm.model_executor.model_loader.weight_utils import (
+        streaming_safetensors_weights_iterator,
+    )
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        list(streaming_safetensors_weights_iterator([], False, **{option: 0}))
+
+
+def test_prefetch_reads_every_byte_without_mapping(tmp_path, monkeypatch):
+    """The prefetch path warms the page cache without parsing anything.
+
+    It reads every byte of the shard, so the storage has the whole file
+    ready, and it does not map the tensors: mapping is the loader's
+    job, and doing it here would tie the memory down for nothing.
+    """
+    import threading
+    from pathlib import Path
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(5):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file({f"weight_{i}": torch.arange(37)}, path)
+        paths.append(path)
+    reads: dict[str, list[tuple[int, int]]] = {path: [] for path in paths}
+    handles = {}
+    opened = []
+    lock = threading.Lock()
+    real_open = open
+    real_pread = wu.os.pread
+    # Exercise the portable pread path.
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+
+    def track_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        with lock:
+            handles[handle.fileno()] = path
+            opened.append(handle)
+        return handle
+
+    def record_pread(fd, count, offset):
+        data = real_pread(fd, count, offset)
+        with lock:
+            reads[handles[fd]].append((offset, len(data)))
+        return data
+
+    def map_after_read(*args, **kwargs):
+        raise AssertionError("The prefetch path must not map tensors")
+
+    monkeypatch.setattr(wu, "open", track_open, raising=False)
+    monkeypatch.setattr(wu.os, "pread", record_pread)
+    monkeypatch.setattr(wu, "BufferSafeTensors", map_after_read)
+
+    assert wu.prefetch_checkpoints(
+        paths, prefetch_file_window=2, io_threads_per_file=3, block_size=19
+    ) == (2, 3)
+    for path in paths:
+        end = 0
+        for offset, count in sorted(reads[path]):
+            assert offset == end
+            end += count
+        assert end == Path(path).stat().st_size
+    assert all(handle.closed for handle in opened)
+
+
+def _safetensors_layout(path: str) -> dict[str, tuple[int, int]]:
+    """Return where each tensor's bytes live in the file.
+
+    The offsets are absolute file offsets, so a test can say which
+    bytes a read touched.
+    """
+    import json
+    import struct
+
+    with open(path, "rb") as file:
+        header_len = struct.unpack("<Q", file.read(8))[0]
+        header = json.loads(file.read(header_len))
+    data_start = 8 + header_len
+    layout = {}
+    for name, spec in header.items():
+        if name == "__metadata__":
+            continue
+        start, end = spec["data_offsets"]
+        layout[name] = (data_start + start, end - start)
+    return layout
+
+
+def test_streaming_reads_each_kept_tensor_exactly_once(tmp_path, monkeypatch):
+    """The reader fetches the bytes of the tensors it keeps, once each.
+
+    It reads the tensors one by one into its own buffers instead of
+    mapping the whole shard, so the bytes of the tensors it keeps are
+    read exactly once and the bytes of the tensors it rejects are never
+    read at all.
+    """
+    import threading
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import threaded_buffer_reader as tbr
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    paths = []
+    for i in range(5):
+        path = str(tmp_path / f"{i}.safetensors")
+        save_file(
+            {f"weight_{i}a": torch.arange(37), f"weight_{i}b": torch.arange(11)}, path
+        )
+        paths.append(path)
+
+    layout = {path: _safetensors_layout(path) for path in paths}
+    reads: dict[str, list[tuple[int, int]]] = {path: [] for path in paths}
+    fd_path: dict[int, str] = {}
+    opened = []
+    lock = threading.Lock()
+    real_open = open
+    real_pread = wu.os.pread
+    # Exercise the portable pread path.
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+
+    def track_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        with lock:
+            fd_path[handle.fileno()] = path
+            opened.append(handle)
+        return handle
+
+    def record_pread(fd, count, offset):
+        data = real_pread(fd, count, offset)
+        with lock:
+            reads[fd_path[fd]].append((offset, len(data)))
+        return data
+
+    monkeypatch.setattr(tbr, "open", track_open, raising=False)
+    monkeypatch.setattr(wu.os, "pread", record_pread)
+
+    weights = dict(
+        wu.streaming_safetensors_weights_iterator(
+            paths,
+            False,
+            prefetch_file_window=2,
+            io_threads_per_file=3,
+            block_size=19,
+        )
+    )
+    assert len(weights) == 2 * len(paths)
+    for path in paths:
+        data_start = min(offset for offset, _ in layout[path].values())
+        data_reads = sorted(
+            (offset, count) for offset, count in reads[path] if offset >= data_start
+        )
+        assert data_reads == sorted(layout[path].values())
+    assert all(handle.closed for handle in opened)
+
+
+def test_streaming_reads_only_the_tensors_it_is_asked_for(tmp_path, monkeypatch):
+    """A filtered reader must not fetch the tensors it rejects.
+
+    This is what keeps expert parallelism from multiplying the bytes
+    the storage moves: a rank that owns a fraction of the experts reads
+    only its own. The dense weights are not expert weights, so every
+    rank keeps them.
+    """
+    import threading
+
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader import threaded_buffer_reader as tbr
+    from vllm.model_executor.model_loader import weight_utils as wu
+
+    path = str(tmp_path / "weights.safetensors")
+    weights = {
+        f"model.layers.0.mlp.experts.{i}.weight": torch.arange(64) for i in range(4)
+    }
+    weights["model.embed_tokens.weight"] = torch.arange(32)
+    save_file(weights, path)
+
+    layout = _safetensors_layout(path)
+    reads: list[tuple[int, int]] = []
+    fd_path: dict[int, str] = {}
+    lock = threading.Lock()
+    real_open = open
+    real_pread = wu.os.pread
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
+
+    def track_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        with lock:
+            fd_path[handle.fileno()] = path
+        return handle
+
+    def record_pread(fd, count, offset):
+        data = real_pread(fd, count, offset)
+        with lock:
+            reads.append((offset, len(data)))
+        return data
+
+    monkeypatch.setattr(tbr, "open", track_open, raising=False)
+    monkeypatch.setattr(wu.os, "pread", record_pread)
+
+    result = dict(
+        wu.safetensors_weights_iterator(
+            [path],
+            False,
+            "streaming",
+            local_expert_ids={1},
+        )
+    )
+    assert set(result) == {
+        "model.layers.0.mlp.experts.1.weight",
+        "model.embed_tokens.weight",
+    }
+    assert torch.equal(result["model.layers.0.mlp.experts.1.weight"], torch.arange(64))
+
+    # The bytes of the experts this rank does not own are never read.
+    for name in (
+        "model.layers.0.mlp.experts.0.weight",
+        "model.layers.0.mlp.experts.2.weight",
+        "model.layers.0.mlp.experts.3.weight",
+    ):
+        start, size = layout[name]
+        for offset, count in reads:
+            assert not (offset < start + size and start < offset + count), (
+                f"read the bytes of {name}"
+            )

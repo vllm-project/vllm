@@ -40,10 +40,18 @@ def main():
     if maybe_run_omni():
         return
 
+    # Weight I/O benchmarks do not need the serving CLI or an accelerator.
+    if len(sys.argv) > 1 and sys.argv[1] == "load-bench":
+        from vllm.entrypoints.cli.load_bench import main as load_bench_main
+
+        load_bench_main(sys.argv[2:])
+        return
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.download_kernels
     import vllm.entrypoints.cli.launch
+    import vllm.entrypoints.cli.load_bench
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.preload
     import vllm.entrypoints.cli.run_batch
@@ -56,6 +64,7 @@ def main():
         vllm.entrypoints.cli.openai,
         vllm.entrypoints.cli.serve,
         vllm.entrypoints.cli.launch,
+        vllm.entrypoints.cli.load_bench,
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.download_kernels,

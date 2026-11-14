@@ -10,13 +10,15 @@ import hashlib
 import inspect
 import json
 import os
+import queue
 import random
 import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -34,6 +36,8 @@ from vllm.config import ModelConfig
 from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
     LoadConfig,
 )
 from vllm.distributed import (
@@ -47,8 +51,19 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
 )
+from vllm.model_executor.model_loader.buffer_safe_tensors import (
+    BufferSafeTensors,
+    byte_memoryview,
+    read_safetensors_header,
+)
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
+)
+from vllm.model_executor.model_loader.threaded_buffer_reader import (
+    ShardSlot,
+    ThreadPinnedBuffer,
+    largest_tensor,
+    read_shard,
 )
 from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
@@ -1058,6 +1073,347 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+def prefetch_checkpoints(
+    sorted_files: list[str],
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> tuple[int, int]:
+    """Read all selected files using the streaming I/O scheduler, without mapping."""
+    files = _prefetched_checkpoint_files(
+        sorted_files,
+        prefetch_file_window=prefetch_file_window,
+        io_threads_per_file=io_threads_per_file,
+        block_size=block_size,
+        map_after_prefetch=False,
+    )
+    try:
+        for result in files:
+            result.close()
+    finally:
+        files.close()
+    return min(prefetch_file_window, len(sorted_files)), io_threads_per_file
+
+
+class _PrefetchedFile:
+    """Own a checkpoint file and its buffer until the result is released."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.contexts = ExitStack()
+        self.file: IO[bytes] | None = None
+        self.size = 0
+        self.mapped: BufferSafeTensors | None = None
+
+    def close(self) -> None:
+        self.contexts.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+def _allocate_host_buffer(nbytes: int) -> torch.Tensor:
+    """A host buffer to read a shard into.
+
+    Pinned when CUDA is available, so the host-to-device copy out of it
+    runs at the pinned rate (55.95 GB/s on B300, PCIe Gen6 x16) instead of
+    the pageable rate (8.47 GB/s). Allocating a large pinned region is
+    slow, so the caller reuses one buffer across shards.
+    """
+    try:
+        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+    except RuntimeError:
+        # No pinned memory allocator on this host: a plain buffer still
+        # works, it is just slower to copy out of.
+        return torch.empty(nbytes, dtype=torch.uint8)
+
+
+def _prefetched_checkpoint_files(
+    hf_weights_files: list[str],
+    *,
+    prefetch_file_window: int,
+    io_threads_per_file: int,
+    block_size: int,
+    map_after_prefetch: bool,
+) -> Generator[_PrefetchedFile, None, None]:
+    """Read shards in parallel blocks and yield them in completion order."""
+    if min(prefetch_file_window, io_threads_per_file, block_size) < 1:
+        raise ValueError(
+            "Streaming prefetch file window, IO threads per file and block size "
+            "must be >= 1"
+        )
+
+    file_parallelism = (
+        min(prefetch_file_window, len(hf_weights_files)) if hf_weights_files else 1
+    )
+    stopped = threading.Event()
+    completed: queue.SimpleQueue = queue.SimpleQueue()
+
+    def read_blocks(
+        fd: int, size: int, start: int, dest: memoryview, data_start: int
+    ) -> None:
+        """Read [start, size) of the file's data section into dest.
+
+        The file's data section starts at *data_start*, so file offset
+        ``data_start + offset`` lands at ``dest[offset]``: the
+        destination buffer holds the data section only.
+
+        The read goes straight into the destination buffer, so the bytes
+        are touched once. Pre-reading into the page cache and copying out
+        of it later touches them twice.
+        """
+        stride = io_threads_per_file * block_size
+        for block_start in range(start, size, stride):
+            offset, end = block_start, min(block_start + block_size, size)
+            while offset < end:
+                if stopped.is_set():
+                    return
+                want = end - offset
+                file_offset = data_start + offset
+                if hasattr(os, "preadv"):
+                    count = os.preadv(fd, [dest[offset : offset + want]], file_offset)
+                else:
+                    chunk = os.pread(fd, want, file_offset)
+                    count = len(chunk)
+                    if count:
+                        dest[offset : offset + count] = chunk
+                if count == 0:
+                    raise EOFError("Checkpoint truncated during streaming prefetch")
+                offset += count
+
+    def prefetch(
+        path: str, io_pool: concurrent.futures.ThreadPoolExecutor
+    ) -> _PrefetchedFile:
+        result = _PrefetchedFile(path)
+        try:
+            if stopped.is_set():
+                return result
+            file = result.contexts.enter_context(open(path, "rb"))  # noqa: SIM115
+            result.file = file
+            size = os.fstat(file.fileno()).st_size
+            result.size = size
+            if size == 0:
+                raise EOFError(f"Checkpoint file is empty: {path}")
+            # The header gives each tensor's offset within the data
+            # section. It is read through the same descriptor the data
+            # is read from, so the file is opened once and its bytes are
+            # covered by that descriptor's reads.
+            header, data_start = read_safetensors_header(file.fileno(), size)
+            data_len = size - data_start
+            dest = _allocate_host_buffer(data_len)
+            dest_mv = byte_memoryview(dest)
+            reads = []
+            try:
+                for start in range(
+                    0,
+                    min(data_len, io_threads_per_file * block_size),
+                    block_size,
+                ):
+                    reads.append(
+                        io_pool.submit(
+                            read_blocks,
+                            file.fileno(),
+                            data_len,
+                            start,
+                            dest_mv,
+                            data_start,
+                        )
+                    )
+                for future in concurrent.futures.as_completed(reads):
+                    future.result()
+            finally:
+                # A failed read must not close the fd while other reads use it.
+                concurrent.futures.wait(reads)
+            if map_after_prefetch and not stopped.is_set():
+                result.mapped = result.contexts.enter_context(
+                    BufferSafeTensors(path, dest, header, data_start)
+                )
+            return result
+        except BaseException:
+            result.close()
+            raise
+
+    paths = iter(hf_weights_files)
+    pending: set[concurrent.futures.Future] = set()
+
+    # Runtime IO threads are grouped too. Every concurrently active shard owns
+    # a dedicated executor and cannot consume another shard's IO slots.
+    io_groups: list[dict[str, Any]] = []
+    with ExitStack() as stack:
+        file_pool = stack.enter_context(
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=file_parallelism,
+                thread_name_prefix="safetensors-file",
+            )
+        )
+        for group_id in range(file_parallelism):
+            io_groups.append(
+                {
+                    "id": group_id,
+                    "io_pool": stack.enter_context(
+                        concurrent.futures.ThreadPoolExecutor(
+                            max_workers=io_threads_per_file,
+                            thread_name_prefix=(f"safetensors-io-group-{group_id}"),
+                        )
+                    ),
+                }
+            )
+
+        def submit_next(group: dict[str, Any]) -> None:
+            path = next(paths, None)
+            if path is None:
+                return
+            future = file_pool.submit(prefetch, path, group["io_pool"])
+            pending.add(future)
+
+            def on_done(
+                done: concurrent.futures.Future[_PrefetchedFile], group=group
+            ) -> None:
+                completed.put((done, group))
+
+            future.add_done_callback(on_done)
+
+        try:
+            for group in io_groups:
+                submit_next(group)
+            while pending:
+                future, group = completed.get()
+                pending.remove(future)
+                result = future.result()
+                del future
+                # Reuse this shard's runtime IO group for the next file.
+                submit_next(group)
+                try:
+                    yield result
+                finally:
+                    del result
+        finally:
+            stopped.set()
+            for future in pending:
+                future.cancel()
+            file_pool.shutdown(wait=True)
+            while True:
+                try:
+                    future, _ = completed.get_nowait()
+                except queue.Empty:
+                    break
+                with suppress(BaseException):
+                    future.result().close()
+
+
+def streaming_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
+    *,
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Read shards with one pinned buffer per IO thread.
+
+    Up to ``prefetch_file_window`` shards are read concurrently, in
+    input order, and consumed in that same order. Each shard is read by
+    ``io_threads_per_file`` IO threads, each of which owns one pinned
+    buffer and reads a disjoint set of tensors into it. The buffers are
+    created once and reused for every shard, so the pages are pinned
+    once for the whole load rather than once per shard.
+
+    Expert weights that do not belong to this rank are skipped before
+    they are read, so the storage only moves the bytes this rank needs.
+    """
+    if min(prefetch_file_window, io_threads_per_file, block_size) < 1:
+        raise ValueError(
+            "Streaming prefetch file window, IO threads per file and block size "
+            "must be >= 1"
+        )
+
+    def keep(name: str) -> bool:
+        return not should_skip_weight(name, local_expert_ids)
+
+    window = min(prefetch_file_window, len(hf_weights_files)) or 1
+    paths = iter(hf_weights_files)
+
+    # Each shard slot has its own set of IO threads and its own pinned
+    # buffers: two shards are read at the same time, so they cannot
+    # share a buffer. A slot's buffers are reused for the next shard
+    # that lands in it, so the pages stay pinned for the whole load.
+    #
+    # The buffer size is decided by the biggest tensor in the whole
+    # checkpoint, so a slot's buffers fit any shard it may read.
+    biggest = max((largest_tensor(path, keep) for path in hf_weights_files), default=0)
+    capacity = max(block_size, biggest)
+
+    with (
+        tqdm(
+            total=len(hf_weights_files),
+            desc="Streaming safetensors checkpoint shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        ) as progress,
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=window, thread_name_prefix="safetensors-shard"
+        ) as shard_pool,
+    ):
+        # A slot is a buffer set and the thread that reads into it.
+        slots: list[ShardSlot] = [
+            ShardSlot(
+                index,
+                buffers=[
+                    ThreadPinnedBuffer(capacity) for _ in range(io_threads_per_file)
+                ],
+            )
+            for index in range(window)
+        ]
+        pending: deque[tuple[concurrent.futures.Future, ShardSlot]] = deque()
+        next_slot = 0
+        for _ in range(window):
+            path = next(paths, None)
+            if path is None:
+                break
+            slot = slots[next_slot]
+            next_slot = (next_slot + 1) % window
+            pending.append(
+                (
+                    shard_pool.submit(
+                        read_shard,
+                        path,
+                        keep=keep,
+                        slot=slot,
+                        buffer_capacity=block_size,
+                    ),
+                    slot,
+                )
+            )
+
+        while pending:
+            # The shards are consumed in the order they were submitted.
+            future, slot = pending.popleft()
+            try:
+                yield from future.result()
+            finally:
+                del future
+            progress.update(1)
+
+            # Read the next shard in the slot this one just freed, so
+            # the read of the next shard overlaps the consumer's work on
+            # this one.
+            next_path = next(paths, None)
+            if next_path is not None:
+                pending.append(
+                    (
+                        shard_pool.submit(
+                            read_shard,
+                            next_path,
+                            keep=keep,
+                            slot=slot,
+                            buffer_capacity=block_size,
+                        ),
+                        slot,
+                    )
+                )
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -1066,14 +1422,27 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    prefetch_file_window: int = DEFAULT_STREAMING_PREFETCH_FILE_WINDOW,
+    io_threads_per_file: int = DEFAULT_STREAMING_IO_THREADS_PER_FILE,
     shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
     When *local_expert_ids* is provided, expert weights not belonging to
-    this rank are skipped **before** reading from disk, which drastically
-    reduces storage I/O for MoE models under EP.
+    this rank are skipped before tensor materialization. Lazy loading also
+    avoids reading their payload; eager and streaming read whole shards.
     """
+    if safetensors_load_strategy == "streaming":
+        yield from streaming_safetensors_weights_iterator(
+            hf_weights_files,
+            use_tqdm_on_load,
+            prefetch_file_window=prefetch_file_window,
+            local_expert_ids=local_expert_ids,
+            io_threads_per_file=io_threads_per_file,
+            block_size=safetensors_prefetch_block_size,
+        )
+        return
+
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
