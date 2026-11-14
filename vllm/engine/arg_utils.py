@@ -110,6 +110,7 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DBOSchedule,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
@@ -580,6 +581,7 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_schedule: DBOSchedule | None = ParallelConfig.dbo_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -1367,6 +1369,7 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument("--dbo-schedule", **parallel_kwargs["dbo_schedule"])
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
@@ -2643,6 +2646,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_schedule=self.dbo_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
