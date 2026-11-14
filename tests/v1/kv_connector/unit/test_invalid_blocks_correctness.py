@@ -57,6 +57,78 @@ def recompute_scheduler():
     return create_scheduler(vllm_config)
 
 
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("execution", ["async", "pp", "single"])
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_aborted_load_cannot_affect_next_allocation(
+    kv_role: str, policy: str, execution: str, load_fails: bool
+):
+    """An aborted load's report must precede reuse by an unrelated request."""
+    config = create_vllm_config(
+        kv_role=kv_role,
+        kv_load_failure_policy=policy,
+        max_num_batched_tokens=256,
+    )
+    config.scheduler_config.async_scheduling = execution == "async"
+    config.parallel_config.pipeline_parallel_size = 2 if execution == "pp" else 1
+    scheduler = create_scheduler(config, num_blocks=9)
+    pool = scheduler.kv_cache_manager.block_pool
+    owner = create_request(num_tokens=128, common_prefix_len=128)
+    unrelated = create_request(num_tokens=128)
+    assert owner.prompt_token_ids != unrelated.prompt_token_ids
+
+    connector = create_mock_connector()
+    connector.get_num_new_matched_tokens.side_effect = _make_get_num_new_matched_tokens(
+        {owner.request_id: 112}, False
+    )
+    connector.request_finished.return_value = (False, None)
+    connector.take_events.return_value = ()
+    connector.has_pending_block_frees.return_value = False
+    connector.has_pending_push_work.return_value = False
+    scheduler.connector = connector
+
+    scheduler.add_request(owner)
+    load_step = scheduler.schedule()
+    owner_blocks = tuple(load_step.scheduled_new_reqs[0].block_ids[0])
+    assert len(owner_blocks) == 8
+    assert pool.get_num_free_blocks() == 0
+    scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+
+    overlapping = execution != "single"
+    scheduler.add_request(unrelated)
+    if overlapping:
+        scheduler.schedule()
+    else:
+        # A single-batch engine processes the old output before scheduling again.
+        assert pool.get_num_free_blocks() == 8
+
+    status_before = unrelated.status
+    computed_before = unrelated.num_computed_tokens
+    scheduler.update_from_output(
+        load_step,
+        create_model_runner_output(
+            [owner], invalid_block_ids={owner_blocks[3]} if load_fails else set()
+        ),
+    )
+    assert unrelated.status == status_before
+    assert unrelated.num_computed_tokens == computed_before
+    assert unrelated.status == RequestStatus.WAITING
+    assert pool.get_num_free_blocks() == 8
+    assert not scheduler.deferred_frees
+
+    next_step = scheduler.schedule()
+    assert unrelated.request_id in next_step.num_scheduled_tokens
+    (next_blocks,) = scheduler.kv_cache_manager.get_block_ids(unrelated.request_id)
+    assert set(next_blocks) == set(owner_blocks)
+    scheduler.update_from_output(
+        next_step, create_model_runner_output([unrelated], use_eos=True)
+    )
+    assert unrelated.status == RequestStatus.FINISHED_STOPPED
+    assert pool.get_num_free_blocks() == 8
+    assert not scheduler.deferred_frees
+
+
 def test_sync_recompute_blocks_not_freed_for_running_requests(
     recompute_scheduler: Scheduler,
 ):
