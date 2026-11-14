@@ -708,8 +708,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
+        no_attn_metadata_layer_names: set[str] = set()
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
+            if self.speculator.speculative_config.prefill_context_kv_only:
+                no_attn_metadata_layer_names = draft_attn_layer_names
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():
             (
@@ -721,6 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                no_attn_metadata_layer_names=no_attn_metadata_layer_names,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
@@ -813,6 +817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.block_tables,
                 self.input_buffers,
                 self.attn_groups,
+                self.kernel_block_sizes,
             )
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode

@@ -245,7 +245,6 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
-        self.kv_cache_transient_bytes_before_tuning = 0
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -552,8 +551,13 @@ class Worker(WorkerBase):
             torch.nn.functional.linear(x, x, x[0])
             del x
 
+            # Collect garbage, then freeze the startup heap so that later gc.collect()
+            # calls (weight loading, memory profiling, KV cache sizing) skip it. It is
+            # unfrozen by the first CUDA graph capture, or at the latest by
+            # compile_or_warm_up_model, which then refreezes the final heap.
+            freeze_gc_heap()
+
             # Now take memory snapshot after NCCL is initialized
-            gc.collect()
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
@@ -1107,22 +1111,18 @@ class Worker(WorkerBase):
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         if self.cache_config.enable_extensible_kv_cache:
+            kv_cache = self.model_runner.extensible_kv_cache
+            assert kv_cache is not None
+            # The blocks warmup_kernels committed hold garbage and can take
+            # nearly all the memory warmup may commit: release them, so the
+            # sizing steps run beside only the blocks they address.
+            kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
             # Measure before capture, whose persistent allocations would
             # hide part of the peak from a later peak - current.
-            kv_cache = self.model_runner.extensible_kv_cache
-            assert kv_cache is not None
-            stats = torch.accelerator.memory_stats(self.device)
-            kv_cache.reserved_headroom_bytes = max(
-                kv_cache.reserved_headroom_bytes,
-                # kernel_warmup keeps FlashInfer autotuning out of this
-                # peak window; include what the steps before it reached.
-                getattr(self, "kv_cache_transient_bytes_before_tuning", 0),
-                stats.get("allocated_bytes.all.peak", 0)
-                - stats.get("allocated_bytes.all.current", 0),
-            )
+            kv_cache.record_transient_peak()
             if not self.model_config.enforce_eager:
                 # Warmup's blocks hold garbage and capture addresses only the
                 # null block: release them so the graphs fit (encoder graphs
@@ -1250,8 +1250,10 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
+        # Unfreeze and run GC (also frees cyclic garbage objects since init_device),
+        # then refreeze so that GC won't scan static objects (model weights, KV caches,
+        # CUDA graphs) during inference.
+        gc.unfreeze()
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
