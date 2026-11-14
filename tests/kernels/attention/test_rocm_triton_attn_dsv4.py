@@ -3201,6 +3201,7 @@ def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
     impl.topk_indices_buffer = topk_buf
     impl.owns_indexer = True
     impl.index_epoch = 0
+    impl.dcp_world_size = 1
 
     metadata = SimpleNamespace(
         num_actual_tokens=num_q,
