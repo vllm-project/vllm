@@ -226,7 +226,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     @staticmethod
     def _supports_batch_invariance():
