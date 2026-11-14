@@ -654,8 +654,8 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 @functools.cache
 def has_flashinfer_cutlass_fused_moe_workspace() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE accepts a caller-owned
-    workspace buffer (``workspace_buffer=`` plus
-    ``cutlass_fused_moe_workspace_size``)."""
+    workspace buffer (`workspace_buffer=` plus
+    `cutlass_fused_moe_workspace_size`)."""
     if not has_flashinfer_cutlass_fused_moe():
         return False
     mod = _get_submodule("flashinfer.fused_moe")
