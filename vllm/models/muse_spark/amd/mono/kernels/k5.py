@@ -76,16 +76,18 @@ from .dev import (
     bf_hi,
     bf_lo,
     butterfly,
+    e4m3_dword,
     fresh,
     hw_rsq,
+    inv_kv_scale,
     ld_f32,
     ld_i32,
     ld_vec,
     mb_poll,
     mb_put,
     mb_put_if,
-    mb_put_sys,
     mfma_bf16,
+    peer_ops,
     readlane,
     rsrc,
     st_if,
@@ -94,9 +96,17 @@ from .dev import (
     wave_sum,
     xred,
 )
-from .k3 import _lay, bf_mma_operand, bf_tile_load, o_gate, route_token, sel_peer
+from .k3 import (
+    GRIDS,
+    _lay,
+    bf_mma_operand,
+    bf_tile_load,
+    o_gate,
+    route_token,
+    sel_peer,
+)
 
-W = 8  # ranks in the TP = EP group
+W = 8  # ranks in the TP = EP group of the module-level defaults (builds take key.W)
 HID = 8192
 QH = HID // W  # hidden columns a rank owns (= stage-A K part = post-proj rows)
 DM = 4096
@@ -117,9 +127,38 @@ QKV_ROWS = QROWS + 2 * KROWS
 QKVG_ROWS = QKV_ROWS + QROWS
 OK_K = HID // W  # o_proj K a rank
 NQTILES = QKVG_ROWS // 16  # qkvg 16-row tiles a rank
-# qkvg tiles a CTA group (32 groups x 8 K eighths; 144 of 160 real)
-NQT = -(-NQTILES // 32)
+# qkvg tiles a CTA group (BLOCKS / W groups x W K parts; W = 8: 144 of 160 real)
+NQT = -(-NQTILES // (BLOCKS // W))
 TL_POINTS = 32
+
+
+class Dims:
+    """The per-rank sizes of a TP = EP = W group (W = 8: the module-level values).
+
+    The QKV GEMV splits K over W CTAs a group (W = 4: each CTA reads twice the K and
+    owns two row pairs of every tile instead of one)."""
+
+    def __init__(self, W):
+        assert W in (4, 8), W
+        self.W = W
+        self.QH = HID // W
+        self.EL = E // W
+        self.KQ = BLOCKS // self.EL
+        self.OWN = 16 // self.KQ
+        self.NRP = self.OWN // 2
+        self.NTILES = self.QH // 16
+        self.KSP = BLOCKS // self.NTILES
+        self.HQ, self.HKV = 128 // W, 16 // W
+        self.QROWS, self.KROWS = self.HQ * HD, self.HKV * HD
+        self.QKV_ROWS = self.QROWS + 2 * self.KROWS
+        self.QKVG_ROWS = self.QKV_ROWS + self.QROWS
+        self.OK_K = HID // W
+        self.NQTILES = self.QKVG_ROWS // 16
+        self.NQT = -(-self.NQTILES // (BLOCKS // W))
+
+
+_DIMS = {w: Dims(w) for w in (4, 8)}
+
 # loads of peer-written data (after its system-scope flag): device scope = past the per-XCD L2,
 # served by the memory-side cache, which every write to this memory passes
 XCM = CM_DEV
@@ -157,9 +196,14 @@ REGION_IDS = {
 @dataclass(frozen=True)
 class Build:
     S: int = 32  # rows (32 / 64 / 96 / 128)
+    W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     # this layer's verify attention fused at the HA head ("swa" / "full")
     attn: str = ""
+    kv_fp8: bool = False  # e4m3 KV cache (HB insert, HA fused attention); else bf16
+    # physical CTAs (256: one a CU of an MI355X; 128: an MI350P, S = 32 only): each runs
+    # BLOCKS / grid virtual CTAs bid + grid v of the BLOCKS-CTA layout, stage by stage
+    grid: int = BLOCKS
 
     @property
     def bnd(self):
@@ -171,7 +215,9 @@ class Build:
 
 
 def scratch_layout(S, world=W, bnd=0):
-    assert world == W, world
+    d = _DIMS[world]
+    W, OK_K, EL, KQ, KSP = d.W, d.OK_K, d.EL, d.KQ, d.KSP
+    NTILES, NQT, QKV_ROWS = d.NTILES, d.NQT, d.QKV_ROWS
     TS = S // W
     extra = (
         []
@@ -200,7 +246,7 @@ def scratch_layout(S, world=W, bnd=0):
             ("mmf", BLOCKS * 8),
             # [K part - 1][tile][row][t]
             ("py", max(128, (KSP - 1) * NTILES) * 16 * S * 8),
-            ("qx", 32 * 8 * NQT * 16 * S * 8),
+            ("qx", BLOCKS * NQT * 16 * S * 8),
             ("qkv", S * (QKV_ROWS // 2) * 8),
         ]
         + extra
@@ -208,7 +254,8 @@ def scratch_layout(S, world=W, bnd=0):
 
 
 def peer_layout(S, world=W, bnd=0):
-    assert world == W, world
+    d = _DIMS[world]
+    W, KQ, NTILES = d.W, d.KQ, d.NTILES
     TS = S // W
     extra = (
         []
@@ -256,16 +303,37 @@ def build(key: Build):
     _KEYSTR = repr(key)  # FlyDSL disk-cache key (see k3.build)
     S = key.S
     assert S in (32, 64, 96, 128), S
+    d = _DIMS[key.W]
+    W, QH, EL, KQ, OWN, NRP = d.W, d.QH, d.EL, d.KQ, d.OWN, d.NRP
+    NTILES, KSP, HQ, HKV = d.NTILES, d.KSP, d.HQ, d.HKV
+    QROWS, QKV_ROWS, QKVG_ROWS = d.QROWS, d.QKV_ROWS, d.QKVG_ROWS
+    OK_K, NQTILES, NQT = d.OK_K, d.NQTILES, d.NQT
+    assert W == 8 or S == 32, (S, W)
+    GRID = key.grid
+    # peer stores: device scope + release fences on PCIe (128 CTAs), else as before
+    mb_put_sys, peer_release, CM_PEER = peer_ops(GRID < BLOCKS)
+    assert GRID in GRIDS, GRID
+    V = BLOCKS // GRID  # virtual CTAs a physical CTA (passes of every stage)
+    assert V == 1 or (key.bnd and not key.attn), key
     NT = S // 16
     TS = S // W  # tokens a rank owns in the token-owner boundaries
     CO = OK_K // KCH // WAVES  # o_proj chunks a wave
     CA = QH // KCH // WAVES  # stage-A pre-proj chunks a wave
     CP = (DM // KSP) // KCH // WAVES  # post-proj chunks a wave
-    KPT = QH // THREADS  # router K a thread
+    KPT = QH // THREADS  # router K a thread (2 / 4)
     NFQ = W * BLOCKS // THREADS  # producer flags a thread (opf / hf polls)
-    QPF = 3  # qkvg tiles issued before stage G (of NQT)
+    # QKV: KQQ = W K parts a group, CQ chunks a wave a tile, NPO row pairs (of 8) a CTA owns
+    KQQ = W
+    XQQ = HID // KQQ
+    CQ = XQQ // KCH // WAVES
+    NPO = 8 // KQQ
+    QPF = (
+        3 // CQ
+    )  # qkvg tiles issued before stage G (of NQT): the same registers at every W
     CPR = BLOCKS // W  # CTAs (16-column blocks) a rank owns in the EP reduce-scatter
+    CGK = QH // 256  # column groups (of the bnd boundaries) in one K part of QH columns
     assert TS * W == S and NFQ * THREADS == W * BLOCKS and W * NTILES * 8 >= 512
+    assert KPT in (2, 4) and NPO * KQQ == 8 and CQ >= 1 and QPF >= 1
     BND = key.bnd != 0  # the column-block boundaries (S = 32)
     QR1 = S == 32  # QKV5 reduces both 16-token row tiles in one LDS round
     lay, _ = scratch_layout(S, W, key.bnd)
@@ -296,7 +364,8 @@ def build(key: Build):
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa")
+        assert W == 8, "the fused attention fragment is built for 2 kv heads a rank"
+        FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8)
         FaLds = FA.Lds
         # the fragment's source hash: the disk cache does not follow FA.run
         _KEYSTR = _KEYSTR + FA.key
@@ -315,7 +384,7 @@ def build(key: Build):
     @fx.struct
     class HbQ:
         red: fx.Array[fx.Float32, (NT if QR1 else 1) * WAVES * NQT * 64 * 4, 16]
-        own: fx.Array[fx.Float32, NT * NQT * 2 * 16, 16]
+        own: fx.Array[fx.Float32, NT * NQT * NPO * 2 * 16, 16]
 
     @fx.union
     class HbLds:
@@ -331,8 +400,9 @@ def build(key: Build):
         pr: fx.Array[fx.Float32, 512 + 64 if BND else 8, 16]
         red4: fx.Array[fx.Float32, 32, 16]
 
-    name_a = f"muse_k5a_s{S}" + (f"_fa{key.attn}" if key.attn else "")
-    name_b = f"muse_k5b_s{S}_r{int(key.next_rope)}"
+    gsuf = f"_g{GRID}" if V > 1 else ""
+    name_a = f"muse_k5a_s{S}_w{W}" + (f"_fa{key.attn}" if key.attn else "") + gsuf
+    name_b = f"muse_k5b_s{S}_w{W}_r{int(key.next_rope)}" + gsuf
 
     # ------------------------------------------------------------ shared helpers
     def red_at(red, base_tile, rr, tt):
@@ -512,12 +582,13 @@ def build(key: Build):
                     w2,
                     rsrc(sel_peer(pl, dw) + fx.Int64(play["op"][0])),
                     idx,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         if const_expr(not BND):  # bnd: tagged pairs, no flags
             rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if tid == 0:
+                peer_release()
                 for pb in pl:
                     mb_put_sys(
                         tag,
@@ -636,11 +707,12 @@ def build(key: Build):
                     xv,
                     rsrc(pb + fx.Int64(play["xin"][0])),
                     (par * S + t) * (HID // 2) + cq // 2,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(tag, pb + fx.Int64(play["xf"][0]), par * S + t, fx.Int32(1))
 
@@ -684,8 +756,9 @@ def build(key: Build):
         rb = bid // KQ
         # ffn_in is local; the 32 CTAs of this K part wrote its columns
         if const_expr(BND):
-            if tid < 32:
-                fa = (tid // 4) * 32 + 4 * kq + tid % 4
+            # the (token group, column group) CTAs whose columns lie in this K part
+            if tid < 8 * CGK:
+                fa = (tid // CGK) * 32 + CGK * kq + tid % CGK
                 mb_poll(
                     tag,
                     health,
@@ -740,7 +813,13 @@ def build(key: Build):
                 xnext = ax_loads(rt + 1)
             # router: thread's 4 K of every token of the tile; all LDS reads first, then the
             # 16 wave reductions interleaved (ILP)
-            xws = [fx.ptr_load(xl + (t16 * XAROW + 2 * tid) // 2) for t16 in range(16)]
+            xws = [
+                [
+                    fx.ptr_load(xl + (t16 * XAROW + KPT * tid + 2 * pr_) // 2)
+                    for pr_ in range(KPT // 2)
+                ]
+                for t16 in range(16)
+            ]
             bvs = []
             for ci in range_constexpr(CA):
                 c = wave + WAVES * ci
@@ -754,7 +833,16 @@ def build(key: Build):
                             )
                         ).bitcast(fx.BFloat16)
                     )
-            prs = [bf_lo(xw) * wf[0] + bf_hi(xw) * wf[1] for xw in xws]
+            prs = []
+            for xw in xws:
+                pr = bf_lo(xw[0]) * wf[0] + bf_hi(xw[0]) * wf[1]
+                for pr_ in range_constexpr(1, KPT // 2):
+                    pr = (
+                        pr
+                        + bf_lo(xw[pr_]) * wf[2 * pr_]
+                        + bf_hi(xw[pr_]) * wf[2 * pr_ + 1]
+                    )
+                prs.append(pr)
             for off in (32, 16, 8, 4, 2, 1):
                 prs = [xred(v, off, _add) for v in prs]
             if lane < 16:
@@ -841,11 +929,12 @@ def build(key: Build):
                         hw,
                         rsrc(pb + fx.Int64(play["hraw"][0])),
                         hidx,
-                        cache_modifier=CM_SYS,
+                        cache_modifier=CM_PEER,
                     )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(
                     tag,
@@ -920,10 +1009,14 @@ def build(key: Build):
         hb0 = (
             (((par * W + hsrc) * EL + hloc // 16) * KQ + (hloc % 16) // OWN) * S + t
         ) * NRP
-        # 8 columns = 4 owner CTAs (K parts) of 2 rows each: one pair a part
+        # 8 columns = 4 pairs: 4 owner CTAs (K parts) of one pair (W = 8) or 2 of two (W = 4)
         hv = fx.Vector.from_elements(
             [
-                ld_i32(own_peer + fx.Int64(play["hraw"][0]), hb0 + o * S, XCM)
+                ld_i32(
+                    own_peer + fx.Int64(play["hraw"][0]),
+                    hb0 + (o // NRP) * S * NRP + o % NRP,
+                    XCM,
+                )
                 for o in range(4)
             ],
             fx.Int32,
@@ -1013,7 +1106,6 @@ def build(key: Build):
         tq = tid // 128
         return fx.ptr_load(pr + (512 + 32 + tq)), fx.ptr_load(pr + (512 + 36 + tq))
 
-    @traced
     def stage_ab_c(
         own_peer,
         pl,
@@ -1026,7 +1118,7 @@ def build(key: Build):
         tag,
         health,
         tid,
-        bid,
+        bids,
         lane,
         wave,
         rank,
@@ -1034,9 +1126,21 @@ def build(key: Build):
     ):
         """The attention boundary with the column-group mapping: the block owners (b / 32 == rank, block
         b = 32 columns, all tokens) reduce the o_proj partials and all-gather the result; CTA (tg, cb) then
-        does the boundary of tokens 4 tg .. x columns 256 cb .."""
+        does the boundary of tokens 4 tg .. x columns 256 cb .. bids: this CTA's virtual CTAs; every
+        owner pass runs first (CTA (tg, cb) reads the columns of the owners 8 cb .. 8 cb + 8)."""
         tid = fresh(tid)
         par = tag_par(tag)
+        for vi in range_constexpr(len(bids)):
+            abc_owner(own_peer, pl, tag, health, tid, bids[vi], rank, par)
+        for vi in range_constexpr(len(bids)):
+            abc_rest(
+                own_peer, scratch, stream_in, nrows, alpha_a, beta_a, w_pffn, tag, health,
+                tid, bids[vi], lane, wave, pr, par,
+            )  # fmt: skip
+
+    @traced
+    def abc_owner(own_peer, pl, tag, health, tid, bid, rank, par):
+        """Block owner b: the W partials in rank order -> bf16 -> every rank's orb."""
         if (
             bid // CPR
         ) == rank:  # the block owner: 8 partials in rank order -> bf16 -> every rank
@@ -1063,6 +1167,13 @@ def build(key: Build):
                     (par * S + tt_) * (HID // 2) + bid * 16 + pp_,
                     bf16_pair(a0, a1),
                 )
+
+    @traced
+    def abc_rest(
+        own_peer, scratch, stream_in, nrows, alpha_a, beta_a, w_pffn, tag, health, tid,
+        bid, lane, wave, pr, par,
+    ):  # fmt: skip
+        """CTA (tg, cb): the boundary of tokens 4 tg .. x columns 256 cb .. (orb polled)."""
         tg = bid // 32
         cb = bid % 32
         tt = 4 * tg + tid // 128
@@ -1287,11 +1398,12 @@ def build(key: Build):
                     mw,
                     pb + fx.Int64(play["moem"][0]),
                     ((par * BLOCKS + bid) * S + t) * 8 + p,
-                    CM_SYS,
+                    CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(
                     tag, pb + fx.Int64(play["mmf"][0]), par * BLOCKS + bid, fx.Int32(1)
@@ -1485,11 +1597,12 @@ def build(key: Build):
                             w2,
                             rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
                             idx,
-                            cache_modifier=CM_SYS,
+                            cache_modifier=CM_PEER,
                         )
             rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
             gpu.barrier()
             if (tid == 0) & (kh == 0):
+                peer_release()
                 for pb in pl:
                     mb_put_sys(
                         tag,
@@ -1589,7 +1702,7 @@ def build(key: Build):
                             swv,
                             rsrc(pb + fx.Int64(play["sg"][0])),
                             (par * S + t) * HID + cq + 4 * h2,
-                            cache_modifier=CM_SYS,
+                            cache_modifier=CM_PEER,
                         )
         ss2 = fx.Float32(0.0)
         for k in range_constexpr(16):
@@ -1614,11 +1727,12 @@ def build(key: Build):
                     xv,
                     rsrc(pb + fx.Int64(play["xn"][0])),
                     (par * S + t) * (HID // 2) + cq // 2,
-                    cache_modifier=CM_SYS,
+                    cache_modifier=CM_PEER,
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
         if tid == 0:
+            peer_release()
             for pb in pl:
                 mb_put_sys(tag, pb + fx.Int64(play["xnf"][0]), par * S + t, fx.Int32(1))
                 if gather != 0:
@@ -1627,16 +1741,20 @@ def build(key: Build):
                     )
 
     def q_loads(w_qkvg, bid, lane, wave, n0, n1):
-        k8 = bid % 8
-        gq = bid // 8
+        """Tiles n0 .. n1 of this CTA's group: CQ chunk operand sets a tile."""
+        kq = bid % KQQ
+        gq = bid // KQQ
         return [
-            bf_tile_load(
-                w_qkvg,
-                fx.min(NQT * gq + n, NQTILES - 1) * 16,
-                HID,
-                k8 * (HID // 8) + wave * KCH,
-                lane,
-            )
+            [
+                bf_tile_load(
+                    w_qkvg,
+                    fx.min(NQT * gq + n, NQTILES - 1) * 16,
+                    HID,
+                    kq * XQQ + (wave + WAVES * ci) * KCH,
+                    lane,
+                )
+                for ci in range(CQ)
+            ]
             for n in range(n0, n1)
         ]
 
@@ -1649,12 +1767,12 @@ def build(key: Build):
         par = tag_par(tag)
         g = lane // 16
         t = lane % 16
-        k8 = bid % 8
-        gq = bid // 8
-        # xn is local; the 32 CTAs of this K eighth wrote its columns
+        kq = bid % KQQ
+        gq = bid // KQQ
+        # xn is local; the CTAs of this K part's column groups wrote its columns
         if const_expr(BND):
-            if tid < 32:
-                fq = (tid // 4) * 32 + 4 * k8 + tid % 4
+            if tid < 8 * CGK:
+                fq = (tid // CGK) * 32 + CGK * kq + tid % CGK
                 mb_poll(
                     tag,
                     health,
@@ -1678,7 +1796,13 @@ def build(key: Build):
             xb = own_peer + fx.Int64(play["xn"][0])
             xpar = par
         qa = [
-            [bf_mma_operand(q_ops[n], qq, lane).bitcast(fx.BFloat16) for qq in range(4)]
+            [
+                [
+                    bf_mma_operand(q_ops[n][ci], qq, lane).bitcast(fx.BFloat16)
+                    for qq in range(4)
+                ]
+                for ci in range(CQ)
+            ]
             for n in range(NQT)
         ]
 
@@ -1687,10 +1811,11 @@ def build(key: Build):
                 ld_vec(
                     xb,
                     (xpar * S + 16 * rt + t) * (HID // 2)
-                    + (k8 * (HID // 8) + wave * KCH + 8 * g + 32 * qq) // 2,
+                    + (kq * XQQ + (wave + WAVES * ci) * KCH + 8 * g + 32 * qq) // 2,
                     4,
                     XCM,
                 ).bitcast(fx.BFloat16)
+                for ci in range(CQ)
                 for qq in range(4)
             ]
 
@@ -1703,8 +1828,9 @@ def build(key: Build):
                     bnext = qb_loads(rt + 1)
                 for n in range_constexpr(NQT):
                     acc = fx.Vector.filled(4, 0.0, fx.Float32)
-                    for qq in range_constexpr(4):
-                        acc = mfma_bf16(qa[n][qq], bs[qq], acc)
+                    for ci in range_constexpr(CQ):
+                        for qq in range_constexpr(4):
+                            acc = mfma_bf16(qa[n][ci][qq], bs[ci * 4 + qq], acc)
                     fx.ptr_store(
                         acc, red + (((rt * WAVES + wave) * NQT + n) * 64 + lane) * 4
                     )
@@ -1726,15 +1852,23 @@ def build(key: Build):
                             red_at(red, (rt * WAVES + w) * NQT + n, rr, tt)
                         )
                     v.append(s_)
-                if okq & (rp == k8):
-                    fx.ptr_store(v[0], own + (((rt * NQT + n) * 2) * 16 + tt))
-                    fx.ptr_store(v[1], own + (((rt * NQT + n) * 2 + 1) * 16 + tt))
+                mine = (
+                    rp // NPO
+                ) == kq  # this CTA owns row pairs NPO kq .. of every tile
+                if okq & mine:
+                    po = (rp % NPO) * 2
+                    fx.ptr_store(
+                        v[0], own + (((rt * NQT + n) * (2 * NPO) + po) * 16 + tt)
+                    )
+                    fx.ptr_store(
+                        v[1], own + (((rt * NQT + n) * (2 * NPO) + po + 1) * 16 + tt)
+                    )
                 for h2 in range_constexpr(2):
                     mb_put_if(
-                        okq & (rp != k8),
+                        okq & (~mine),
                         tag,
                         scratch + fx.Int64(lay["qx"][0]),
-                        (((gq * 8 + k8) * NQT + n) * 16 + 2 * rp + h2) * S
+                        (((gq * KQQ + kq) * NQT + n) * 16 + 2 * rp + h2) * S
                         + 16 * rt
                         + tt,
                         v[h2],
@@ -1747,8 +1881,9 @@ def build(key: Build):
                     bnext = qb_loads(rt + 1)
                 for n in range_constexpr(NQT):
                     acc = fx.Vector.filled(4, 0.0, fx.Float32)
-                    for qq in range_constexpr(4):
-                        acc = mfma_bf16(qa[n][qq], bs[qq], acc)
+                    for ci in range_constexpr(CQ):
+                        for qq in range_constexpr(4):
+                            acc = mfma_bf16(qa[n][ci][qq], bs[ci * 4 + qq], acc)
                     fx.ptr_store(acc, red + ((wave * NQT + n) * 64 + lane) * 4)
                 gpu.barrier()
                 for it_ in range_constexpr((NQT * 128 + THREADS - 1) // THREADS):
@@ -1765,51 +1900,63 @@ def build(key: Build):
                         for w in range_constexpr(WAVES):
                             s_ = s_ + fx.ptr_load(red_at(red, w * NQT + n, rr, tt))
                         v.append(s_)
-                    if okq & (rp == k8):
-                        fx.ptr_store(v[0], own + (((rt * NQT + n) * 2) * 16 + tt))
-                        fx.ptr_store(v[1], own + (((rt * NQT + n) * 2 + 1) * 16 + tt))
+                    mine = (rp // NPO) == kq
+                    if okq & mine:
+                        po = (rp % NPO) * 2
+                        fx.ptr_store(
+                            v[0], own + (((rt * NQT + n) * (2 * NPO) + po) * 16 + tt)
+                        )
+                        fx.ptr_store(
+                            v[1],
+                            own + (((rt * NQT + n) * (2 * NPO) + po + 1) * 16 + tt),
+                        )
                     for h2 in range_constexpr(2):
                         mb_put_if(
-                            okq & (rp != k8),
+                            okq & (~mine),
                             tag,
                             scratch + fx.Int64(lay["qx"][0]),
-                            (((gq * 8 + k8) * NQT + n) * 16 + 2 * rp + h2) * S
+                            (((gq * KQQ + kq) * NQT + n) * 16 + 2 * rp + h2) * S
                             + 16 * rt
                             + tt,
                             v[h2],
                         )
                 gpu.barrier()  # red is rewritten by the next row tile
         gpu.barrier()
-        for it_ in range_constexpr((NQT * 16 * NT + THREADS - 1) // THREADS):
+        for it_ in range_constexpr((NQT * 16 * NT * NPO + THREADS - 1) // THREADS):
             e = tid + THREADS * it_
-            if e < NQT * 16 * NT:
+            if e < NQT * 16 * NT * NPO:
+                po = e % NPO  # the owned row pair (of NPO) of the (tile, token)
+                e = e // NPO
                 rt_ = e // (NQT * 16)
                 n = (e // 16) % NQT
                 tt = e % 16
+                rp = NPO * kq + po
                 specs, oks = [], []
-                for src in range_constexpr(8):
+                for src in range_constexpr(KQQ):
                     for h2 in range_constexpr(2):
                         specs.append(
                             (
                                 scratch + fx.Int64(lay["qx"][0]),
-                                (((gq * 8 + src) * NQT + n) * 16 + 2 * k8 + h2) * S
+                                (((gq * KQQ + src) * NQT + n) * 16 + 2 * rp + h2) * S
                                 + 16 * rt_
                                 + tt,
                                 1,
                             )
                         )
-                        oks.append(fx.Int32(src) != k8)
+                        oks.append(fx.Int32(src) != kq)
                 got = mb_poll(tag, health, specs, REGION_IDS["qx"], oks=oks)
                 tot = []
                 for h2 in range_constexpr(2):
-                    mine = fx.ptr_load(own + (((rt_ * NQT + n) * 2 + h2) * 16 + tt))
+                    mine = fx.ptr_load(
+                        own + (((rt_ * NQT + n) * (2 * NPO) + 2 * po + h2) * 16 + tt)
+                    )
                     s_ = fx.Float32(0.0)
-                    for src in range_constexpr(8):
-                        s_ = s_ + (fx.Int32(src) == k8).select(
+                    for src in range_constexpr(KQQ):
+                        s_ = s_ + (fx.Int32(src) == kq).select(
                             mine, got[2 * src + h2][0].bitcast(fx.Float32)
                         )
                     tot.append(s_)
-                row = (NQT * gq + n) * 16 + 2 * k8
+                row = (NQT * gq + n) * 16 + 2 * rp
                 w2 = bf16_pair(tot[0], tot[1])
                 if row < QKV_ROWS:
                     mb_put(
@@ -1835,6 +1982,8 @@ def build(key: Build):
         slots,
         cos_sin,
         pos,
+        k_scale,
+        v_scale,
         tag,
         health,
         tid,
@@ -1849,7 +1998,8 @@ def build(key: Build):
         element (slot >> 4) * bstride + (kv * 16 + (slot & 15)) * 128 + 64 isv + 2p, bstride = v_cache (a
         value); each half wave stores with its own wave-uniform 64-bit block base (readlane of its slot);
         slot < 0 and tt >= nrows skipped. Rows tt >= nrows are not real rows (their q is written, their KV
-        is not)."""
+        is not). kv_fp8: e4m3 bytes (element = byte) scaled by 1 / *k_scale or *v_scale, one dword a lane
+        pair (e4m3_dword)."""
         row0 = (hh * HD) // 2 + p
         got = mb_poll(
             tag,
@@ -1880,20 +2030,23 @@ def build(key: Build):
         else:
             kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
             slot = ld_i32(slots, fx.min(tt, nrows - 1) * 2)
+            if const_expr(key.kv_fp8):
+                w8 = e4m3_dword(o0, o1, inv_kv_scale(isv.select(v_scale, k_scale)))
             for half in range_constexpr(2):
                 sl = readlane(slot, 32 * half)
                 tl_ = readlane(tt, 32 * half)
                 mine = ((tid % 64) >= 32) if half == 1 else ((tid % 64) < 32)
                 if (sl >= 0) & (tl_ < nrows):
-                    base = k_cache + (
-                        fx.Int64(sl >> 4) * v_cache
-                        + fx.Int64(
-                            (kv * 16 + (sl & 15)) * 128
-                            + isv.select(fx.Int32(HD), fx.Int32(0))
+                    eoff = fx.Int64(sl >> 4) * v_cache + fx.Int64(
+                        (kv * 16 + (sl & 15)) * 128
+                        + isv.select(fx.Int32(HD), fx.Int32(0))
+                    )
+                    if const_expr(key.kv_fp8):
+                        st_if(mine & (p % 2 == 0), w8, k_cache + eoff, p // 2)
+                    elif mine:
+                        bo.buffer_store(
+                            bf16_pair(o0, o1), rsrc(k_cache + eoff * fx.Int64(2)), p
                         )
-                    ) * fx.Int64(2)
-                    if mine:
-                        bo.buffer_store(bf16_pair(o0, o1), rsrc(base), p)
 
     @traced
     def head_finish(
@@ -1904,6 +2057,8 @@ def build(key: Build):
         slots,
         cos_sin,
         pos,
+        k_scale,
+        v_scale,
         tag,
         health,
         tid,
@@ -1925,6 +2080,8 @@ def build(key: Build):
                     slots,
                     cos_sin,
                     pos,
+                    k_scale,
+                    v_scale,
                     tag,
                     health,
                     tid,
@@ -2005,10 +2162,14 @@ def build(key: Build):
         sl = alloc.allocate(HaLds)
         so, sa = sl.o_.peek(), sl.a_.peek()
         rt = {"rid": rl.rid.ptr, "rw": rl.rw.ptr, "sel": rl.sel.ptr}
-        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
+        # this CTA's virtual CTAs (stage passes): bid + GRID v
+        vbs = [bid]
+        for v in range_constexpr(1, V):
+            vbs.append(bid + GRID * v)
         ao = None
         if const_expr(FA is None):
             o_ops = o_loads(w_o, bid, lane, wave)
@@ -2019,8 +2180,24 @@ def build(key: Build):
             )
             ao = (ao_t, health)
             o_ops = o_loads(w_o, bid, lane, wave)
-        stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
-        stage_o(o_ops, scratch, pl, tag, health, tid, bid, lane, wave, rank, so.red.ptr)
+        for v in range_constexpr(V):
+            stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, vbs[v], nrows, ao)
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                o_ops = o_loads(w_o, vbs[v], lane, wave)
+            stage_o(
+                o_ops,
+                scratch,
+                pl,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                rank,
+                so.red.ptr,
+            )
         wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
         if const_expr(BND):  # all 256 CTAs, column groups
             stage_ab_c(
@@ -2035,7 +2212,7 @@ def build(key: Build):
                 tag,
                 health,
                 tid,
-                bid,
+                vbs,
                 lane,
                 wave,
                 rank,
@@ -2062,41 +2239,48 @@ def build(key: Build):
                     rank,
                     misc.red4.ptr,
                 )
-        stage_a(
-            wr,
-            wp,
-            own_peer,
-            pl,
-            scratch,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            sa.red.ptr,
-            sa.tok.ptr,
-            sa.own.ptr,
-            sa.x.ptr,
-        )
-        if bid < S:
-            stage_route_h(
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage A is rewritten by the next pass
+                wr, wp = a_loads(w_r, w_pre, vbs[v], tid, lane, wave)
+            stage_a(
+                wr,
+                wp,
                 own_peer,
-                bias,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
+                pl,
+                scratch,
                 tag,
                 health,
                 tid,
-                bid,
+                vbs[v],
                 lane,
                 wave,
-                rt,
+                rank,
+                sa.red.ptr,
                 sa.tok.ptr,
+                sa.own.ptr,
+                sa.x.ptr,
             )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # route / tok LDS of the previous pass
+            if vbs[v] < S:
+                stage_route_h(
+                    own_peer,
+                    bias,
+                    w_pren,
+                    h_out,
+                    ids_out,
+                    sc_out,
+                    tag,
+                    health,
+                    tid,
+                    vbs[v],
+                    lane,
+                    wave,
+                    rt,
+                    sa.tok.ptr,
+                )
 
     @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
     def hb(
@@ -2116,6 +2300,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2143,38 +2329,47 @@ def build(key: Build):
         misc = alloc.allocate(Misc).peek()
         sl = alloc.allocate(HbLds)
         sf, sq = sl.f_.peek(), sl.q_.peek()
-        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
+        vbs = [bid]
+        for v in range_constexpr(1, V):
+            vbs.append(bid + GRID * v)
         ppo = pp_loads(w_pp, bid, lane, wave)
-        if bid // CPR == rank:
-            stage_ar(own_peer, pl, tag, health, tid, bid, rank)
-        stage_post(
-            ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, sf.red.ptr
-        )
+        for v in range_constexpr(V):
+            if vbs[v] // CPR == rank:
+                stage_ar(own_peer, pl, tag, health, tid, vbs[v], rank)
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage F is rewritten by the next pass
+                ppo = pp_loads(w_pp, vbs[v], lane, wave)
+            stage_post(
+                ppo, pl, scratch, tag, health, tid, vbs[v], lane, wave, rank, sf.red.ptr
+            )
         qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
         if const_expr(BND):  # all 256 CTAs, column groups
-            stage_g_c(
-                own_peer,
-                scratch,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                stream_out,
-                so_stride,
-                so_off,
-                sfull_out,
-                gather,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                misc.pr.ptr,
-            )
+            for v in range_constexpr(V):
+                stage_g_c(
+                    own_peer,
+                    scratch,
+                    w_pff,
+                    alpha,
+                    beta,
+                    w_in,
+                    stream_out,
+                    so_stride,
+                    so_off,
+                    sfull_out,
+                    gather,
+                    tag,
+                    health,
+                    tid,
+                    vbs[v],
+                    lane,
+                    wave,
+                    misc.pr.ptr,
+                )
         else:
             if bid < TS:
                 stage_g(
@@ -2199,34 +2394,41 @@ def build(key: Build):
                     misc.red4.ptr,
                 )
         qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
-        stage_qkv(
-            qo,
-            own_peer,
-            scratch,
-            g_out,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            sq.red.ptr,
-            sq.own.ptr,
-        )
-        head_finish(
-            scratch,
-            q_out,
-            k_cache,
-            v_cache,
-            slots,
-            cos_sin,
-            pos,
-            tag,
-            health,
-            tid,
-            bid,
-            nrows,
-        )
+        for v in range_constexpr(V):
+            if const_expr(v > 0):
+                gpu.barrier()  # the LDS of stage QKV is rewritten by the next pass
+                qo = q_loads(w_qkvg, vbs[v], lane, wave, 0, NQT)
+            stage_qkv(
+                qo,
+                own_peer,
+                scratch,
+                g_out,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                lane,
+                wave,
+                sq.red.ptr,
+                sq.own.ptr,
+            )
+        for v in range_constexpr(V):
+            head_finish(
+                scratch,
+                q_out,
+                k_cache,
+                v_cache,
+                slots,
+                cos_sin,
+                pos,
+                k_scale,
+                v_scale,
+                tag,
+                health,
+                tid,
+                vbs[v],
+                nrows,
+            )
         if const_expr(not BND):  # the column-block G wrote sfull_out itself
             if (gather != 0) & (bid < nrows):
                 stage_gather(own_peer, sfull_out, tag, health, tid, bid)
@@ -2299,7 +2501,7 @@ def build(key: Build):
             g_stride,
             s_full,
             nrows,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     @flyc.jit
     def launch_b(
@@ -2319,6 +2521,8 @@ def build(key: Build):
         slots: Int64,
         cos_sin: Int64,
         pos: Int64,
+        k_scale: Int64,
+        v_scale: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -2357,6 +2561,8 @@ def build(key: Build):
             slots,
             cos_sin,
             pos,
+            k_scale,
+            v_scale,
             scratch,
             epoch,
             health,
@@ -2375,15 +2581,25 @@ def build(key: Build):
             so_off,
             gather,
             nrows,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+        ).launch(grid=(GRID,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = (launch_a, launch_b)
     return _BUILDS[key]
 
 
-def build_vllm(S=32, W=8, next_rope=True, attn=""):
-    """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = 8 group;
-    next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this layer's verify attention
-    fused at the HA head."""
-    assert W == 8 and S in (32, 64, 96, 128), (S, W)
-    return Build(S=S, next_rope=bool(next_rope), attn=attn)
+def build_vllm(S=32, W=8, next_rope=True, attn="", kv_fp8=False, grid=BLOCKS):
+    """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = W group
+    (W = 4: S = 32 only); next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this
+    layer's verify attention fused at the HA head (W = 8 only); kv_fp8: e4m3 KV cache; grid:
+    the CTAs a launch (256 on an MI355X; 128 on an MI350P: S = 32, no fused attention)."""
+    assert W in (4, 8) and S in (32, 64, 96, 128) and grid in GRIDS, (S, W, grid)
+    assert (W == 8 or S == 32) and (not attn or W == 8), (S, W, attn)
+    assert grid == BLOCKS or (S == 32 and not attn), (S, attn, grid)
+    return Build(
+        S=S,
+        W=W,
+        next_rope=bool(next_rope),
+        attn=attn,
+        kv_fp8=bool(kv_fp8),
+        grid=grid,
+    )
