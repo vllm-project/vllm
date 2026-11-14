@@ -202,7 +202,10 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
         self.execute_model_state: ExecuteModelState | None = None
 
-        set_offloader(create_offloader(self.vllm_config.offload_config))
+        set_offloader(
+            create_offloader(self.vllm_config.offload_config),
+            self.vllm_config.offload_config,
+        )
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
