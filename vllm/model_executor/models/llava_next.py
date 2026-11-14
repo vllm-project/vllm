@@ -18,6 +18,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -620,10 +621,12 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
 
         pixel_values = mm_kwargs.get("pixel_values") if mm_kwargs else None
         if pixel_values is None or not isinstance(pixel_values.data, torch.Tensor):
-            return num_mm_embeds, num_mm_embeds
+            if mm_kwargs is not None:
+                return num_mm_embeds, num_mm_embeds
+            num_tiles = None
+        else:
+            num_tiles = pixel_values.data.shape[0]
 
-        # Unpad runs after the connector, so `num_mm_embeds` is not invertible.
-        num_tiles = pixel_values.data.shape[0]
         encoder_info = get_vision_encoder_info(self.config)
         tile_size = encoder_info.get_image_size()
         tokens_per_tile = encoder_info.get_num_image_tokens(
@@ -632,4 +635,13 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         selected_per_tile = get_num_selected_vision_tokens(
             tokens_per_tile, self.config.vision_feature_select_strategy
         )
+
+        if num_tiles is None:
+            # Unpadding preserves the base tile, bounding the number of images.
+            max_images = num_mm_embeds // selected_per_tile
+            max_tiles_per_image = 1 + max(
+                cdiv(height, tile_size) * cdiv(width, tile_size)
+                for height, width in self.config.image_grid_pinpoints
+            )
+            num_tiles = max_images * max_tiles_per_image
         return num_tiles * tokens_per_tile, num_tiles * selected_per_tile
