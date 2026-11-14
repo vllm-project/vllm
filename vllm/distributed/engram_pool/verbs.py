@@ -21,7 +21,7 @@ WR_WRITE_WITH_IMM = 1
 # ibv_wc opcodes from here on are receive completions.
 WC_RECV = 128
 
-_REMOTE_WRITE = 1 | 2  # local write, remote write
+_REMOTE_WRITE = 1 | 2 | 4  # local write, remote write, remote read
 _RELAXED = 1 << 20
 # Access of registered memory: read by this NIC only; peers' bulk writes, which
 # may land in any order; peers' flags, which land after their earlier writes.
@@ -208,19 +208,17 @@ class Device:
         lkey, rkey = struct.unpack_from("<II", ctypes.string_at(mr + 36, 8))
         return lkey, rkey
 
-    def create_cq(self, depth: int) -> tuple[int, int, int]:
-        """A CQ whose completions can wake a sleeper: returns it, its
-        completion channel and the channel's fd."""
-        channel = _check(_lib().ibv_create_comp_channel(self.context), "channel")
+    def create_cq(self, depth: int, wakeable: bool = False) -> tuple[int, int]:
+        """A CQ, and if `wakeable` a completion channel (else 0) whose events
+        (`cq_event`) wake a sleeper."""
+        channel = 0
+        if wakeable:
+            channel = _check(_lib().ibv_create_comp_channel(self.context), "channel")
         cq = _check(
             _lib().ibv_create_cq(self.context, depth, None, channel, 0),
             "ibv_create_cq",
         )
-        return (
-            cq,
-            channel,
-            struct.unpack_from("<i", ctypes.string_at(channel + 8, 4))[0],
-        )
+        return cq, channel
 
     def notify_cq(self, cq: int) -> None:
         """Raise one event on the CQ's channel at its next completion."""
@@ -228,7 +226,7 @@ class Device:
             raise RuntimeError(f"ibv_req_notify_cq failed: {os.strerror(error)}")
 
     def cq_event(self, channel: int) -> None:
-        """Consume one event of `channel` (its fd is readable)."""
+        """Sleep until the next event of `channel` and consume it."""
         cq, context = ctypes.c_void_p(), ctypes.c_void_p()
         _check(
             _lib().ibv_get_cq_event(channel, ctypes.byref(cq), ctypes.byref(context))
@@ -243,7 +241,8 @@ class Device:
 
     def create_qp(
         self,
-        cq: int,
+        send_cq: int,
+        recv_cq: int,
         max_send_wr: int,
         max_send_sge: int = 1,
         max_inline: int = 0,
@@ -252,7 +251,7 @@ class Device:
         """An RC QP; it receives only WRITE_WITH_IMM notices. Returns it and
         its number."""
         attr = ctypes.create_string_buffer(64)
-        struct.pack_into("<QQ", attr, 8, cq, cq)
+        struct.pack_into("<QQ", attr, 8, send_cq, recv_cq)
         struct.pack_into(
             "<IIIII", attr, 32, max_send_wr, max_recv_wr, max_send_sge, 1, max_inline
         )
