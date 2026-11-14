@@ -131,6 +131,9 @@ class WorkerSentinel:
                 # startup); its cpu_all_reduce_ forwards it, so update both.
                 group.cpu_timeout = timeout
 
+    def pause(self, ft_request: FaultToleranceRequest):
+        self.worker.synchronize_device()
+
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params

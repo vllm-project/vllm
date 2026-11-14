@@ -106,8 +106,10 @@ from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
     EngineCoreSentinel,
+    FaultTolerancePause,
     fault_tolerant_wrapper,
 )
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
@@ -1990,6 +1992,14 @@ class EngineCoreProc(EngineCore):
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.FT_PAUSE:
+            if self.ft_sentinel.pause_requested:
+                self.model_executor.collective_rpc(
+                    "handle_ft_command",
+                    args=(FaultToleranceRequest(instruction="pause", params={}),),
+                    timeout=self.ft_sentinel.engine_recovery_timeout_sec,
+                )
+                raise FaultTolerancePause
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
@@ -2854,8 +2864,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
-        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
-            # Coordinator disabled: never idle-pause; engines keep stepping.
+        elif (
+            self.enable_fault_tolerance
+            and self.ft_sentinel.coordinator_disabled
+            and not self.ignore_start_dp_wave
+        ):
+            # Coordinator disabled: never idle-pause; engines keep stepping
+            # unless generation is paused.
             return True
 
         return has_unfinished

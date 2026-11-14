@@ -477,6 +477,14 @@ report `unhealthy`. Include the original rank IDs in `removed_dp_ranks`. If the
 removed rank hosted the DP store, also provide a reachable surviving
 `dp_master_ip` and a free `dp_store_port`.
 
+If the orchestrator detects a failure before idle engines do, send `pause` to
+every surviving engine first, then wait for all of them to report `unhealthy`
+before sending `retry` or `scale_down`. Pause stops request admission and enters
+recovery after the current step and outstanding device work finish. It does not
+interrupt an in-flight collective; a failed peer may still require the backend's
+fault timeout. Pause is accepted only while the engine is healthy; other states
+are rejected without changing the last recovery result.
+
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
 endpoint is no longer registered.
