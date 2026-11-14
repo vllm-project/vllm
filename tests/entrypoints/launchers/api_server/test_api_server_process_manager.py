@@ -586,7 +586,7 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
             False,
         ),
         (
-            ["--log-config-file", "/tmp/logging.json"],
+            ["--logging-config.pylogging_config_file", "/tmp/logging.json"],
             envs.VLLM_LOGGING_LEVEL,
             "text",
             True,

@@ -452,12 +452,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
-    "--log-config-file is deprecated and will be removed in v0.33.0. "
-    "Use --logging-config.pylogging_config_file instead."
-)
-
-
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
     "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
@@ -474,14 +468,6 @@ _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
 )
-
-
-class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy `--log-config-file` option is used."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
-        setattr(namespace, self.dest, values)
 
 
 @dataclass
@@ -792,7 +778,6 @@ class EngineArgs:
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
-    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -1688,16 +1673,6 @@ class EngineArgs:
                 "Overrides that field if both are specified."
             ),
         )
-        logging_group.add_argument(
-            "--log-config-file",
-            dest="log_config_file",
-            default=argparse.SUPPRESS,
-            metavar="PYLOGGING_CONFIG_FILE",
-            action=DeprecatedLogConfigFileAction,
-            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
-        )
-        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
-        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -2280,10 +2255,6 @@ class EngineArgs:
         config = self.logging_config or LoggingConfig()
         if self.log_level is not None:
             config = dataclasses.replace(config, log_level=self.log_level)
-        if self.log_config_file is not None:
-            config = dataclasses.replace(
-                config, pylogging_config_file=self.log_config_file
-            )
         return config
 
     def create_engine_config(
