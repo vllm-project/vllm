@@ -136,6 +136,7 @@ def _fused_moe_lora_one_shot_kernel(
     token_lora_mapping_ptr,
     lora_ids_ptr,
     adapter_enabled_ptr,
+    row_map_ptr,
     # ---- dims ----
     N,
     K,
@@ -171,6 +172,7 @@ def _fused_moe_lora_one_shot_kernel(
     BLOCK_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
+    HAS_ROW_MAP: tl.constexpr,
 ):
     pid_full = tl.program_id(axis=0)
     pid_m = pid_full // NPID_FACTOR
@@ -221,6 +223,24 @@ def _fused_moe_lora_one_shot_kernel(
             other=num_valid_tokens,
         )
     token_mask = offs_token < num_valid_tokens
+    if HAS_ROW_MAP:
+        offs_out_row = tl.load(row_map_ptr + offs_token, mask=token_mask, other=-1).to(
+            tl.int64
+        )
+        token_mask = token_mask & (offs_out_row >= 0)
+        offs_x_row = (
+            offs_out_row if MUL_ROUTED_WEIGHT else offs_token // token_mapping_factor
+        )
+    else:
+        offs_out_row = offs_token
+        offs_x_row = offs_token // token_mapping_factor
+
+    # Loaded before the shrink loop: on XPU (Triton 3.8), loading it after
+    # the loop reads zeros when the output rows are offs_token.
+    if MUL_ROUTED_WEIGHT:
+        moe_w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0).to(
+            tl.float32
+        )
 
     # N range owned by this program. Splitting [0, N) into NPID_FACTOR
     # contiguous outer blocks lets us scale parallelism for small batches.
@@ -247,7 +267,6 @@ def _fused_moe_lora_one_shot_kernel(
     safe_offs_r = tl.where(rank_mask, offs_r, 0)
     offs_k = tl.arange(0, BLOCK_K)
 
-    offs_x_row = offs_token // token_mapping_factor
     x_ptrs = x_ptr + offs_x_row[:, None] * stride_xm + offs_k[None, :] * stride_xk
     a_ptrs = A_base + offs_k[:, None] * stride_A_k + safe_offs_r[None, :] * stride_A_r
 
@@ -275,11 +294,6 @@ def _fused_moe_lora_one_shot_kernel(
     # this program's [n_lo, n_hi). The (offs_n < n_hi) mask is required
     # whenever BLOCK_N > n_per_outer to keep adjacent outer blocks from
     # writing into each other's columns.
-    if MUL_ROUTED_WEIGHT:
-        moe_w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0).to(
-            tl.float32
-        )
-
     out_slice_base = out_ptr + slice_id * slice_n_offset
 
     for n_start in range(n_lo, n_hi, BLOCK_N):
@@ -297,7 +311,7 @@ def _fused_moe_lora_one_shot_kernel(
 
         out_ptrs = (
             out_slice_base
-            + offs_token[:, None] * stride_om
+            + offs_out_row[:, None] * stride_om
             + offs_n[None, :] * stride_on
         )
         out_mask = token_mask[:, None] & n_mask[None, :]
@@ -326,6 +340,7 @@ def _run_fused_moe_lora_one_shot(
     mul_routed_weight: bool,
     block_size_m: int,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
     """Fast-path wrapper: launches one fused shrink+expand kernel.
 
@@ -479,6 +494,7 @@ def _run_fused_moe_lora_one_shot(
         token_lora_mapping,
         lora_ids,
         adapter_enabled,
+        row_map,
         N_per_slice,
         K,
         topk_weights.numel(),
@@ -509,6 +525,7 @@ def _run_fused_moe_lora_one_shot(
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         ADD_INPUTS=add_inputs,
+        HAS_ROW_MAP=row_map is not None,
         num_warps=nw,
         num_stages=ns,
     )
@@ -532,6 +549,7 @@ def _fused_moe_lora_small_batch_kernel(
     expert_ids_ptr,  # (num_tokens * top_k_num,)
     token_lora_mapping_ptr,  # (num_tokens,)
     adapter_enabled_ptr,
+    row_map_ptr,
     # ---- dims ----
     N,
     K,
@@ -572,6 +590,7 @@ def _fused_moe_lora_small_batch_kernel(
     BLOCK_K: tl.constexpr,
     NUM_SLICES: tl.constexpr,
     EVEN_K: tl.constexpr,
+    HAS_ROW_MAP: tl.constexpr,
 ):
     """Persistent fused MoE-LoRA kernel for naive_block_assignment inputs.
 
@@ -621,6 +640,13 @@ def _fused_moe_lora_small_batch_kernel(
         valid = valid & (enabled != 0)
         expert_id = tl.load(expert_ids_ptr + pair_idx)
         valid = valid & (expert_id >= 0)
+        if HAS_ROW_MAP:
+            out_row = tl.load(row_map_ptr + pair_idx)
+            valid = valid & (out_row >= 0)
+            x_row = out_row if MUL_ROUTED_WEIGHT else pair_idx // token_mapping_factor
+        else:
+            out_row = pair_idx
+            x_row = pair_idx // token_mapping_factor
 
         if valid:
             cur_A_ptr = tl.load(A_ptrs + slice_id).to(
@@ -632,7 +658,6 @@ def _fused_moe_lora_small_batch_kernel(
             A_base = cur_A_ptr + lora_id * stride_A_lora + expert_id * stride_A_expert
             B_base = cur_B_ptr + lora_id * stride_B_lora + expert_id * stride_B_expert
 
-            x_row = pair_idx // token_mapping_factor
             x_row_ptr = x_ptr + x_row * stride_xm
 
             # SHRINK GEMV (once per program; reused across n_tiles_per_program
@@ -672,7 +697,7 @@ def _fused_moe_lora_small_batch_kernel(
             # tl.static_range) so a single compiled kernel handles every
             # chunk size — see the note on the kernel signature.
             n_tile_start = n_chunk_idx * n_tiles_per_program
-            out_row_ptr = out_ptr + slice_id * slice_n_offset + pair_idx * stride_om
+            out_row_ptr = out_ptr + slice_id * slice_n_offset + out_row * stride_om
 
             if MUL_ROUTED_WEIGHT:
                 moe_w = tl.load(topk_weights_ptr + pair_idx).to(tl.float32)
@@ -740,6 +765,7 @@ def _run_fused_moe_lora_small_batch(
     adapter_enabled: torch.Tensor,
     mul_routed_weight: bool,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
     """Small-batch GEMV-style wrapper. Naive-block-assignment inputs only.
 
@@ -826,6 +852,7 @@ def _run_fused_moe_lora_small_batch(
         expert_ids_flat,
         token_lora_mapping,
         adapter_enabled,
+        row_map,
         N_per_slice,
         K,
         top_k_num,
@@ -855,6 +882,7 @@ def _run_fused_moe_lora_small_batch(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         NUM_SLICES=num_slices,
+        HAS_ROW_MAP=row_map is not None,
         num_warps=nw,
         num_stages=ns,
     )
@@ -918,6 +946,7 @@ def _fused_moe_lora_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     token_lora_mapping_ptr,
+    row_map_ptr,
     # Matrix dimensions
     N,
     K,
@@ -976,6 +1005,10 @@ def _fused_moe_lora_kernel(
     #   yes     | no      | False  | expand kernel (num_slices>1)
     #   no      | no      | True   | shrink kernel (num_slices>1)
     sort_c: tl.constexpr,
+    # Remap A / C rows from flat (token, topk) pairs through row_map_ptr;
+    # pairs mapped to a negative row are skipped.
+    REMAP_A: tl.constexpr = False,
+    REMAP_C: tl.constexpr = False,
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
@@ -1051,6 +1084,13 @@ def _fused_moe_lora_kernel(
 
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     token_mask = offs_token < num_valid_tokens
+    if REMAP_A or REMAP_C:
+        offs_row = tl.load(row_map_ptr + offs_token, mask=token_mask, other=-1).to(
+            tl.int64
+        )
+        token_mask = token_mask & (offs_row >= 0)
+    offs_a_row = offs_row if REMAP_A else offs_token // token_mapping_factor
+    offs_c_row = offs_row if REMAP_C else offs_token
 
     if USE_TMA and a_desc is not None:
         # Expand path - with TMA enabled, load from A using TMA descriptor
@@ -1065,8 +1105,7 @@ def _fused_moe_lora_kernel(
         # 'sorted_token_ids_ptr' then store them in c_ptr in this same sorted order
         tl.static_assert(a_desc is None, "a_desc must be none")
         a_ptrs = cur_a_ptr + (
-            offs_token[:, None] // token_mapping_factor * stride_am
-            + offs_k[None, :] * stride_ak
+            offs_a_row[:, None] * stride_am + offs_k[None, :] * stride_ak
         )
 
     if USE_TMA:
@@ -1152,7 +1191,7 @@ def _fused_moe_lora_kernel(
         lora_id,
         pid_m,
         offs,
-        offs_token,
+        offs_c_row,
         offs_cn,
         stride_cm,
         stride_cn,
@@ -1210,7 +1249,9 @@ def _fused_moe_lora_shrink(
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    assert row_map is None or not use_tma
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
         "BLOCK_SIZE_M": block_size_m,
@@ -1262,6 +1303,7 @@ def _fused_moe_lora_shrink(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        row_map,
         N,
         K,
         EM,
@@ -1292,6 +1334,7 @@ def _fused_moe_lora_shrink(
         USE_B_L2_CACHE=True,
         sort_c=use_tma and sorted_token_ids is not None,
         IS_PRIMARY=True,
+        REMAP_A=row_map is not None and mul_routed_weight,
         **shrink_config,
     )
 
@@ -1335,7 +1378,9 @@ def _fused_moe_lora_expand(
     use_gdc: bool = False,
     use_tma: bool = False,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    assert row_map is None or not use_tma
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
     N = w1_output_dim_size
@@ -1404,6 +1449,7 @@ def _fused_moe_lora_expand(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        row_map,
         N,
         K,
         EM,
@@ -1434,6 +1480,7 @@ def _fused_moe_lora_expand(
         USE_B_L2_CACHE=True,
         sort_c=False,
         IS_PRIMARY=False,
+        REMAP_C=row_map is not None,
         **expand_config,
     )
 
@@ -1476,7 +1523,15 @@ def _fused_moe_lora(
     fully_sharded: bool = False,
     offset: int = 0,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    """Adds the MoE LoRA delta of each (token, topk) pair to `output`.
+
+    If `row_map` is given, `output` (and `qcurr_hidden_states` when it holds
+    one row per pair, i.e. `mul_routed_weight=True`) are indexed by
+    `row_map[token * top_k_num + k]` instead of the pair index, and pairs
+    mapped to a negative row are skipped.
+    """
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert topk_weights.dim() == qcurr_hidden_states.dim() == 2
     if sorted_token_ids is None:
@@ -1523,6 +1578,7 @@ def _fused_moe_lora(
                 adapter_enabled,
                 mul_routed_weight,
                 add_inputs=add_inputs,
+                row_map=row_map,
             )
             return
         # shrink/expand BLOCK_SIZE_M must match the block_size that
@@ -1547,6 +1603,7 @@ def _fused_moe_lora(
             mul_routed_weight,
             shrink_block_size_m,
             add_inputs=add_inputs,
+            row_map=row_map,
         )
         return
 
@@ -1576,6 +1633,7 @@ def _fused_moe_lora(
         supports_tma(device)
         and not fully_sharded
         and max_lora_rank * output.element_size() % 16 == 0
+        and row_map is None
     )
 
     intermediate_cache_shape = (
@@ -1639,6 +1697,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        row_map=row_map,
     )
 
     if fully_sharded:
@@ -1690,6 +1749,7 @@ def _fused_moe_lora(
         use_gdc=use_gdc,
         use_tma=use_tma,
         add_inputs=add_inputs,
+        row_map=row_map,
     )
 
 
