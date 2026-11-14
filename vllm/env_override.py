@@ -144,6 +144,12 @@ def _maybe_promote_torch_symbols_for_rocm():
         return
 
 
+def _force_legacy_nccl_backend():
+    """Select legacy NCCL before PyTorch registers distributed backends."""
+    os.environ["TORCH_DIST_USE_NCCL2"] = "0"
+
+
+_force_legacy_nccl_backend()
 _maybe_set_cuda_compatibility_path()
 _maybe_promote_torch_symbols_for_rocm()
 
