@@ -11,8 +11,9 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -77,6 +78,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -302,7 +304,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
         input_ids: torch.Tensor | None,
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
+        use_hc_sp: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if use_hc_sp is None:
+            use_hc_sp = self.use_hc_sequence_parallel
         if prev_block_output is None:
             assert prev_injection is None
         attn_hc = self.attn_hyper_connection
@@ -322,6 +327,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 input_ids,
                 query_start_loc,
                 ngram_context,
+                use_sequence_parallel=use_hc_sp,
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
@@ -332,7 +338,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
-        if self.use_hc_sequence_parallel:
+        if use_hc_sp:
             # Positions retain the full token axis for both text and MRoPE inputs.
             block_input = sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
@@ -347,7 +353,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         mlp_hc = self.mlp_hyper_connection
         if self.use_hc_sequence_parallel:
-            attn_out = sp_reduce_scatter(attn_out)
+            attn_out = (
+                sp_reduce_scatter(attn_out)
+                if use_hc_sp
+                else tensor_model_parallel_all_reduce(attn_out)
+            )
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
@@ -355,16 +365,21 @@ class Qwen4ExpDecoderLayer(nn.Module):
             # MoE consumes local tokens and returns complete local outputs.
             mlp_out = self.mlp(block_input, already_sequence_parallel=True)
         else:
-            if self.use_hc_sequence_parallel:
+            if use_hc_sp:
                 block_input = sp_all_gather(block_input)[: positions.shape[-1]]
             mlp_out = self.mlp(block_input)
             if self.use_hc_sequence_parallel:
                 assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
                 reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
                 # Only sum partial outputs. Reduced outputs already include all ranks.
-                mlp_out = (
-                    sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)
-                )
+                if use_hc_sp:
+                    mlp_out = (
+                        sp_reduce_scatter(mlp_out)
+                        if reduce_output
+                        else sp_shard(mlp_out)
+                    )
+                elif reduce_output:
+                    mlp_out = tensor_model_parallel_all_reduce(mlp_out)
         return hidden_states, mlp_out, injection
 
 
@@ -433,6 +448,34 @@ class Qwen4ExpModel(nn.Module):
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
+        self.hc_sp_min_tokens = 0
+        extra = vllm_config.additional_config
+        small_batch_fallback = isinstance(extra, dict) and extra.get(
+            "hc_sp_small_batch_fallback", False
+        )
+        if small_batch_fallback:
+            parallel = vllm_config.parallel_config
+            if (
+                not self.use_hc_sequence_parallel
+                or self.use_sequence_parallel
+                or parallel.data_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.nnodes != 1
+                or parallel.tensor_parallel_size > torch.accelerator.device_count()
+                or vllm_config.speculative_config is not None
+                or vllm_config.lora_config is not None
+                or vllm_config.compilation_config.mode != CompilationMode.NONE
+                or vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+                or not current_platform.is_device_capability_family(90)
+            ):
+                raise ValueError(
+                    "Experimental HC-SP fallback requires single-node SM90, "
+                    "HC-SP, DP1/PP1, "
+                    "no CP/MTP/LoRA/native MegaMoE, and no torch.compile"
+                )
+            self.hc_sp_min_tokens = parallel.tensor_parallel_size
         self.vocab_size = config.vocab_size
         self._qsa_layer_ids = frozenset(
             layer_idx
@@ -547,6 +590,9 @@ class Qwen4ExpModel(nn.Module):
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        use_hc_sp = self.use_hc_sequence_parallel and (
+            positions.shape[-1] >= self.hc_sp_min_tokens
+        )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -554,7 +600,7 @@ class Qwen4ExpModel(nn.Module):
                 if input_ids is None:
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
-            if self.use_hc_sequence_parallel:
+            if use_hc_sp:
                 if (
                     self.use_sequence_parallel
                     and envs.VLLM_MOE_SKIP_PADDING
@@ -602,6 +648,7 @@ class Qwen4ExpModel(nn.Module):
                 input_ids=input_ids,
                 query_start_loc=query_start_loc,
                 ngram_context=ngram_context,
+                use_hc_sp=use_hc_sp,
             )
             if deepstack_input_embeds is not None and layer_idx < len(
                 deepstack_input_embeds
@@ -609,7 +656,7 @@ class Qwen4ExpModel(nn.Module):
                 deepstack_embed = deepstack_input_embeds[
                     f"deepstack_input_embeds_{layer_idx}"
                 ]
-                if self.use_hc_sequence_parallel:
+                if use_hc_sp:
                     deepstack_embed = sp_shard(deepstack_embed)
                 deepstack_embed = (
                     deepstack_embed.unsqueeze(-2)
@@ -645,7 +692,7 @@ class Qwen4ExpModel(nn.Module):
         multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
-        if self.use_hc_sequence_parallel:
+        if use_hc_sp:
             if self._mtp_hidden_buffer is not None:
                 # Gather LM-head and MTP states together when both are needed.
                 hidden_size = self.config.hidden_size
