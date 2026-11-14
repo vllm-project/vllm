@@ -1484,6 +1484,7 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=k_descale,
                 v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
+                s_aux=self.sinks,
             )
             return output
 
@@ -1584,6 +1585,8 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        # Include sinks only in the new-token partition so the merged
+        # softmax denominator counts each sink once.
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
@@ -1604,6 +1607,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
+            s_aux=self.sinks,
         )
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
