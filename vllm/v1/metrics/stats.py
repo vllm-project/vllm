@@ -247,6 +247,9 @@ class SchedulerStats:
     kv_connector_stats: dict[str, Any] | None = None
     ec_connector_stats: dict[str, Any] | None = None
 
+    # Cumulative delivery counters from the KV event publisher, if enabled.
+    kv_event_publisher_stats: dict[str, int] | None = None
+
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
 
