@@ -104,11 +104,12 @@ CALLERS = {
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+@pytest.mark.parametrize("compact_rows", [False, True])
 @pytest.mark.parametrize("state_layout", ["DS", "SD"])
 @pytest.mark.parametrize("recurrent_shape", list(RECURRENT_SHAPES))
 @pytest.mark.parametrize("caller", list(CALLERS))
 def test_exporter_stores_each_callers_checkpoints(
-    caller: str, state_layout: str, recurrent_shape: str
+    caller: str, state_layout: str, recurrent_shape: str, compact_rows: bool
 ):
     """Each checkpoint gets the inputs before its offset as its conv window and
     its emitted recurrent state; nothing else in either cache changes."""
@@ -175,6 +176,14 @@ def test_exporter_stores_each_callers_checkpoints(
     checkpoint = MambaPrefillCheckpointMetadata(
         torch.tensor(OFFSETS, dtype=torch.int32, device=device),
         torch.tensor(STATE_SLOTS, dtype=torch.int32, device=device),
+        # Launching only the rows with an offset must store the same.
+        export_rows=torch.tensor(
+            [i for i, offset in enumerate(OFFSETS) if offset],
+            dtype=torch.int32,
+            device=device,
+        )
+        if compact_rows
+        else None,
     )
     kwargs: dict = {}
     if c.recurrent != "none":
