@@ -19,7 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -211,7 +211,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        if isinstance(layer, (Attention, MLAAttention)):
+        # The attention layers that declare `supports_kv_cache_quant`:
+        # `Attention`, `MLAAttention`, Kimi's `MultiHeadLatentAttention` and
+        # `MiniMaxM3SparseAttention`.
+        if isinstance(layer, AttentionLayerBase) and layer.supports_kv_cache_quant:
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(

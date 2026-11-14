@@ -453,6 +453,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     supports_dense_mha_prefill: ClassVar[bool] = True
     # PCP+DCP is validated per model; subclasses opt in.
     supports_pcp_dcp: ClassVar[bool] = False
+    supports_kv_cache_quant: bool = True
 
     def __init__(
         self,

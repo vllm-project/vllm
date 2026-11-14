@@ -34,7 +34,7 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.attention import set_default_quant_scales
+from vllm.model_executor.layers.attention.attention import _init_kv_cache_quant
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
@@ -136,6 +136,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
+    KVQuantMode,
     get_kv_quant_mode,
 )
 
@@ -852,6 +853,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     `index_{v,o}_proj` are never created.
     """
 
+    supports_kv_cache_quant: bool = True
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -949,10 +952,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
         # MiniMax-M3 sparse attention owns its KV-cache insert/read path instead
         # of wrapping the generic Attention module. Keep the same runtime scale
-        # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
-        set_default_quant_scales(self, register_buffer=True)
-        # The fused insert quantizes k/v into NVFP4 pages with these scales.
-        self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
+        # attributes, loaded from the checkpoint like Attention's, so FP8 KV
+        # reads can honor vLLM's per-layer descale contract.
+        _init_kv_cache_quant(self, quant_config, prefix)
+        # The fused insert quantizes k/v into NVFP4 or FP8 pages with these
+        # scales, the same ones the attention kernels dequantize with.
+        kv_quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
+        self.use_nvfp4_kv = kv_quant_mode.is_nvfp4
+        self.kv_insert_scaled = (
+            self.use_nvfp4_kv or kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        )
         # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
@@ -1035,6 +1044,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     weight_bytes=self.qkv_proj.output_size_per_partition
                     * self.hidden_size,
                 )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # The checkpoint's KV-cache scales arrive under the names of an inner
+        # `Attention` module (`attn.k_scale`, ...); this layer holds them itself.
+        weights = ((name.removeprefix("attn."), weight) for name, weight in weights)
+        return AutoWeightsLoader(self).load_weights(weights)
 
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
@@ -1197,8 +1212,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 q_fp8_out=q if q_is_fp8 else None,
                 q_fp8_scale=self._q_scale_float,
-                kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
-                kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
+                kv_k_scale=self._k_scale if self.kv_insert_scaled else None,
+                kv_v_scale=self._v_scale if self.kv_insert_scaled else None,
                 write_qkv=not q_is_fp8,
             )
 
