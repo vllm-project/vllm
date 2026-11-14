@@ -12,10 +12,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.distributed import (
-    get_dcp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
@@ -749,8 +746,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         )
+        # Model-wide head count: a layer replicated across TP ranks holds all heads.
         self.masked_mha_available = _is_masked_mha_available(
-            num_heads_total=num_heads * get_tensor_model_parallel_world_size(),
+            num_heads_total=get_current_vllm_config().model_config.model_arch_config.total_num_attention_heads,
             kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
