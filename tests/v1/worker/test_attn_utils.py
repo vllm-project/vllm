@@ -38,14 +38,22 @@ from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
 )
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
-from vllm.v1.hisparse.runtime import _has_hisparse_ops
+from vllm.v1.hisparse.binding import (
+    allocate_hisparse_kv_caches,
+)
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    HiSparseRuntime,
+    _has_hisparse_ops,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiSparseHotPageSpec,
     HiSparsePageSpec,
     KVCacheConfig,
     KVCacheLayerConfig,
@@ -54,6 +62,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
+    SparseFullAttentionSpec,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -74,6 +83,7 @@ from vllm.v1.worker.utils import (
 )
 
 
+@pytest.mark.parametrize("sparse_full_attention", [False, True])
 @pytest.mark.parametrize(
     ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
@@ -86,18 +96,38 @@ from vllm.v1.worker.utils import (
     ],
 )
 def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
+    monkeypatch,
+    enabled,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    expected,
+    indexer,
+    sparse_full_attention,
 ):
-    """Resolve shared MLA geometry before planning; leave other specs alone."""
-    specs = {
-        "main": MLAAttentionSpec(
+    """Resolve sparse source/indexer geometry without changing compression."""
+    main_spec = (
+        SparseFullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=2,
+            head_size=32,
+            dtype=torch.bfloat16,
+            topk_buffer_width=35,
+        )
+        if sparse_full_attention
+        else MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
-        ),
+        )
+    )
+    compress_ratio = 4 if sparse_full_attention else 1
+    specs = {
+        "main": main_spec,
         "indexer": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
+            tokens_per_state=compress_ratio,
             cache_role=SparseCacheRole.INDEXER,
         ),
         "dense": AttentionSpec(
@@ -119,9 +149,6 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    monkeypatch.setattr(
-        attn_utils_module, "get_hisparse_page_layer_configs", lambda *_: {}
-    )
     mamba_fit_inputs: list[dict[str, KVCacheLayerConfig]] = []
 
     def fit_mamba_blocks(_, layer_configs, __):
@@ -132,7 +159,13 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
     )
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig() if enabled else None
+        ),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+        cache_config=SimpleNamespace(kv_cache_layout=None),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
@@ -140,8 +173,16 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_layer_configs(config)
-    assert resolved["main"].spec.block_size == expected
-    assert resolved["indexer"].spec.block_size == indexer
+    main = resolved["main"].spec
+    assert main.block_size == expected
+    indexer_spec = resolved["indexer"].spec
+    assert isinstance(indexer_spec, MLAAttentionSpec)
+    assert indexer_spec.block_size == indexer
+    assert indexer_spec.tokens_per_state == compress_ratio
+    assert indexer_spec.num_states == indexer // compress_ratio
+    if sparse_full_attention:
+        assert isinstance(main, SparseFullAttentionSpec)
+        assert main.topk_buffer_width == 35
     assert [lcs["indexer"].spec.block_size for lcs in mamba_fit_inputs] == (
         [indexer] if enabled else []
     )
@@ -150,6 +191,31 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         customize_attention_spec(dense_backend, specs["dense"], "dense")
     )
     assert all(spec.block_size == block_size for spec in specs.values())
+    if enabled:
+        resident = resolved["main.hisparse_resident"]
+        hot = resolved["main.hisparse_hot"]
+        assert resident.manager_cls is HiSparseResidentManager
+        assert hot.manager_cls is HiSparseHotManager
+        assert isinstance(resident.spec, HiSparsePageSpec)
+        assert isinstance(hot.spec, HiSparseHotPageSpec)
+        assert resident.spec.block_size == hot.spec.block_size == expected
+        assert (
+            resident.spec.page_size_bytes
+            == hot.spec.page_size_bytes
+            == main.page_size_bytes
+        )
+        assert len(resolved) == len(specs) + 2
+        groups = get_kv_cache_groups(config, resolved)
+        grouped_names = [name for group in groups for name in group.layer_names]
+        assert len(grouped_names) == len(set(grouped_names)) == len(resolved)
+        assert set(grouped_names) == set(resolved)
+    else:
+        assert resolved == {
+            name: full_layer(
+                customize_attention_spec(layers[name].get_attn_backend(), spec)
+            )
+            for name, spec in specs.items()
+        }
 
 
 def test_resolve_hisparse_specs_before_kv_cache_layout():
@@ -1149,6 +1215,144 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
+    """The row copy data plane sees all heads' K/V without copying host storage."""
+    names = ["layer.0", "layer.1"]
+    resident_names = [f"{name}.hisparse_resident" for name in names]
+    hot_names = [f"{name}.hisparse_hot" for name in names]
+    spec = SparseFullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.bfloat16,
+        topk_buffer_width=2,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        hisparse_host_num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=192,
+                layers=names,
+                layer_stride=96,
+                block_stride=32,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=256,
+                layers=resident_names,
+                layer_stride=32,
+                block_stride=64,
+            ),
+            KVCacheTensor(
+                size=256,
+                layers=hot_names,
+                layer_stride=32,
+                block_stride=64,
+            ),
+        ],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                names, spec, HiSparseSourceManager.config(), host_resident=True
+            ),
+            new_kv_cache_group(
+                resident_names,
+                HiSparsePageSpec(block_size=2, page_size=32),
+                HiSparseResidentManager.config(),
+            ),
+            new_kv_cache_group(
+                hot_names,
+                HiSparseHotPageSpec(block_size=2, page_size=32),
+                HiSparseHotManager.config(blocks_per_request=2),
+            ),
+        ],
+    )
+    host_backing = torch.zeros(192, dtype=torch.int8)
+    host_pool = SimpleNamespace(
+        allocate=lambda size: host_backing,
+        registered=host_backing,
+        shared_region=None,
+    )
+    caches = allocate_hisparse_kv_caches(
+        config, torch.device("cpu"), KVCacheLayout.BLNHC, [2, 2, 2], host_pool
+    )
+
+    def make_handle():
+        # Exercise the real bind methods on CPU without starting GPU streams.
+        runtime = object.__new__(HiSparseRuntime)
+        runtime.row_width = 8
+        runtime.kv_dtype = torch.bfloat16
+        runtime.backend = CUDAHiSparseBackend()
+        runtime.is_group_leader = True
+        runtime.index_group = SimpleNamespace(
+            followers=[],
+            device_global_indices=torch.full((1, 2), -1),
+            lru_slots=torch.arange(2),
+            swap_stats=torch.zeros(2),
+        )
+        return HiSparseCacheHandle(runtime)
+
+    forward_context = {}
+    expected_rows = []
+    for index, name in enumerate(names):
+        # Distinct layer/block/token/head/K/V values in canonical attention
+        # views detect a silent head/token transpose in the row-copy view.
+        tagged_rows = (
+            torch.arange(48, dtype=torch.float32).view(3, 2, 2, 4) + index * 64
+        ).to(torch.bfloat16)
+        caches[name].copy_(tagged_rows.transpose(1, 2))
+        expected_rows.append(tagged_rows.view(6, 8))
+        forward_context[name] = SimpleNamespace(
+            hisparse_cache=make_handle(),
+            is_draft_layer=index == 1,
+        )
+    reader = make_handle()
+    forward_context["reader"] = SimpleNamespace(
+        kv_sharing_target_layer_name=names[1], hisparse_cache=reader
+    )
+    block_tables = SimpleNamespace(
+        input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
+        slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
+    )
+
+    handles = attn_utils_module.bind_hisparse_kv_caches(
+        forward_context=forward_context,
+        kv_cache_config=config,
+        kv_caches=caches,
+        block_tables=block_tables,
+        host_pool=host_pool,
+    )
+
+    owners = [forward_context[name].hisparse_cache for name in names]
+    assert set(handles) == {*owners, reader}
+    owner = owners[1]
+    assert reader.runtime.host_cache.data_ptr() == owner.runtime.host_cache.data_ptr()
+    torch.testing.assert_close(reader.runtime.host_cache, expected_rows[1])
+    assert reader.view is not None and owner.view is not None
+    assert reader.view.cache.data_ptr() == owner.view.cache.data_ptr()
+    assert reader.runtime.hot.cache.data_ptr() == owner.runtime.hot.cache.data_ptr()
+    assert reader.runtime.index_group.lru_slots is owner.runtime.index_group.lru_slots
+    residency = owners[0].residency
+    assert isinstance(residency, torch.Tensor)
+    assert residency.shape == (1, 1, 2)
+    assert torch.count_nonzero(residency).item() == 0
+    for index, (name, handle) in enumerate(zip(names, owners, strict=True)):
+        assert handle.draft_layer == (index == 1)
+        assert caches[name].shape == (3, 2, 2, 4)
+        assert handle.runtime.host_cache.shape == (6, 8)
+        assert handle.runtime.host_cache.data_ptr() == caches[name].data_ptr()
+        torch.testing.assert_close(handle.runtime.host_cache, expected_rows[index])
+        assert handle.view is not None
+        assert handle.view.cache.shape == (4, 2, 8)
+        assert handle.view.cache.stride() == (32, 8, 1)
+        assert handle.runtime.hot.cache.stride() == (32, 8, 1)
+        assert handle.source_block_table is block_tables.input_block_tables[0]
+        assert handle.residency is not None
+        assert handle.residency is residency
+        assert handle.block_table is not None
+        assert handle.block_table.data_ptr() == residency[0].data_ptr()
 
 
 class _TableBuilder:

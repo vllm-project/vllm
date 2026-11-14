@@ -517,6 +517,18 @@ class AttentionSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class SparseFullAttentionSpec(AttentionSpec):
+    """Complete K/V history with TP-sharded heads and sparse decode reads."""
+
+    topk_buffer_width: int
+    """Maximum selected token slots, excluding a packed selection's count."""
+
+    @property
+    def is_index_group_leader(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(AttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None

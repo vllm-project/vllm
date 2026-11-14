@@ -112,6 +112,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    PHYSICAL_BLOCK_STRIDE: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -150,27 +151,29 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
 
     for tile in range(split_id, tile_end, NUM_SPLITS):
         columns = tile * BLOCK_N + column_offsets
-        logical_token = tl.load(
+        selected_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
             mask=columns < TOPK,
             other=-1,
         )
-        safe_token = tl.maximum(logical_token, 0)
-        logical_page = safe_token // PAGE_SIZE
-        page_offset = safe_token % PAGE_SIZE
-        valid = (
-            (request >= 0)
-            & (request < num_requests)
-            & (logical_token >= 0)
-            & (logical_page < PAGE_TABLE_WIDTH)
-        )
-        physical_page = tl.load(
-            block_table_ptr
-            + safe_request * stride_table_req
-            + tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1),
-            mask=valid,
-            other=-1,
-        )
+        safe_token = tl.maximum(selected_token, 0)
+        valid = (request >= 0) & (request < num_requests) & (selected_token >= 0)
+        if PHYSICAL_BLOCK_STRIDE:
+            # HiSparse encodes rows using the backing block stride, including padding.
+            physical_page = safe_token // PHYSICAL_BLOCK_STRIDE
+            page_offset = safe_token % PHYSICAL_BLOCK_STRIDE
+            valid &= page_offset < PAGE_SIZE
+        else:
+            selected_page = safe_token // PAGE_SIZE
+            page_offset = safe_token % PAGE_SIZE
+            valid &= selected_page < PAGE_TABLE_WIDTH
+            physical_page = tl.load(
+                block_table_ptr
+                + safe_request * stride_table_req
+                + tl.minimum(selected_page, PAGE_TABLE_WIDTH - 1),
+                mask=valid,
+                other=-1,
+            )
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
@@ -648,6 +651,7 @@ def qsa_sparse_paged_attention(
     v_scale: float | None = None,
     *,
     output_gate: torch.Tensor,
+    physical_indices: bool = False,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -662,8 +666,9 @@ def qsa_sparse_paged_attention(
     with the trailing column holding each row's valid-entry count (written by
     the expand kernel; never a token index). The kernel reads it as the
     tile-loop bound. use_prefill_config steers the top of the config table (see
-    _select_config). Large fp8 batches, prefill or decode, take the Blackwell
-    kernel in qsa_fp8 (see qsa_fp8.use_fp8_decode_kernel).
+    _select_config). Large Blackwell FP8 batches with logical indices use
+    the kernel in qsa_fp8. With `physical_indices=True`, split-K reads resolved
+    rows directly from the supplied cache view.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -720,7 +725,9 @@ def qsa_sparse_paged_attention(
     if not q.shape[0]:
         return out
 
-    if qsa_fp8.use_fp8_decode_kernel(q.shape[0] * k_cache.shape[2], k_cache.dtype):
+    if not physical_indices and qsa_fp8.use_fp8_decode_kernel(
+        q.shape[0] * k_cache.shape[2], k_cache.dtype
+    ):
         return qsa_fp8.qsa_sparse_paged_decode(
             q,
             k_cache,
@@ -745,6 +752,7 @@ def qsa_sparse_paged_attention(
         output_gate_view,
         softmax_scale,
         output_scale,
+        physical_indices=physical_indices,
     )
 
 
@@ -760,6 +768,8 @@ def _qsa_sparse_paged_splitk(
     output_gate_view: torch.Tensor,
     softmax_scale: float,
     output_scale: float,
+    *,
+    physical_indices: bool,
 ) -> torch.Tensor:
     """The split-K kernel (and merge) at _select_config's config."""
     is_fp8 = k_cache.dtype != torch.bfloat16
@@ -827,6 +837,9 @@ def _qsa_sparse_paged_splitk(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        PHYSICAL_BLOCK_STRIDE=k_cache.stride(0) // k_cache.stride(1)
+        if physical_indices
+        else 0,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -859,9 +872,9 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
+    physical_indices: bool = False,
 ) -> tuple[tuple[int | str, ...], ...]:
-    """Compile every production-reachable split-K/merge and decode
-    specialization."""
+    """Warm split-K/merge and, for logical indices, the Blackwell FP8 kernel."""
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
@@ -883,7 +896,7 @@ def warmup_qsa_sparse_paged_attention(
             num_rows, num_kv_heads, use_prefill_config, selection_width, is_fp8
         )
         for num_rows in range(1, 8193)
-        for use_prefill_config in (False, True)
+        for use_prefill_config in ((False,) if physical_indices else (False, True))
     }
 
     # Scalars constant per deployment get their real values (their divisibility
@@ -976,6 +989,9 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
+            PHYSICAL_BLOCK_STRIDE=key_cache.stride(0) // key_cache.stride(1)
+            if physical_indices
+            else 0,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
@@ -1001,12 +1017,13 @@ def warmup_qsa_sparse_paged_attention(
             )
         warmed.append((block_n, num_splits, warps))
 
-    warmed += qsa_fp8.warmup_qsa_fp8_decode(
-        kv_cache,
-        block_table,
-        num_query_heads=num_query_heads,
-        selection_width=selection_width,
-    )
+    if not physical_indices:
+        warmed += qsa_fp8.warmup_qsa_fp8_decode(
+            kv_cache,
+            block_table,
+            num_query_heads=num_query_heads,
+            selection_width=selection_width,
+        )
     return tuple(warmed)
 
 

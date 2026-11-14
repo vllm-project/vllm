@@ -28,6 +28,7 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -65,6 +66,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroup,
     KVCacheLayerConfig,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -77,38 +79,45 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])
 @pytest.mark.parametrize("shared_host_pool", [False, True])
+@pytest.mark.parametrize(
+    "topk_buffer_widths,expected_hot_rows",
+    [((None,), 258), ((256,), 512), ((256, 512), 1024)],
+    ids=["legacy-topk", "rounded-topk", "largest-rounded-topk"],
+)
 def test_hisparse_hma_uses_resolved_gpu_block_size(
-    monkeypatch, gpu_block_size, shared_host_pool
+    monkeypatch,
+    gpu_block_size,
+    shared_host_pool,
+    topk_buffer_widths,
+    expected_hot_rows,
 ):
     monkeypatch.setattr(
         current_platform,
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    specs = {
-        "model.layers.0.self_attn": full_layer(
-            MLAAttentionSpec(
-                block_size=gpu_block_size,
-                num_kv_heads=1,
-                head_size=576,
-                dtype=torch.bfloat16,
-                is_index_group_leader=True,
-            )
-        ),
-        "model.layers.0.self_attn.indexer": full_layer(
-            MLAAttentionSpec(
-                block_size=gpu_block_size,
-                num_kv_heads=1,
-                head_size=128,
-                dtype=torch.bfloat16,
-                cache_role=SparseCacheRole.INDEXER,
-            )
-        ),
-    }
+    specs = {}
+    for i, topk_buffer_width in enumerate(topk_buffer_widths):
+        name = f"model.layers.{i}.self_attn"
+        specs[name] = MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+            topk_buffer_width=topk_buffer_width,
+        )
+        specs[f"{name}.indexer"] = MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(index_topk=128),
+            hf_text_config=SimpleNamespace(index_topk=129),
             max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(
@@ -130,8 +139,11 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
+    layer_configs = {name: full_layer(spec) for name, spec in specs.items()}
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
+        config,
+        get_hisparse_kv_cache_groups(config, layer_configs),
+        available_memory=2**30,
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -161,13 +173,30 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert indexer_group.block_size == gpu_block_size
     host_specs = host_group.kv_cache_specs
     gpu_indexer_specs = indexer_group.kv_cache_specs
-    assert set(host_specs) == {"model.layers.0.self_attn"}
-    assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
+    assert set(host_specs) == {
+        name
+        for name, spec in specs.items()
+        if spec.cache_role is SparseCacheRole.SPARSE
+    }
+    assert set(gpu_indexer_specs) == {
+        name
+        for name, spec in specs.items()
+        if spec.cache_role is SparseCacheRole.INDEXER
+    }
     assert indexer_group.prefix_cacheable
     assert host_group.enable_kv_transfer
     auxiliary_managers = [group.manager_cls for group in auxiliary_groups]
     assert HiSparseResidentManager in auxiliary_managers
     assert HiSparseHotManager in auxiliary_managers
+    assert all(
+        group.manager_config
+        == HiSparseHotManager.config(
+            blocks_per_request=(expected_hot_rows + gpu_block_size - 1)
+            // gpu_block_size
+        )
+        for group in auxiliary_groups
+        if group.manager_cls is HiSparseHotManager
+    )
     assert all(
         isinstance(spec, HiSparsePageSpec) and spec.block_size == gpu_block_size
         for group in auxiliary_groups
@@ -186,6 +215,217 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         ),
     )
     assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+@pytest.mark.parametrize(
+    "main_dtype,host_blocks,host_stride,layer_stride,indexer_block_size",
+    [
+        (torch.bfloat16, 128, 4096, 2048, 128),
+        (torch.uint8, 256, 2048, 1024, 64),
+    ],
+    ids=["main-bf16", "main-fp8"],
+)
+def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
+    monkeypatch,
+    main_dtype,
+    host_blocks,
+    host_stride,
+    layer_stride,
+    indexer_block_size,
+):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+    from vllm.v1.kv_cache_interface import SparseFullAttentionSpec
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    source_names = {
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn",
+    }
+    indexer_names = {f"{name}.indexer" for name in source_names}
+    ring_names = {f"{name}.raw_keys" for name in source_names}
+    layer_configs: dict[str, KVCacheLayerConfig] = {}
+    for name in sorted(source_names):
+        layer_configs[name] = full_layer(
+            SparseFullAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=32,
+                head_size_v=32,
+                dtype=main_dtype,
+                kv_quant_mode=(
+                    KVQuantMode.FP8_PER_TENSOR
+                    if main_dtype == torch.uint8
+                    else KVQuantMode.NONE
+                ),
+                topk_buffer_width=35,
+            )
+        )
+        layer_configs[f"{name}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+        layer_configs[f"{name}.raw_keys"] = CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=16,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+            )
+        )
+    # A dense attention layer and recurrent state are not HiSparse sources.
+    layer_configs["model.layers.2.self_attn"] = full_layer(
+        AttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.bfloat16,
+        )
+    )
+    layer_configs["model.layers.3.mamba"] = mamba_layer(
+        MambaSpec(
+            block_size=16,
+            shapes=((4, 8), (2, 8)),
+            dtypes=(torch.bfloat16, torch.float32),
+        ),
+        num_speculative_blocks=0,
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        # QSA publishes its selection capacity on the cache spec. It has no
+        # MLA-only index_topk field.
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(),
+            max_model_len=128,
+            get_total_num_kv_heads=lambda: 2,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            mamba_cache_mode="none",
+            kv_cache_layout=KVCacheLayout.BLNHC.name,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        max_in_flight_tokens=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1 / 1024},
+        ),
+    )
+
+    # The worker derives resident/hot specs before EngineCore selects a layout.
+    worker_config = copy.copy(config)
+    worker_config.cache_config = CacheConfig(mamba_cache_mode="none")
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda _: [16])
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend)
+        for name in source_names | indexer_names
+    }
+    layer_configs = resolve_hisparse_specs(worker_config, layer_configs, layers)
+    assert worker_config.cache_config.kv_cache_layout is None
+
+    groups = get_kv_cache_groups(config, layer_configs)
+    for group in groups:
+        for name, spec in group.kv_cache_specs.items():
+            if isinstance(spec, HiSparsePageSpec):
+                assert layer_configs[name] == KVCacheLayerConfig(
+                    group.manager_config, spec
+                )
+    # The shared pool is sized by a main-K/V page (2048 B, or 1024 B for FP8).
+    # At 128 tokens the compressed indexers use one BF16-pool block or two
+    # FP8-pool blocks. The other groups need 2 x 8 resident + 2 x 5 hot
+    # + 8 dense + 1 raw-ring + 1 recurrent blocks in both layouts.
+    gpu_reserved_bytes = (128 // indexer_block_size + 36) * layer_stride
+    assert (
+        kv_cache_planning._max_memory_usage_bytes_from_groups(
+            kv_cache_planning.DefaultKVCacheConfigBuilder(), config, groups
+        )
+        == gpu_reserved_bytes
+    )
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=2**20
+    )
+
+    # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x
+    # 32 dimensions x 2 bytes = 8192 B (4096 B for FP8). A 1 MiB logical
+    # budget holds 128/256 blocks, with half the payload on each TP rank.
+    assert cache_config.num_blocks == 7
+    assert cache_config.hisparse_host_num_blocks == host_blocks
+    assert cache_config.hisparse_host_block_stride == host_stride
+    assert cache_config.hisparse_shared_host_pool is False
+    host_groups = [g for g in cache_config.kv_cache_groups if g.host_resident]
+    assert len(host_groups) == 1
+    assert set(host_groups[0].layer_names) == source_names
+    assert host_groups[0].enable_kv_transfer
+    host_tensors = [t for t in cache_config.kv_cache_tensors if t.host_resident]
+    assert {name for tensor in host_tensors for name in tensor.layers} == source_names
+    assert all(tensor.size == 512 * 1024 for tensor in host_tensors)
+    assert all(tensor.block_stride == layer_stride for tensor in host_tensors)
+
+    device_groups = [g for g in cache_config.kv_cache_groups if not g.host_resident]
+    device_names = {name for group in device_groups for name in group.layer_names}
+    assert source_names.isdisjoint(device_names)
+    assert (
+        indexer_names
+        | ring_names
+        | {
+            "model.layers.2.self_attn",
+            "model.layers.3.mamba",
+        }
+        <= device_names
+    )
+    device_specs = {
+        name: spec
+        for group in device_groups
+        for name, spec in group.kv_cache_specs.items()
+    }
+    for name in indexer_names:
+        indexer = device_specs[name]
+        assert isinstance(indexer, MLAAttentionSpec)
+        assert indexer.cache_role == SparseCacheRole.INDEXER
+        assert indexer.block_size == indexer_block_size
+        assert indexer.tokens_per_state == 4
+        assert indexer.num_states == indexer_block_size // 4
+        assert indexer.dtype == torch.bfloat16
+    assert all(device_specs[name] == layer_configs[name].spec for name in ring_names)
+    assert (
+        device_specs["model.layers.3.mamba"]
+        == layer_configs["model.layers.3.mamba"].spec
+    )
+    hot_groups = [
+        group for group in device_groups if group.manager_cls is HiSparseHotManager
+    ]
+    assert {tuple(group.layer_names) for group in hot_groups} == {
+        (f"{name}.hisparse_hot",) for name in source_names
+    }
+    # One decode query plus one selection's LRU slack: 70 rows occupy five
+    # 16-token blocks, without reducing the 35 selected token slots.
+    assert all(
+        group.manager_config == HiSparseHotManager.config(blocks_per_request=5)
+        for group in hot_groups
+    )
 
 
 @pytest.mark.parametrize(
