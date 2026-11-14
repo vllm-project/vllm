@@ -1040,6 +1040,23 @@ def _ensure_min_page_size(
     return scaled, common_page
 
 
+def _split_kv_cache_groups_to_single_layer(
+    groups: list[KVCacheGroup],
+) -> list[KVCacheGroup]:
+    """Split each KV cache group into one group per layer.
+
+    The shared block pool sizes every block to the widest group. A singleton
+    hidden-state extraction group next to a wide MLA group is then billed at
+    that MLA width for every extraction block. Splitting removes the unused
+    layer slots so extraction is charged at its own width.
+    """
+    return [
+        replace(group, kv_cache_specs={name: spec})
+        for group in groups
+        for name, spec in group.kv_cache_specs.items()
+    ]
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: dict[str, KVCacheLayerConfig],
@@ -1127,6 +1144,11 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             hidden = replace(layer_configs[name], spec=aligned)
             groups.append(KVCacheGroup.from_layers({name: hidden}))
+        # The shared pool sizes every block to the widest group, so a 1-layer
+        # hidden-state group would otherwise pay for unused MLA/Mamba slots on
+        # every extraction block. Split so each group is billed at its own width.
+        if any(len(group.layer_names) > 1 for group in groups):
+            groups = _split_kv_cache_groups_to_single_layer(groups)
 
     return groups
 
