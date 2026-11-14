@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
-@dataclass
+@dataclass(slots=True)
 class ExternalWeightCharges:
     """Track a worker's external weight charges and those freed by disk fallback."""
 

@@ -55,13 +55,13 @@ from vllm.parser.engine.registered_adapters import (
 # ── Data structures ──────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ToolCallSpec:
     name: str
     arguments: dict[str, Any]
 
 
-@dataclass
+@dataclass(slots=True)
 class Scenario:
     id: str
     description: str

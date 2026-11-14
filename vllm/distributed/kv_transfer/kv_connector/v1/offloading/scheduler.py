@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -126,7 +126,7 @@ class _RequestTokens(NamedTuple):
     num_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmReqContext(ReqContext):
     _scheduler: "OffloadingConnectorScheduler" = field(
         kw_only=True, repr=False, compare=False
@@ -362,7 +362,7 @@ class OffloadingConnectorScheduler:
         region.close()
 
     @contextmanager
-    def _manager_locked(self) -> Iterator[None]:
+    def _manager_locked(self) -> Generator[None]:
         """Hold the manager for the duration of one hook outside schedule().
 
         None of these hooks can legitimately run inside the step-scoped region:
