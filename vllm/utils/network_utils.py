@@ -8,7 +8,7 @@ import sys
 import tempfile
 import warnings
 from collections.abc import (
-    Iterator,
+    Generator,
     Sequence,
 )
 from dataclasses import dataclass
@@ -26,7 +26,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ZmqListener:
     """A supervisor-bound listener that a ZMQ socket can adopt."""
 
@@ -456,7 +456,7 @@ def zmq_socket_ctx(
     linger: int = 0,
     identity: bytes | None = None,
     router_handover: bool = False,
-) -> Iterator[zmq.Socket]:
+) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
@@ -470,6 +470,6 @@ def zmq_socket_ctx(
         )
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
-
+        raise
     finally:
         ctx.destroy(linger=linger)

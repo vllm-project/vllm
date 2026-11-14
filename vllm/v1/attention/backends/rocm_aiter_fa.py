@@ -327,7 +327,7 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
     # Sliding-window decode: window-trimmed block table and rebased seq lens.
@@ -336,14 +336,14 @@ class AiterFlashAttentionDecodeMetadata:
     swa_max_seq_len: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkSlidingWindowMetadata:
     swa_cu_seqlens: torch.Tensor
     swa_seq_starts: torch.Tensor
@@ -353,7 +353,7 @@ class AiterChunkSlidingWindowMetadata:
     swa_workspace: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkContextMetadata:
     workspace: torch.Tensor
     cu_seq_lens_chunk: torch.Tensor
@@ -365,7 +365,7 @@ class AiterChunkContextMetadata:
     swa_metadata: AiterChunkSlidingWindowMetadata | None
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
     max_seq_len: int
@@ -373,7 +373,7 @@ class AiterFlashAttentionChunkPrefillMetadata:
     chunk_context_metadata: AiterChunkContextMetadata
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterKVSharingMetadata:
     workspace: torch.Tensor
     query_start_loc: torch.Tensor
@@ -417,7 +417,7 @@ class AiterFlashAttentionMetadata:
     kv_sharing_metadata: AiterKVSharingMetadata | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class AsmKvScaleTables:
     """Dense per-slot scale tables the asm decode kernel reads for an fp8 cache.
 
@@ -566,14 +566,14 @@ class AiterFlashAttentionMetadataBuilder(
         assert self._swa_seq_lens is not None and self._swa_block_offsets is not None
         window = self.aot_sliding_window[0] + 1
         lens = seq_lens[:num_decodes]
-        first_block = torch.clamp(lens - window, min=0) // self.block_size
-        index = (first_block.to(torch.int64)[:, None] + self._swa_block_offsets).clamp_(
+        first_block = (lens - window).clamp_(min=0) // self.block_size
+        index = (self._swa_block_offsets + first_block[:, None]).clamp_(
             max=block_table.shape[1] - 1
         )
         swa_block_table = self._swa_block_table[:num_decodes]
         torch.gather(block_table[:num_decodes], 1, index, out=swa_block_table)
         swa_seq_lens = self._swa_seq_lens[:num_decodes]
-        swa_seq_lens.copy_(lens - first_block * self.block_size)
+        torch.sub(lens, first_block, alpha=self.block_size, out=swa_seq_lens)
         return (
             swa_block_table,
             swa_seq_lens,

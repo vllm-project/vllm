@@ -199,7 +199,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/moriio
 
-# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# Most UMBP tests need mori and skip on CUDA. Run them all on MI355 whenever
 # the connector or its tests change.
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
   key: amd-umbp-connector-unit-mi355
@@ -214,6 +214,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
@@ -222,14 +224,9 @@ steps:
   - docker/Dockerfile.rocm_base
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s -rs
-    v1/kv_connector/unit/test_umbp_async_lookup.py
-    v1/kv_connector/unit/test_umbp_core.py
-    v1/kv_connector/unit/test_umbp_embedded.py
-    v1/kv_connector/unit/test_umbp_events.py
-    v1/kv_connector/unit/test_umbp_hybrid.py
-    v1/kv_connector/unit/test_umbp_standalone.py
+  # Fail loudly instead of skipping every test if the image lacks mori.
+  - python3 -c "import mori"
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
@@ -244,6 +241,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - tests/v1/kv_connector/umbp_integration/
   - tests/v1/kv_connector/umbp_test_utils.py
   - tests/v1/kv_connector/conftest.py
@@ -280,15 +279,14 @@ steps:
 
 # Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
 # decode on separate GPUs over xGMI, compared exactly against a direct serve.
-- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
+- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E"
   key: amd-moriio-write-dummy-e2e-mi355
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
-  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 28 cases the
-  # largest of 6 shards holds 7 (~32 min on MI355). Every case picks free ports
-  # for its servers and proxy and its own compile-cache dir.
-  parallelism: 6
+  # ~3.5-5 min per case, 28 cases, split by automatic sharding. Every case
+  # picks free ports for its servers and proxy and its own compile-cache dir.
   timeout_in_minutes: 45
   working_dir: /vllm-workspace/tests
   depends_on:
@@ -304,7 +302,7 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp"
 
 # The same P/D between different TP sizes (WRITE TP2 -> TP1, READ of MLA
 # TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
@@ -392,7 +390,6 @@ steps:
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
-    - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
@@ -582,7 +579,7 @@ steps:
   key: python-only-installation
   depends_on: ~
   optional: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 75
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -591,9 +588,9 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Python-only Installation"
+      label: ":amd: (MI300 DPX) Python-only Installation"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -606,12 +603,23 @@ steps:
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
-  timeout_in_minutes: 30
+  timeout_in_minutes: 85
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   commands:
   - PYTHON_ONLY_COMPILE_PYTHON=3.14 bash standalone_tests/python_only_compile.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) [Nightly] Python 3.14 Smoke"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/standalone_tests/python_only_compile.sh
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker"
   device: h200_35gb

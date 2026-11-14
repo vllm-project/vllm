@@ -129,7 +129,7 @@ class VisionRMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VisionAttentionParams:
     dim: int
     num_heads: int
