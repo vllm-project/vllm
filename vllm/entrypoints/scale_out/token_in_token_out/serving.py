@@ -556,6 +556,7 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
+                aux_output_keys=output.aux_output_keys,
             )
             if derender_mode:
                 derender_choice_fields.append(choice_fields)
@@ -827,6 +828,7 @@ class ServingTokens(GenerateBaseServing):
                         stop_reason=output.stop_reason,
                         token_ids=token_ids_out,
                         routed_experts=routed_experts_b64,
+                        aux_output_keys=output.aux_output_keys,
                         sampling_mask=sampling_mask,
                         weight_versions=output.weight_versions,
                     )

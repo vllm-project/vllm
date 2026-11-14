@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from vllm.distributed.aux_output_connector import connector as connector_module
-from vllm.distributed.aux_output_connector import store as store_module
+from vllm.distributed.aux_output_connector import row_cache
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -26,7 +26,7 @@ from vllm.distributed.aux_output_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_keys,
 )
-from vllm.distributed.aux_output_connector.store import (
+from vllm.distributed.aux_output_connector.row_cache import (
     BackgroundBlockObjectStore,
     BlockObject,
     BlockObjectStore,
@@ -206,6 +206,7 @@ def _make_worker(
         max_concurrent_batches,
     )
     worker._requests = {}
+    worker._object_writer = None
     worker._generation = 0
     worker._step_metadata = None
     worker._pending_outputs = []
@@ -1316,7 +1317,7 @@ def test_store_grows_with_a_warning_when_every_object_is_referenced():
     store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
     store.put([], retain_keys=["kept"])
 
-    with patch.object(store_module.logger, "warning") as warning:
+    with patch.object(row_cache.logger, "warning") as warning:
         store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
 
     warning.assert_called_once()
@@ -2045,7 +2046,7 @@ def test_retained_objects_follow_max_bytes(
         kv_transfer_config=kv_transfer_config,
     )
     kv_cache_config = SimpleNamespace(num_blocks=3)
-    assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
+    assert retained_objects(vllm_config, kv_cache_config) == (expected, 16, 8)
 
 
 def test_connector_releases_oldest_uncached_blocks_past_capacity():
