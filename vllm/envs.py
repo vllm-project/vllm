@@ -221,7 +221,6 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
-    VLLM_DEEP_GEMM_MOE_ALLOW_FI_NVL: bool = False
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
@@ -1751,11 +1750,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
-    # Allow the DeepGEMM / Triton block-FP8 MoE experts with the FlashInfer
-    # NVLink one-/two-sided all2all (opt-in; the gate cites an uninvestigated IMA).
-    "VLLM_DEEP_GEMM_MOE_ALLOW_FI_NVL": lambda: bool(
-        int(os.getenv("VLLM_DEEP_GEMM_MOE_ALLOW_FI_NVL", "0"))
-    ),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(

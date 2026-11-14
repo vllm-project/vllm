@@ -4,7 +4,6 @@
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.activation import (
@@ -227,13 +226,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # Opt-in: GLM-5.3 DEP8 + flashinfer_nvlink_one_sided ran without an IMA.
-        if envs.VLLM_DEEP_GEMM_MOE_ALLOW_FI_NVL:
-            return True
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        return True
 
     @staticmethod
     def _supports_batch_invariance():
