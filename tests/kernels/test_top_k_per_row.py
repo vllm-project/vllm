@@ -1984,9 +1984,26 @@ NAN_ORDERING_CASES = [
 @pytest.mark.parametrize("backend,num_rows,dtype", NAN_ORDERING_CASES)
 @pytest.mark.parametrize("seq_len", [65536, 262144])
 @pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "nan_sign",
+    [
+        1,
+        pytest.param(
+            -1,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="ROCm keys a sign-set NaN below -inf"
+            ),
+        ),
+    ],
+)
 @torch.inference_mode()
 def test_topk_nan_ordering_matches_torch(
-    backend: str, num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
+    backend: str,
+    num_rows: int,
+    seq_len: int,
+    top_k: int,
+    dtype: torch.dtype,
+    nan_sign: int,
 ) -> None:
     # Fewer NaNs than top_k, mixed with +inf and the largest finite values:
     # every kernel's ordered key must rank NaN above +inf, as torch.topk does.
@@ -2001,6 +2018,10 @@ def test_topk_nan_ordering_matches_torch(
     logits.scatter_(1, pos[:, n_nan + n_big : n_nan + 2 * n_big], fmax)
     logits.scatter_(1, pos[:, n_nan + 2 * n_big :], 1e30)
     logits = logits.to(dtype)
+    if nan_sign < 0:
+        # The bf16 cast drops a NaN's sign: set the bits after it.
+        bits = logits.view(torch.int16 if dtype == torch.bfloat16 else torch.int32)
+        bits.scatter_(1, pos[:, :n_nan], -1)
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
