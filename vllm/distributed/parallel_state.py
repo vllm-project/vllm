@@ -28,7 +28,7 @@ import gc
 import pickle
 import weakref
 from collections import deque, namedtuple
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1719,6 +1719,41 @@ _PCP: GroupCoordinator | None = None
 def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
+
+
+_GROUP_NAMES = ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP")
+
+
+@contextmanager
+def override_parallel_groups(group: "ParallelGroup") -> Generator[None]:
+    """Use `group` for all parallel groups, e.g. a single-rank fake in tests."""
+    module_globals = globals()
+    saved = {name: module_globals[name] for name in _GROUP_NAMES}
+    module_globals.update({name: group for name in _GROUP_NAMES})
+    try:
+        yield
+    finally:
+        module_globals.update(saved)
+
+
+class ParallelGroup(Protocol):
+    """Parallel group interface, implemented by `GroupCoordinator` and test fakes."""
+
+    @property
+    def world_size(self) -> int: ...
+    @property
+    def rank_in_group(self) -> int: ...
+    @property
+    def local_rank(self) -> int: ...
+    @property
+    def is_first_rank(self) -> bool: ...
+    @property
+    def is_last_rank(self) -> bool: ...
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor: ...
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor: ...
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor: ...
+    def broadcast(self, input_: torch.Tensor, src: int = 0) -> torch.Tensor: ...
+    def barrier(self) -> None: ...
 
 
 def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:

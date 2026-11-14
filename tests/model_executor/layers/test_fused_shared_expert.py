@@ -18,6 +18,7 @@ from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.distributed.parallel_state import override_parallel_groups
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
@@ -1396,24 +1397,6 @@ def _load_minimax_m3_weights(
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
 
 
-@pytest.fixture
-def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
-    """Single rank parallel groups without initializing a process group.
-
-    This is faster than the `dist_init` fixture.
-    """
-    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
-        monkeypatch.setattr(
-            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
-        )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
-
-
 @pytest.mark.parametrize(
     "model_type",
     [
@@ -1441,12 +1424,12 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
+@override_parallel_groups(_SingleRankGroup())
 def test_models_fse_init(
     model_type: str,
     shared_expert_precision: str,
     use_fse: bool,
     exclude: list[str],
-    single_rank_parallel_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""

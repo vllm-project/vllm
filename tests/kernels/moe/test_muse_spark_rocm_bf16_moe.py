@@ -9,9 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
-from vllm import envs
 from vllm.config.kernel import MoEBackend
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -34,6 +33,12 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_quant_config,
 )
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
     QuarkW8A8Fp8MoEMethod,
@@ -51,12 +56,11 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
     MuseSparkQuarkW8A8Fp8FusedMoE,
+    MuseSparkRoutedExperts,
     MuseSparkTopKWeightAndReduce,
     MuseSparkTritonExperts,
     MuseSparkUnquantizedFusedMoE,
     MuseSparkUnquantizedMoEQuantConfig,
-    _online_mxfp4_applies,
-    _quantize_experts_to_mxfp4,
     validate_bf16_deployment,
     validate_fp8_deployment,
     validate_mxfp4_deployment,
@@ -985,52 +989,104 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     assert torch.count_nonzero(actual[3:]) == 0
 
 
-@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
-def test_online_mxfp4_quantizer_matches_the_quark_export_layout() -> None:
-    """Packed nibbles + E8M0 block scales, and a bounded rounding error."""
-    torch.manual_seed(0)
-    weight = torch.randn(5, 12, 64, device="cuda", dtype=torch.bfloat16) * 0.02
-    packed, scales = _quantize_experts_to_mxfp4(weight, experts_per_chunk=2)
+def _fake_online_mxfp4_init(monkeypatch, backend: Mxfp4MoeBackend) -> None:
+    def _init(self, *, moe, activation_quant_key=kMxfp4Dynamic) -> None:
+        self.moe = moe
+        self.activation_quant_key = activation_quant_key
+        self.mxfp4_backend = backend
+        self.experts_cls = None
 
-    assert packed.shape == (5, 12, 32) and packed.dtype == torch.uint8
-    assert scales.shape == (5, 12, 2) and scales.dtype == torch.uint8
-
-    # E2M1 value grid, low nibble first, scaled by 2**(e8m0 - 127) per block.
-    grid = torch.tensor(
-        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
-        device="cuda",
-    )
-    nibbles = torch.stack((packed & 0xF, packed >> 4), dim=-1).flatten(-2).long()
-    block_scale = torch.pow(2.0, scales.float() - 127).repeat_interleave(32, dim=-1)
-    dequantized = grid[nibbles] * block_scale
-    reference = weight.float()
-    error = (dequantized - reference).abs().max(dim=-1).values
-    # Rounding to the grid is off by at most half the widest step (2 * scale).
-    assert torch.all(error <= block_scale.amax(dim=-1) * 1.0 + 1e-6)
-    assert (
-        torch.nn.functional.cosine_similarity(
-            dequantized.flatten(), reference.flatten(), dim=0
-        )
-        > 0.98
-    )
+    monkeypatch.setattr(Mxfp4OnlineMoEMethod, "__init__", _init)
 
 
-def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
-    monkeypatch,
+@pytest.mark.skip_global_cleanup
+def test_muse_online_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
+    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
+
+    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
+    method = MuseSparkOnlineMXFP4FusedMoE(config)
+    assert isinstance(method, Mxfp4OnlineMoEMethod)
+    assert method.experts_cls is MuseSparkAiterExperts
+
+    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.EMULATION)
+    with pytest.raises(NotImplementedError, match="AITER_MXFP4_MXFP4"):
+        MuseSparkOnlineMXFP4FusedMoE(config)
+
+
+@pytest.mark.parametrize(
+    "quantization_config, first_layers_method",
+    [
+        # The first and last decoder layers stay BF16, as in the Quark export.
+        (
+            {"moe": "mxfp4", "ignore": ["*layers.0.*", "*layers.61.*"]},
+            MuseSparkUnquantizedFusedMoE,
+        ),
+        ({"moe": "mxfp4"}, MuseSparkOnlineMXFP4FusedMoE),
+        (
+            {"targets": {"re:.*layers\\.(?!0\\.|61\\.).*experts": "mxfp4"}},
+            MuseSparkUnquantizedFusedMoE,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_muse_online_quantization_config_selects_the_experts_method(
+    monkeypatch, default_vllm_config, quantization_config, first_layers_method
 ) -> None:
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(num_hidden_layers=62)
-        )
+    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
+    online_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(**quantization_config)
     )
-    monkeypatch.setattr(amd_muse_moe_runner, "get_current_vllm_config", lambda: config)
+    experts = object.__new__(MuseSparkRoutedExperts)
+    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
     prefix = "model.layers.{}.feed_forward.experts"
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "")
-    assert not _online_mxfp4_applies(prefix.format(5))
+    for layer in (5, 30):
+        method = experts._get_online_quant_method(
+            prefix.format(layer), online_config, config
+        )
+        assert isinstance(method, MuseSparkOnlineMXFP4FusedMoE)
+        assert prefix.format(layer) in online_config.quantized_layers
+    for layer in (0, 61):
+        method = experts._get_online_quant_method(
+            prefix.format(layer), online_config, config
+        )
+        assert type(method) is first_layers_method
 
-    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
-    assert _online_mxfp4_applies(prefix.format(5))
-    assert not _online_mxfp4_applies(prefix.format(0))
-    assert not _online_mxfp4_applies(prefix.format(61))
-    assert issubclass(MuseSparkOnlineMXFP4FusedMoE, MuseSparkQuarkOCPMXFusedMoE)
+
+@pytest.mark.skip_global_cleanup
+def test_muse_online_quantization_rejects_other_formats() -> None:
+    online_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(moe="fp8_per_block")
+    )
+    experts = object.__new__(MuseSparkRoutedExperts)
+    with pytest.raises(NotImplementedError, match="online MXFP4"):
+        experts._get_online_quant_method(
+            "model.layers.5.feed_forward.experts", online_config, _moe_config()
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_muse_deprecated_online_quant_env_redirects_to_quantization_config(
+    monkeypatch, default_vllm_config
+) -> None:
+    default_vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(num_hidden_layers=62)
+    )
+    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
+    experts = object.__new__(MuseSparkRoutedExperts)
+    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
+    prefix = "model.layers.{}.feed_forward.experts"
+
+    monkeypatch.delenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", raising=False)
+    method = experts._get_quant_method(prefix.format(5), None, config)
+    assert type(method) is MuseSparkUnquantizedFusedMoE
+
+    monkeypatch.setenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
+    # The first and last decoder layers stay BF16.
+    for layer, expected in (
+        (0, MuseSparkUnquantizedFusedMoE),
+        (5, MuseSparkOnlineMXFP4FusedMoE),
+        (61, MuseSparkUnquantizedFusedMoE),
+    ):
+        method = experts._get_quant_method(prefix.format(layer), None, config)
+        assert type(method) is expected

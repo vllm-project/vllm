@@ -6,8 +6,8 @@ Attention / indexer / router weights are repacked into the kernels' tiled
 formats (copies). The routed experts are read in place: vLLM's AITER a4w4 MXFP4
 storage (aiter `shuffle_weight` values, `e8m0_shuffle` scales) is the
 kernels' ATOM layout. The shared expert, a separate block-FP8 MLP in vLLM, is
-re-quantized to MXFP4 the way `VLLM_FP8_MOE_REQUANT` quantizes the routed
-experts and passed through its own pointers.
+re-quantized to MXFP4 the way online quantization (`--quantization-config`)
+quantizes the routed experts and passed through its own pointers.
 """
 
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.quantization.online.fp8_requant import (
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     dequant_block_fp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
@@ -181,7 +181,7 @@ def _routed_experts(experts) -> dict[str, torch.Tensor]:
         raise MonoUnsupported(
             f"routed experts on {backend} ({type(experts).__name__}/"
             f"{type(method).__name__}); mono reads AITER a4w4 storage "
-            "(VLLM_FP8_MOE_REQUANT=mxfp4 VLLM_FP8_MOE_REQUANT_ACT=a4w4)"
+            '(--quantization-config \'{"moe": "mxfp4"}\')'
         )
     out = {}
     for name, key in (

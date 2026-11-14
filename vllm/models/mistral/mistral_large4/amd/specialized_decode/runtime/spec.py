@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 
 from vllm.config import CompilationMode, VllmConfig
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 
 AUTO, SPECIALIZED = "auto", "latency_specialized"
 # the kernel's step rows at most (``mono/kernel.py``: ``1 <= S <= 12``)
@@ -16,6 +20,24 @@ MAX_ROWS = 12
 # ``num_speculative_tokens + 1`` causal rows per request, the target's residual
 # stream tapped at ``aux_hidden_state_layers``
 SPEC_METHODS = ("dspark",)
+
+
+def _is_online_mxfp4_a4w4(spec: QuantSpec | None) -> bool:
+    # An omitted activation defaults to dynamic MXFP4 for online MXFP4.
+    return (
+        spec is not None
+        and spec.weight == kMxfp4Static
+        and ("activation" not in spec.fields_set or spec.activation == kMxfp4Dynamic)
+    )
+
+
+def routed_experts_online_mxfp4_a4w4(config: VllmConfig) -> bool:
+    """Whether `--quantization-config '{"moe": "mxfp4"}'` requantizes the routed
+    experts to MXFP4 with MXFP4 activations (`targets` specs are not supported)."""
+    args = getattr(config.model_config, "quantization_config", None)
+    if isinstance(args, dict):
+        args = QuantizationConfigArgs(**args)
+    return args is not None and _is_online_mxfp4_a4w4(args.moe)
 
 
 @dataclass(frozen=True)
@@ -89,13 +111,10 @@ class DecodeConfig:
         if getattr(aux, "enable_return_routed_experts", False):
             reasons.append("does not support routed-expert capture")
         quant = config.model_config.quantization
-        if quant == "fp8" and (
-            os.environ.get("VLLM_FP8_MOE_REQUANT", "").lower() != "mxfp4"
-            or os.environ.get("VLLM_FP8_MOE_REQUANT_ACT", "a8w4").lower() != "a4w4"
-        ):
+        if quant == "fp8" and not routed_experts_online_mxfp4_a4w4(config):
             reasons.append(
-                "requires MXFP4 a4w4 routed experts (VLLM_FP8_MOE_REQUANT=mxfp4 "
-                "VLLM_FP8_MOE_REQUANT_ACT=a4w4)"
+                "requires MXFP4 a4w4 routed experts "
+                '(--quantization-config \'{"moe": "mxfp4"}\')'
             )
         return reasons
 

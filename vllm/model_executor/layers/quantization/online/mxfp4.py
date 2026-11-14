@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     _backend_activation_key,
+    _serves_requested_activation,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -183,6 +184,9 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if (
             self.activation_quant_key != kMxfp4Dynamic
             and self.activation_quant_key != backend_key
+            and not _serves_requested_activation(
+                self.mxfp4_backend, self.activation_quant_key
+            )
         ):
             raise NotImplementedError(
                 f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
@@ -257,6 +261,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                # The layer's resolved request (`targets` included).
+                requested_activation_key=self.activation_quant_key,
             )
         )
 
