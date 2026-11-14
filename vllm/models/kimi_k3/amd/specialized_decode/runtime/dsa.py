@@ -299,8 +299,8 @@ def prologue_on() -> bool:
 
 def indexer_prep_on(w) -> bool:
     """D1a runs the MXFP4 indexer's prep (``VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER``
-    with ``VLLM_K3_FUSED_INDEXER_PREP``): a layer that runs its own top-k with
-    32 heads."""
+    with ``VLLM_K3_FUSED_INDEXER_PREP``): a layer that runs its own 2048-wide top-k
+    with 32 x 128 heads."""
     import vllm.envs as envs
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
 
@@ -312,6 +312,8 @@ def indexer_prep_on(w) -> bool:
         and ind.index_num_heads == dsa_pre.IVN
         and ind.index_head_dim == dsa_pre.IKD
         and ind.dcp_scores is None
+        and ind.topk_indices_buffer is not None
+        and ind.topk_indices_buffer.shape[1] == dsa_pre.TOPK
     )
 
 

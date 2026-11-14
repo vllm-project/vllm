@@ -987,8 +987,13 @@ def idx_reasons(ik_cache, islots, topk, s=None) -> list[str]:
         or ik_cache.data_ptr() % 4
     ):
         bad.append(f"an indexer cache not MXFP4 [pages, 64, 68]: {_desc(ik_cache)}")
-    if islots is None or islots.dtype != torch.int64 or islots.stride(-1) != 1:
-        bad.append(f"indexer slots not dense int64: {_desc(islots)}")
+    if (
+        islots is None
+        or islots.dtype != torch.int64
+        or islots.stride(-1) != 1
+        or (s is not None and islots.numel() < s)
+    ):
+        bad.append(f"indexer slots not dense int64, one a token: {_desc(islots)}")
     if (
         topk is None
         or topk.dtype != torch.int32
