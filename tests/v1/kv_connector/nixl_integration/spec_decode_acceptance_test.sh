@@ -68,11 +68,11 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 # ── Detect platform (NVIDIA vs ROCm) ────────────────────────────────────
 
-if [[ "$SMI_BIN" == *"rocm"* ]]; then
+if [[ "$SMI_BIN" == *rocm-smi || "$SMI_BIN" == *amd-smi ]]; then
   GPU_PLATFORM="rocm"
   GPU_DEVICE_VAR="HIP_VISIBLE_DEVICES"
 else
@@ -181,13 +181,12 @@ if [[ -n "${VISIBLE_DEVICES}" ]]; then
   IFS=',' read -ra ALL_GPUS <<< "$VISIBLE_DEVICES"
 else
   ALL_GPUS=()
-  if [[ "$GPU_PLATFORM" == "nvidia" ]]; then
-    num=$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)
-  elif [[ "$GPU_PLATFORM" == "rocm" ]]; then
-    num=$($SMI_BIN -l | grep -c GPU)
-  else
-    num=1
-  fi
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) num=$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l) ;;
+    rocm-smi)   num=$($SMI_BIN -l | grep -c GPU) ;;
+    amd-smi)    num=$($SMI_BIN list | grep -c "^GPU") ;;
+    *)          num=1 ;;
+  esac
   for (( g=0; g<num; g++ )); do ALL_GPUS+=("$g"); done
 fi
 
