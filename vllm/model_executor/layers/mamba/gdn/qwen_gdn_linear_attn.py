@@ -1899,15 +1899,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
+        # Short prefills join the decodes in one recurrent-kernel launch;
+        # the other batches with prefills use the chunked prefill pipeline.
+        use_chunked_prefill = (
+            attn_metadata.num_prefills > 0 and not attn_metadata.use_recurrent_prefill
+        )
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
             spec_sequence_masks is None
-            and attn_metadata.num_prefills > 0
+            and use_chunked_prefill
             and attn_metadata.num_decodes > 0
         )
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        if attn_metadata.num_prefills > 0:
+        if use_chunked_prefill:
             assert mixed_qkv_non_spec is not None, (
                 "mixed_qkv_non_spec must be provided for prefill path"
             )
@@ -2008,9 +2013,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_decode = None
 
-        # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
+        # 2.3: Process the remaining part (prefill chunk, or all non-spec
+        # sequences in one recurrent launch)
         prefill_in_place = False
-        if attn_metadata.num_prefills > 0:
+        if use_chunked_prefill:
             # State indices, initial-state mask and cu_seqlens for the chunk
             # kernel are precomputed by the metadata builder (the prefill tail
             # when decodes are peeled off, else the full non-spec batch), so they
@@ -2073,12 +2079,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
-        elif attn_metadata.num_decodes > 0:
+        elif attn_metadata.num_decodes > 0 or attn_metadata.num_prefills > 0:
+            # Decodes, plus short prefills when use_recurrent_prefill is set.
+            # The 1-D state indices make the kernel store each sequence's state
+            # once, after its last token; has_initial_state zeroes the start
+            # state of new sequences (it is None for decode-only batches).
+            num_non_spec_seqs = attn_metadata.num_decodes + attn_metadata.num_prefills
+            if spec_sequence_masks is not None:
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
+            else:
+                a_non_spec = a
+                b_non_spec = b
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_non_spec,
+                    b=b_non_spec,
                     dt_bias=self.dt_bias,
                     q=query_non_spec,
                     k=key_non_spec,
@@ -2086,11 +2103,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=ssm_state,
                     inplace_final_state=True,
                     cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                        : attn_metadata.num_decodes
-                        + 1  # type: ignore[attr-defined]
+                        : num_non_spec_seqs + 1
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
+                    has_initial_state=has_initial_state,
                 )
             )
         else:

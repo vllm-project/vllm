@@ -38,6 +38,11 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
 FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
 
+# Longest non-spec query of a batch with prefills that still runs through the
+# recurrent kernel: one launch then replaces the decode launch plus the six
+# kernels of the chunked prefill pipeline.
+RECURRENT_PREFILL_MAX_QUERY_LEN = 32
+
 
 def plan_flashinfer_checkpoints(
     offsets: list[int], query_lens: list[int]
@@ -104,6 +109,10 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
+    # True when every non-spec sequence (decodes and prefills) runs through
+    # one recurrent-kernel launch instead of the chunked prefill pipeline.
+    # Only set for batches with prefills, so FULL decode graphs never see it.
+    use_recurrent_prefill: bool = False
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
     has_initial_state: torch.Tensor | None = None
@@ -192,6 +201,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
             and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
+        )
+        # Measured against the FLA (Triton) chunk pipeline only; the other
+        # prefill backends keep their chunk path. The recurrent kernel also
+        # exports no prefill checkpoints.
+        self.allow_recurrent_prefill = (
+            self.gdn_prefill_backend == "triton"
+            and not self.plan_flashinfer_checkpoints
         )
 
         if self.speculative_config:
@@ -533,6 +549,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else:
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
+        # The recurrent kernel walks each sequence token by token, while the
+        # chunked pipeline has a fixed cost per layer. Host tensors: no sync.
+        use_recurrent_prefill = (
+            num_prefills > 0
+            and self.allow_recurrent_prefill
+            and int(non_spec_query_start_loc_cpu.diff().max())  # type: ignore[union-attr]
+            <= RECURRENT_PREFILL_MAX_QUERY_LEN
+        )
+
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         prefill_query_start_loc: torch.Tensor | None = None
@@ -703,6 +728,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
+            use_recurrent_prefill=use_recurrent_prefill,
             checkpoint=checkpoint,
             flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
             has_initial_state=has_initial_state,

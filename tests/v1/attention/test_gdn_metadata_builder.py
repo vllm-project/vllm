@@ -591,3 +591,42 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+@pytest.mark.parametrize(
+    ("query_lens", "expected"),
+    [
+        pytest.param([1, 32], True, id="at-limit"),
+        pytest.param([1, 33], False, id="above-limit"),
+        pytest.param([1, 1], False, id="decode-only"),
+    ],
+)
+def test_recurrent_prefill_selection(query_lens: list[int], expected: bool):
+    """Short prefills join the decodes in the recurrent kernel; the decision
+    reads only host lengths and never applies to decode-only batches."""
+    builder = _create_gdn_builder()
+    is_prefilling = [False, query_lens[1] > 1]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, query_lens[1]], query_lens=query_lens),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool))
+    meta = builder.build(0, common)
+
+    assert meta.use_recurrent_prefill is expected
+    if expected:
+        # The recurrent launch reads the per-sequence initial-state mask.
+        assert meta.has_initial_state is not None
+        assert meta.has_initial_state.tolist() == [True, False]
+
+
+def test_recurrent_prefill_selection_with_spec_decode():
+    """With spec decodes, the reclassified one-token non-spec rows are short
+    prefills, so they also take the recurrent kernel."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=[65, 20], query_lens=[1, 3])
+    meta = _build(builder, batch, num_decode_draft_tokens=[-1, 2])
+
+    assert meta.num_prefills == 1
+    assert meta.num_spec_decodes == 1
+    assert meta.use_recurrent_prefill is True
