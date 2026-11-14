@@ -129,6 +129,8 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and vllm_config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
+        # The executor shards attention heads across TP ranks.
+        "VLLM_DSV41_REPLICATE_MIXER unset": not envs.VLLM_DSV41_REPLICATE_MIXER,
         "DeepGEMM and NVLink multicast for the fused all-reduce + mHC": (
             supports_mhc_overlap(vllm_config) and supports_mhc_all_reduce(vllm_config)
         ),
