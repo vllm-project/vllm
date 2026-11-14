@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.tokenize.api_router import attach_router
 from vllm.entrypoints.serve.tokenize.protocol import (
+    DetokenizeRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
@@ -280,3 +281,32 @@ class TestDetokenizeClientErrorResponses:
 
         assert statuses["/tokenize"] == HTTPStatus.BAD_REQUEST
         assert statuses["/detokenize"] == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_detokenize_rejects_out_of_vocabulary_ids_before_decoding():
+    """Out-of-vocabulary ids must fail, not be silently dropped from the text.
+
+    The tokenizer decode skips unknown ids, so validation has to run first,
+    including when a valid id is mixed with an invalid one.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+    mock_engine.renderer.validate_token_ids.side_effect = VLLMValidationError(
+        "Token id 999999999 is out of vocabulary", parameter="tokens"
+    )
+    mock_engine.renderer.tokenize_prompt_async = AsyncMock()
+
+    serving = _build_serving_tokenization(mock_engine)
+    request = DetokenizeRequest(model=MODEL_NAME, tokens=[9707, 999999999])
+
+    with pytest.raises(VLLMValidationError, match="out of vocabulary"):
+        await serving.create_detokenize(request, MagicMock(headers={}))
+
+    mock_engine.renderer.validate_token_ids.assert_called_once_with(
+        [9707, 999999999], parameter="tokens"
+    )
+    mock_engine.renderer.tokenize_prompt_async.assert_not_called()
