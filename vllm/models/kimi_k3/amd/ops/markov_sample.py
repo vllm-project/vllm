@@ -245,7 +245,8 @@ def why_not(spec, num_reqs: int) -> str | None:
         if getattr(lp, "head_dtype", None) not in (None, torch.bfloat16):
             return f"a {lp.head_dtype} head dtype"
     if not 1 <= num_reqs <= MAX_ROWS:
-        return f"{num_reqs} requests"
+        # One reason for every batch size (the caller logs each reason once).
+        return f"more than {MAX_ROWS} requests"
     w1, w2 = head.markov_w1.weight, head.markov_w2.weight
     if w1.dtype != torch.bfloat16 or w2.dtype != torch.bfloat16:
         return "Markov weights not bf16"
@@ -271,16 +272,19 @@ def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
     head = spec.model.model.markov_head
     w1, w2 = head.markov_w1.weight, head.markov_w2.weight
     cache = spec.draft_logits.values
-    if (
-        base_logits.dtype != torch.bfloat16
-        or base_logits.stride(-1) != 1
-        or base_logits.stride(1) != vocab
-        or w2.shape[0] < vocab
-        or cache.shape[-1] < vocab
-    ):
-        logger.info_once(
-            "DSpark fused Markov sampling off: %s base logits", base_logits.dtype
-        )
+    # A step's row is addressed as base_logits[:, step] (stride(0) apart), so
+    # only the vocabulary has to be contiguous.
+    why = None
+    if base_logits.dtype != torch.bfloat16:
+        why = f"{base_logits.dtype} base logits"
+    elif base_logits.stride(-1) != 1:
+        why = "non-contiguous base logits"
+    elif w2.shape[0] < vocab:
+        why = f"{w2.shape[0]} Markov rows for vocabulary {vocab}"
+    elif cache.shape[-1] < vocab:
+        why = f"a {cache.shape[-1]}-wide draft logits cache for vocabulary {vocab}"
+    if why is not None:
+        logger.info_once("DSpark fused Markov sampling off: %s", why)
         return False
     rank = w1.shape[1]
     num_sample = num_reqs * n_spec
