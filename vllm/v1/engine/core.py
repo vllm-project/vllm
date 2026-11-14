@@ -1095,6 +1095,9 @@ class EngineCore:
     ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
+        Callers must serialize sleep, wake, pause, and resume operations; see
+        the control request ordering contract in docs/features/sleep_mode.md.
+
         Args:
             level: Sleep level.
                 - Level 0: Pause scheduling only. Requests are still accepted
@@ -1111,7 +1114,7 @@ class EngineCore:
             raise RuntimeError(
                 f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
             )
-        # Pause scheduler before sleeping.
+        # Callers serialize control operations, including the drain interval.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(
             mode=mode,
