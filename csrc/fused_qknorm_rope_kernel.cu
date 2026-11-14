@@ -99,8 +99,27 @@ using namespace vllm::cuda_async;
 // scalar_t_cache: data type of cos/sin cache
 // head_dim: the dimension of each head
 // interleave: interleave=!is_neox.
+// Destinations for the cache-writing variant (WRITE_CACHE == true). In that
+// mode the kernel never writes back into `qkv`: normalised/rotated Q and K go
+// to the contiguous q_out / k_out tensors, and K and V are additionally
+// scattered into the paged KV cache (flash layout, may be strided) using
+// slot_mapping. Tokens beyond num_slot_tokens or with a negative slot are
+// processed but not cached, matching reshape_and_cache_flash.
+struct KVCacheWriteParams {
+  void* q_out = nullptr;      // [num_tokens, num_heads_q, head_dim]
+  void* k_out = nullptr;      // [num_tokens, num_heads_k, head_dim]
+  void* key_cache = nullptr;  // [num_blocks, block_size, num_heads_k, head_dim]
+  void* value_cache =
+      nullptr;  // [num_blocks, block_size, num_heads_v, head_dim]
+  int64_t const* slot_mapping = nullptr;
+  int num_slot_tokens = 0;
+  int block_size = 1;
+  int64_t kc_stride_b = 0, kc_stride_s = 0, kc_stride_h = 0;
+  int64_t vc_stride_b = 0, vc_stride_s = 0, vc_stride_h = 0;
+};
+
 template <typename scalar_t_in, typename scalar_t_cache, int head_dim,
-          bool interleave>
+          bool interleave, bool WRITE_CACHE>
 __global__ void fusedQKNormRopeKernel(
     void* qkv_void,                  // Combined QKV tensor
     int const num_heads_q,           // Number of query heads
@@ -112,7 +131,8 @@ __global__ void fusedQKNormRopeKernel(
     void const* cos_sin_cache_void,  // Pre-computed cos/sin cache
     int64_t const* position_ids,     // Position IDs for RoPE
     int const num_tokens,            // Number of tokens
-    int const rotary_dim             // Dimension for RoPE
+    int const rotary_dim,            // Dimension for RoPE
+    KVCacheWriteParams const cw      // Only read when WRITE_CACHE
 ) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr ((std::is_same_v<scalar_t_in, c10::BFloat16>) ||
@@ -148,8 +168,10 @@ __global__ void fusedQKNormRopeKernel(
     // processes
     int const globalWarpIdx = blockIdx.x * warpsPerBlock + warpId;
 
-    // Total number of attention heads (Q and K)
-    int const total_qk_heads = num_heads_q + num_heads_k;
+    // Total number of attention heads (Q and K; plus V when writing the cache)
+    int const total_qk_heads = WRITE_CACHE
+                                   ? num_heads_q + num_heads_k + num_heads_v
+                                   : num_heads_q + num_heads_k;
 
     // Determine which token and head type (Q or K) this warp processes
     int const tokenIdx = globalWarpIdx / total_qk_heads;
@@ -194,6 +216,28 @@ __global__ void fusedQKNormRopeKernel(
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
     cudaGridDependencySynchronize();
 #endif
+
+    if constexpr (WRITE_CACHE) {
+      if (localHeadIdx >= num_heads_q + num_heads_k) {
+        // V head: no norm / rope, just scatter into the paged value cache.
+        // offsetThread already points at this V head (headIdx counts on from
+        // the K heads, so the K offset formula covers the V block).
+        if (tokenIdx < cw.num_slot_tokens) {
+          int64_t const slot = cw.slot_mapping[tokenIdx];
+          if (slot >= 0) {
+            int const vHead = localHeadIdx - num_heads_q - num_heads_k;
+            T_in* value_cache = reinterpret_cast<T_in*>(cw.value_cache);
+            int64_t const dst = (slot / cw.block_size) * cw.vc_stride_b +
+                                (slot % cw.block_size) * cw.vc_stride_s +
+                                vHead * cw.vc_stride_h +
+                                laneId * numElemsPerThread;
+            *reinterpret_cast<vec_T*>(&value_cache[dst]) =
+                *reinterpret_cast<vec_T const*>(&qkv[offsetThread]);
+          }
+        }
+        return;
+      }
+    }
 
     // Sum of squares for RMSNorm
     float sumOfSquares = 0.0f;
@@ -243,6 +287,15 @@ __global__ void fusedQKNormRopeKernel(
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
     int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
+    if constexpr (!interleave) {
+      // Exchange with the whole warp: rotary_lanes < 32 when rotary_dim <
+      // head_dim, so shuffling inside the lane guard below would be UB.
+      int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+#pragma unroll
+      for (int i = 0; i < numElemsPerThread; i++) {
+        elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+      }
+    }
     if (laneId < rotary_lanes) {
       if constexpr (interleave) {
         // Perform interleaving. Use pre-computed cos/sin values.
@@ -266,15 +319,10 @@ __global__ void fusedQKNormRopeKernel(
           elements[idx1] = val0 * sin_val + val1 * cos_val;
         }
       } else {
-        // Before data exchange with in warp, we need to sync.
-        __syncwarp();
-        int pairOffset = (rotary_dim / 2) / numElemsPerThread;
-        // Get the data from the other half of the warp. Use pre-computed
-        // cos/sin values.
+        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+        // Use pre-computed cos/sin values.
 #pragma unroll
         for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
           }
@@ -287,8 +335,6 @@ __global__ void fusedQKNormRopeKernel(
 
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
-        __syncwarp();
       }
     }
     // Store.
@@ -303,7 +349,27 @@ __global__ void fusedQKNormRopeKernel(
         // Place it into the generic vector
         *(reinterpret_cast<T2_in*>(&vec) + i) = packed_val;
       }
-      *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
+      if constexpr (WRITE_CACHE) {
+        T_in* out = reinterpret_cast<T_in*>(isQ ? cw.q_out : cw.k_out);
+        int const out_heads = isQ ? num_heads_q : num_heads_k;
+        int64_t const out_off =
+            (static_cast<int64_t>(tokenIdx) * out_heads + headIdx) * head_dim +
+            laneId * numElemsPerThread;
+        *reinterpret_cast<vec_T*>(&out[out_off]) = vec;
+        if (!isQ && tokenIdx < cw.num_slot_tokens) {
+          int64_t const slot = cw.slot_mapping[tokenIdx];
+          if (slot >= 0) {
+            T_in* key_cache = reinterpret_cast<T_in*>(cw.key_cache);
+            int64_t const dst = (slot / cw.block_size) * cw.kc_stride_b +
+                                (slot % cw.block_size) * cw.kc_stride_s +
+                                headIdx * cw.kc_stride_h +
+                                laneId * numElemsPerThread;
+            *reinterpret_cast<vec_T*>(&key_cache[dst]) = vec;
+          }
+        }
+      } else {
+        *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
+      }
     }
 
     // PDL: signal completion so a dependent successor may launch early.
@@ -321,12 +387,13 @@ __global__ void fusedQKNormRopeKernel(
 // When HEADS_PER_WARP > 1 the warp reuses the loaded cos/sin across all heads,
 // hiding global-memory latency and improving occupancy for large batches.
 template <typename scalar_t_in, typename scalar_t_cache, int head_dim,
-          bool interleave, int HEADS_PER_WARP>
+          bool interleave, int HEADS_PER_WARP, bool WRITE_CACHE>
 __global__ void fusedQKNormRopeKernelNTokenHeads(
     void* qkv_void, int const num_heads_q, int const num_heads_k,
     int const num_heads_v, float const eps, void const* q_weight_void,
     void const* k_weight_void, void const* cos_sin_cache_void,
-    int64_t const* position_ids, int const num_tokens, int const rotary_dim) {
+    int64_t const* position_ids, int const num_tokens, int const rotary_dim,
+    KVCacheWriteParams const cw) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr ((std::is_same_v<scalar_t_in, c10::BFloat16>) ||
                 std::is_same_v<scalar_t_cache, c10::BFloat16>) {
@@ -365,8 +432,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     int const warpId = threadIdx.x / 32;
     int const laneId = threadIdx.x % 32;
 
-    int const total_qk_heads = num_heads_q + num_heads_k;
     int const num_heads = num_heads_q + num_heads_k + num_heads_v;
+    int const total_qk_heads =
+        WRITE_CACHE ? num_heads : num_heads_q + num_heads_k;
     int const head_chunks_per_token =
         (total_qk_heads + HEADS_PER_WARP - 1) / HEADS_PER_WARP;
 
@@ -472,6 +540,29 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       }
       int const offsetThread = offsetWarp + laneId * numElemsPerThread;
 
+      if constexpr (WRITE_CACHE) {
+        if (localHeadIdx >= num_heads_q + num_heads_k) {
+          // V head: copy the prefetched tile into the paged value cache.
+          if (k == 0) cp_async_wait_group<0>();  // keep the cos/sin wait
+          if (tokenIdx < cw.num_slot_tokens) {
+            int64_t const slot = cw.slot_mapping[tokenIdx];
+            if (slot >= 0) {
+              char const* smem_src = this_warp_head_smem + k * qkv_tile_bytes +
+                                     laneId * elemSizeBytes;
+              vec_T const vec = *reinterpret_cast<vec_T const*>(smem_src);
+              int const vHead = localHeadIdx - num_heads_q - num_heads_k;
+              T_in* value_cache = reinterpret_cast<T_in*>(cw.value_cache);
+              int64_t const dst = (slot / cw.block_size) * cw.vc_stride_b +
+                                  (slot % cw.block_size) * cw.vc_stride_s +
+                                  vHead * cw.vc_stride_h +
+                                  laneId * numElemsPerThread;
+              *reinterpret_cast<vec_T*>(&value_cache[dst]) = vec;
+            }
+          }
+          continue;
+        }
+      }
+
       // === Part 1: QK Norm (read from smem; group 0 already done). ===
       float sumOfSquares = 0.0f;
       {
@@ -502,6 +593,14 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       if (k == 0) cp_async_wait_group<0>();
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
+      if constexpr (!interleave) {
+        // Whole-warp exchange, see the single-head kernel above.
+        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+#pragma unroll
+        for (int i = 0; i < numElemsPerThread; i++) {
+          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+        }
+      }
       if (laneId < rotary_lanes) {
         if constexpr (interleave) {
 #pragma unroll
@@ -518,11 +617,9 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             elements[idx1] = val0 * sin_val + val1 * cos_val;
           }
         } else {
-          __syncwarp();
           int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
           for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
@@ -531,7 +628,6 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
             elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
           }
-          __syncwarp();
         }
       }
 
@@ -545,7 +641,28 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
               make_float2(elements[2 * i], elements[2 * i + 1]));
           *(reinterpret_cast<T2_in*>(&vec) + i) = packed_val;
         }
-        *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
+        if constexpr (WRITE_CACHE) {
+          T_in* out = reinterpret_cast<T_in*>(isQ ? cw.q_out : cw.k_out);
+          int const out_heads = isQ ? num_heads_q : num_heads_k;
+          int64_t const out_off =
+              (static_cast<int64_t>(tokenIdx) * out_heads + headIdx) *
+                  head_dim +
+              laneId * numElemsPerThread;
+          *reinterpret_cast<vec_T*>(&out[out_off]) = vec;
+          if (!isQ && tokenIdx < cw.num_slot_tokens) {
+            int64_t const slot = cw.slot_mapping[tokenIdx];
+            if (slot >= 0) {
+              T_in* key_cache = reinterpret_cast<T_in*>(cw.key_cache);
+              int64_t const dst = (slot / cw.block_size) * cw.kc_stride_b +
+                                  (slot % cw.block_size) * cw.kc_stride_s +
+                                  headIdx * cw.kc_stride_h +
+                                  laneId * numElemsPerThread;
+              *reinterpret_cast<vec_T*>(&key_cache[dst]) = vec;
+            }
+          }
+        } else {
+          *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
+        }
       }
     }
 
@@ -606,17 +723,19 @@ void launchWithPDL(KernelFn kernel, dim3 gridDim, dim3 blockDim,
 }
 }  // namespace
 
-template <typename scalar_t_in, typename scalar_t_cache>
+template <typename scalar_t_in, typename scalar_t_cache, bool WRITE_CACHE>
 void launchFusedQKNormRope(void* qkv, int const num_tokens,
                            int const num_heads_q, int const num_heads_k,
                            int const num_heads_v, int const head_dim,
                            int const rotary_dim, float const eps,
                            void const* q_weight, void const* k_weight,
                            void const* cos_sin_cache, bool const interleave,
-                           int64_t const* position_ids, cudaStream_t stream) {
+                           int64_t const* position_ids, cudaStream_t stream,
+                           KVCacheWriteParams const& cw) {
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
-  int const totalQKHeads = num_heads_q + num_heads_k;
+  int const totalQKHeads = WRITE_CACHE ? num_heads_q + num_heads_k + num_heads_v
+                                       : num_heads_q + num_heads_k;
   int const totalWarps = num_tokens * totalQKHeads;
   int const gridSize = common::divUp(totalWarps, warpsPerBlock);
   dim3 gridDim(gridSize);
@@ -625,29 +744,32 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
   switch (head_dim) {
     case 64:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
+        launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64,
+                                            INTERLEAVE, WRITE_CACHE>,
+                      gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                      num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                      k_weight, cos_sin_cache, position_ids, num_tokens,
+                      rotary_dim, cw);
       });
       break;
     case 128:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 128, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
+        launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 128,
+                                            INTERLEAVE, WRITE_CACHE>,
+                      gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                      num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                      k_weight, cos_sin_cache, position_ids, num_tokens,
+                      rotary_dim, cw);
       });
       break;
     case 256:
       DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        launchWithPDL(
-            fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 256, INTERLEAVE>,
-            gridDim, blockDim, 0, stream, enable_pdl, qkv, num_heads_q,
-            num_heads_k, num_heads_v, eps, q_weight, k_weight, cos_sin_cache,
-            position_ids, num_tokens, rotary_dim);
+        launchWithPDL(fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 256,
+                                            INTERLEAVE, WRITE_CACHE>,
+                      gridDim, blockDim, 0, stream, enable_pdl, qkv,
+                      num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                      k_weight, cos_sin_cache, position_ids, num_tokens,
+                      rotary_dim, cw);
       });
       break;
     default:
@@ -658,14 +780,14 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
 
 // Launch: one warp processes token_heads_per_warp token-heads (1, 2, 4, or 8).
 // When token_heads_per_warp == 1, delegates to the 1-head baseline above.
-template <typename scalar_t_in, typename scalar_t_cache>
+template <typename scalar_t_in, typename scalar_t_cache, bool WRITE_CACHE>
 void launchFusedQKNormRopeNTokenHeads(
     void* qkv, int const num_tokens, int const num_heads_q,
     int const num_heads_k, int const num_heads_v, int const head_dim,
     int const rotary_dim, float const eps, void const* q_weight,
     void const* k_weight, void const* cos_sin_cache, bool const interleave,
     int64_t const* position_ids, int const token_heads_per_warp,
-    cudaStream_t stream) {
+    cudaStream_t stream, KVCacheWriteParams const& cw) {
   STD_TORCH_CHECK(token_heads_per_warp == 1 || token_heads_per_warp == 2 ||
                       token_heads_per_warp == 4 || token_heads_per_warp == 8,
                   "token_heads_per_warp must be 1, 2, 4, or 8, got ",
@@ -673,10 +795,10 @@ void launchFusedQKNormRopeNTokenHeads(
 
   // token_heads_per_warp == 1: delegate to the 1-head baseline kernel.
   if (token_heads_per_warp == 1) {
-    launchFusedQKNormRope<scalar_t_in, scalar_t_cache>(
+    launchFusedQKNormRope<scalar_t_in, scalar_t_cache, WRITE_CACHE>(
         qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
         rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
-        position_ids, stream);
+        position_ids, stream, cw);
     return;
   }
 
@@ -689,17 +811,18 @@ void launchFusedQKNormRopeNTokenHeads(
         static_cast<size_t>(rotary_dim) *
         (std::is_same_v<scalar_t_cache, float> ? sizeof(float) : 2u);
     if (rotary_bytes % 16 != 0) {
-      launchFusedQKNormRope<scalar_t_in, scalar_t_cache>(
+      launchFusedQKNormRope<scalar_t_in, scalar_t_cache, WRITE_CACHE>(
           qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
           rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
-          position_ids, stream);
+          position_ids, stream, cw);
       return;
     }
   }
 
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
-  int const totalQKHeads = num_heads_q + num_heads_k;
+  int const totalQKHeads = WRITE_CACHE ? num_heads_q + num_heads_k + num_heads_v
+                                       : num_heads_q + num_heads_k;
   // Grid: one warp per (token, head_chunk); same token → reuse cos/sin in smem.
   int const head_chunks_per_token =
       (totalQKHeads + token_heads_per_warp - 1) / token_heads_per_warp;
@@ -727,30 +850,33 @@ void launchFusedQKNormRopeNTokenHeads(
         DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
           launchWithPDL(                                                      \
               fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               64, INTERLEAVE, (N)>,          \
+                                               64, INTERLEAVE, (N),           \
+                                               WRITE_CACHE>,                  \
               gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
               num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
+              cos_sin_cache, position_ids, num_tokens, rotary_dim, cw);       \
         });                                                                   \
         break;                                                                \
       case 128:                                                               \
         DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
           launchWithPDL(                                                      \
               fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               128, INTERLEAVE, (N)>,         \
+                                               128, INTERLEAVE, (N),          \
+                                               WRITE_CACHE>,                  \
               gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
               num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
+              cos_sin_cache, position_ids, num_tokens, rotary_dim, cw);       \
         });                                                                   \
         break;                                                                \
       case 256:                                                               \
         DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                         \
           launchWithPDL(                                                      \
               fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache,   \
-                                               256, INTERLEAVE, (N)>,         \
+                                               256, INTERLEAVE, (N),          \
+                                               WRITE_CACHE>,                  \
               gridDim, blockDim, smem_bytes, stream, enable_pdl, qkv,         \
               num_heads_q, num_heads_k, num_heads_v, eps, q_weight, k_weight, \
-              cos_sin_cache, position_ids, num_tokens, rotary_dim);           \
+              cos_sin_cache, position_ids, num_tokens, rotary_dim, cw);       \
         });                                                                   \
         break;                                                                \
       default:                                                                \
@@ -770,23 +896,14 @@ void launchFusedQKNormRopeNTokenHeads(
 
 }  // namespace tensorrt_llm::kernels
 
-void fused_qk_norm_rope(
-    torch::stable::Tensor&
-        qkv,              // Combined QKV tensor [num_tokens,
-                          // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
-    int64_t num_heads_q,  // Number of query heads
-    int64_t num_heads_k,  // Number of key heads
-    int64_t num_heads_v,  // Number of value heads
-    int64_t head_dim,     // Dimension per head
-    double eps,           // Epsilon for RMS normalization
-    torch::stable::Tensor& q_weight,  // RMSNorm weights for query [head_dim]
-    torch::stable::Tensor& k_weight,  // RMSNorm weights for key [head_dim]
-    torch::stable::Tensor& cos_sin_cache,  // Cos/sin cache [max_position,
-                                           // head_dim]
-    bool is_neox,  // Whether RoPE is applied in Neox style
-    torch::stable::Tensor& position_ids,  // Position IDs for RoPE [num_tokens]
-    int64_t forced_token_heads_per_warp   // -1 = auto-select, >0 = forced value
-) {
+namespace {
+// Argument validation shared by the two entry points below. Returns the
+// token_heads_per_warp to launch with (forced value or auto-selected).
+int validate_qk_norm_rope_args(
+    torch::stable::Tensor& qkv, int64_t num_heads_q, int64_t num_heads_k,
+    int64_t num_heads_v, int64_t head_dim, torch::stable::Tensor& q_weight,
+    torch::stable::Tensor& k_weight, torch::stable::Tensor& cos_sin_cache,
+    torch::stable::Tensor& position_ids, int64_t forced_token_heads_per_warp) {
   // Input validation
   CHECK_INPUT(qkv);
   CHECK_INPUT(position_ids);
@@ -826,10 +943,6 @@ void fused_qk_norm_rope(
       qkv.size(1) == total_heads * head_dim,
       "QKV tensor size must match total number of heads and head dimension");
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      qkv.get_device_index());
-  auto stream = get_current_cuda_stream(qkv.get_device_index());
-
   // Select token_heads_per_warp: forced value if >0, else auto-select.
   // Auto thresholds are calibrated on SM 9.0 (H100). On other architectures,
   // fall back to token_heads_per_warp=1 (base kernel) until profiled.
@@ -860,7 +973,21 @@ void fused_qk_norm_rope(
       }
     }
   }
+  return token_heads_per_warp;
+}
 
+template <bool WRITE_CACHE>
+void launch_fused_qk_norm_rope(
+    torch::stable::Tensor& qkv, int64_t num_heads_q, int64_t num_heads_k,
+    int64_t num_heads_v, int64_t head_dim, double eps,
+    torch::stable::Tensor& q_weight, torch::stable::Tensor& k_weight,
+    torch::stable::Tensor& cos_sin_cache, bool is_neox,
+    torch::stable::Tensor& position_ids, int token_heads_per_warp,
+    tensorrt_llm::kernels::KVCacheWriteParams const& cw) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      qkv.get_device_index());
+  auto stream = get_current_cuda_stream(qkv.get_device_index());
+  int64_t const num_tokens = qkv.size(0);
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
         using qkv_scalar_t = scalar_t;
@@ -868,7 +995,7 @@ void fused_qk_norm_rope(
             cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
               using cache_scalar_t = scalar_t;
               tensorrt_llm::kernels::launchFusedQKNormRopeNTokenHeads<
-                  qkv_scalar_t, cache_scalar_t>(
+                  qkv_scalar_t, cache_scalar_t, WRITE_CACHE>(
                   qkv.data_ptr(), static_cast<int>(num_tokens),
                   static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
                   static_cast<int>(num_heads_v), static_cast<int>(head_dim),
@@ -876,7 +1003,112 @@ void fused_qk_norm_rope(
                   static_cast<float>(eps), q_weight.data_ptr(),
                   k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
                   reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
-                  token_heads_per_warp, stream);
+                  token_heads_per_warp, stream, cw);
             });
       });
+}
+}  // namespace
+
+void fused_qk_norm_rope(
+    torch::stable::Tensor&
+        qkv,              // Combined QKV tensor [num_tokens,
+                          // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
+    int64_t num_heads_q,  // Number of query heads
+    int64_t num_heads_k,  // Number of key heads
+    int64_t num_heads_v,  // Number of value heads
+    int64_t head_dim,     // Dimension per head
+    double eps,           // Epsilon for RMS normalization
+    torch::stable::Tensor& q_weight,  // RMSNorm weights for query [head_dim]
+    torch::stable::Tensor& k_weight,  // RMSNorm weights for key [head_dim]
+    torch::stable::Tensor& cos_sin_cache,  // Cos/sin cache [max_position,
+                                           // head_dim]
+    bool is_neox,  // Whether RoPE is applied in Neox style
+    torch::stable::Tensor& position_ids,  // Position IDs for RoPE [num_tokens]
+    int64_t forced_token_heads_per_warp   // -1 = auto-select, >0 = forced value
+) {
+  int const token_heads_per_warp = validate_qk_norm_rope_args(
+      qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, q_weight, k_weight,
+      cos_sin_cache, position_ids, forced_token_heads_per_warp);
+  tensorrt_llm::kernels::KVCacheWriteParams const cw{};
+  launch_fused_qk_norm_rope<false>(
+      qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight,
+      k_weight, cos_sin_cache, is_neox, position_ids, token_heads_per_warp, cw);
+}
+
+// Same computation as fused_qk_norm_rope, but qkv is read-only: normalised and
+// rotated Q/K are written to q_out [num_tokens, num_heads_q, head_dim] and
+// k_out [num_tokens, num_heads_k, head_dim], and K/V are also scattered into
+// the paged KV cache (flash layout [num_blocks, block_size, num_kv_heads,
+// head_dim]; the block/slot/head strides may be arbitrary, head_dim must be
+// contiguous). This replaces fused_qk_norm_rope + reshape_and_cache_flash
+// with one launch that never re-reads K/V. Only kv_cache_dtype="auto"
+// (cache dtype == qkv dtype) is supported. Tokens at or beyond
+// slot_mapping.size(0), or whose slot is negative, are normalised/rotated
+// but not cached, matching reshape_and_cache_flash.
+void fused_qk_norm_rope_kvcache(
+    torch::stable::Tensor& qkv, torch::stable::Tensor& q_out,
+    torch::stable::Tensor& k_out, int64_t num_heads_q, int64_t num_heads_k,
+    int64_t num_heads_v, int64_t head_dim, double eps,
+    torch::stable::Tensor& q_weight, torch::stable::Tensor& k_weight,
+    torch::stable::Tensor& cos_sin_cache, bool is_neox,
+    torch::stable::Tensor& position_ids, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, torch::stable::Tensor& slot_mapping,
+    int64_t forced_token_heads_per_warp) {
+  int const token_heads_per_warp = validate_qk_norm_rope_args(
+      qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, q_weight, k_weight,
+      cos_sin_cache, position_ids, forced_token_heads_per_warp);
+  int64_t const num_tokens = qkv.size(0);
+  STD_TORCH_CHECK(num_heads_k == num_heads_v,
+                  "fused_qk_norm_rope_kvcache requires num_heads_k == "
+                  "num_heads_v");
+  CHECK_INPUT(q_out);
+  CHECK_INPUT(k_out);
+  CHECK_INPUT(slot_mapping);
+  CHECK_TH_CUDA(key_cache);
+  CHECK_TH_CUDA(value_cache);
+  CHECK_TYPE(slot_mapping, torch::headeronly::ScalarType::Long);
+  STD_TORCH_CHECK(q_out.dim() == 3 && q_out.size(0) == num_tokens &&
+                      q_out.size(1) == num_heads_q && q_out.size(2) == head_dim,
+                  "q_out must be [num_tokens, num_heads_q, head_dim]");
+  STD_TORCH_CHECK(k_out.dim() == 3 && k_out.size(0) == num_tokens &&
+                      k_out.size(1) == num_heads_k && k_out.size(2) == head_dim,
+                  "k_out must be [num_tokens, num_heads_k, head_dim]");
+  STD_TORCH_CHECK(q_out.scalar_type() == qkv.scalar_type() &&
+                      k_out.scalar_type() == qkv.scalar_type(),
+                  "q_out and k_out must have the dtype of qkv");
+  STD_TORCH_CHECK(key_cache.dim() == 4 && value_cache.dim() == 4,
+                  "key/value cache must be [num_blocks, block_size, "
+                  "num_kv_heads, head_dim]");
+  STD_TORCH_CHECK(key_cache.size(1) == value_cache.size(1),
+                  "key/value cache block_size mismatch");
+  STD_TORCH_CHECK(
+      key_cache.size(2) == num_heads_k && key_cache.size(3) == head_dim &&
+          value_cache.size(2) == num_heads_v && value_cache.size(3) == head_dim,
+      "key/value cache head count or head_dim does not match qkv");
+  STD_TORCH_CHECK(key_cache.stride(3) == 1 && value_cache.stride(3) == 1,
+                  "head_dim must be the contiguous dimension of the cache");
+  STD_TORCH_CHECK(key_cache.scalar_type() == qkv.scalar_type() &&
+                      value_cache.scalar_type() == qkv.scalar_type(),
+                  "fused_qk_norm_rope_kvcache only supports "
+                  "kv_cache_dtype=auto (cache dtype == qkv dtype)");
+  STD_TORCH_CHECK(slot_mapping.dim() == 1 && slot_mapping.size(0) <= num_tokens,
+                  "slot_mapping must be 1D with at most num_tokens entries");
+
+  tensorrt_llm::kernels::KVCacheWriteParams cw;
+  cw.q_out = q_out.data_ptr();
+  cw.k_out = k_out.data_ptr();
+  cw.key_cache = key_cache.data_ptr();
+  cw.value_cache = value_cache.data_ptr();
+  cw.slot_mapping = reinterpret_cast<int64_t const*>(slot_mapping.data_ptr());
+  cw.num_slot_tokens = static_cast<int>(slot_mapping.size(0));
+  cw.block_size = static_cast<int>(key_cache.size(1));
+  cw.kc_stride_b = key_cache.stride(0);
+  cw.kc_stride_s = key_cache.stride(1);
+  cw.kc_stride_h = key_cache.stride(2);
+  cw.vc_stride_b = value_cache.stride(0);
+  cw.vc_stride_s = value_cache.stride(1);
+  cw.vc_stride_h = value_cache.stride(2);
+  launch_fused_qk_norm_rope<true>(
+      qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight,
+      k_weight, cos_sin_cache, is_neox, position_ids, token_heads_per_warp, cw);
 }
