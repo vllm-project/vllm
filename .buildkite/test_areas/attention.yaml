@@ -113,3 +113,23 @@ steps:
   - tests/v1/attention/test_attention_backends.py
   commands:
   - pytest -v -s v1/attention/test_attention_backends.py -k nvfp4_decode_correctness
+
+- label: ":nvidia: (DGX Spark) [Nightly] SM120 Sparse MLA"
+  key: flashinfer-sparse-mla-dgx-spark
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/v1/attention/backends/mla/index_group.py
+  - vllm/v1/worker/workspace.py
+  - vllm/v1/attention/ops/dcp.py
+  - tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py
+  commands:
+  - pytest -v -s v1/attention/test_flashinfer_sparse_mla_sm120_api.py
