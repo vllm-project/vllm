@@ -1071,6 +1071,63 @@ async def collect_outputs(
 
 
 @pytest.mark.asyncio
+async def test_level2_wake_fails_requests_queued_before_reload():
+    """A wake_up that remaps the weights discarded by level-2 sleep and resumes
+    scheduling in one call fails the requests queued during sleep with a
+    retryable error, rather than running them on the discarded weights. A
+    staged wake runs them on the restored weights, and level-1 sleep keeps
+    them."""
+    engine_args = AsyncEngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        enforce_eager=True,
+        enable_sleep_mode=True,
+        enable_prefix_caching=False,
+        max_model_len=4096,
+        kv_cache_memory_bytes=1 << 30,
+        gpu_memory_utilization=0.15,
+    )
+    params = SamplingParams(max_tokens=32, temperature=0)
+
+    async def final_text(collector) -> str:
+        while not (out := await collector.get()).finished:
+            pass
+        return out.outputs[0].text
+
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        def submit(request_id: str):
+            return engine.add_request(request_id, TEXT_PROMPT, params)
+
+        expected = await final_text(await submit("before-sleep"))
+
+        # Tagless wake: nothing restores the weights before scheduling resumes.
+        await engine.sleep(level=2)
+        queued = await submit("tagless")
+        assert await engine.wake_up()
+        with pytest.raises(RetryableRequestError):
+            await final_text(queued)
+        await engine.collective_rpc("reload_weights")
+        assert await final_text(await submit("after-reload")) == expected
+
+        # Staged wake: the queued request runs on the restored weights.
+        await engine.sleep(level=2)
+        queued = await submit("staged")
+        assert not await engine.wake_up(tags=["weights"])
+        await engine.collective_rpc("reload_weights")
+        assert await engine.wake_up(tags=["kv_cache"])
+        assert await final_text(queued) == expected
+
+        # Level 1 restores the weights on wake.
+        await engine.sleep(level=1)
+        queued = await submit("level1")
+        assert await engine.wake_up()
+        assert await final_text(queued) == expected
+
+
+@pytest.mark.asyncio
 async def test_pause_resume_basic():
     """Test basic pause/resume flag behavior and idempotency.
 
