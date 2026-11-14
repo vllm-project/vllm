@@ -32,6 +32,32 @@ class FakeModelexpressLoader:
         self.calls.append(("load_model", args, kwargs))
         return self.loaded_model
 
+    def on_sleep(self, *args, **kwargs):
+        self.calls.append(("on_sleep", args, kwargs))
+
+    def on_wake_up(self, *args, **kwargs):
+        self.calls.append(("on_wake_up", args, kwargs))
+
+    def reload_model(self, *args, **kwargs):
+        self.calls.append(("reload_model", args, kwargs))
+        return kwargs["model"]
+
+
+class FakeModelexpressLoaderWithoutSleepHooks:
+    """Mimics an older modelexpress install that predates on_sleep/on_wake_up."""
+
+    def __init__(self, load_config: LoadConfig):
+        self.load_config = load_config
+
+    def download_model(self, *args, **kwargs):
+        pass
+
+    def load_weights(self, *args, **kwargs):
+        pass
+
+    def load_model(self, *args, **kwargs):
+        pass
+
 
 def _install_fake_modelexpress(monkeypatch):
     FakeModelexpressLoader.calls = []
@@ -88,6 +114,57 @@ def test_modelexpress_loader_delegates_to_modelexpress(monkeypatch):
             },
         ),
     ]
+
+
+def test_modelexpress_loader_delegates_sleep_hooks(monkeypatch):
+    _install_fake_modelexpress(monkeypatch)
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
+
+    loader.on_sleep(1)
+    loader.on_wake_up(["weights"])
+
+    assert FakeModelexpressLoader.calls == [
+        ("on_sleep", (1,), {}),
+        ("on_wake_up", (["weights"],), {}),
+    ]
+
+
+def test_modelexpress_loader_tolerates_missing_sleep_hooks(monkeypatch):
+    _install_fake_modelexpress(monkeypatch)
+    module = sys.modules["modelexpress.engines.vllm.loader"]
+    module.__dict__["MxModelLoader"] = FakeModelexpressLoaderWithoutSleepHooks
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
+
+    loader.on_sleep(1)
+    loader.on_wake_up(["weights"])
+
+
+def test_modelexpress_loader_reloads_weights_inplace(monkeypatch):
+    _install_fake_modelexpress(monkeypatch)
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
+    model = nn.Module()
+    model_config = SimpleNamespace()
+    vllm_config = SimpleNamespace()
+
+    assert loader.reload_weights_inplace(vllm_config, model_config, model)
+    assert FakeModelexpressLoader.calls == [
+        (
+            "reload_model",
+            (),
+            {"vllm_config": vllm_config, "model_config": model_config, "model": model},
+        ),
+    ]
+
+
+def test_modelexpress_loader_without_reload_model_falls_back(monkeypatch):
+    _install_fake_modelexpress(monkeypatch)
+    module = sys.modules["modelexpress.engines.vllm.loader"]
+    module.__dict__["MxModelLoader"] = FakeModelexpressLoaderWithoutSleepHooks
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
+
+    assert not loader.reload_weights_inplace(
+        SimpleNamespace(), SimpleNamespace(), nn.Module()
+    )
 
 
 def test_modelexpress_loader_missing_modelexpress_error(monkeypatch):
