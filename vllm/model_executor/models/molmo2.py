@@ -1716,16 +1716,15 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
         processor = self.get_hf_processor()
         video_processor = processor.video_processor
 
         num_frames = video_processor.num_frames
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len, processor)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1),
+            max_total_frames // max(num_videos, 1),
             num_frames,
         )
         return max(max_frames_per_video, 1)
@@ -1872,7 +1871,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
             processor = self.info.get_hf_processor()
             video_size = processor.video_processor.size
             target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
+                seq_len, num_videos
             )
 
             video_overrides = mm_options.get("video")

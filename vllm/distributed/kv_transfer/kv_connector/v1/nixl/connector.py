@@ -89,12 +89,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         # Peers within a host map it through UCX cuda_ipc.
         return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
-
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
@@ -144,6 +138,21 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             raise NotImplementedError(
                 "NixlConnector PCP producers do not support bidirectional KV transfer."
             )
+
+        if parallel_config.pipeline_parallel_size > 1:
+            if kv_role != "kv_producer":
+                raise NotImplementedError(
+                    "NIXL connectors support pipeline_parallel_size > 1 only for "
+                    "kv_producer. Use pipeline_parallel_size=1 for kv_consumer "
+                    "or kv_both."
+                )
+            if vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            ):
+                raise NotImplementedError(
+                    "NIXL connectors do not support bidirectional KV transfer with PP. "
+                    "Set pipeline_parallel_size=1 or disable bidirectional_kv_xfer."
+                )
 
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id

@@ -25,6 +25,8 @@ import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
+from datetime import timedelta
+from functools import cache
 
 import numpy as np
 import torch
@@ -548,9 +550,11 @@ def _engram_lookup_kernel(
     PACKED: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
     PEER_ROWS: tl.constexpr = 0,
+    WORD: tl.constexpr = tl.uint8,
     PACKED_FP4: tl.constexpr = False,
 ):
-    """Gather FP8 or MXFP4 rows; packed output supports FP8 tables only.
+    """Gather FP8 or MXFP4 rows as dequantized BF16, or FP8 rows as packed
+    values/scales (copied WORD at a time).
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
@@ -594,42 +598,55 @@ def _engram_lookup_kernel(
             row_weight, row_scales = weight, scales
         row_weight += local * ROW_BYTES
         row_scales += local * (DIM // QUANT_BLOCK)
-        if PACKED_FP4:
-            # Even column in the low nibble. E2M1 magnitude with e = bits 2:1,
-            # m = bit 0: m * 0.5 if e == 0, else (2 + m) * 2**(e - 2).
-            byte = tl.load(
-                row_weight[:, None] + (cols // 2)[None, :],
-                mask=owned[:, None],
-                other=0,
-            ).to(tl.int32)
-            nib = tl.where(cols[None, :] % 2 == 0, byte & 0xF, (byte >> 4) & 0xF)
-            e = (nib & 0x7) >> 1
-            m = (nib & 0x1).to(tl.float32)
-            pow2 = ((e - 2 + 127) << 23).to(tl.float32, bitcast=True)
-            mag = tl.where(e == 0, m * 0.5, (2.0 + m) * pow2)
-            values = tl.where((nib & 0x8) != 0, -mag, mag)
-        else:
-            values = tl.load(
-                row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
-            )
-        scale = tl.load(
-            row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
-        )
         if PACKED:
+            # Copy values and scales WORD at a time: one memory request a word.
+            word_bytes: tl.constexpr = WORD.primitive_bitwidth // 8
+            value_words = tl.arange(0, DIM // word_bytes)
+            scale_words = tl.arange(0, DIM // QUANT_BLOCK // word_bytes)
             width: tl.constexpr = DIM + DIM // QUANT_BLOCK
             dst = dst.to(tl.int64)
             dst = dst // LOCAL_HEADS * OUT_STRIDE + dst % LOCAL_HEADS * width
-            tl.store(
-                out + dst[:, None] + cols[None, :],
-                values.to(tl.uint8, bitcast=True),
-                mask=valid[:, None],
+            out_row = (out + dst).to(tl.pointer_type(WORD))
+            # Load both first: a load after a store waits out its round trip.
+            values = tl.load(
+                row_weight.to(tl.pointer_type(WORD))[:, None] + value_words[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            scale = tl.load(
+                row_scales.to(tl.pointer_type(WORD))[:, None] + scale_words[None, :],
+                mask=owned[:, None],
+                other=0,
             )
             tl.store(
-                out + dst[:, None] + DIM + scale_cols[None, :],
-                scale,
-                mask=valid[:, None] & (cols[None, :] % QUANT_BLOCK == 0),
+                out_row[:, None] + value_words[None, :], values, mask=valid[:, None]
+            )
+            out_row += DIM // word_bytes
+            tl.store(
+                out_row[:, None] + scale_words[None, :], scale, mask=valid[:, None]
             )
         else:
+            if PACKED_FP4:
+                # Even column in the low nibble. E2M1 magnitude with e = bits 2:1,
+                # m = bit 0: m * 0.5 if e == 0, else (2 + m) * 2**(e - 2).
+                byte = tl.load(
+                    row_weight[:, None] + (cols // 2)[None, :],
+                    mask=owned[:, None],
+                    other=0,
+                ).to(tl.int32)
+                nib = tl.where(cols[None, :] % 2 == 0, byte & 0xF, (byte >> 4) & 0xF)
+                e = (nib & 0x7) >> 1
+                m = (nib & 0x1).to(tl.float32)
+                pow2 = ((e - 2 + 127) << 23).to(tl.float32, bitcast=True)
+                mag = tl.where(e == 0, m * 0.5, (2.0 + m) * pow2)
+                values = tl.where((nib & 0x8) != 0, -mag, mag)
+            else:
+                values = tl.load(
+                    row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
+                )
+            scale = tl.load(
+                row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
+            )
             # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
             scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
             tl.store(
@@ -700,6 +717,62 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
+class EngramPeerGroup:
+    """GPUs of several engines that split each Engram table over their HBM.
+
+    They meet only at startup, through a file store; lookups then read peers'
+    rows directly, so no engine's step ever waits on another's. Every GPU
+    builds and loads the same tables in the same order, so its n-th exchange
+    is every peer's n-th.
+    """
+
+    # Engines load their weights at their own pace before the group can serve.
+    TIMEOUT = timedelta(minutes=30)
+
+    def __init__(self, size: int, path: str) -> None:
+        self.world_size = size
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.store = torch.distributed.FileStore(path, size)
+        self.store.set_timeout(self.TIMEOUT)
+        # Any assignment works: a rank only decides which rows a GPU holds.
+        self.rank_in_group = self.store.add("next_rank", 1) - 1
+        if self.rank_in_group >= size:
+            raise RuntimeError(
+                f"More than {size} GPUs joined the Engram peer group at {path}; "
+                "check peer_group_size and use a fresh store path per launch"
+            )
+        self._step = 0
+
+    def all_gather(self, value: bytes) -> list[bytes]:
+        """Every GPU's value for the next exchange in rank order, once all have
+        set theirs."""
+        self._step += 1
+        key = f"step{self._step}"
+        self.store.set(f"{key}/{self.rank_in_group}", value)
+        keys = [f"{key}/{rank}" for rank in range(self.world_size)]
+        try:
+            self.store.wait(keys)
+        except RuntimeError as exc:
+            missing = [
+                rank for rank, name in enumerate(keys) if not self.store.check([name])
+            ]
+            raise TimeoutError(
+                f"Engram peer GPUs {missing} did not reach startup step "
+                f"{self._step} within {self.TIMEOUT}; every engine of the group "
+                "must start, and none may restart alone"
+            ) from exc
+        return [self.store.get(name) for name in keys]
+
+    def barrier(self) -> None:
+        self.all_gather(b"")
+
+
+@cache
+def join_engram_peer_group(size: int, path: str) -> EngramPeerGroup:
+    """This GPU's membership, shared by all of its process's tables."""
+    return EngramPeerGroup(size, path)
+
+
 def _shm_shortfall(num_bytes: int) -> str | None:
     """Why /dev/shm cannot hold a table of this size, or None if it can."""
     if not os.path.isdir(SHM_PATH):
@@ -767,9 +840,9 @@ class DPSharedEngramStorage:
 
         views = None
         if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
 
-            views = engram_host_table.share_host_table(num_bytes, group)
+            views = engram_fabric_table.share_host_table(num_bytes, group)
         # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
         self.huge_pages = views is not None
         host, gpu = views or self.share_shm_table(num_bytes, group)
@@ -941,14 +1014,16 @@ class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 or packed MXFP4 rows and per-block E8M0 scales.
 
     Heads are TP-sharded, and additionally DP-sharded across a node-local
-    group unless the table lives in (DP-shared) pinned host memory. MXFP4 rows
-    are E2M1 values, two per byte (even column in the low nibble), stored as
-    uint8 since torch has no 4-bit dtype.
+    group unless the table lives in (DP-shared) pinned host memory or its rows
+    are split over a peer group's HBM. MXFP4 rows are E2M1 values, two per
+    byte (even column in the low nibble), stored as uint8 since torch has no
+    4-bit dtype.
     """
 
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
     _shared_memory: DPSharedEngramStorage | None = None
     _packed: torch.Tensor | None = None
+    _loaded = False
     packed_fp4: bool = False
 
     def __init__(
@@ -961,6 +1036,7 @@ class ParallelEngramEmbedding(nn.Module):
         dp_shared_memory: bool = False,
         use_thp: bool = False,
         packed_fp4: bool = False,
+        peer_group: EngramPeerGroup | None = None,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -983,10 +1059,13 @@ class ParallelEngramEmbedding(nn.Module):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
-        # GPU tables split rows over the DP group and every rank reads its own
-        # tokens' rows from the owning peer's HBM, so lookups need no collective.
-        peer_group = None
-        if (
+        # GPU tables split rows over a peer group (the given GPUs of several
+        # engines, else the DP group) and every rank reads its own tokens' rows
+        # from the owning peer's HBM, so lookups need no collective.
+        self._peer_group: EngramPeerGroup | GroupCoordinator | None = peer_group
+        if peer_group is not None:
+            self.dp_size = 1
+        elif (
             not cpu_offload
             and self.dp_size > 1
             and get_tensor_model_parallel_world_size() == 1
@@ -1006,7 +1085,7 @@ class ParallelEngramEmbedding(nn.Module):
                 )
                 peer = current_platform.is_fully_connected(physical_ids)
             if peer:
-                peer_group, self.dp_size = group, 1
+                self._peer_group, self.dp_size = group, 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -1030,11 +1109,9 @@ class ParallelEngramEmbedding(nn.Module):
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         # Peer tables keep the full lookup range but store one row slice.
         self.peer_rows, row_start = 0, self.vocab_start_idx
-        if peer_group is not None:
-            self.peer_rows = triton.cdiv(self.vocab_end_idx, peer_group.world_size)
-            row_start = min(
-                peer_group.rank_in_group * self.peer_rows, self.vocab_end_idx
-            )
+        if (peers := self._peer_group) is not None:
+            self.peer_rows = triton.cdiv(self.vocab_end_idx, peers.world_size)
+            row_start = min(peers.rank_in_group * self.peer_rows, self.vocab_end_idx)
             self.part_num_embeddings = min(
                 self.peer_rows, self.vocab_end_idx - row_start
             )
@@ -1089,22 +1166,33 @@ class ParallelEngramEmbedding(nn.Module):
                 torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
             )
         if self.peer_rows:
-            import torch.distributed._symmetric_memory as symm_mem
-
-            group = get_engram_dp_group()
-            assert group is not None
+            peers = self._peer_group
             values = self.peer_rows * self.row_bytes
+            num_bytes = values + self.peer_rows * scale_dim
             device = torch.device("cuda", torch.accelerator.current_device_index())
-            buffer = symm_mem.empty(
-                values + self.peer_rows * scale_dim, dtype=torch.uint8, device=device
-            )
-            handle = symm_mem.rendezvous(buffer, group.device_group)
+            if isinstance(peers, EngramPeerGroup):
+                # Symmetric memory cannot span engines: its rendezvous rejects
+                # equal device ordinals on one node, and each engine's start at 0.
+                from vllm.models.deepseek_v41.nvidia.ops.engram_fabric_table import (
+                    share_peer_table,
+                )
+
+                # Held here like the symmetric handle, so lookups keep every
+                # slice mapped even if a loader replaces the parameters' data.
+                buffer, self._peer_mappings = share_peer_table(num_bytes, peers)
+                pointers = self._peer_mappings.addresses
+            else:
+                import torch.distributed._symmetric_memory as symm_mem
+
+                assert peers is not None
+                buffer = symm_mem.empty(num_bytes, dtype=torch.uint8, device=device)
+                self._symm_handle = symm_mem.rendezvous(buffer, peers.device_group)
+                pointers = self._symm_handle.buffer_ptrs
             self.register_buffer(
                 "peer_ptrs",
-                torch.tensor(handle.buffer_ptrs, dtype=torch.int64, device=device),
+                torch.tensor(pointers, dtype=torch.int64, device=device),
                 persistent=False,
             )
-            self._symm_handle = handle
             rows = self.part_num_embeddings
             return (
                 buffer[: rows * self.row_bytes]
@@ -1153,6 +1241,22 @@ class ParallelEngramEmbedding(nn.Module):
                 pin_memory=True,
             ),
         )
+
+    def process_weights_after_loading(self) -> None:
+        """Peers read this table's rows directly, so serve only once every GPU
+        of the group has finished loading its own."""
+        if not self.peer_rows:
+            return
+        assert self._peer_group is not None
+        if self._loaded and isinstance(self._peer_group, EngramPeerGroup):
+            # Other engines read these rows at any time, also while they reload.
+            raise RuntimeError(
+                "Engram tables split across engines (peer_group_size) cannot "
+                "reload weights; restart the peer group instead"
+            )
+        torch.accelerator.synchronize()
+        self._peer_group.barrier()
+        self._loaded = True
 
     def collapse_huge_pages(self) -> None:
         """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
@@ -1221,8 +1325,19 @@ class ParallelEngramEmbedding(nn.Module):
             dst = dst.int()
         # The table dwarfs TLB reach, so a persistent grid near the SM count
         # beats one program per row; halve it to leave SMs for the main stream.
-        tiles = triton.cdiv(rows, 16)
-        grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
+        max_grid = self._num_sms // 2 if background else self._num_sms
+        # Host reads are latency bound: once the rows fill the grid with
+        # 128-row tiles, each program keeps 8x the reads in flight.
+        block_r = 128 if rows >= 128 * max_grid else 16
+        packed = out.dtype == torch.uint8
+        # Copy packed rows 8 bytes per load where their values, scales and
+        # output rows are 8-byte aligned.
+        wide = (
+            packed
+            and self.dim // self.block_size % 8 == 0
+            and (out.stride(0) | out.data_ptr()) % 8 == 0
+        )
+        grid = min(triton.cdiv(rows, block_r), max_grid)
         _engram_lookup_kernel[(grid,)](
             self.peer_ptrs if self.peer_rows else weight,
             scales,
@@ -1239,13 +1354,15 @@ class ParallelEngramEmbedding(nn.Module):
             TOTAL_HEADS=self.n_hash_cols,
             DIM=self.dim,
             QUANT_BLOCK=self.block_size,
-            BLOCK_R=16,
+            BLOCK_R=block_r,
             GRID=grid,
             SORTED=sort,
-            PACKED=out.dtype == torch.uint8,
+            PACKED=packed,
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
             PACKED_FP4=self.packed_fp4,
+            WORD=tl.uint64 if wide else tl.uint8,
+            num_warps=8 if block_r == 128 else 4,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -1670,6 +1787,11 @@ class Engram(nn.Module):
     ) -> ParallelEngramEmbedding:
         engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
+        peer_group = None
+        if engram_config.peer_group_store is not None:
+            peer_group = join_engram_peer_group(
+                engram_config.peer_group_size, engram_config.peer_group_store
+            )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -1678,6 +1800,7 @@ class Engram(nn.Module):
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
             packed_fp4=layout.packed_fp4,
+            peer_group=peer_group,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
