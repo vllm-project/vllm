@@ -29,6 +29,8 @@ class OffloadingModelConfig:
     dtype: str
     # Longest request the engine accepts, in tokens. 0 when not known.
     max_model_len: int = 0
+    # Resolved model revision, when the model loader pins one.
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
