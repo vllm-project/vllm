@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.utils.torch_utils import set_random_seed
 
@@ -49,6 +50,35 @@ TENSORS_SHAPES_FN = [
     _get_flat_tensor_shape,
     _get_padded_tensor_shape,
 ]
+
+
+@pytest.mark.parametrize("layout", ["transposed", "feature_strided"])
+@pytest.mark.parametrize("strided_arg", ["query", "key", "query_without_key"])
+def test_rotary_embedding_rejects_feature_stride(layout: str, strided_arg: str) -> None:
+    """Reject unsupported q/k views before modifying either input."""
+    num_tokens, num_heads, head_size = 4, 2, 64
+    shape = (
+        (num_heads * head_size, num_tokens)
+        if layout == "transposed"
+        else (num_tokens, num_heads, head_size * 4)
+    )
+    storage = torch.ones(shape, device="cuda", dtype=torch.float32)
+    strided = storage.T if layout == "transposed" else storage[..., ::4]
+    query = strided.contiguous() if strided_arg == "key" else strided
+    key = strided if strided_arg == "key" else strided.contiguous()
+    if strided_arg == "query_without_key":
+        key = None
+    positions = torch.arange(num_tokens, device="cuda")
+    cache = torch.zeros((num_tokens, head_size), device="cuda")
+    invalid_arg = "key" if strided_arg == "key" else "query"
+
+    with pytest.raises(RuntimeError, match=f"{invalid_arg} must have stride 1"):
+        ops.rotary_embedding(positions, query, key, head_size, cache, True)
+
+    torch.testing.assert_close(storage, torch.ones_like(storage), rtol=0, atol=0)
+    torch.testing.assert_close(query, torch.ones_like(query), rtol=0, atol=0)
+    if key is not None:
+        torch.testing.assert_close(key, torch.ones_like(key), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
