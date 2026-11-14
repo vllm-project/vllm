@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -466,8 +467,28 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
-def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
+def _parse_lark(grammar: str, tokenizer: "TokenizerLike | None") -> None:
+    try:
+        xgr.Grammar.from_lark(grammar)
+    except Exception:
+        # Named special tokens such as `<|im_end|>` resolve only with a
+        # tokenizer, as in `compile_grammar`; most grammars parse without one.
+        if tokenizer is None:
+            raise
+        xgr.Grammar.from_lark(grammar, tokenizer_info=_tokenizer_info(tokenizer))
+
+
+@functools.lru_cache(maxsize=8)
+def _tokenizer_info(tokenizer: "TokenizerLike") -> "xgr.TokenizerInfo":
+    return xgr.TokenizerInfo.from_huggingface(tokenizer)
+
+
+def validate_xgrammar_grammar(
+    sampling_params: SamplingParams, tokenizer: "TokenizerLike | None" = None
+) -> None:
     """Validate that the request is supported by structured output.
+
+    `tokenizer` resolves named special tokens in Lark grammars.
 
     Raises VLLMValidationError if the request is not supported.
     """
@@ -541,7 +562,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         # but don't compile it. The grammar is passed on unchanged.
         try:
             if grammar_is_likely_lark(so_params.grammar):
-                xgr.Grammar.from_lark(so_params.grammar)
+                _parse_lark(so_params.grammar, tokenizer)
             else:
                 xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
