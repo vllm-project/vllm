@@ -177,3 +177,64 @@ def test_dispatch_cpu_unquantized_gemm_conv_layer():
     dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
     # No cpu_linear set — conv layers are handled elsewhere.
     assert not hasattr(layer, "cpu_linear")
+
+
+@pytest.mark.parametrize("dim_first", [False, True])
+def test_speculative_short_conv_ragged_acceptance(monkeypatch, dim_first):
+    from vllm.model_executor.layers.mamba import short_conv as module
+
+    torch.manual_seed(17)
+    dim, width = 2, 4
+    state = torch.randn(4, dim, 6)
+    expected_state = state.clone()
+    weights = torch.randn(dim, 1, width)
+    bias = torch.randn(dim)
+    layer = SimpleNamespace(
+        prefix="spec_conv",
+        kv_cache=(state if dim_first else state.transpose(-1, -2),),
+        conv=SimpleNamespace(weight=weights, bias=bias),
+        in_proj=lambda x: (
+            torch.cat((torch.ones_like(x), torch.ones_like(x), x), -1),
+            None,
+        ),
+        out_proj=lambda x: (x, None),
+    )
+    metadata = ShortConvAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=2,
+        num_decode_tokens=4,
+        num_reqs=2,
+        query_start_loc_p=None,
+        has_initial_states_p=None,
+        state_indices_tensor_p=None,
+        state_indices_tensor_d=torch.tensor([[1, 3, 3], [2, 3, 3]]),
+        num_accepted_tokens=torch.tensor([2, 1]),
+        query_start_loc_d=torch.tensor([0, 3, 4]),
+        seq_lens=torch.tensor([10, 20]),
+    )
+    monkeypatch.setattr(module, "is_conv_state_dim_first", lambda: dim_first)
+    monkeypatch.setattr(
+        module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata}),
+    )
+    # A second verify step rolls back rejected candidate tokens from step one.
+    for accepted in ([2, 1], [2, 1]):
+        metadata.num_accepted_tokens = torch.tensor(accepted)
+        inputs = torch.randn(4, dim)
+        expected = torch.empty_like(inputs)
+        for req, (start, end) in enumerate(((0, 3), (3, 4))):
+            slot = req + 1
+            offset = accepted[req] - 1
+            history = expected_state[slot, :, offset : offset + width - 1].clone()
+            sequence = torch.cat((history, inputs[start:end].T), -1)
+            for token in range(end - start):
+                expected[start + token] = (
+                    sequence[:, token : token + width] * weights[:, 0]
+                ).sum(-1) + bias
+            expected_state[slot, :, : sequence.shape[-1] - 1] = sequence[:, 1:]
+        output = torch.empty_like(inputs)
+        ShortConv.forward_native(layer, inputs, output)
+        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(state, expected_state)
