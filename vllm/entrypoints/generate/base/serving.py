@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
 from typing import TypeVar
 
@@ -29,6 +29,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tracing import start_request_span
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -291,6 +292,29 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                         request.request_id,
                         exc_info=True,
                     )
+
+    async def _with_request_span(
+        self,
+        raw_request: Request | None,
+        create: Callable[[Mapping[str, str] | None], Awaitable[_T]],
+    ) -> _T:
+        """Run a `create_*` coroutine under the request's `llm_request` span.
+
+        `create` gets the trace headers to send to the engine. The span is
+        open while it runs, so rendering is traced as part of the request.
+        The output processor ends it; it is ended here instead if the request
+        fails before reaching the engine.
+        """
+        request_span = start_request_span(
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
+        with request_span.guard():
+            result = await create(request_span.trace_headers)
+        if isinstance(result, ErrorResponse):
+            request_span.abandon("error_response")
+        return result
 
     @staticmethod
     def _get_decoded_token(

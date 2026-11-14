@@ -43,6 +43,15 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
     GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
 
+    # Request stages before the engine. Sizes and shapes only, never content.
+    VLLM_PROMPT_EMBEDS_NUM_PARTS = "vllm.prompt_embeds.num_parts"
+    VLLM_PROMPT_EMBEDS_PAYLOAD_BYTES = "vllm.prompt_embeds.payload_bytes"
+    VLLM_PROMPT_EMBEDS_NUM_TOKENS = "vllm.prompt_embeds.num_tokens"
+    VLLM_PROMPT_EMBEDS_HIDDEN_SIZE = "vllm.prompt_embeds.hidden_size"
+    VLLM_PROMPT_EMBEDS_DTYPE = "vllm.prompt_embeds.dtype"
+    VLLM_PROMPT_EMBEDS_SPARSE = "vllm.prompt_embeds.sparse"
+    VLLM_NUM_PROMPTS = "vllm.num_prompts"
+
 
 class LoadingSpanAttributes:
     """Custom attributes for code-level tracing (file, line number)."""

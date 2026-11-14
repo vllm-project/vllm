@@ -4,8 +4,9 @@
 import asyncio
 import itertools
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from collections.abc import Sequence as GenericSequence
+from functools import partial
 from http import HTTPStatus
 from typing import Any, Final, cast
 
@@ -310,13 +311,19 @@ class OpenAIServingChat(GenerateBaseServing):
                 )
             )
         return await self._with_kv_transfer_rejection_cleanup(
-            self._create_chat_completion(request, raw_request), request, raw_request
+            self._with_request_span(
+                raw_request,
+                partial(self._create_chat_completion, request, raw_request),
+            ),
+            request,
+            raw_request,
         )
 
     async def _create_chat_completion(
         self,
         request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        raw_request: Request | None,
+        trace_headers: Mapping[str, str] | None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
         tokenizer = self.renderer.tokenizer
@@ -389,11 +396,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
             session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):

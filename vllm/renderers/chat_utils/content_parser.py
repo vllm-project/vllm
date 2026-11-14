@@ -16,6 +16,7 @@ from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.renderers.embed_utils import (
+    prompt_embeds_load_span,
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
@@ -378,7 +379,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     ) -> tuple[torch.Tensor, None]:
         # Second tuple slot fills the tracker's generic `(item, uuid | None)`
         # contract. prompt_embeds has no UUID concept, so it's always `None`.
-        tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
+        with prompt_embeds_load_span(data_bytes):
+            tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
         return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):

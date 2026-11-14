@@ -7,6 +7,7 @@ This is similar in concept to the `asyncio` module.
 
 import asyncio
 import contextlib
+import contextvars
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -37,7 +38,9 @@ def make_async(
 
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Future[T]:
         loop = asyncio.get_event_loop()
-        p_func = partial(func, *args, **kwargs)
+        # Like `asyncio.to_thread`, run in a copy of the caller's context so
+        # that context variables, such as the current trace span, carry over.
+        p_func = partial(contextvars.copy_context().run, func, *args, **kwargs)
         return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper

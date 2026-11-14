@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, Final, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -50,12 +50,13 @@ from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.tracing import SpanAttributes, span
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
-from .embed_utils import safe_load_prompt_embeds
+from .embed_utils import prompt_embeds_load_span, safe_load_prompt_embeds
 from .inputs import (
     DictPrompt,
     EncoderDecoderDictPrompt,
@@ -75,6 +76,11 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+RENDER_MESSAGES_SPAN: Final[str] = "vllm.render_messages"
+RENDER_PROMPTS_SPAN: Final[str] = "vllm.render_prompts"
+TOKENIZE_SPAN: Final[str] = "vllm.tokenize"
+PROCESS_FOR_ENGINE_SPAN: Final[str] = "vllm.process_for_engine"
 
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
@@ -590,9 +596,10 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: DictPrompt | bytes,
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
-            embeds = await self._safe_load_prompt_embeds_async(
-                self.model_config, prompt
-            )
+            with prompt_embeds_load_span(prompt):
+                embeds = await self._safe_load_prompt_embeds_async(
+                    self.model_config, prompt
+                )
             return EmbedsPrompt(prompt_embeds=embeds)
 
         return prompt
@@ -1349,19 +1356,26 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
-        dict_prompts = await self.render_prompts_async(prompts)
-        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        num_prompts = {SpanAttributes.VLLM_NUM_PROMPTS: len(prompts)}
+        with span(RENDER_PROMPTS_SPAN, num_prompts):
+            dict_prompts = await self.render_prompts_async(prompts)
+        with span(TOKENIZE_SPAN, num_prompts):
+            tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return await asyncio.gather(
-            *(
-                self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+        with span(PROCESS_FOR_ENGINE_SPAN, num_prompts):
+            return await asyncio.gather(
+                *(
+                    self.process_for_engine_async(
+                        p,
+                        arrival_time,
+                        skip_mm_cache=skip_mm_cache,
+                        tok_params=tok_params,
+                    )
+                    for p in tok_prompts
                 )
-                for p in tok_prompts
             )
-        )
 
     def render_chat(
         self,
@@ -1422,25 +1436,32 @@ class BaseRenderer(ABC, Generic[_T]):
             for conversation in conversations
         ]
 
+        num_prompts = {SpanAttributes.VLLM_NUM_PROMPTS: len(conversations)}
         out_conversations = list[list["ConversationMessage"]]()
         dict_prompts = list[DictPrompt]()
-        for conv, prompt in await asyncio.gather(*rendered):
-            out_conversations.append(conv)
-            dict_prompts.append(prompt)
+        with span(RENDER_MESSAGES_SPAN, num_prompts):
+            for conv, prompt in await asyncio.gather(*rendered):
+                out_conversations.append(conv)
+                dict_prompts.append(prompt)
 
-        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        with span(TOKENIZE_SPAN, num_prompts):
+            tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
         prompt_extras = dict(prompt_extras or {})
         prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = await asyncio.gather(
-            *(
-                self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+        with span(PROCESS_FOR_ENGINE_SPAN, num_prompts):
+            eng_prompts = await asyncio.gather(
+                *(
+                    self.process_for_engine_async(
+                        p,
+                        arrival_time,
+                        skip_mm_cache=skip_mm_cache,
+                        tok_params=tok_params,
+                    )
+                    for p in tok_prompts
                 )
-                for p in tok_prompts
             )
-        )
 
         return out_conversations, eng_prompts

@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from collections.abc import Callable
-from typing import Any, TypeAlias
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any, Final, TypeAlias
 
 # Import the implementation details
 from .otel import (
     SpanKind,
+    end_otel_request_span,
     extract_trace_context,
     init_otel_tracer,
     init_otel_worker_tracer,
@@ -15,6 +17,9 @@ from .otel import (
     is_otel_available,
     manual_instrument_otel,
     otel_import_error_traceback,
+    otel_span,
+    start_otel_request_span,
+    use_otel_span,
 )
 from .utils import (
     SpanAttributes,
@@ -26,6 +31,11 @@ from .utils import (
 __all__ = [
     "instrument",
     "instrument_manual",
+    "REQUEST_SPAN_NAME",
+    "RequestSpan",
+    "start_request_span",
+    "end_request_span",
+    "span",
     "init_tracer",
     "maybe_init_worker_tracer",
     "is_tracing_available",
@@ -153,3 +163,81 @@ def is_tracing_available() -> bool:
         for is_available, _, _, _, _ in _REGISTERED_TRACING_BACKENDS.values()
     ]
     return any(check_available)
+
+
+REQUEST_SPAN_NAME: Final[str] = "llm_request"
+
+
+class RequestSpan:
+    """The `llm_request` span of one request, opened when it arrives.
+
+    Opening it early lets the work done before the request reaches the engine,
+    such as rendering and loading `prompt_embeds`, be recorded as its
+    children. The output processor ends it when the request finishes or is
+    aborted; call `abandon` if the request never gets that far.
+    """
+
+    def __init__(
+        self, span: Any = None, trace_headers: Mapping[str, str] | None = None
+    ):
+        self._span = span
+        self.trace_headers = trace_headers
+        """Headers to pass to the engine, naming this span when it is open."""
+
+    def activate(self) -> AbstractContextManager[None]:
+        """Make this span current, so stages run within become its children."""
+        return nullcontext() if self._span is None else use_otel_span(self._span)
+
+    def abandon(self, error: BaseException | str | None = None) -> None:
+        """End the span of a request that will not reach the output processor."""
+        if self._span is not None:
+            end_otel_request_span(self.trace_headers, error=error)
+
+    @contextmanager
+    def guard(self) -> Iterator[None]:
+        """`activate`, abandoning the span if an exception escapes."""
+        try:
+            with self.activate():
+                yield
+        except BaseException as exc:
+            self.abandon(exc)
+            raise
+
+
+def start_request_span(trace_headers: Mapping[str, str] | None) -> RequestSpan:
+    """Open the `llm_request` span for a request with these trace headers.
+
+    When tracing is not configured, or the request is not sampled, the
+    returned handle records nothing and passes `trace_headers` through.
+    """
+    if (opened := start_otel_request_span(REQUEST_SPAN_NAME, trace_headers)) is None:
+        return RequestSpan(trace_headers=trace_headers)
+    return RequestSpan(*opened)
+
+
+def end_request_span(
+    trace_headers: Mapping[str, str] | None,
+    attributes: Mapping[str, Any] | None = None,
+    error: BaseException | str | None = None,
+) -> bool:
+    """End the `llm_request` span opened for these trace headers.
+
+    Returns `False` when no span was opened for them, in which case the caller
+    should record the request some other way.
+    """
+    return end_otel_request_span(trace_headers, attributes, error)
+
+
+def span(
+    span_name: str,
+    attributes: Mapping[str, Any] | None = None,
+    *,
+    trace_headers: Mapping[str, str] | None = None,
+) -> AbstractContextManager[Any]:
+    """Record a stage of a traced request as a child span.
+
+    The parent is the span named by `trace_headers` when given, otherwise the
+    span in scope. Outside a recording request this records nothing and yields
+    `None`. Attributes must never carry request content.
+    """
+    return otel_span(span_name, attributes, trace_headers)

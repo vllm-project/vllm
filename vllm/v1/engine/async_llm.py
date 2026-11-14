@@ -6,7 +6,7 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, Final
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -49,7 +49,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer, log_tracing_disabled_warning
+from vllm.tracing import init_tracer, log_tracing_disabled_warning, span
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
@@ -77,6 +77,9 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+PROCESS_INPUTS_SPAN: Final[str] = "vllm.process_inputs"
+ENGINE_CORE_ADD_REQUEST_SPAN: Final[str] = "vllm.engine_core.add_request"
 
 
 class InputStreamError(Exception):
@@ -494,20 +497,22 @@ class AsyncLLM(EngineClient):
         else:
             if isinstance(prompt, dict) and "type" in prompt:
                 # Rendered EngineInput; no blocking preprocessing needed.
-                request = self.input_processor.process_inputs(
-                    request_id,
-                    prompt,
-                    params,
-                    supported_tasks=await self.get_supported_tasks(),
-                    arrival_time=arrival_time,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    data_parallel_rank=data_parallel_rank,
-                    session_id=session_id,
-                    kv_hints=kv_hints,
-                )
+                supported_tasks = await self.get_supported_tasks()
+                with span(PROCESS_INPUTS_SPAN, trace_headers=trace_headers):
+                    request = self.input_processor.process_inputs(
+                        request_id,
+                        prompt,
+                        params,
+                        supported_tasks=supported_tasks,
+                        arrival_time=arrival_time,
+                        lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                        data_parallel_rank=data_parallel_rank,
+                        session_id=session_id,
+                        kv_hints=kv_hints,
+                    )
             else:
                 # Raw prompts require tokenization and possibly multimodal
                 # processing, which must not block the event loop.
@@ -595,7 +600,8 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        with span(ENGINE_CORE_ADD_REQUEST_SPAN, trace_headers=request.trace_headers):
+            await self.engine_core.add_request_async(request)
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)

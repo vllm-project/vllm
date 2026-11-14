@@ -5,10 +5,12 @@ import atexit
 import functools
 import inspect
 import os
+import threading
 import traceback
-from collections.abc import Mapping
-from contextlib import contextmanager
-from typing import Any
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any, Final
 
 from vllm.logger import init_logger
 from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
@@ -258,3 +260,138 @@ def propagate_trace_to_env():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original_value
+
+
+_REQUEST_TRACER_NAME: Final[str] = "vllm.request"
+_ERROR_TYPE_ATTRIBUTE: Final[str] = "error.type"
+_MAX_OPEN_REQUEST_SPANS: Final = 8192
+
+# `llm_request` spans opened when a request arrives, keyed by the
+# `traceparent` that names them, until the output processor ends them.
+_open_request_spans: "OrderedDict[str, Any]" = OrderedDict()
+_open_request_spans_lock = threading.Lock()
+
+
+def _configured_tracer() -> Tracer | None:
+    """The tracer to record with, or `None` when no provider is installed."""
+    if not _IS_OTEL_AVAILABLE:
+        return None
+    provider = trace.get_tracer_provider()
+    if isinstance(provider, (trace.ProxyTracerProvider, trace.NoOpTracerProvider)):
+        return None
+    return provider.get_tracer(_REQUEST_TRACER_NAME)
+
+
+def _set_error_type(span: Any, exc: BaseException | str) -> None:
+    # Only the type: messages can echo request content.
+    if isinstance(exc, BaseException):
+        exc = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    span.set_attribute(_ERROR_TYPE_ATTRIBUTE, exc)
+    span.set_status(trace.StatusCode.ERROR)
+
+
+def start_otel_request_span(
+    span_name: str, headers: Mapping[str, str] | None
+) -> tuple[Any, dict[str, str]] | None:
+    """Open a recording request span parented on `headers`."""
+    tracer = _configured_tracer()
+    if tracer is None:
+        return None
+    span = tracer.start_span(
+        span_name, context=extract_trace_context(headers), kind=SpanKind.SERVER
+    )
+    if not span.is_recording():
+        return None
+
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(
+        carrier, context=trace.set_span_in_context(span)
+    )
+    traceparent = carrier["traceparent"]
+    evicted = None
+    with _open_request_spans_lock:
+        _open_request_spans[traceparent] = span
+        if len(_open_request_spans) > _MAX_OPEN_REQUEST_SPANS:
+            _, evicted = _open_request_spans.popitem(last=False)
+    if evicted is not None:
+        _set_error_type(evicted, "abandoned")
+        evicted.end()
+    return span, carrier
+
+
+def end_otel_request_span(
+    headers: Mapping[str, str] | None,
+    attributes: Mapping[str, Any] | None = None,
+    error: BaseException | str | None = None,
+) -> bool:
+    """End the open request span that `headers` name."""
+    if not headers or (traceparent := headers.get("traceparent")) is None:
+        return False
+    with _open_request_spans_lock:
+        span = _open_request_spans.pop(traceparent, None)
+    if span is None:
+        return False
+    if attributes:
+        span.set_attributes(attributes)
+    if error is not None:
+        _set_error_type(span, error)
+    span.end()
+    return True
+
+
+@contextmanager
+def use_otel_span(span: Any) -> Iterator[None]:
+    with trace.use_span(span, end_on_exit=False):
+        yield
+
+
+@contextmanager
+def _record_otel_span(
+    tracer: Tracer,
+    span_name: str,
+    attributes: Mapping[str, Any] | None,
+    context: Context | None,
+) -> Iterator[Any]:
+    with tracer.start_as_current_span(
+        span_name,
+        context=context,
+        attributes=attributes,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            yield span
+        except BaseException as exc:
+            _set_error_type(span, exc)
+            raise
+
+
+_NO_SPAN = nullcontext(None)
+
+
+def otel_span(
+    span_name: str,
+    attributes: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> AbstractContextManager[Any]:
+    """Record a stage of a request already being traced.
+
+    The parent is the open request span named by `headers` when given, else
+    the span in scope. Nothing is recorded outside a recording request.
+    """
+    tracer = _configured_tracer()
+    if tracer is None:
+        return _NO_SPAN
+    if headers is None:
+        if not trace.get_current_span().is_recording():
+            return _NO_SPAN
+        return _record_otel_span(tracer, span_name, attributes, None)
+    if (traceparent := headers.get("traceparent")) is None:
+        return _NO_SPAN
+    with _open_request_spans_lock:
+        parent = _open_request_spans.get(traceparent)
+    if parent is None:
+        return _NO_SPAN
+    return _record_otel_span(
+        tracer, span_name, attributes, trace.set_span_in_context(parent)
+    )

@@ -5,8 +5,9 @@ import asyncio
 import itertools
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from collections.abc import Sequence as GenericSequence
+from functools import partial
 from typing import cast
 
 from fastapi import Request
@@ -171,13 +172,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
         NOTE: suffix is only supported by models that implement FIM rendering.
         """
         return await self._with_kv_transfer_rejection_cleanup(
-            self._create_completion(request, raw_request), request, raw_request
+            self._with_request_span(
+                raw_request, partial(self._create_completion, request, raw_request)
+            ),
+            request,
+            raw_request,
         )
 
     async def _create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Request | None = None,
+        raw_request: Request | None,
+        trace_headers: Mapping[str, str] | None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if request.stream and request.use_beam_search:
             return self.create_error_response(
@@ -235,11 +241,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
             session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):

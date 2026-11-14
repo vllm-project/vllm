@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pybase64
 import torch
 
 from vllm.exceptions import VLLMValidationError
+from vllm.tracing import SpanAttributes, span
 from vllm.utils.async_utils import make_async
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -20,6 +23,12 @@ if TYPE_CHECKING:
 # How much of torch's own reason is repeated back to the caller. The reason is
 # built from bytes the caller sent, so it is bounded rather than echoed whole.
 _MAX_EMBED_ERROR_REASON_CHARS: Final = 200
+
+PROMPT_EMBEDS_LOAD_SPAN: Final[str] = "vllm.prompt_embeds.load"
+PROMPT_EMBEDS_DESERIALIZE_SPAN: Final[str] = "vllm.prompt_embeds.deserialize"
+PROMPT_EMBEDS_B64DECODE_SPAN: Final[str] = "vllm.prompt_embeds.b64decode"
+PROMPT_EMBEDS_TORCH_LOAD_SPAN: Final[str] = "vllm.prompt_embeds.torch_load"
+PROMPT_EMBEDS_CAST_SPAN: Final[str] = "vllm.prompt_embeds.cast"
 
 
 def _truncated_reason(exc: Exception) -> str:
@@ -38,7 +47,40 @@ def _truncated_reason(exc: Exception) -> str:
     )
 
 
+def _set_tensor_attributes(current: Any, tensor: torch.Tensor) -> None:
+    if current is not None and tensor.dim() == 2:
+        current.set_attributes(
+            {
+                SpanAttributes.VLLM_PROMPT_EMBEDS_NUM_TOKENS: tensor.shape[0],
+                SpanAttributes.VLLM_PROMPT_EMBEDS_HIDDEN_SIZE: tensor.shape[1],
+            }
+        )
+
+
+@contextmanager
+def prompt_embeds_load_span(embed: bytes | str) -> Iterator[None]:
+    """Trace loading one `prompt_embeds` payload, from the event loop."""
+    with span(
+        PROMPT_EMBEDS_LOAD_SPAN,
+        {SpanAttributes.VLLM_PROMPT_EMBEDS_PAYLOAD_BYTES: len(embed)},
+    ):
+        yield
+
+
 def safe_load_prompt_embeds(
+    model_config: "ModelConfig",
+    embed: bytes,
+) -> torch.Tensor:
+    with span(
+        PROMPT_EMBEDS_DESERIALIZE_SPAN,
+        {SpanAttributes.VLLM_PROMPT_EMBEDS_PAYLOAD_BYTES: len(embed)},
+    ) as current:
+        tensor = _safe_load_prompt_embeds(model_config, embed)
+        _set_tensor_attributes(current, tensor)
+    return tensor
+
+
+def _safe_load_prompt_embeds(
     model_config: "ModelConfig",
     embed: bytes,
 ) -> torch.Tensor:
@@ -50,9 +92,13 @@ def safe_load_prompt_embeds(
 
     # Decoded outside the try below so that a body which is not base64 keeps
     # raising binascii.Error, which is a ValueError and already answered 400.
-    payload: Final = pybase64.b64decode(embed, validate=True)
+    with span(PROMPT_EMBEDS_B64DECODE_SPAN):
+        payload: Final = pybase64.b64decode(embed, validate=True)
 
-    with check_sparse_tensor_invariants_threadsafe():
+    with (
+        span(PROMPT_EMBEDS_TORCH_LOAD_SPAN) as current,
+        check_sparse_tensor_invariants_threadsafe(),
+    ):
         try:
             tensor = torch.load(
                 BytesIO(payload),
@@ -80,6 +126,15 @@ def safe_load_prompt_embeds(
                 f"{_truncated_reason(exc)}",
                 parameter="prompt_embeds",
             ) from exc
+        if current is not None and isinstance(tensor, torch.Tensor):
+            current.set_attributes(
+                {
+                    SpanAttributes.VLLM_PROMPT_EMBEDS_DTYPE: str(tensor.dtype),
+                    SpanAttributes.VLLM_PROMPT_EMBEDS_SPARSE: (
+                        tensor.layout != torch.strided
+                    ),
+                }
+            )
         tensor = safe_to_dense(tensor, parameter="prompt_embeds")
 
     if tensor.dim() > 2:
@@ -122,7 +177,11 @@ def safe_load_prompt_embeds(
                 f"type, cannot safely cast to the model's dtype {expected_dtype}.",
                 parameter="prompt_embeds",
             )
-        tensor = tensor.to(expected_dtype)
+        with span(
+            PROMPT_EMBEDS_CAST_SPAN,
+            {SpanAttributes.VLLM_PROMPT_EMBEDS_DTYPE: str(tensor.dtype)},
+        ):
+            tensor = tensor.to(expected_dtype)
 
     return tensor
 

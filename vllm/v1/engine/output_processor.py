@@ -3,7 +3,7 @@
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -24,8 +24,10 @@ from vllm.outputs import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
+    REQUEST_SPAN_NAME,
     SpanAttributes,
     SpanKind,
+    end_request_span,
     extract_trace_context,
     instrument_manual,
 )
@@ -205,6 +207,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        trace_headers: Mapping[str, str] | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -227,6 +230,7 @@ class RequestState:
         self.top_p = top_p
         self.n = n
         self.temperature = temperature
+        self.trace_headers = trace_headers
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
@@ -348,6 +352,7 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
+            trace_headers=request.trace_headers,
         )
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
@@ -637,6 +642,12 @@ class OutputProcessor:
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
+                if self.tracing_enabled:
+                    end_request_span(
+                        req_state.trace_headers,
+                        {SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id},
+                        error="aborted",
+                    )
                 # Produce final abort output.
                 if req_state.queue is not None and (
                     request_output := req_state.make_request_output(
@@ -995,8 +1006,11 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
+        # The span is open already if the entrypoint started it on arrival.
+        if end_request_span(engine_core_output.trace_headers, attributes):
+            return
         instrument_manual(
-            span_name="llm_request",
+            span_name=REQUEST_SPAN_NAME,
             start_time=arrival_time_ns,
             attributes=attributes,
             context=trace_context,
