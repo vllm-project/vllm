@@ -9,6 +9,9 @@ steps:
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/lora
+  - vllm/v1/engine/core.py
+  - vllm/v1/executor/abstract.py
+  - vllm/v1/metrics/loggers.py
   - tests/lora
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
@@ -35,6 +38,9 @@ steps:
       timeout_in_minutes: 85
       source_file_dependencies:
       - vllm/lora
+      - vllm/v1/engine/core.py
+      - vllm/v1/executor/abstract.py
+      - vllm/v1/metrics/loggers.py
       - tests/lora
       - vllm/platforms/rocm.py
       depends_on:
@@ -51,6 +57,9 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/lora
+  - vllm/v1/engine/core.py
+  - vllm/v1/executor/abstract.py
+  - vllm/v1/metrics/loggers.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/models/transformers/moe.py
   - tests/lora
@@ -70,6 +79,7 @@ steps:
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_gemma4_tp.py
     - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+    - pytest -v -s -x lora/test_lora_metrics.py -k "tp2 or pp2 or dp2"
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
@@ -84,6 +94,9 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/lora
+      - vllm/v1/engine/core.py
+      - vllm/v1/executor/abstract.py
+      - vllm/v1/metrics/loggers.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/models/transformers/moe.py
       - vllm/platforms/rocm.py
@@ -99,3 +112,4 @@ steps:
       - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
       - pytest -v -s -x lora/test_gemma4_tp.py
       - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+      - pytest -v -s -x lora/test_lora_metrics.py -k "tp2 or pp2 or dp2"
