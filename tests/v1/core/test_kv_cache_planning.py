@@ -843,7 +843,12 @@ def test_layers_group_by_manager_policy_not_layout():
         },
     )
     assert [g.layer_names for g in groups] == [["swa8.0"], ["swa16.0"]]
-    assert [g.manager_config.params.sliding_window for g in groups] == [8, 16]
+    windows = []
+    for group in groups:
+        params = group.manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        windows.append(params.sliding_window)
+    assert windows == [8, 16]
 
     # Same policy, different layouts: one group keeping each layer's spec.
     groups = get_kv_cache_groups(
@@ -1603,6 +1608,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm, d
     assert groups[0].manager_cls is FullAttentionManager
     assert groups[0].block_size == 64
     promoted_draft = groups[0].kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, AttentionSpec)
     assert promoted_draft == replace(
         draft.spec,
         block_size=64,
@@ -1817,6 +1823,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
     assert unified_specs["target_attn"].spec == target_spec
     unified_draft_spec = unified_specs["draft_attn"].spec
+    assert isinstance(unified_draft_spec, AttentionSpec)
     assert unified_draft_spec.block_size == draft_spec.block_size
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
@@ -1948,13 +1955,17 @@ def test_unify_kv_cache_spec_page_size_mamba():
         }
     )
     # Mamba page is padded; block_size (caching granularity) is unchanged.
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
-    assert unified["mamba_layer"].spec.block_size == mamba_spec.block_size
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
+    assert unified_mamba.block_size == mamba_spec.block_size
     # Attention layer with smaller page still unifies by scaling block_size.
-    assert unified["main_attn_layer"].spec.page_size_bytes == 32768
-    assert unified["main_attn_layer"].spec.block_size == 2 * main_attn_spec.block_size
-    assert unified["main_attn_layer"].spec.page_size_padded is None
+    unified_main = unified["main_attn_layer"].spec
+    assert isinstance(unified_main, AttentionSpec)
+    assert unified_main.page_size_bytes == 32768
+    assert unified_main.block_size == 2 * main_attn_spec.block_size
+    assert unified_main.page_size_padded is None
     # Layer already at max page size is unchanged.
     assert unified["draft_attn_layer"].spec == draft_attn_spec
 
@@ -1970,8 +1981,10 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),
         }
     )
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
 
     # 3. Mamba page that does not evenly divide the maximum page size is
     # padded as well (the divisibility constraint only applies to block_size
@@ -1996,9 +2009,11 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),  # 32768
         }
     )
-    assert unified["attn_layer"].spec.page_size_padded == 32768
-    assert unified["attn_layer"].spec.page_size_bytes == 32768
-    assert unified["attn_layer"].spec.block_size == 24
+    unified_attn = unified["attn_layer"].spec
+    assert isinstance(unified_attn, AttentionSpec)
+    assert unified_attn.page_size_padded == 32768
+    assert unified_attn.page_size_bytes == 32768
+    assert unified_attn.block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {
