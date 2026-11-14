@@ -1419,7 +1419,7 @@ def test_candidate_indexer_matches_dense(
             132, torch.uint8, INDEXER_LAYER, config.cache_config, ratio
         )
         k_cache.bind_kv_cache(cache.transpose(1, 2))
-        spec = k_cache.get_kv_cache_spec(config)
+        spec = k_cache.get_kv_cache_config(config)
         indexer = CandidateIndexer(k_cache, 512, 128, 16384, out, candidates, 8)
         builder = k_cache.get_attn_backend().get_builder_cls()(
             spec, [INDEXER_LAYER], config, device, block_table_width=table.shape[1]
