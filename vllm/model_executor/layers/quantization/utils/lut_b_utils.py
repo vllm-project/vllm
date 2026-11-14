@@ -237,7 +237,7 @@ def dequantize_lut_b(
 # (expert, 128 N, 128 K) tile. See csrc/moe/lut_b_moe_sm107.cu.
 LUT_B_SM107_TILE_N = 128
 LUT_B_SM107_TILE_K = 128
-LUT_B_SM107_TILE_BYTES = 6144 + 512 + 512
+LUT_B_SM107_TILE_BYTES = 6144 + 512 + 256
 
 
 def lut_b_to_sm107_tiles(
@@ -245,14 +245,15 @@ def lut_b_to_sm107_tiles(
 ) -> torch.Tensor:
     """Rearrange stacked LUT-B weights into the SM107 MoE kernel layout.
 
-    Returns `[E, N / 128, K / 128, 7168]` uint8. Each tile holds:
+    Returns `[E, N / 128, K / 128, 6912]` uint8. Each tile holds:
 
     * 6144 bytes of 3-bit indices, 48 bytes (K128) per output channel, in the
       no-swizzle K-major core-matrix layout (8 rows x 16 bytes),
     * 512 bytes of UE8M0 B scales: byte `q` of word `[lane][col]` is the
       scale of channel `col * 32 + lane` for K32 block `q`,
-    * 512 bytes of codebooks: lane `g` holds the two eight-entry books (one
-      per K64 half) of channel group `g`; lanes 16-31 are zero padding.
+    * 256 bytes of codebooks: 16 bytes per channel group `g`, the two
+      eight-entry books (one per K64 half). The kernel pads them to its
+      512-byte TMEM copy in shared memory.
     """
     num_experts, n_tiles, k_tiles = packed.shape[:3]
     n, k = n_tiles * LUT_B_BLOCK_N, k_tiles * LUT_B_BLOCK_K
@@ -275,7 +276,6 @@ def lut_b_to_sm107_tiles(
     )
 
     books = codebooks.view(torch.uint8).view(num_experts, nt, 16, kt, 2, 8)
-    books = books.permute(0, 1, 3, 2, 4, 5).reshape(num_experts, nt, kt, 256)
-    book_bytes = torch.nn.functional.pad(books, (0, 256))
+    book_bytes = books.permute(0, 1, 3, 2, 4, 5).reshape(num_experts, nt, kt, 256)
 
     return torch.cat((index_bytes, scale_bytes, book_bytes), dim=-1).contiguous()

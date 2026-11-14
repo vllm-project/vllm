@@ -13,9 +13,11 @@
 // four warps load a 3-stage cp.async pipeline, one thread issues the MMAs, and
 // all four warps run the epilogue. It favors clarity over peak throughput.
 //
-// Weights are pre-arranged by Python (see lut_b_moe.py) into the exact shared
+// Weights are pre-arranged by Python (see lut_b_moe.py) into the shared
 // memory image per (expert, 128 N, 128 K) tile:
-//   [6144 B packed indices][512 B B scales][512 B codebooks]
+//   [6144 B packed indices][512 B B scales][256 B codebooks]
+// The codebook copy into TMEM reads 512 B, so each stage pads the codebooks
+// with 256 zero bytes that are not stored in global memory.
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -42,8 +44,10 @@ constexpr int kStages = 3;
 constexpr int kABytes = kBlockM * kBlockK;               // E4M3 activations
 constexpr int kMetaBytes = 512;                          // one 32x128b copy
 constexpr int kBIndexBytes = kBlockN * kBlockK * 3 / 8;  // 3-bit indices
-constexpr int kBTileBytes = kBIndexBytes + 2 * kMetaBytes;
-constexpr int kStageBytes = kABytes + kMetaBytes + kBTileBytes;
+constexpr int kBookBytes = kBlockN / 8 * 16;  // two 8-entry books per group
+constexpr int kBTileBytes = kBIndexBytes + kMetaBytes + kBookBytes;  // global
+constexpr int kBStageBytes = kBIndexBytes + 2 * kMetaBytes;
+constexpr int kStageBytes = kABytes + kMetaBytes + kBStageBytes;
 constexpr int kSmemBytes = kStages * kStageBytes + 1024;  // + alignment slack
 // TMEM: 128 accumulator columns, 4 A-scale, 4 B-scale, 4 codebook columns.
 constexpr int kTmemCols = 256;
@@ -190,6 +194,13 @@ __global__ void __launch_bounds__(kThreads)
             "r"(smem_addr(&tmem_base)),
         "n"(kTmemCols)
         : "memory");
+  }
+
+  constexpr int kBookPad16 = (kMetaBytes - kBookBytes) / 16;
+  if (tid < kStages * kBookPad16) {
+    uint8_t* pad = smem + (tid / kBookPad16) * kStageBytes + kABytes +
+                   kMetaBytes + kBTileBytes;
+    reinterpret_cast<uint4*>(pad)[tid % kBookPad16] = make_uint4(0, 0, 0, 0);
   }
 
   uint8_t const* a_row =
