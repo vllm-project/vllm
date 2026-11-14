@@ -184,6 +184,7 @@ def main(args):
     num_draft_tokens = 0
     num_accepted_tokens = 0
     acceptance_counts = [0] * args.num_spec_tokens
+    draft_counts = [0] * args.num_spec_tokens
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -198,6 +199,10 @@ def main(args):
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:spec_decode_num_draft_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                draft_counts[pos] += metric.values[pos]
 
     print("-" * 50)
     print(f"total_num_output_tokens: {total_num_output_tokens}")
@@ -208,9 +213,10 @@ def main(args):
     print(f"mean acceptance length: {acceptance_length:.2f}")
     print("-" * 50)
 
-    # print acceptance at each token position
+    # print acceptance at each token position, over the drafts that reached it
     for i in range(len(acceptance_counts)):
-        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
+        drafted = draft_counts[i]
+        acceptance_rate = acceptance_counts[i] / drafted if drafted > 0 else 0
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
 
     return acceptance_length

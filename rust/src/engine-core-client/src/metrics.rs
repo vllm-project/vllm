@@ -106,6 +106,7 @@ struct SchedulerStatsHandles {
     spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
     spec_decode_num_verified_tokens: U64Counter,
     spec_decode_num_verified_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+    spec_decode_num_draft_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 
     // Per-engine performance / MFU counters.
     estimated_flops_per_gpu: U64Counter,
@@ -301,6 +302,7 @@ fn resolve_scheduler_stats_handles(
         spec_decode_num_verified_tokens_per_pos: metrics
             .spec_decode_num_verified_tokens_per_pos
             .clone(),
+        spec_decode_num_draft_tokens_per_pos: metrics.spec_decode_num_draft_tokens_per_pos.clone(),
         log_stats: metrics.log_stats.get_or_create_owned(&labels),
         estimated_flops_per_gpu: metrics.estimated_flops_per_gpu.get_or_create_owned(&labels),
         estimated_read_bytes_per_gpu: metrics
@@ -408,7 +410,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
             .spec_decode_num_verified_tokens
             .inc_by(spec_decoding_stats.num_verified_tokens);
         handles.log_stats.observe_spec_decode(
-            spec_decoding_stats.num_drafts,
+            &spec_decoding_stats.num_draft_tokens_per_pos,
             &spec_decoding_stats.num_accepted_tokens_per_pos,
         );
 
@@ -435,6 +437,18 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
                     position: position as u32,
                 })
                 .inc_by(verified_tokens);
+        }
+        for (position, draft_tokens) in
+            spec_decoding_stats.num_draft_tokens_per_pos.iter().copied().enumerate()
+        {
+            handles
+                .spec_decode_num_draft_tokens_per_pos
+                .get_or_create(&EnginePositionLabels {
+                    model_name: handles.labels.model_name.clone(),
+                    engine: handles.labels.engine,
+                    position: position as u32,
+                })
+                .inc_by(draft_tokens);
         }
     }
 

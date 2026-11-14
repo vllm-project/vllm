@@ -467,15 +467,23 @@ fn spec_decoding_log_stats(
     } else {
         f64::NAN
     };
-    let per_position_acceptance_rates = if raw_log_stats.spec_num_drafts > 0 {
-        raw_log_stats
-            .spec_accepted_tokens_per_pos
-            .iter()
-            .map(|accepted_tokens| *accepted_tokens as f64 / raw_log_stats.spec_num_drafts as f64)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Over the drafts that reached each position: a draft can be shorter than
+    // num_speculative_tokens, e.g. under dynamic speculative decoding. A position
+    // no draft reached is NaN, like the Python frontend.
+    let per_position_acceptance_rates = raw_log_stats
+        .spec_draft_tokens_per_pos
+        .iter()
+        .enumerate()
+        .map(|(position, draft_tokens)| {
+            let accepted_tokens =
+                raw_log_stats.spec_accepted_tokens_per_pos.get(position).copied().unwrap_or(0);
+            if *draft_tokens > 0 {
+                accepted_tokens as f64 / *draft_tokens as f64
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
 
     Some(SpecDecodingLogStats {
         mean_acceptance_length: 1.0 + accepted_tokens as f64 / num_drafts as f64,
@@ -539,7 +547,12 @@ fn format_position_rates(output: &mut String, rates: &[f64]) {
         if position > 0 {
             output.push_str(", ");
         }
-        write!(output, "{rate:.3}").unwrap();
+        if rate.is_nan() {
+            // Python formats NaN as "nan", Rust as "NaN".
+            output.push_str("nan");
+        } else {
+            write!(output, "{rate:.3}").unwrap();
+        }
     }
 }
 
@@ -589,8 +602,9 @@ mod tests {
 
     #[test]
     fn spec_decoding_log_stats_uses_interval_deltas() {
+        // Two of the four drafts stopped short of the last position.
         let raw_log_stats = SchedulerLogStatsInterval {
-            spec_num_drafts: 4,
+            spec_draft_tokens_per_pos: vec![4, 4, 2],
             spec_accepted_tokens_per_pos: vec![4, 2, 1],
             ..Default::default()
         };
@@ -617,7 +631,7 @@ mod tests {
         assert_eq!(stats.accepted_tokens, 12);
         assert_eq!(stats.draft_tokens, 20);
         assert_eq!(stats.verified_tokens, 15);
-        assert_eq!(stats.per_position_acceptance_rates, vec![1.0, 0.5, 0.25]);
+        assert_eq!(stats.per_position_acceptance_rates, vec![1.0, 0.5, 0.5]);
         assert_eq!(stats.draft_acceptance_rate, 60.0);
     }
 
@@ -649,5 +663,14 @@ mod tests {
         format_position_rates(&mut output, &[1.0, 0.5, 0.25]);
 
         assert_eq!(output, "1.000, 0.500, 0.250");
+    }
+
+    #[test]
+    fn format_position_rates_prints_undrafted_positions_like_python() {
+        let mut output = String::new();
+
+        format_position_rates(&mut output, &[0.5, f64::NAN]);
+
+        assert_eq!(output, "0.500, nan");
     }
 }

@@ -190,25 +190,32 @@ pub struct CudagraphLogKey {
 /// Raw scheduler stats accumulated for one periodic text-log interval.
 #[derive(Default)]
 pub struct SchedulerLogStatsInterval {
-    pub spec_num_drafts: u64,
+    pub spec_draft_tokens_per_pos: Vec<u64>,
     pub spec_accepted_tokens_per_pos: Vec<u64>,
     pub cudagraph_counts: BTreeMap<CudagraphLogKey, u64>,
+}
+
+/// Add `counts` into `totals` position by position, growing `totals` as needed.
+fn add_per_pos(totals: &mut Vec<u64>, counts: &[u64]) {
+    if totals.len() < counts.len() {
+        totals.resize(counts.len(), 0);
+    }
+    for (total, count) in totals.iter_mut().zip(counts) {
+        *total += count;
+    }
 }
 
 impl SchedulerLogStatsInterval {
     /// Merge another drained interval into this one.
     pub fn merge(&mut self, other: Self) {
-        self.spec_num_drafts += other.spec_num_drafts;
-
-        if self.spec_accepted_tokens_per_pos.len() < other.spec_accepted_tokens_per_pos.len() {
-            self.spec_accepted_tokens_per_pos
-                .resize(other.spec_accepted_tokens_per_pos.len(), 0);
-        }
-        for (position, accepted_tokens) in
-            other.spec_accepted_tokens_per_pos.into_iter().enumerate()
-        {
-            self.spec_accepted_tokens_per_pos[position] += accepted_tokens;
-        }
+        add_per_pos(
+            &mut self.spec_draft_tokens_per_pos,
+            &other.spec_draft_tokens_per_pos,
+        );
+        add_per_pos(
+            &mut self.spec_accepted_tokens_per_pos,
+            &other.spec_accepted_tokens_per_pos,
+        );
 
         for (key, count) in other.cudagraph_counts {
             *self.cudagraph_counts.entry(key).or_default() += count;
@@ -225,16 +232,17 @@ pub struct SchedulerLogStatsAccumulator {
 
 impl SchedulerLogStatsAccumulator {
     /// Observe spec-decoding fields needed for per-position text-log rates.
-    pub fn observe_spec_decode(&self, num_drafts: u64, accepted_tokens_per_pos: &[u64]) {
+    pub fn observe_spec_decode(
+        &self,
+        draft_tokens_per_pos: &[u64],
+        accepted_tokens_per_pos: &[u64],
+    ) {
         let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
-        inner.spec_num_drafts += num_drafts;
-
-        if inner.spec_accepted_tokens_per_pos.len() < accepted_tokens_per_pos.len() {
-            inner.spec_accepted_tokens_per_pos.resize(accepted_tokens_per_pos.len(), 0);
-        }
-        for (position, accepted_tokens) in accepted_tokens_per_pos.iter().copied().enumerate() {
-            inner.spec_accepted_tokens_per_pos[position] += accepted_tokens;
-        }
+        add_per_pos(&mut inner.spec_draft_tokens_per_pos, draft_tokens_per_pos);
+        add_per_pos(
+            &mut inner.spec_accepted_tokens_per_pos,
+            accepted_tokens_per_pos,
+        );
     }
 
     /// Observe one CUDA graph runtime sample for the interval table.
@@ -297,6 +305,7 @@ pub struct SchedulerMetrics {
     pub spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
     pub spec_decode_num_verified_tokens: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_verified_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+    pub spec_decode_num_draft_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 
     // Per-engine performance / MFU counters.
     pub estimated_flops_per_gpu: Family<EngineLabels, U64Counter>,
@@ -497,6 +506,13 @@ impl SchedulerMetrics {
             "vllm:spec_decode_num_verified_tokens_per_pos",
             "Verified draft tokens per draft position.",
             spec_decode_num_verified_tokens_per_pos.clone(),
+        );
+
+        let spec_decode_num_draft_tokens_per_pos = Family::default();
+        registry.register(
+            "vllm:spec_decode_num_draft_tokens_per_pos",
+            "Draft tokens per draft position.",
+            spec_decode_num_draft_tokens_per_pos.clone(),
         );
 
         // Per-engine performance / MFU counters.
@@ -801,6 +817,7 @@ impl SchedulerMetrics {
             spec_decode_num_accepted_tokens_per_pos,
             spec_decode_num_verified_tokens,
             spec_decode_num_verified_tokens_per_pos,
+            spec_decode_num_draft_tokens_per_pos,
             estimated_flops_per_gpu,
             estimated_read_bytes_per_gpu,
             estimated_write_bytes_per_gpu,
@@ -877,14 +894,14 @@ mod tests {
     fn log_stats_accumulator_drains_interval_data() {
         let accumulator = SchedulerLogStatsAccumulator::default();
 
-        accumulator.observe_spec_decode(2, &[1, 2]);
-        accumulator.observe_spec_decode(3, &[3, 4, 5]);
+        accumulator.observe_spec_decode(&[2, 2], &[1, 2]);
+        accumulator.observe_spec_decode(&[3, 3, 1], &[3, 4, 5]);
         accumulator.observe_cudagraph(8, 16, 8, "FULL");
         accumulator.observe_cudagraph(8, 16, 8, "FULL");
 
         let interval = accumulator.drain();
 
-        assert_eq!(interval.spec_num_drafts, 5);
+        assert_eq!(interval.spec_draft_tokens_per_pos, vec![5, 5, 1]);
         assert_eq!(interval.spec_accepted_tokens_per_pos, vec![4, 6, 5]);
         assert_eq!(
             interval
@@ -898,6 +915,6 @@ mod tests {
                 .copied(),
             Some(2)
         );
-        assert_eq!(accumulator.drain().spec_num_drafts, 0);
+        assert!(accumulator.drain().spec_draft_tokens_per_pos.is_empty());
     }
 }

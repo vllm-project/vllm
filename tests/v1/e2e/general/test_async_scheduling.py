@@ -15,7 +15,7 @@ from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Counter, Metric
+from vllm.v1.metrics.reader import Counter, Metric, Vector
 
 from ....conftest import VllmRunner
 from ....models.utils import check_outputs_equal
@@ -502,6 +502,27 @@ def _check_draft_counts(before: list[Metric], after: list[Metric]) -> None:
     verified = _get_count(before, after, "vllm:spec_decode_num_verified_tokens")
     accepted = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
     assert drafted >= verified >= accepted, (drafted, verified, accepted)
+    # Per-position counts split the totals, and are the denominator of the
+    # per-position acceptance rate.
+    drafted_per_pos = _get_vector(
+        before, after, "vllm:spec_decode_num_draft_tokens_per_pos"
+    )
+    accepted_per_pos = _get_vector(
+        before, after, "vllm:spec_decode_num_accepted_tokens_per_pos"
+    )
+    assert sum(drafted_per_pos) == drafted, (drafted_per_pos, drafted)
+    assert all(d >= a for d, a in zip(drafted_per_pos, accepted_per_pos)), (
+        drafted_per_pos,
+        accepted_per_pos,
+    )
+
+
+def _get_vector(before: list[Metric], after: list[Metric], name: str) -> list[int]:
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Vector)
+    assert isinstance(after_metric, Vector)
+    return [a - b for a, b in zip(after_metric.values, before_metric.values)]
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:

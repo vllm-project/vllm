@@ -69,6 +69,45 @@ def test_verified_counters_differ_from_proposals(
         assert registry.get_sample_value(per_pos_name, labels) == expected
 
 
+@pytest.mark.parametrize(
+    "drafts, expected_rates",
+    [
+        # (num_draft_tokens, num_accepted_tokens) per request. Under dynamic SD
+        # drafts can be shorter than num_speculative_tokens, so later
+        # positions are drafted less often.
+        ([(3, 2), (1, 1)], "1.000, 1.000, 0.000"),
+        ([(1, 1), (1, 0)], "0.500, nan, nan"),
+    ],
+)
+def test_per_position_acceptance_rate_counts_drafted_positions(drafts, expected_rates):
+    registry = CollectorRegistry()
+    prom = SpecDecodingProm(
+        speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=3),
+        registry=registry,
+        labelnames=["engine"],
+        per_engine_labelvalues={0: ["0"]},
+    )
+    stats = SpecDecodingStats.new(num_spec_tokens=3)
+    for num_draft_tokens, num_accepted_tokens in drafts:
+        stats.observe_draft_stats_per_req(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens,
+            num_verified_tokens=num_draft_tokens,
+        )
+    prom.observe(stats)
+    spec_logging = SpecDecodingLogging()
+    spec_logging.observe(stats)
+    messages: list[str] = []
+    spec_logging.log(log_fn=lambda fmt, *args: messages.append(fmt % args))
+
+    assert f"Per-position acceptance rate: {expected_rates}," in messages[0]
+    per_pos_name = "vllm:spec_decode_num_draft_tokens_per_pos_total"
+    for pos in range(3):
+        labels = {"engine": "0", "position": str(pos)}
+        expected = sum(1 for num_draft_tokens, _ in drafts if num_draft_tokens > pos)
+        assert registry.get_sample_value(per_pos_name, labels) == expected
+
+
 def test_adaptive_verified_budget_logging():
     stats = SpecDecodingStats.new(num_spec_tokens=5)
     stats.observe_draft_stats_per_req(

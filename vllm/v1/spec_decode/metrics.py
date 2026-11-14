@@ -82,6 +82,7 @@ class SpecDecodingLogging:
         self.num_verified_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
+        self.draft_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
@@ -91,6 +92,9 @@ class SpecDecodingLogging:
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
+        )
+        self.draft_tokens_per_pos_lists.append(
+            spec_decoding_stats.num_draft_tokens_per_pos
         )
 
     def log(self, log_fn=logger.info):
@@ -128,8 +132,13 @@ class SpecDecodingLogging:
         # Conventionally, mean acceptance length includes the bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
-        pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
-        acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
+        # Over the drafts that reached each position: a draft can be shorter
+        # than num_speculative_tokens, e.g. under dynamic speculative decoding.
+        # A position no draft reached reports nan.
+        accepted_per_pos = np.sum(self.accepted_tokens_per_pos_lists, axis=0)
+        drafted_per_pos = np.sum(self.draft_tokens_per_pos_lists, axis=0)
+        with np.errstate(invalid="ignore"):
+            acceptance_rates = accepted_per_pos / drafted_per_pos
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
         log_fn(
@@ -209,7 +218,11 @@ class SpecDecodingProm:
     A per-position acceptance rate vector can be computed using
 
       vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
-      vllm:spec_decode_num_drafts_total[$interval]
+      vllm:spec_decode_num_draft_tokens_per_pos_total[$interval]
+
+    Dividing by vllm:spec_decode_num_drafts_total instead under-reports later
+    positions whenever drafts are shorter than num_speculative_tokens, e.g.
+    under dynamic speculative decoding.
     """
 
     _counter_cls = prometheus_client.Counter
@@ -278,6 +291,9 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_verified_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
+        self.counter_spec_decode_num_draft_tokens_per_pos: dict[
+            int, list[prometheus_client.Counter]
+        ] = {}
         if not is_diffusion:
             assert speculative_config is not None
             num_spec_tokens = speculative_config.num_speculative_tokens
@@ -292,6 +308,11 @@ class SpecDecodingProm:
                 documentation="Verified draft tokens per draft position.",
                 labelnames=pos_labelnames,
             )
+            draft_counter = self._counter_cls(
+                name="vllm:spec_decode_num_draft_tokens_per_pos",
+                documentation="Draft tokens per draft position.",
+                labelnames=pos_labelnames,
+            )
             self.counter_spec_decode_num_accepted_tokens_per_pos = (
                 create_metric_per_engine_and_pos(
                     accepted_counter, per_engine_labelvalues, num_spec_tokens
@@ -300,6 +321,11 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_verified_tokens_per_pos = (
                 create_metric_per_engine_and_pos(
                     verified_counter, per_engine_labelvalues, num_spec_tokens
+                )
+            )
+            self.counter_spec_decode_num_draft_tokens_per_pos = (
+                create_metric_per_engine_and_pos(
+                    draft_counter, per_engine_labelvalues, num_spec_tokens
                 )
             )
 
@@ -327,6 +353,10 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+        for pos, counter in enumerate(
+            self.counter_spec_decode_num_draft_tokens_per_pos.get(engine_idx, [])
+        ):
+            counter.inc(spec_decoding_stats.num_draft_tokens_per_pos[pos])
 
 
 def create_metric_per_engine_and_pos(
