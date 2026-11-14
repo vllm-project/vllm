@@ -207,6 +207,9 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/checkpoint/prepare` - Prepare for a process checkpoint (stops serving, needs `--enable-sleep-mode`)
+- `/checkpoint/restore` - Restore after a process checkpoint (needs `--enable-sleep-mode`)
+- `/checkpoint/status` - Check if the server is prepared for a checkpoint (needs `--enable-sleep-mode`)
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
@@ -310,6 +313,10 @@ Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
 
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
+this option, because the [gRPC interface](#grpc-interface) serves only trusted
+callers. It supports only `video.fps`, and the per-video frame cap still applies.
+
 ### P2P KV-Offload Peer Session Limits
 
 Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
@@ -321,6 +328,7 @@ vLLM enforces several configurable limits to prevent this:
 | `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
 | `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
 | `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is eligible for eviction. Idle eviction runs only when remaining peer slots are within 8 of `VLLM_P2P_MAX_PEERS`. Set to `0` to disable idle eviction. |
+| `VLLM_P2P_TRANSFER_STALL_TIMEOUT_S` | `20` | Seconds a P2P WRITE may stay in progress before its peer is treated as faulted: no new WRITEs to it, and the session is torn down. The stalled transfer's memory stays held until it stops. Set to `0` to disable. |
 
 Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
 
@@ -391,7 +399,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference`, `Control`, and `Render` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -491,7 +499,7 @@ driver-side credentials from worker-side processes within the same Ray
 cluster.
 
 This assumption is consistent with
-[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+[Ray's own security model](https://docs.ray.io/en/latest/ray-security/index.html),
 which states that any user who can connect to a Ray cluster can run arbitrary
 code on any node in that cluster. In other words, Ray cluster access already
 implies full code execution on worker nodes, so restricting environment

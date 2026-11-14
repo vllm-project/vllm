@@ -34,7 +34,7 @@ MODEL_NAME = os.environ.get("TEST_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 SD_METHOD = os.environ.get("SD_METHOD", "eagle3").lower()
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelConfig:
     model: str
     method: str
@@ -91,7 +91,6 @@ def _get_mt_bench_prompts() -> list[str]:
         seed=42,
         no_oversample=False,
         endpoint_type="openai-chat",
-        backend="openai-chat",
         input_len=None,
         output_len=DEFAULT_OUTPUT_LEN,
         sharegpt_output_len=DEFAULT_OUTPUT_LEN,

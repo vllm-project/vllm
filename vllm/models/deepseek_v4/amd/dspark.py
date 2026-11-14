@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark draft model for DeepSeek-V4 on ROCm/AMD (gfx950).
 
-ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
-``amd/mtp.py``:
+ROCm port of `nvidia/dspark.py`. Follows the same nvidia->amd recipe used for
+`amd/mtp.py`:
 
-  * import ``DeepseekV4DecoderLayer`` from the AMD ``.model`` (aiter/triton
+  * import `DeepseekV4DecoderLayer` from the AMD `.model` (aiter/triton
     attention + MHC CustomOp path) instead of the nvidia one;
-  * route the MHC head through the ``HCHeadOp`` CustomOp dispatcher (aiter /
+  * route the MHC head through the `HCHeadOp` CustomOp dispatcher (aiter /
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
-    and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (True when AITER
+    and gate the trailing `mhc_post` on `use_fused_mhc` (True when AITER
     or TileLang fused MHC is available; False only on the torch fallback);
-  * use the AITER MegaMoE path (``aiter_mega_moe``) instead of the DeepGEMM
+  * use the AITER MegaMoE path (`aiter_mega_moe`) instead of the DeepGEMM
     mega-MoE path.
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
-sliding-window context-KV insert, and the checkpoint ``mtp.*`` weight remap — is
+sliding-window context-KV insert, and the checkpoint `mtp.*` weight remap — is
 pure torch / Triton and shared with the nvidia implementation unchanged.
 """
 
@@ -34,10 +34,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import HCHeadOp
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -72,12 +68,9 @@ class DSparkDeepseekV4Model(nn.Module):
 
         self.num_dspark_layers = getattr(config, "n_mtp_layers", None) or 3
 
-        # Shared with the target (aliased by the speculator's loading utility).
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
+        # Assigned by load_dspark_model from the target. Avoiding a placeholder
+        # here reduces transient startup memory for DSpark bring-up.
+        self.embed_tokens: nn.Module | None = None
 
         self.main_proj = ReplicatedLinear(
             config.hidden_size * len(self.target_layer_ids),
@@ -135,12 +128,13 @@ class DSparkDeepseekV4Model(nn.Module):
         self.hc_head_op = HCHeadOp()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         return self.embed_tokens(input_ids)
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         """main_x = main_norm(main_proj(concat of target aux hidden states)).
 
-        ``aux_hidden_states`` is [T, hidden_size * len(target_layer_ids)].
+        `aux_hidden_states` is [T, hidden_size * len(target_layer_ids)].
         """
         return self.main_norm(self.main_proj(aux_hidden_states))
 
@@ -154,13 +148,13 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
-        from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        from the SAME projected target hidden `main_x`, via that layer's own
+        `wkv` + `kv_norm` + RoPE + quant, then writes it at the
         layer's context slots.
 
-        ``context_slot_mappings`` is a per-layer list (each entry is the context
+        `context_slot_mappings` is a per-layer list (each entry is the context
         slot mapping for that layer's kv-cache group, since the hybrid manager may
-        place draft layers in different groups). ``None`` (or a ``None`` entry)
+        place draft layers in different groups). `None` (or a `None` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
         for i, layer in enumerate(self.layers):
@@ -229,7 +223,7 @@ def _insert_context_kv(
 
     Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
     query and discard it, since context tokens have no query). Mirrors
-    ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+    `DeepseekV4Attention._fused_qnorm_rope_kv_insert`.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
@@ -268,10 +262,8 @@ def _insert_context_kv(
             block_size,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # NOTE(rocm): unreachable on ROCm/aiter, where the SWA cache dtype is
-        # uint8 (fp8_ds_mla) or bfloat16. This branch relies on FlashInfer-only
-        # attributes (``_flashinfer_fp8_*``) that the aiter attention layer does
-        # not define; kept for parity with the nvidia path.
+        # --kv-cache-dtype fp8_e4m3; the aiter layer registers the same
+        # ``_flashinfer_fp8_*`` scales as FlashInfer.
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
@@ -305,12 +297,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.model = DSparkDeepseekV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        # Shared with the target (aliased by the speculator's load utility).
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        # Assigned by load_dspark_model from the target. Avoid a transient
+        # full-vocabulary allocation during DSpark startup.
+        self.lm_head: nn.Module | None = None
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
     # --- Hooks used by the speculator -------------------------------------
@@ -347,6 +336,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
+        assert self.lm_head is not None
         return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -376,10 +366,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # --- Weight loading ----------------------------------------------------
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
+        """Load the `mtp.{0,1,2}.*` draft weights from the target checkpoint.
 
         Non-mtp weights (embed/head/main layers) belong to the target model and
-        are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
+        are skipped here. `embed_tokens`/`lm_head` are aliased from the target.
         """
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -407,16 +397,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_confidence_head = False
 
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
                 continue
             name = mapped
-            if "confidence_head." in name:
-                loaded_confidence_head = True
-
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -477,8 +463,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if self.model.confidence_head is not None and not loaded_confidence_head:
-            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
@@ -486,7 +470,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         finalize_mega_moe_weights(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
+        """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.
 
         Returns None for non-mtp weights (owned by the target model).
         """

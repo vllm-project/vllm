@@ -201,7 +201,7 @@ class LogprobsTensors(NamedTuple):
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplerOutput:
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
@@ -211,7 +211,7 @@ class SamplerOutput:
     logprobs_tensors: LogprobsTensors | None
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorOutput:
     # [req_ids]
     finished_sending: set[str] | None = None
@@ -244,7 +244,7 @@ class KVConnectorOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
@@ -263,12 +263,10 @@ class ECConnectorOutput:
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
-@dataclass
+@dataclass(slots=True)
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
-    # req_id -> index
-    req_id_to_index: dict[str, int]
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
@@ -304,6 +302,14 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Draft tokens per request that came out of the drafter, in req_ids order.
+    # None in steps without draft tokens.
+    num_drafted_tokens_per_req: list[int] | None = None
+
+    # Drafted tokens per request that went into the target forward pass, in
+    # req_ids order.
+    num_verified_tokens_per_req: list[int] | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
@@ -372,7 +378,7 @@ class AsyncModelRunnerOutput(ABC):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class DraftTokenIds:
     # [num_reqs]
     req_ids: list[str]
@@ -392,9 +398,6 @@ def make_empty_encoder_model_runner_output(
     # Convert to list so we get a deterministic, indexable sequence
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
 
-    # Give every request its own contiguous index
-    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
-
     # An encoder instance never samples, so it emits no tokens at all. The
     # scheduler finishes these requests once their prompt is fully encoded
     # (see `Scheduler.update_from_output`).
@@ -405,10 +408,9 @@ def make_empty_encoder_model_runner_output(
 
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         pooler_output=pooler_output,
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[])

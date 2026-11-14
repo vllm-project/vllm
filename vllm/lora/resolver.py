@@ -41,7 +41,7 @@ class LoRAResolver(ABC):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class _LoRAResolverRegistry:
     resolvers: dict[str, LoRAResolver] = field(default_factory=dict)
 

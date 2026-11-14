@@ -79,7 +79,7 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
 class FusedIndexerQRopeQuantTritonKernel(
     VllmTritonJitKernel["FusedIndexerQRopeQuantTritonKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         num_heads: int
@@ -206,7 +206,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -322,7 +322,7 @@ def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
 class FusedIndexerQRopeMxFp4TritonKernel(
     VllmTritonJitKernel["FusedIndexerQRopeMxFp4TritonKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         weights_out_dtype: torch.dtype
@@ -441,7 +441,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -562,7 +562,7 @@ def fused_indexer_q_rope_quant(
 ]:
     """Fused RoPE + quantize Q for the sparse indexer.
 
-    ``weights_out_dtype`` is the dtype the downstream scoring kernel takes:
+    `weights_out_dtype` is the dtype the downstream scoring kernel takes:
     fp32 for the dense MQA-logits kernels, bf16 for DeepGEMM's sparse
     MQA-logits kernels (CUDA MXFP4 path only).
 
@@ -701,7 +701,7 @@ def fused_indexer_q_rope_quant(
             index_weights_out,
         )
     elif current_platform.is_cpu():
-        from vllm._custom_ops import fused_indexer_q_rope_quant_cpu
+        from vllm._cpu_ops import fused_indexer_q_rope_quant_cpu
 
         fused_indexer_q_rope_quant_cpu(
             positions.contiguous(),

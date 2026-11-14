@@ -26,7 +26,7 @@ _LAMPORT_COPY_THREADS = 128
 _SUPPORTED_TP_SIZES = (8, 16)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KimiK3LatentMoETailContract:
     tp_group_id: int
     tp_size: int

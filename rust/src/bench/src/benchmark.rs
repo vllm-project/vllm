@@ -13,7 +13,9 @@ use crate::backends::{RequestFuncInput, RequestFuncOutput, get_backend};
 use crate::cli::{BackendKind, DatasetName, LoraAssignment};
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
-use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics};
+use crate::metrics::calculator::{
+    attach_client_queue_metrics, calculate_embedding_metrics, calculate_metrics,
+};
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
@@ -96,6 +98,7 @@ pub(crate) struct SpecDecodeMetrics {
     num_draft_tokens: u64,
     num_accepted_tokens: u64,
     accepted_per_pos: HashMap<u64, u64>,
+    num_verified_tokens: u64,
 }
 
 /// Computed speculative decoding statistics (delta between before/after benchmark).
@@ -104,6 +107,7 @@ pub struct SpecDecodeStats {
     pub num_drafts: u64,
     pub draft_tokens: u64,
     pub accepted_tokens: u64,
+    pub verified_tokens: u64,
     pub acceptance_rate: f64,
     pub acceptance_length: f64,
     pub per_position_acceptance_rates: Vec<f64>,
@@ -153,6 +157,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
     let mut accepted_per_pos: HashMap<u64, u64> = HashMap::new();
+    let mut num_verified_tokens: u64 = 0;
     let mut found_spec_decode = false;
 
     for line in text.lines() {
@@ -190,6 +195,8 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
             }
         } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
+        } else if metric_name.contains("num_verified_tokens_total") {
+            num_verified_tokens += val;
         }
     }
 
@@ -202,6 +209,7 @@ pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics>
         num_draft_tokens,
         num_accepted_tokens,
         accepted_per_pos,
+        num_verified_tokens,
     })
 }
 
@@ -213,6 +221,7 @@ pub(crate) fn compute_spec_decode_stats(
     let delta_drafts = after.num_drafts.saturating_sub(before.num_drafts);
     let delta_draft_tokens = after.num_draft_tokens.saturating_sub(before.num_draft_tokens);
     let delta_accepted = after.num_accepted_tokens.saturating_sub(before.num_accepted_tokens);
+    let delta_verified = after.num_verified_tokens.saturating_sub(before.num_verified_tokens);
 
     if delta_draft_tokens == 0 {
         return None;
@@ -249,6 +258,7 @@ pub(crate) fn compute_spec_decode_stats(
         num_drafts: delta_drafts,
         draft_tokens: delta_draft_tokens,
         accepted_tokens: delta_accepted,
+        verified_tokens: delta_verified,
         acceptance_rate,
         acceptance_length,
         per_position_acceptance_rates: per_pos_rates,
@@ -645,7 +655,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         let total_output_tokens: usize = input_requests.iter().map(|r| r.expected_output_len).sum();
         println!("Dry run stats:");
         println!("  Total prompts: {}", input_requests.len());
-        println!("  Total input tokens: {total_input_tokens}");
+        println!("  Estimated total input tokens: {total_input_tokens}");
         println!("  Total expected output tokens: {total_output_tokens}");
         println!(
             "  Avg input tokens: {:.1}",
@@ -930,6 +940,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     let semaphore = config.max_concurrency.map(|mc| Arc::new(Semaphore::new(mc)));
 
     let benchmark_start = Instant::now();
+    // Wall-clock anchor for `rps_change_events` timestamps.
+    let benchmark_start_local = chrono::Local::now();
 
     // Arc-wrap shared data to avoid cloning per request
     let shared_api_url = Arc::new(config.api_url.clone());
@@ -984,6 +996,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     tokio::time::sleep(target - now).await;
                 }
 
+                let arrival = Instant::now();
+
                 // Acquire semaphore permit
                 let _permit = if let Some(ref s) = sem {
                     Some(s.acquire().await.unwrap())
@@ -1015,63 +1029,33 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     prompt_list,
                 };
 
-                // Send request, retry on connection errors
-                let max_retries = 3;
-                let mut output = None;
-
-                for attempt in 0..=max_retries {
-                    // Capture monotonic start time right before sending,
-                    // relative to benchmark_start. Python uses perf_counter()
-                    // for both start_time and ttft/itl, keeping them on the
-                    // same clock. We do the same with Instant.
-                    let request_instant = Instant::now();
-                    let result = backend.send_request(&input, &client).await;
-
-                    match result {
-                        Ok(mut o) => {
-                            // Override SystemTime-based start_time with monotonic offset
-                            o.start_time =
-                                request_instant.duration_since(bench_start).as_secs_f64();
-
-                            // Retry on connection-level failures reported as !success
-                            if !o.success && attempt < max_retries && is_connection_error(&o.error)
-                            {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(o);
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt < max_retries {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(RequestFuncOutput {
-                                success: false,
-                                error: e.to_string(),
-                                prompt_len: input.prompt_len,
-                                start_time: request_instant
-                                    .duration_since(bench_start)
-                                    .as_secs_f64(),
-                                ..Default::default()
-                            });
-                            break;
-                        }
+                // Capture monotonic start time right before sending,
+                // relative to benchmark_start. Python uses perf_counter()
+                // for both start_time and ttft/itl, keeping them on the
+                // same clock. We do the same with Instant.
+                let request_instant = Instant::now();
+                let mut output = match backend.send_request(&input, &client).await {
+                    Ok(mut output) => {
+                        // Override SystemTime-based start_time with monotonic offset
+                        output.start_time =
+                            request_instant.duration_since(bench_start).as_secs_f64();
+                        output
                     }
-                }
+                    Err(error) => RequestFuncOutput {
+                        success: false,
+                        error: format!("{}", error.as_report()),
+                        prompt_len: input.prompt_len,
+                        start_time: request_instant.duration_since(bench_start).as_secs_f64(),
+                        ..Default::default()
+                    },
+                };
 
                 if let Some(pb) = pb {
                     pb.inc(1);
                 }
 
-                output.unwrap()
+                output.client_queue_time = request_instant.duration_since(arrival).as_secs_f64();
+                output
             }),
         ));
     }
@@ -1118,7 +1102,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m, Vec::new())
     } else {
         calculate_metrics(
-            &input_requests,
             &outputs,
             benchmark_duration,
             &config.selected_percentiles,
@@ -1126,6 +1109,14 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             &config.goodput,
         )
     };
+
+    attach_client_queue_metrics(
+        &mut metrics,
+        &outputs,
+        config.max_concurrency,
+        config.request_rate,
+        &config.selected_percentiles,
+    );
 
     // Attach steady-state metrics when the closed-loop scope gate passes.
     // Trace replay is open-loop: an in-flight plateau there reflects a burst
@@ -1148,7 +1139,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         ) {
             let ss = steady_state::compute(
                 &outputs,
-                &input_requests,
                 &window,
                 &config.selected_percentiles,
                 config.backend.is_pooling(),
@@ -1180,22 +1170,37 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     }
 
     // Build result JSON
-    let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let result_json = build_result_json(
+    let current_dt = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut result_json = build_result_json(
         config,
+        &model_id,
         &metrics,
         &actual_output_lens,
         &outputs,
         benchmark_duration,
-        &date_iso,
+        &current_dt,
         spec_decode_stats.as_ref(),
     );
+    if let Some(ramp_up) = &config.ramp_up {
+        // Same shape as Python: local time, ISO 8601 with microseconds.
+        let events: Vec<serde_json::Value> = schedule
+            .rps_change_offsets(ramp_up.start_rps)
+            .into_iter()
+            .map(|(rps, delay)| {
+                let at =
+                    benchmark_start_local + chrono::Duration::microseconds((delay * 1e6) as i64);
+                serde_json::json!({
+                    "rps": rps,
+                    "timestamp": at.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                })
+            })
+            .collect();
+        result_json["rps_change_events"] = events.into();
+    }
 
     // Save if requested
     if config.save_result || config.append_result {
-        let model_for_filename = config.model.as_deref().unwrap_or(&model_id);
-        let file_name = compute_result_filename(config, model_for_filename, &dt_filename);
+        let file_name = compute_result_filename(config, &model_id, &current_dt);
 
         // Create result directory if needed
         if let Some(ref dir) = config.result_dir {
@@ -1392,7 +1397,7 @@ pub(crate) async fn send_profile_request(
     Ok(resp.status().is_success())
 }
 
-/// Parse `vllm:num_requests_running` from the server's `/metrics` Prometheus endpoint.
+/// Fetch total `vllm:num_requests_running` across engines from `/metrics`.
 pub(crate) async fn fetch_num_requests_running(
     client: &reqwest::Client,
     base_url: &str,
@@ -1400,18 +1405,35 @@ pub(crate) async fn fetch_num_requests_running(
     let url = format!("{base_url}/metrics");
     let resp = client.get(&url).send().await.ok()?;
     let text = resp.text().await.ok()?;
+
+    parse_num_requests_running(&text)
+}
+
+/// Parse total running requests across the engine series in `/metrics`.
+fn parse_num_requests_running(text: &str) -> Option<usize> {
+    let mut total: Option<usize> = None;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("vllm:num_requests_running") {
-            // Line format: `vllm:num_requests_running{model_name="..."} 42`
-            // The value is after the last space.
-            if let Some(val_str) = rest.rsplit(' ').next()
-                && let Ok(v) = val_str.parse::<f64>()
-            {
-                return Some(v as usize);
-            }
+        let Some(rest) = line.trim().strip_prefix("vllm:num_requests_running") else {
+            continue;
+        };
+        let sample = if rest.trim_start().starts_with('{') {
+            let Some((_, sample)) = rest.rsplit_once('}') else {
+                continue;
+            };
+            sample
+        } else if rest.starts_with(char::is_whitespace) {
+            rest
+        } else {
+            continue;
+        };
+        if let Some(value) = sample.split_whitespace().next().and_then(|s| s.parse::<f64>().ok())
+            && value.is_finite()
+            && value >= 0.0
+        {
+            total = Some(total.unwrap_or(0).saturating_add(value as usize));
         }
     }
-    None
+    total
 }
 
 /// Poll `/metrics` until `num_requests_running >= threshold`, then start the
@@ -1808,21 +1830,6 @@ async fn server_detokenize(
     unreachable!()
 }
 
-/// Check if an error message indicates a transient connection error worth retrying.
-fn is_connection_error(error: &str) -> bool {
-    let patterns = [
-        "connection reset",
-        "Connection reset",
-        "connection error",
-        "broken pipe",
-        "connect error",
-        "timed out",
-        "connection refused",
-        "Connection refused",
-    ];
-    patterns.iter().any(|p| error.contains(p))
-}
-
 // --- Tokenizer verification cache ---
 
 /// Build a cache key from base_url + model_id.
@@ -1921,7 +1928,178 @@ async fn sample_verify_prompts(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use clap::Parser;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+    use crate::cli::BenchServeArgs;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchServeArgs,
+    }
+
+    async fn read_request_path(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let (header_end, content_length) = loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request headers");
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::parse::<usize>)
+                })
+                .transpose()
+                .unwrap()
+                .unwrap_or(0);
+            break (header_end + 4, content_length);
+        };
+
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+
+        String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string()
+    }
+
+    #[allow(
+        deprecated,
+        reason = "zero linger deterministically resets the regression-test connection"
+    )]
+    async fn spawn_connection_reset_server()
+    -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let workload_requests = Arc::new(AtomicUsize::new(0));
+        let request_count = workload_requests.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let path = read_request_path(&mut stream).await;
+                if path != "/v1/completions" {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\
+                              connection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+
+                let attempt = request_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    stream.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+                    continue;
+                }
+
+                let body = concat!(
+                    "data: {\"choices\":[{\"text\":\"ok\"}]}\n\n",
+                    "data: {\"choices\":[],\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":1}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        (format!("http://{addr}"), workload_requests, server)
+    }
+
+    #[tokio::test]
+    async fn test_measured_request_does_not_retry_connection_failure() {
+        let (base_url, workload_requests, server) = spawn_connection_reset_server().await;
+        let dataset_path = crate::datasets::test_support::write_temp_jsonl(
+            "measured-request-no-retry",
+            r#"{"prompt":"hello","output_tokens":1}"#,
+        );
+        let cli = TestCli::parse_from([
+            "vllm-bench",
+            "--backend",
+            "openai",
+            "--base-url",
+            &base_url,
+            "--model",
+            "test-model",
+            "--tokenizer",
+            "gpt2",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            &dataset_path,
+            "--custom-output-len",
+            "-1",
+            "--num-prompts",
+            "1",
+            "--disable-tqdm",
+        ]);
+        let config = BenchConfig::from_args(&cli.args).unwrap();
+
+        let result = run_benchmark(&config).await.unwrap();
+        server.abort();
+
+        assert_eq!(workload_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(result["completed"], 0);
+        assert_eq!(result["failed"], 1);
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_sums_dp_engines() {
+        let metrics: String = (0..8)
+            .map(|engine| {
+                format!("vllm:num_requests_running{{model_name=\"m\",engine=\"{engine}\"}} 16.0\n")
+            })
+            .collect();
+
+        assert_eq!(parse_num_requests_running(&metrics), Some(128));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_matches_exact_metric_name() {
+        let metrics = "\
+vllm:num_requests_running_total{engine=\"0\"} 1024
+vllm:num_requests_running{engine=\"0\"} 16
+vllm:num_requests_waiting{model_name=\"vllm:num_requests_running\"} 256
+vllm:num_requests_running{engine=\"1\"} 16
+";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(32));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_distinguishes_zero_and_missing() {
+        for (metrics, expected) in [("vllm:num_requests_running 0\n", Some(0)), ("", None)] {
+            assert_eq!(parse_num_requests_running(metrics), expected);
+        }
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_reads_sample_before_timestamp() {
+        let metrics =
+            "vllm:num_requests_running {model_name=\"model with spaces\"}\t4.2e1 123456\n";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(42));
+    }
 
     fn make_metrics(
         drafts: u64,
@@ -1934,6 +2112,7 @@ mod tests {
             num_draft_tokens: draft_tokens,
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
+            num_verified_tokens: 0,
         }
     }
 
@@ -1947,12 +2126,15 @@ vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
 vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
 vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
 vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:spec_decode_num_verified_tokens_total{model_name=\"m\",engine=\"0\"} 500.0
+vllm:spec_decode_num_verified_tokens_per_pos_total{position=\"0\",engine=\"0\"} 150.0
 vllm:num_requests_running{model_name=\"m\"} 0
 ";
         let m = parse_spec_decode_metrics(text).unwrap();
         assert_eq!(m.num_drafts, 150);
         assert_eq!(m.num_draft_tokens, 700);
         assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.num_verified_tokens, 500);
         assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
     }
 
@@ -1985,14 +2167,21 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 0
 
     #[test]
     fn test_compute_spec_decode_stats_basic() {
-        let before = make_metrics(100, 300, 200, &[(0, 90), (1, 70), (2, 50)]);
-        let after = make_metrics(200, 600, 440, &[(0, 180), (1, 150), (2, 120)]);
+        let before = SpecDecodeMetrics {
+            num_verified_tokens: 250,
+            ..make_metrics(100, 300, 200, &[(0, 90), (1, 70), (2, 50)])
+        };
+        let after = SpecDecodeMetrics {
+            num_verified_tokens: 520,
+            ..make_metrics(200, 600, 440, &[(0, 180), (1, 150), (2, 120)])
+        };
 
         let stats = compute_spec_decode_stats(&before, &after).unwrap();
 
         assert_eq!(stats.num_drafts, 100);
         assert_eq!(stats.draft_tokens, 300);
         assert_eq!(stats.accepted_tokens, 240);
+        assert_eq!(stats.verified_tokens, 270);
         assert!((stats.acceptance_rate - 80.0).abs() < 0.01);
         assert!((stats.acceptance_length - 3.4).abs() < 0.01);
         assert_eq!(stats.per_position_acceptance_rates.len(), 3);

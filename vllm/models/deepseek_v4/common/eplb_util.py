@@ -7,17 +7,6 @@ from typing import Any
 
 import torch.nn as nn
 
-from vllm.config import ModelConfig
-
-
-def dspark_draft_supports_eplb(draft_model_config: ModelConfig) -> bool:
-    """Return whether a DSpark draft can share EPLB state with the target.
-
-    Only DeepSeek-V4 DSpark drafts reuse the target expert layout. V4.1 drafts
-    use a smaller routed-expert count and cannot share EPLB state.
-    """
-    return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
-
 
 def collect_moe_layers(
     moe_model: Any,
@@ -27,11 +16,11 @@ def collect_moe_layers(
     decoder_layer_type: type[nn.Module],
     moe_type: type[nn.Module],
 ) -> None:
-    """Populate ``MixtureOfExperts`` fields from decoder layers for EPLB.
+    """Populate `MixtureOfExperts` fields from decoder layers for EPLB.
 
     Works for both target backbones and DSpark draft stacks. Draft models pass
-    their shorter ``model.layers`` list; pipeline-parallel placeholder layers
-    are skipped via ``decoder_layer_type``.
+    their shorter `model.layers` list; pipeline-parallel placeholder layers
+    are skipped via `decoder_layer_type`.
     """
     moe_model.num_expert_groups = getattr(config, "n_group", 1)
     moe_model.moe_layers = []

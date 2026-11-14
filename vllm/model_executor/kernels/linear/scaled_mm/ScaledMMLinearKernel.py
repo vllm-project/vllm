@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from ..base import MMLinearLayerConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
@@ -33,7 +33,7 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_fused_module: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
@@ -67,6 +67,16 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod
@@ -200,6 +210,7 @@ class Int8ScaledMMLinearKernel(
             getattr(layer, w_q),
             getattr(layer, w_s),
             getattr(layer, i_s, None),
-            getattr(layer, i_zp, None),
+            # A loaded zero point of a symmetric scheme stays registered, unused.
+            None if self.config.input_symmetric else getattr(layer, i_zp, None),
             getattr(layer, azp_adj, None),
         )

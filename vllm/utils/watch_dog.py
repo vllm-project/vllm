@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
 from logging import Logger
 
@@ -31,7 +31,7 @@ class NoopWatchDog(WatchDog):
         pass
 
     @contextmanager
-    def disable(self) -> Iterator[None]:
+    def disable(self) -> Generator[None]:
         yield
 
     def handle_failure(self, reason: str) -> None:
@@ -65,7 +65,7 @@ class ThreadedWatchDog(WatchDog):
         self.last_feed_time = time.monotonic()
 
     @contextmanager
-    def disable(self) -> Iterator[None]:
+    def disable(self) -> Generator[None]:
         assert self.active, "WatchDog.disable() is not re-entrant"
         self.active = False
         try:
@@ -154,7 +154,7 @@ def start_watch_dog(
     watchdog_config: WatchdogConfig,
     logger: Logger,
 ) -> WatchDog:
-    """Start the process-wide watchdog if ``watchdog_config.dump_dir`` is set.
+    """Start the process-wide watchdog if `watchdog_config.dump_dir` is set.
 
     Returns the WatchDog singleton either way.
     """

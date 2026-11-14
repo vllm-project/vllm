@@ -46,6 +46,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -205,7 +206,7 @@ class OpenPanguMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT_FP16_GUARD,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -505,16 +506,10 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        rope_parameters = config.rope_parameters or {}
-        if rope_parameters is not None and rope_parameters.get(
-            "mrope_interleaved", False
-        ):
-            rope_parameters["rope_type"] = "openpangu"
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
         )
 
@@ -827,7 +822,7 @@ class OpenPanguDecoderLayer(nn.Module):
                     f"is_causal={config.is_causal} is not support "
                     "for attention with sink"
                 )
-            rope_parameters = getattr(config, "rope_scaling", None)
+            rope_parameters = getattr(config, "rope_parameters", None)
             if rope_parameters is None:
                 rope_parameters = {
                     "rope_type": "default",
@@ -1091,7 +1086,7 @@ class OpenPanguModel(nn.Module):
         return loaded
 
     def post_weight_load(self) -> None:
-        for name, module in self.named_modules():
+        for _, module in self.named_modules():
             if module is self:
                 continue
             if hasattr(module, "post_weight_load"):

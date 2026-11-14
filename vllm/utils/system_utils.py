@@ -10,7 +10,7 @@ import multiprocessing
 import os
 import signal
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import psutil
@@ -42,7 +42,7 @@ def update_environment_variables(envs_dict: dict[str, str]):
 
 
 @contextlib.contextmanager
-def set_env_var(key: str, value: str) -> Iterator[None]:
+def set_env_var(key: str, value: str) -> Generator[None]:
     """Temporarily set an environment variable."""
     old = os.environ.get(key)
     os.environ[key] = value
@@ -137,9 +137,12 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
-    # Force spawn if NUMA binding is enabled via --numa-bind.
-    # NUMA binding uses executable hijacking which requires spawn
-    if "--numa-bind" in sys.argv:
+    # NUMA binding uses executable hijacking, which requires spawn.
+    if any(
+        arg.split("=", 1)[0].replace("_", "-")
+        in ("--numa-bind", "--numa-bind-nodes", "--numa-bind-cpus")
+        for arg in sys.argv
+    ):
         reasons.append("NUMA binding requires spawn method")
 
     if cuda_is_initialized():

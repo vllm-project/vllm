@@ -10,7 +10,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from math import lcm
 from uuid import uuid4
@@ -25,9 +25,9 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
-MODEL = "riverclouds/Kimi-K3-8L-dummy"
+MODEL = "vllm-project/Kimi-K3-8L-dummy"
 # The recipe's DSpark draft, reading target layers that exist in MODEL.
-DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
+DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
 
 # Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
 # unaligned tail, and each later turn appends TURN_TOKENS random tokens.
@@ -52,8 +52,12 @@ BASE_ARGS = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="Kimi-K3 NVIDIA kernels require the SM100 family",
+    not (
+        current_platform.supports_mx()
+        if current_platform.is_rocm()
+        else current_platform.is_device_capability_family(100)
+    ),
+    reason="Kimi-K3 needs the SM100 family, or native MX support on ROCm",
 )
 
 SPEC_CONFIG = {
@@ -91,7 +95,7 @@ NIXL_OFFLOAD = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Mode:
     # A finer prefix_match_unit enables partial hits inside a Mamba block.
     prefix_match_unit: int | None
@@ -106,7 +110,7 @@ class Mode:
 MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Instance:
     tp: int = 1
     dp: int = 1
@@ -136,7 +140,7 @@ class Instance:
         return args
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Deployment:
     decode: Instance
     prefill: Instance | None = None
@@ -171,19 +175,10 @@ DEPLOYMENTS = {
 }
 
 
-def _known_failure(name: str, mode: Mode) -> str | None:
-    deployment = DEPLOYMENTS[name]
-    if mode.spec and deployment.decode.dcp > 1:
-        return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
-    return None
-
-
 def _case(name: str, mode: Mode):
     marks = []
     if (num_gpus := DEPLOYMENTS[name].num_gpus) > 1:
         marks += multi_gpu_marks(num_gpus=num_gpus)
-    if reason := _known_failure(name, mode):
-        marks.append(pytest.mark.xfail(reason=reason, strict=True))
     return pytest.param(name, mode, marks=marks, id=f"{name}-{mode.name}")
 
 
@@ -270,7 +265,7 @@ def _reset_gpu_prefix_cache(url: str) -> None:
         time.sleep(0.1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Turn:
     prompt_len: int
     cached: int
@@ -296,7 +291,7 @@ def _expected_cached(prev_prompt_len: int, hit_unit: int, spec: bool) -> int:
 
 
 @contextlib.contextmanager
-def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServer]]:
+def _serve(deployment: Deployment, mode: Mode) -> Generator[list[RemoteOpenAIServer]]:
     with contextlib.ExitStack() as stack:
         # Sequential shutdown waits on memory still held by sibling servers.
         servers: list[RemoteOpenAIServer] = []
@@ -455,7 +450,7 @@ def mooncake_store(tmp_path, monkeypatch) -> Iterator[None]:
                 {
                     "metadata_server": "P2PHANDSHAKE",
                     "master_server_address": f"127.0.0.1:{port}",
-                    "protocol": "rdma",
+                    "protocol": os.getenv("MOONCAKE_PROTOCOL", "rdma"),
                     "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
                     "global_segment_size": "4GB",
                     "local_buffer_size": "1GB",

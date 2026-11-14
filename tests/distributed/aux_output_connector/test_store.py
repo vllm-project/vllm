@@ -11,12 +11,14 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import connector as connector_module
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
+    retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -85,10 +87,10 @@ def _kv_cache_manager(
 
 
 def _make_connector():
-    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}), 0)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Execution:
     request_id: str
     token_start: int
@@ -97,13 +99,13 @@ class _Execution:
     block_hashes: list[bytes] | PackedBlockHashes
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerStep:
     metadata: AuxOutputConnectorMetadata
     executions: list[_Execution]
 
 
-@dataclass
+@dataclass(slots=True)
 class _SchedulerRequest:
     request_id: str
     block_hashes: list[bytes]
@@ -285,7 +287,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     )
     assert pending is not None
     output = async_utils.AsyncOutput(
-        ModelRunnerOutput(["request"], {"request": 0}),
+        ModelRunnerOutput(["request"]),
         SamplerOutput(
             torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
         ),
@@ -1124,13 +1126,15 @@ def test_worker_emits_mid_block_chunked_prefill():
     worker.close()
 
 
-def test_worker_emits_published_block_and_mid_block_tail():
+@pytest.mark.parametrize("emit_start", [0, 5])
+@pytest.mark.parametrize("token_end", [7, 8, 10])
+def test_worker_emits_published_blocks_with_unkeyed_rows(token_end, emit_start):
     worker = _make_worker(1)
-    logical = np.arange(7 * 3 * 2, dtype=np.uint8).reshape(7, 3, 2)
+    logical = np.arange(token_end * 6, dtype=np.uint8).reshape(token_end, *_SHAPE)
 
     first = _metadata(
         0,
-        [_request_metadata("request", 0, 6, 0, [b"a" * 32])],
+        [_request_metadata("request", 0, 6, emit_start, [b"a" * 32])],
         {},
     )
     output = _process_output(
@@ -1145,12 +1149,12 @@ def test_worker_emits_published_block_and_mid_block_tail():
 
     second = _metadata(
         0,
-        [_request_metadata("request", 6, 1, 0, [])],
+        [_request_metadata("request", 6, token_end - 6, emit_start, [])],
         {},
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].rows, logical[emit_start:])
     worker.close()
 
 
@@ -1498,9 +1502,7 @@ def _step_output(
     output = SchedulerOutput.make_empty()
     output.scheduled_cached_reqs = CachedRequestData(
         req_ids=request_ids,
-        resumed_req_ids=set(),
         new_token_ids=[[] for _ in request_ids],
-        all_token_ids={},
         new_block_ids=[None for _ in request_ids],
         num_computed_tokens=token_starts,
         num_output_tokens=[0 for _ in request_ids],
@@ -2010,7 +2012,9 @@ def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
 
 def _finished_request_with_cached_blocks(num_blocks: int = 1):
     cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
-    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager(cached, 2, num_blocks), 2 * num_blocks
+    )
     request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
     connector.request_finished(request)
     assert _kv_cache_metadata(connector) == (_HASHES, [])
@@ -2020,6 +2024,28 @@ def _finished_request_with_cached_blocks(num_blocks: int = 1):
 def _finish_empty_request(connector: AuxOutputSchedulerConnector):
     connector.request_finished(_SchedulerRequest("empty", [], 1))
     return _kv_cache_metadata(connector)
+
+
+@pytest.mark.parametrize(
+    "max_bytes,kv_transfer_config,expected",
+    [(None, None, 6), (None, object(), 12), (400, object(), 5), (1, None, 1)],
+    ids=["kv-cache", "kv-connector", "max-bytes", "max-bytes-floor"],
+)
+def test_retained_objects_follow_max_bytes(
+    monkeypatch, max_bytes, kv_transfer_config, expected
+):
+    monkeypatch.setattr(
+        connector_module, "resolve_kv_cache_block_sizes", lambda *_: (16, 8)
+    )
+    monkeypatch.setattr(
+        connector_module, "get_routed_experts_bytes_per_token", lambda _: 10
+    )
+    vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(max_bytes=max_bytes),
+        kv_transfer_config=kv_transfer_config,
+    )
+    kv_cache_config = SimpleNamespace(num_blocks=3)
+    assert retained_objects(vllm_config, kv_cache_config) == (expected, 8)
 
 
 def test_connector_releases_oldest_uncached_blocks_past_capacity():

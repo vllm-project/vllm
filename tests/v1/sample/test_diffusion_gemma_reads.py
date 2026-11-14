@@ -3,6 +3,8 @@
 """Per-request DiffusionGemma state behind structured reads: seed canvases,
 pinned positions, read-only slots and the per-slot step cap."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -10,17 +12,24 @@ import torch
 from vllm.model_executor.models.diffusion_gemma import (
     _MASKED_LOGIT,
     DiffusionGemmaRequestStates,
-    _compiled_sample_step,
     _concat_logprob_stashes,
     _denoise_temperature,
     _mask_rows_to_allowed,
-    sample_row_stats_reference,
+    _store_self_conditioning,
 )
+from vllm.model_executor.models.diffusion_gemma_sampler import (
+    sample_row_stats,
+    sample_row_stats_reference,
+    sample_step,
+    sample_step_reference,
+    softcap_logits,
+)
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -29,15 +38,17 @@ MAX_REQS = 4
 MAX_STEPS = 48
 
 
-def _states() -> DiffusionGemmaRequestStates:
+def _states(
+    max_num_reqs: int = MAX_REQS, stability_threshold: int = 2
+) -> DiffusionGemmaRequestStates:
     return DiffusionGemmaRequestStates(
-        max_num_reqs=MAX_REQS,
+        max_num_reqs=max_num_reqs,
         canvas_length=CL,
         vocab_size=VOCAB,
         max_denoising_steps=MAX_STEPS,
         device=torch.device("cuda"),
         hidden_size=4,
-        stability_threshold=2,
+        stability_threshold=stability_threshold,
     )
 
 
@@ -116,6 +127,43 @@ def test_remove_request_forgets_the_slot():
     assert not states.read_only_slots
 
 
+def _step_kwargs(
+    states: DiffusionGemmaRequestStates,
+    decode_slots: torch.Tensor,
+    sample: torch.Tensor,
+    argmax: torch.Tensor,
+    entropy: torch.Tensor,
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+) -> dict:
+    n, width = sample.shape
+    device = states.device
+    return dict(
+        new_tokens=sample,
+        argmax_tokens=argmax,
+        token_entropy=entropy,
+        random_tokens=torch.randint(0, VOCAB, (n, width), device=device),
+        decode_slots=decode_slots,
+        decode_idx=torch.arange(n, dtype=torch.int64, device=device),
+        valid_canvas_len=torch.full((n,), width, dtype=torch.int64, device=device),
+        canvas=states.canvas,
+        argmax_canvas=states.argmax_canvas,
+        history=states.accepted_canvas_history,
+        pin_mask=states.pin_mask,
+        seed_canvas=states.seed_canvas,
+        step=states.step,
+        is_encoder_phase=states.is_encoder_phase,
+        confident=states.confident,
+        history_len=states.accepted_canvas_history_len,
+        max_steps=states.max_steps,
+        read_only=states.read_only,
+        sampled=sampled,
+        num_sampled=num_sampled,
+        confidence_threshold=0.1,
+        entropy_bound=0.1,
+    )
+
+
 def _denoise_once(
     states: DiffusionGemmaRequestStates,
     slots: list[int],
@@ -124,15 +172,14 @@ def _denoise_once(
     embed_weight: torch.Tensor | None = None,
     embed_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One compiled denoise step over ``slots`` with flat logits, so nothing
+    """One denoise step over `slots` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
-    ``width`` below CL runs the step on [:, :width] views, as the sampler
-    does for a narrow tile."""
+    `width` below CL runs the step on the first `width` columns, as the
+    sampler does for a narrow tile."""
     n = len(slots)
     device = states.device
     decode_slots = torch.tensor(slots, dtype=torch.int64, device=device)
-    decode_idx = torch.arange(n, dtype=torch.int64, device=device)
-    sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width]
+    sampled = torch.zeros(n, CL, dtype=torch.int32, device=device)
     num_sampled = torch.zeros(n, dtype=torch.int32, device=device)
     temp = _denoise_temperature(states.step, decode_slots, float(MAX_STEPS), 0.5, 1.0)
     argmax, sample, entropy, probs = sample_row_stats_reference(
@@ -141,48 +188,35 @@ def _denoise_once(
         width,
         embed_dtype if compute_sc else None,
     )
-    _compiled_sample_step(
-        sample.view(n, width),
-        argmax.view(n, width),
-        entropy.view(n, width),
-        probs.view(n, width, -1) if probs is not None else None,
-        decode_slots,
-        decode_idx,
-        decode_slots,
-        torch.full((n,), width, dtype=torch.int64, device=device),
-        states.canvas[:, :width],
-        states.argmax_canvas[:, :width],
-        states.step,
-        states.is_encoder_phase,
-        states.confident,
+    keep = sample_step(
+        **_step_kwargs(
+            states,
+            decode_slots,
+            sample.view(n, width),
+            argmax.view(n, width),
+            entropy.view(n, width),
+            sampled,
+            num_sampled,
+        )
+    )
+    _store_self_conditioning(
         states.self_conditioning_embeds[:, :width],
+        decode_slots,
+        keep,
+        probs.view(n, width, -1) if probs is not None else None,
+        states.pin_mask[:, :width],
         (
             torch.zeros(VOCAB, 4, dtype=embed_dtype, device=device)
             if embed_weight is None
             else embed_weight
         ),
         torch.tensor(1.0, dtype=embed_dtype, device=device),
-        states.accepted_canvas_history[:, :, :width],
-        states.accepted_canvas_history_len,
-        states.max_steps,
-        states.pin_mask[:, :width],
-        states.seed_canvas[:, :width],
-        states.read_only,
-        sampled,
-        num_sampled,
-        torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
-        confidence_threshold=0.1,
-        vocab_size=VOCAB,
-        CL=width,
-        ST=states.stability_threshold,
-        entropy_bound=0.1,
         sc_vocab_start=0,
         sc_vocab_end=VOCAB,
         tp_size=1,
         tp_group_name="",
-        compute_sc=compute_sc,
     )
-    return sampled, num_sampled
+    return sampled[:, :width], num_sampled
 
 
 def test_pinned_positions_hold_their_seed_through_a_step():
@@ -216,6 +250,49 @@ def test_add_request_clears_pins():
     assert not states.pin_mask[0].any()
 
 
+def test_single_step_decode_does_not_sync():
+    # The sampler runs on the engine's hot path, where vLLM forbids GPU->CPU
+    # syncs. A single-step tile zeroes the soft embeds instead of storing them.
+    states = _states()
+    for slot in (0, 1):
+        states.add_request(slot)
+        states.is_encoder_phase[slot] = False
+    device = states.device
+    slots = torch.tensor([0, 1], device=device)
+    entropy = torch.rand(2, CL, device=device)
+    kwargs = _step_kwargs(
+        states,
+        slots,
+        torch.randint(0, VOCAB, (2, CL), device=device),
+        torch.randint(0, VOCAB, (2, CL), device=device),
+        entropy,
+        torch.zeros(2, CL, dtype=torch.int32, device=device),
+        torch.zeros(2, dtype=torch.int32, device=device),
+    )
+    embed_weight = torch.ones(VOCAB, 4, device=device)
+    normalizer = torch.tensor(1.0, device=device)
+    torch.accelerator.synchronize()
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        keep = sample_step(**kwargs)
+        _store_self_conditioning(
+            states.self_conditioning_embeds,
+            slots,
+            keep,
+            None,
+            states.pin_mask,
+            embed_weight,
+            normalizer,
+            sc_vocab_start=0,
+            sc_vocab_end=VOCAB,
+            tp_size=1,
+            tp_group_name="",
+        )
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
+
+
 def test_single_step_tile_skips_self_conditioning():
     states = _states()
     states.add_request(0)
@@ -227,26 +304,153 @@ def test_single_step_tile_skips_self_conditioning():
     assert not states.self_conditioning_embeds[0].any()
 
 
-def test_sample_step_is_compiled():
-    assert hasattr(_compiled_sample_step, "_torchdynamo_orig_callable")
+@pytest.mark.parametrize("width", [CL, 3, 1])
+@pytest.mark.parametrize("stability_threshold", [1, 3])
+def test_sample_step_kernel_matches_reference(width, stability_threshold):
+    torch.manual_seed(0)
+    n, num_reqs = 6, 8
+    states = _states(max_num_reqs=num_reqs, stability_threshold=stability_threshold)
+    device = states.device
+    states.canvas.random_(VOCAB)
+    states.argmax_canvas.random_(VOCAB)
+    states.seed_canvas.random_(VOCAB)
+    states.accepted_canvas_history.random_(VOCAB)
+    states.pin_mask.copy_(torch.rand(num_reqs, CL, device=device) < 0.3)
+    states.accepted_canvas_history_len.fill_(stability_threshold)
+
+    # One request per outcome: 0 converges, 1 is a read that converges and
+    # emits, 2 is stable but uncertain, 3 is confident but unstable, 4
+    # commits and 5 hits its step cap.
+    decode_slots = torch.tensor([5, 0, 3, 7, 1, 6], device=device)
+    argmax = torch.randint(0, VOCAB, (n, width), device=device)
+    states.accepted_canvas_history[decode_slots[:3], :, :width] = argmax[:3, None]
+    # The step writes ring row 0 (history_len % ST), so break a later row.
+    states.accepted_canvas_history[decode_slots[3], -1, :width] = argmax[3] + 1
+    states.read_only[decode_slots[1]] = True
+    states.is_encoder_phase[decode_slots[4]] = True
+    states.step[decode_slots[5]] = MAX_STEPS - 1
+    # Confident rows, an uncertain one ending in a negative NaN (which sorts
+    # last, as in torch.sort), and tied entropies.
+    entropy = torch.rand(n, width, device=device) * 0.05
+    entropy[2] = 0.15 + 0.01 * torch.rand(width, device=device)
+    entropy[2, -1] = torch.tensor(float("nan")).neg()
+    entropy[0] = 0.02
+    kwargs = _step_kwargs(
+        states,
+        decode_slots,
+        torch.randint(0, VOCAB, (n, width), device=device),
+        argmax,
+        entropy,
+        torch.full((num_reqs, CL), -1, dtype=torch.int32, device=device),
+        torch.full((num_reqs,), -1, dtype=torch.int32, device=device),
+    )
+    kwargs["decode_idx"] = torch.tensor([2, 0, 5, 1, 7, 3], device=device)
+    kwargs["valid_canvas_len"] = torch.randint(1, width + 1, (n,), device=device)
+    mutable = (
+        "canvas",
+        "argmax_canvas",
+        "history",
+        "step",
+        "is_encoder_phase",
+        "confident",
+        "history_len",
+        "sampled",
+        "num_sampled",
+    )
+    ref_kwargs = {k: v.clone() if k in mutable else v for k, v in kwargs.items()}
+
+    keep = sample_step(**kwargs)
+    ref_keep = sample_step_reference(**ref_kwargs)
+
+    assert torch.equal(keep, ref_keep)
+    for name in mutable:
+        assert torch.equal(kwargs[name], ref_kwargs[name]), name
+    num_sampled = ref_kwargs["num_sampled"][kwargs["decode_idx"]]
+    assert (num_sampled[[1, 4]] > 0).all()
+    assert ref_keep.tolist() == [
+        False,
+        False,
+        True,
+        stability_threshold > 1,
+        False,
+        False,
+    ]
 
 
-@pytest.mark.parametrize("stance", ["default", "force_eager"])
-def test_self_conditioning_stores_a_bf16_model_in_the_fp32_buffer(stance):
-    # The model's embeddings are bf16 while the buffer is fp32. Compiled code
-    # casts on the store, but eager does not, and the step runs eager once
-    # torch.compile hits its recompile limit.
+def test_softcap_kernel_matches_reference():
+    logits = torch.randn(5, 3 * 4096 + 7, dtype=torch.bfloat16, device="cuda") * 40
+
+    out = softcap_logits(logits, 30.0)
+
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, torch.tanh(logits.float() / 30.0) * 30.0)
+
+
+def test_jit_warmup_covers_every_serving_variant():
+    """Startup warmup compiles every kernel variant serving reaches, so the
+    JIT monitor sees no compile in the engine step."""
+    registry = JitWarmupRegistry(
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                try_get_generation_config=lambda: {"stability_threshold": 1},
+                get_vocab_size=lambda: VOCAB,
+                dtype=torch.bfloat16,
+            ),
+            diffusion_config=SimpleNamespace(canvas_length=CL),
+            parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            scheduler_config=SimpleNamespace(max_num_seqs=MAX_REQS),
+        )
+    )
+    dispatchers = (softcap_logits, sample_row_stats, sample_step)
+    for dispatcher in dispatchers:
+        # Drop variants earlier tests compiled, which would hide a gap.
+        dispatcher.kernel.device_caches.clear()
+    with registry.activate():
+        for dispatcher in dispatchers:
+            dispatcher.register_warmup()
+    registry.warmup()
+
+    def num_variants() -> list[int]:
+        return [
+            sum(len(cache[0]) for cache in d.kernel.device_caches.values())
+            for d in dispatchers
+        ]
+
+    warmed = num_variants()
+    assert all(warmed)
+    for cols in (VOCAB, 1, 7, 16, 48):
+        softcap_logits(torch.randn(3, cols, device="cuda"), 30.0)
+        for width in (4, 1, 3):
+            for probs_dtype in (None, torch.bfloat16):
+                sample_row_stats(
+                    torch.randn(2 * width, cols, device="cuda"),
+                    torch.ones(2, device="cuda"),
+                    width,
+                    123,
+                    probs_dtype,
+                )
+    softcap_logits(torch.randn(3, VOCAB, dtype=torch.bfloat16, device="cuda"), 30.0)
+    for width, slots in ((CL, [0]), (3, [0, 1, 2]), (1, [3, 1])):
+        states = _states()
+        for slot in slots:
+            states.add_request(slot)
+        _denoise_once(states, slots, width=width)
+
+    assert num_variants() == warmed
+
+
+def test_self_conditioning_stores_a_bf16_model_in_the_fp32_buffer():
+    # The model's embeddings are bf16 while the buffer is fp32.
     states = _states()
     states.add_request(0)
     states.is_encoder_phase[0] = False
 
-    with torch.compiler.set_stance(stance):
-        _denoise_once(
-            states,
-            [0],
-            embed_weight=torch.ones(VOCAB, 4, dtype=torch.bfloat16, device="cuda"),
-            embed_dtype=torch.bfloat16,
-        )
+    _denoise_once(
+        states,
+        [0],
+        embed_weight=torch.ones(VOCAB, 4, dtype=torch.bfloat16, device="cuda"),
+        embed_dtype=torch.bfloat16,
+    )
 
     assert states.self_conditioning_embeds.dtype == torch.float32
     # uniform probs @ an all-ones embedding

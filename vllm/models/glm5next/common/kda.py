@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from dataclasses import replace
-
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -21,6 +19,9 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    _make_fused_conv1d_weight_loader,
+)
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
     kda_prefill_checkpoint_alignment,
@@ -45,8 +46,8 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -64,7 +65,7 @@ else:
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
-    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
+    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
     replicated shards (f_a, g_a) instead of one. Pre-multiplies each
     replicated entry's output_size by tp_size so the per-rank shard
     divides back to the full size, and forces tp_rank=0 during weight
@@ -139,8 +140,8 @@ def _resolve_kda_prefill_backend(
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
     SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
-    ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
+    `chunk_kda_with_fused_gate` path. `backend` comes from
+    `additional_config.kda_prefill_backend` (auto / triton / flashkda)."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     capability = current_platform.get_device_capability()
@@ -160,20 +161,43 @@ def _resolve_kda_prefill_backend(
     return "flashkda" if supported and backend != "triton" else "triton"
 
 
+def _fused_qkv_conv1d(
+    conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
+) -> ColumnParallelLinear:
+    """The q|k|v short convs as one `[3 * C_local, 1, K]` parameter.
+
+    Checkpoint `q/k/v_conv1d` weights load as shards 0/1/2 (see
+    `stacked_params_mapping`). The conv kernels read this parameter directly,
+    so every weight write (load, refit, offload, IPC cache) lands in it and its
+    address stays fixed for cudagraphs (#55087).
+    """
+    conv1d = ColumnParallelLinear(
+        input_size=conv_size,
+        output_size=3 * projection_size,
+        bias=False,
+        params_dtype=torch.float32,
+        prefix=prefix,
+    )
+    conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
+    delattr(conv1d.weight, "weight_loader")
+    set_weight_attrs(
+        conv1d.weight,
+        {
+            "weight_loader": _make_fused_conv1d_weight_loader(
+                [projection_size] * 3, tp_size, tp_rank
+            )
+        },
+    )
+    return conv1d
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
         self,
@@ -266,37 +290,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.q_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.q_conv1d",
+        self.conv1d = _fused_qkv_conv1d(
+            self.conv_size,
+            projection_size,
+            self.tp_size,
+            self.tp_rank,
+            prefix=f"{prefix}.conv1d",
         )
-        self.k_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.k_conv1d",
-        )
-        self.v_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.v_conv1d",
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -310,7 +310,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
@@ -349,6 +353,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
         )
+        if self.kda_prefill_backend == "triton":
+            l2norm_fwd_block.register_warmup(
+                dtype=vllm_config.model_config.dtype,
+                dim=self.head_dim,
+            )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
@@ -397,12 +406,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         conv_state: torch.Tensor | None = None,
         recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
-        and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
-        bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
-        matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
-        attention output into ``out`` (a workspace buffer when ``None``) and
-        returns ``(out, final_state)``."""
+        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits `g`
+        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the
+        bounded gate `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`,
+        matching `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the
+        attention output into `out` (a workspace buffer when `None`) and
+        returns `(out, final_state)`."""
         assert self._flashkda_buffer_specs is not None
         final_state, checkpoint_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)
@@ -415,11 +424,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         if out is None:
             out = workspace_out[:, : q.shape[1]]
-        # FlashKDA hardcodes dense q/k/v/g strides; beta may be row-strided.
+        # FlashKDA accepts row-strided q/k/v (contiguous H/D rows, aligned
+        # token stride), so the packed q|k|v views are passed without a copy.
         torch.ops._flashkda_C.fwd(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
+            q,
+            k,
+            v,
             g.contiguous(),
             beta,
             self.head_dim**-0.5,
@@ -552,20 +562,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
-        conv_weights = self._merged_conv_weight
-        conv_bias = self.q_conv1d.bias
+        # three calls. conv_state is already stored as the merged q|k|v state.
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(-1)
+        )
+        conv_bias = self.conv1d.bias
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry

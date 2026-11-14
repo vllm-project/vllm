@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_fbgemm_gpu
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
@@ -21,6 +22,10 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        if not (
+            current_platform.is_cuda() and current_platform.has_device_capability(100)
+        ):
+            return False, "NVFP4 activation quantization requires CUDA sm_100+"
         if has_fbgemm_gpu():
             return True, None
         return False, "fbgemm_gpu required"

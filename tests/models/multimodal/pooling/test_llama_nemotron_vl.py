@@ -17,7 +17,7 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor
 
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.types import ScoreMultiModalParam
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.platforms import current_platform
 from vllm.renderers.chat_utils import (
@@ -55,6 +55,51 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 )
 
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    ("async_scheduling", "long_prefill_token_threshold"),
+    [(True, 0), (False, 128)],
+    ids=["async-encoder-cache-pressure", "sync-prefill-threshold"],
+)
+def test_image_embeddings_without_chunked_prefill(
+    vllm_runner, model, monkeypatch, async_scheduling, long_prefill_token_threshold
+):
+    """Encoder pressure and prefill caps must preserve whole bidirectional prompts."""
+    # Queue both requests before scheduling, independent of arrival timing.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    images = [Image.new("RGB", (512, 512), color=color) for color in ("red", "blue")]
+    prompts = [f"{PASSAGE_PREFIX}<image>"] * len(images)
+    # ROCM_ENGINE_KWARGS also sets max_num_seqs, which this test needs at 2.
+    engine_kwargs = {**ROCM_ENGINE_KWARGS, "max_num_seqs": 2}
+    # The 384-token encoder cache fits one 256-token image, but not both.
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="half",
+        max_model_len=384,
+        max_num_batched_tokens=384,
+        async_scheduling=async_scheduling,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"max_dynamic_patch": 1, "use_thumbnail": False},
+        **engine_kwargs,
+    ) as vllm_model:
+        batched = vllm_model.embed(prompts, images=images)
+        individual = [
+            vllm_model.embed([prompt], images=[image])[0]
+            for prompt, image in zip(prompts, images)
+        ]
+    check_embeddings_close(
+        embeddings_0_lst=individual,
+        embeddings_1_lst=batched,
+        name_0="individual",
+        name_1="batch",
+    )
 
 
 @pytest.mark.usefixtures("default_vllm_config")
@@ -212,6 +257,10 @@ RERANKER_TEXT_DOCS = [
 
 RERANKER_IMAGE_QUERY = "photo of a red stop sign on a street"
 
+RERANKER_SIGMOID_OVERRIDES = {
+    "sbert_ce_default_activation_function": "torch.nn.modules.activation.Sigmoid"
+}
+
 RerankerDocument = tuple[str | None, Image.Image | None]
 RerankerCase = tuple[str, Sequence[RerankerDocument]]
 
@@ -228,6 +277,7 @@ def _run_hf_reranker(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    apply_sigmoid: bool,
 ) -> list[list[float]]:
     """Run all HF reranker cases in one model lifecycle."""
     with hf_runner(
@@ -260,8 +310,11 @@ def _run_hf_reranker(
             }
             with torch.inference_mode():
                 logits = hf_model.model(**batch_dict, return_dict=True).logits
-            # vLLM applies sigmoid activation to raw logits before returning scores.
-            scores = torch.sigmoid(logits.squeeze(-1).float())
+            # The checkpoint declares an Identity activation, so vLLM returns logits
+            # unless hf_overrides sets a sigmoid.
+            scores = logits.squeeze(-1).float()
+            if apply_sigmoid:
+                scores = torch.sigmoid(scores)
             scores_per_case.append(scores.detach().cpu().tolist())
 
     return scores_per_case
@@ -272,6 +325,7 @@ def _run_vllm_reranker(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    hf_overrides: dict[str, str],
 ) -> list[list[float]]:
     """Run all vLLM reranker cases in one model lifecycle.
 
@@ -285,6 +339,7 @@ def _run_vllm_reranker(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        hf_overrides=hf_overrides,
         **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         scores_per_case = []
@@ -340,13 +395,18 @@ def _run_reranker_test(
     model: str,
     dtype: str,
     input_cases: Sequence[RerankerCase],
+    hf_overrides: dict[str, str],
 ) -> None:
     """Compare HF and vLLM reranker scores for all input cases.
 
     NOTE: Run vLLM first to avoid CUDA initialization issues with multiprocessing.
     """
-    vllm_scores_per_case = _run_vllm_reranker(vllm_runner, model, dtype, input_cases)
-    hf_scores_per_case = _run_hf_reranker(hf_runner, model, dtype, input_cases)
+    vllm_scores_per_case = _run_vllm_reranker(
+        vllm_runner, model, dtype, input_cases, hf_overrides
+    )
+    hf_scores_per_case = _run_hf_reranker(
+        hf_runner, model, dtype, input_cases, apply_sigmoid=bool(hf_overrides)
+    )
 
     # ROCm has slightly higher variance because vLLM and HF use different
     # attention backends.
@@ -363,12 +423,16 @@ def _run_reranker_test(
 
 @pytest.mark.parametrize("model", RERANKER_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize(
+    "hf_overrides", [{}, RERANKER_SIGMOID_OVERRIDES], ids=["logits", "sigmoid"]
+)
 def test_reranker(
     hf_runner,
     vllm_runner,
     image_assets,
     model: str,
     dtype: str,
+    hf_overrides: dict[str, str],
 ) -> None:
     """Test reranking with text and image documents."""
     text_docs: list[RerankerDocument] = [(text, None) for text in RERANKER_TEXT_DOCS]
@@ -379,4 +443,4 @@ def test_reranker(
         (RERANKER_TEXT_QUERY, text_docs),
         (RERANKER_IMAGE_QUERY, image_docs),
     ]
-    _run_reranker_test(hf_runner, vllm_runner, model, dtype, input_cases)
+    _run_reranker_test(hf_runner, vllm_runner, model, dtype, input_cases, hf_overrides)

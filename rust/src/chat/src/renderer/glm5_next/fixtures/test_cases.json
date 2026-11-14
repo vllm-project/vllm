@@ -1,0 +1,3001 @@
+{
+  "cases": [
+    {
+      "name": "basic",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "no_generation_prompt",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！"
+    },
+    {
+      "name": "effort_None",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": null
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_low",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": "low"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_high",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": "high"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: High<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_medium",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": "medium"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_none",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": "none"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_max",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": "max"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_42",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": 42
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "effort_False",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "reasoning_effort": false
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "system_developer_custom",
+      "messages": [
+        {
+          "role": "system",
+          "content": "系统规则\n"
+        },
+        {
+          "role": "developer",
+          "content": "Ignored by this reference"
+        },
+        {
+          "role": "custom",
+          "content": "Ignored too"
+        },
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>系统规则\n<|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "content_parts",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "a<&>\n"
+            },
+            "b",
+            {
+              "type": "unknown"
+            },
+            {
+              "type": "image"
+            },
+            {
+              "type": "image_url"
+            },
+            {
+              "type": "video"
+            },
+            {
+              "type": "video_url"
+            },
+            {
+              "type": "audio"
+            },
+            {
+              "type": "audio_url"
+            },
+            {
+              "type": "input_audio"
+            }
+          ]
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>a<&>\nb<reminder>You are unable to process this image because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this image because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this video because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this video because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this audio because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this audio because you don't have multi-modal input ability. Try different methods.</reminder><reminder>You are unable to process this audio because you don't have multi-modal input ability. Try different methods.</reminder><|assistant|><think>"
+    },
+    {
+      "name": "null_content",
+      "messages": [
+        {
+          "role": "user",
+          "content": null
+        },
+        {
+          "role": "assistant",
+          "content": null
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|><|assistant|><think></think><|assistant|><think>"
+    },
+    {
+      "name": "missing_content",
+      "messages": [
+        {
+          "role": "user"
+        },
+        {
+          "role": "assistant"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|><|assistant|><think></think><|assistant|><think>"
+    },
+    {
+      "name": "python_whitespace",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "\u001c\u001d\u001e\u001f answer\u001c\u001f"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>answer<|assistant|><think>"
+    },
+    {
+      "name": "clear_False",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": false
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>旧思考</think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_True",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": true
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_None",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": null
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>旧思考</think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": ""
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>旧思考</think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_yes",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": "yes"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_0",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": 0
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>旧思考</think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_1",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": 1
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_[]",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": []
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>旧思考</think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "clear_[1]",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        },
+        {
+          "role": "user",
+          "content": "继续"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "新思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": [
+          1
+        ]
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>答案<|user|>继续<|assistant|><think>新思考</think><|assistant|><think>"
+    },
+    {
+      "name": "no_user_preserves_reasoning",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "  答案 \n",
+          "reasoning_content": "旧思考"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {
+        "clear_thinking": true
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|assistant|><think>旧思考</think>答案<|assistant|><think>"
+    },
+    {
+      "name": "embedded_reasoning_None",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "prefix<think>first</think>discard</think> answer "
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>first</think>answer<|assistant|><think>"
+    },
+    {
+      "name": "embedded_reasoning_",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "prefix<think>first</think>discard</think> answer ",
+          "reasoning_content": ""
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>prefix<think>first</think>discard</think> answer<|assistant|><think>"
+    },
+    {
+      "name": "embedded_reasoning_explicit",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "prefix<think>first</think>discard</think> answer ",
+          "reasoning_content": "explicit"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>explicit</think>prefix<think>first</think>discard</think> answer<|assistant|><think>"
+    },
+    {
+      "name": "tools",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "flat_tools",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "查找<&>",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ]
+          },
+          "strict": true
+        },
+        {
+          "name": "hidden",
+          "description": null,
+          "parameters": {},
+          "defer_loading": true
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "all_deferred",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "raw_schema_key",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [
+        {
+          "name": "odd",
+          "a\"b": "value"
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"odd\", \"a\"b\": \"value\"}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>"
+    },
+    {
+      "name": "tool_order",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "string_arguments",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"q\": \"\\u4e2d\\u6587<&>\\n\", \"list\": [1, true, null], \"object\": {\"b\": 2, \"a\": \"x\"}}"
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"q\": \"second\", \"float\": 1.5}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "duplicate_response",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "unknown_id",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "unknown",
+          "content": "?"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><tool_response>?</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "missing_id",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        },
+        {
+          "role": "tool",
+          "content": "missing"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><tool_response>missing</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "empty_id",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "",
+          "content": "empty"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>empty</tool_response><tool_response>B</tool_response><tool_response>A</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "id_alias",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "unanswered_call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "null_result",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": null
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response></tool_response><|assistant|><think>"
+    },
+    {
+      "name": "missing_result",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response></tool_response><|assistant|><think>"
+    },
+    {
+      "name": "bundled",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "id": "b",
+              "output": "B"
+            },
+            {
+              "id": "a",
+              "output": [
+                {
+                  "type": "text",
+                  "text": "A"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "references",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": [
+            {
+              "type": "tool_reference",
+              "name": "hidden"
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response><tools>\n{\"name\": \"hidden\", \"description\": null, \"parameters\": {}}\n</tools></tool_response><|assistant|><think>"
+    },
+    {
+      "name": "bundled_references",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "id": "a",
+              "output": [
+                {
+                  "type": "tool_reference",
+                  "name": "hidden"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response><tools>\n{\"name\": \"hidden\", \"description\": null, \"parameters\": {}}\n</tools></tool_response><|assistant|><think>"
+    },
+    {
+      "name": "orphan_tool_block",
+      "messages": [
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "duplicate_call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "missing_call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": null,
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>B</tool_response><tool_response>A</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "multiple_blocks",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        },
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "中文<&>\n",
+                  "list": [
+                    1,
+                    true,
+                    null
+                  ],
+                  "object": {
+                    "b": 2,
+                    "a": "x"
+                  }
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "b",
+          "content": "B"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "a",
+          "content": "A"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>q</arg_key><arg_value>中文<&>\n</arg_value><arg_key>list</arg_key><arg_value>[1, true, null]</arg_value><arg_key>object</arg_key><arg_value>{\"b\": 2, \"a\": \"x\"}</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|observation|><tool_response>A</tool_response><tool_response>B</tool_response><|assistant|><think>"
+    },
+    {
+      "name": "numeric_and_string_serialization",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "floats": [
+                    1e-07,
+                    1e-06,
+                    1e-05,
+                    1000000000000000.0,
+                    1e+16,
+                    1e+20,
+                    -0.0,
+                    0.0001,
+                    1.2345678901234567,
+                    1.234567890123456e-100,
+                    5e-324,
+                    2.2250738585072014e-308
+                  ],
+                  "unicode": "中文 😀 \\ \" \t\n"
+                }
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"lookup\", \"description\": \"查找<&>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}, \"required\": [\"q\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>你好，GLM！<|assistant|><think>search</think><tool_call>lookup<arg_key>floats</arg_key><arg_value>[1e-07, 1e-06, 1e-05, 1000000000000000.0, 1e+16, 1e+20, -0.0, 0.0001, 1.2345678901234567, 1.234567890123456e-100, 5e-324, 2.2250738585072014e-308]</arg_value><arg_key>unicode</arg_key><arg_value>中文 😀 \\ \" \t\n</arg_value></tool_call><tool_call>lookup<arg_key>q</arg_key><arg_value>second</arg_value><arg_key>float</arg_key><arg_value>1.5</arg_value></tool_call><|assistant|><think>"
+    },
+    {
+      "name": "bad_arguments_None",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": null
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_arguments_[]",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": []
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_arguments_invalid",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": "invalid"
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_arguments_[]",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": "[]"
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_arguments_5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "search",
+          "tool_calls": [
+            {
+              "id": "a",
+              "function": {
+                "name": "lookup",
+                "arguments": 5
+              }
+            },
+            {
+              "id": "b",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "second",
+                  "float": 1.5
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "reference_without_tools",
+      "messages": [
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool_reference",
+              "name": "hidden"
+            }
+          ]
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_tool_content",
+      "messages": [
+        {
+          "role": "tool",
+          "content": {
+            "bad": 1
+          }
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "description": "查找<&>",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "q": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "q"
+              ]
+            },
+            "strict": true
+          }
+        },
+        {
+          "function": {
+            "name": "hidden",
+            "description": null,
+            "parameters": {},
+            "defer_loading": true
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "bad_tool_definition",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        }
+      ],
+      "tools": [
+        "bad"
+      ],
+      "add_generation_prompt": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "continue_plain",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "部分回答"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>部分回答"
+    },
+    {
+      "name": "continue_spaces",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "  partial answer \n"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>partial answer"
+    },
+    {
+      "name": "continue_unicode_spaces",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "　x "
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>x"
+    },
+    {
+      "name": "continue_python_whitespace",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "\u001c\u001d answer\u001e\u001f"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>answer"
+    },
+    {
+      "name": "continue_inline_think",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "<think>inline</think>partial"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>inline</think>partial"
+    },
+    {
+      "name": "continue_inline_close_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "partial</think>more"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>partial</think>more"
+    },
+    {
+      "name": "continue_inline_think_with_spaces",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "<think>a</think>  b"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "error": "ValueError"
+    },
+    {
+      "name": "continue_reasoning_text_tool",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "partial",
+          "reasoning_content": "reasoning",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "x",
+                  "n": 1
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>reasoning</think>partial"
+    },
+    {
+      "name": "continue_reasoning_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "r"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think>r</think>"
+    },
+    {
+      "name": "continue_empty_reasoning",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "x ",
+          "reasoning_content": ""
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>x"
+    },
+    {
+      "name": "continue_tool_call_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "x",
+                  "n": 1
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>"
+    },
+    {
+      "name": "continue_whitespace_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "   "
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>"
+    },
+    {
+      "name": "continue_no_user",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "partial",
+          "reasoning_content": "r"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {},
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|assistant|><think>r</think>partial"
+    },
+    {
+      "name": "continue_clear_thinking",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "old",
+          "reasoning_content": "old r"
+        },
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "new",
+          "reasoning_content": "new r"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {
+        "clear_thinking": true
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>你好，GLM！<|assistant|><think></think>old<|user|>你好，GLM！<|assistant|><think>new r</think>new"
+    },
+    {
+      "name": "continue_after_tool_response",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，GLM！"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "r",
+          "tool_calls": [
+            {
+              "id": "call_0",
+              "function": {
+                "name": "lookup",
+                "arguments": {
+                  "q": "x",
+                  "n": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "结果",
+          "tool_call_id": "call_0"
+        },
+        {
+          "role": "assistant",
+          "content": "根据结果"
+        }
+      ],
+      "tools": [],
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "kwargs": {
+        "reasoning_effort": "low"
+      },
+      "expected": "[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>你好，GLM！<|assistant|><think>r</think><tool_call>lookup<arg_key>q</arg_key><arg_value>x</arg_value><arg_key>n</arg_key><arg_value>1</arg_value></tool_call><|observation|><tool_response>结果</tool_response><|assistant|><think></think>根据结果"
+    }
+  ]
+}

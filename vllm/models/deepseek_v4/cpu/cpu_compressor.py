@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU DeepSeek-V4 compressor subclass and dispatch: partial-state-cache
 write and the compress -> RMSNorm -> RoPE -> FP8 quant -> KV cache store
-step, calling ``torch.ops._C.save_partial_states_cpu``/
-``compress_norm_rope_store_cpu``/``compress_norm_rope_store_indexer_cpu``
-(``csrc/cpu/sgl-kernels/compressor.cpp``) in place of triton-cpu.
+step, calling `torch.ops._C.save_partial_states_cpu`/
+`compress_norm_rope_store_cpu`/`compress_norm_rope_store_indexer_cpu`
+(`csrc/cpu/sgl-kernels/compressor.cpp`) in place of triton-cpu.
 
 Covers both the head_dim=512 main-attention compressor path and the
-head_dim=128 indexer compressor path (fp8 only -- MXFP4, ``use_fp4_cache``,
+head_dim=128 indexer compressor path (fp8 only -- MXFP4, `use_fp4_cache`,
 never occurs on CPU: the indexer's MXFP4 cache requires a Blackwell GPU).
 """
 
@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import torch
 
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     compress_norm_rope_store_cpu,
     compress_norm_rope_store_indexer_cpu,
     save_partial_states_cpu,
@@ -27,10 +27,10 @@ from vllm.models.deepseek_v4.cpu.cpu_utils import map_local_to_global_slots_cpu
 
 class DeepseekV4CPUCompressor(DeepseekCompressor):
     """CPU compressor: same state/weights as the shared base, but
-    ``forward``'s cache-write and compress->RMSNorm->RoPE->quant->store
+    `forward`'s cache-write and compress->RMSNorm->RoPE->quant->store
     steps always dispatch straight to the ported CPU kernels above instead
     of through the shared method's platform-dispatch chain. This class
-    only ever runs on CPU, and ``use_fp4_cache`` is always ``False`` here
+    only ever runs on CPU, and `use_fp4_cache` is always `False` here
     (the indexer's MXFP4 cache requires a Blackwell GPU), so the shared
     method's MXFP4/two-stage/cutedsl/triton branches never apply.
     """
@@ -38,9 +38,9 @@ class DeepseekV4CPUCompressor(DeepseekCompressor):
     _norm_weight_fp32: torch.Tensor
 
     def cache_norm_weight_fp32(self) -> None:
-        """Cache a fp32 contiguous copy of ``norm.weight`` once, right after
+        """Cache a fp32 contiguous copy of `norm.weight` once, right after
         weight loading (see
-        ``DeepseekV4CPUAttention.process_weights_after_loading``) -- the CPU
+        `DeepseekV4CPUAttention.process_weights_after_loading`) -- the CPU
         kernel requires fp32/contiguous but the checkpoint loads this weight
         in bf16, and it never changes after loading."""
         self._norm_weight_fp32 = self.norm.weight.to(torch.float32).contiguous()

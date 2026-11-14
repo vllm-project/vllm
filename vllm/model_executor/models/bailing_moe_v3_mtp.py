@@ -10,7 +10,6 @@ from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -39,9 +38,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    PPMissingLayer,
     _merge_multimodal_embeddings,
-    is_pp_missing_parameter,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
@@ -174,15 +171,12 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -252,9 +246,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
         )
         self.lm_head: nn.Module | None = None
 
-    def share_lm_head(self, lm_head: nn.Module) -> None:
-        self.lm_head = lm_head
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -319,7 +310,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
         expert_params_mapping = list(self.get_expert_mapping())
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
-        loaded_mtp_layers: set[int] = set()
 
         def load_param(
             name: str,
@@ -330,7 +320,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
             if remapped_name is None:
                 return False
             name = remapped_name
-            if name not in params_dict or is_pp_missing_parameter(name, self):
+            if name not in params_dict:
                 return False
 
             param = params_dict[name]
@@ -411,7 +401,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
                     loaded = True
                     break
             if loaded:
-                loaded_mtp_layers.add(spec_layer)
                 continue
 
             if "mlp.experts" in name:
@@ -421,23 +410,9 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
                         continue
                     mapped_name = name.replace(weight_name, param_name)
                     if load_param(mapped_name, loaded_weight, (expert_id, shard_id)):
-                        loaded = True
                         break
-                if loaded:
-                    loaded_mtp_layers.add(spec_layer)
                 continue
 
-            if load_param(name, loaded_weight):
-                loaded_mtp_layers.add(spec_layer)
+            load_param(name, loaded_weight)
 
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_mtp_layers:
-                raise ValueError(
-                    f"Bailing V3 MTP speculative decoding layer {layer_idx} "
-                    "weights are missing from checkpoint. Use a checkpoint that "
-                    "includes MTP layer weights, or disable speculative decoding."
-                )
         return loaded_params

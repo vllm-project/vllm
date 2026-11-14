@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
@@ -15,7 +15,6 @@ from vllm.config.quantization import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -33,6 +32,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -45,6 +47,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -61,6 +67,9 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_layer_name_after_index,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -68,15 +77,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Static,
-    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
 
-class OnlineQuantizationSource(str, Enum):
+class OnlineQuantizationSource(StrEnum):
     """Supported online quantization configuration sources."""
 
     linear = "linear"  # LinearBase
@@ -84,25 +95,27 @@ class OnlineQuantizationSource(str, Enum):
     targets = "targets"
 
 
-# Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
-# corresponding method class handles the activation choice via its
-# `supported_activation_quant` set.
+# Online dispatch tables, keyed by the QuantSpec.weight QuantKey.
 _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineLinearMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
-    kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
+
+# Online linear methods validated with `QuantSpec.hadamard_size`.
+_ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineMoEMethod,
-    kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
+    kMxfp8Static: Mxfp8OnlineMoEMethod,
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
+    kLutBStatic: LutBOnlineMoEMethod,
 }
 
 # Quantizers for full-precision fused shared-expert weights, keyed by the routed
@@ -114,10 +127,49 @@ ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
     kMxfp4Static: mxfp4_quantize,
 }
 
+# Dequantizers `(weight, weight_scale) -> high precision weight` of quantized fused
+# shared-expert checkpoint weights, keyed by the checkpoint weight QuantKey.
+ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
+    QuantKey, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+] = {
+    kMxfp8Static: dequant_mxfp8_to_bf16,
+}
+
+
+def _resolved_target(target: str | QuantSpec) -> tuple:
+    """Comparable identity of a `quantization_config.targets` value.
+
+    Returns one `(weight, activation, activation was explicit, hadamard_size)`
+    tuple per layer kind (linear, MoE), or `None` for a kind the target does not
+    define: a shorthand name and the equivalent `QuantSpec` therefore compare
+    equal, while an omitted activation still differs from an explicit `null`.
+    """
+    if isinstance(target, str):
+        shorthand = _ONLINE_SHORTHANDS[target]
+        # A one-sided shorthand applies its spec to either layer kind, like the
+        # equivalent `QuantSpec` does, so compare it that way.
+        specs = (
+            shorthand.linear or shorthand.moe,
+            shorthand.moe or shorthand.linear,
+        )
+    else:
+        specs = (target, target)
+    return tuple(
+        None
+        if spec is None
+        else (
+            spec.weight,
+            spec.activation,
+            "activation" in spec.fields_set,
+            spec.hadamard_size,
+        )
+        for spec in specs
+    )
+
 
 def _find_matching_targets(
     prefix: str,
-    targets: Mapping[str, str],
+    targets: Mapping[str, str | QuantSpec],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> list[str]:
     per_shard_matches = find_matching_patterns(
@@ -138,8 +190,8 @@ def _find_matching_targets(
         )
 
     matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
-    quant_key_strs = {targets[pattern] for pattern in matched_patterns}
-    if len(quant_key_strs) > 1:
+    target_values = [_resolved_target(targets[pattern]) for pattern in matched_patterns]
+    if any(target != target_values[0] for target in target_values[1:]):
         raise ValueError(
             f"Found different quantization_config.targets values for the "
             f"shards of {prefix}: {matched_patterns}. vLLM requires all "
@@ -237,7 +289,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             layer_cls: Type of the layer that will use the resolved method.
 
         Returns:
-            The matching method class, or None when ``spec`` has no weight
+            The matching method class, or None when `spec` has no weight
             quantization.
 
         """
@@ -253,13 +305,16 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
-        # Online method classes pick their own activation format internally.
-        # Per-class activation overrides are not yet wired through; reject
-        # explicit overrides until the relevant method class opts in.
-        if spec.activation is not None:
-            raise ValueError(
-                f"activation override (activation={spec.activation}) is not "
-                f"yet supported for online {cls.__name__}"
+        # TODO: InputHadamardLinearMethod is format-agnostic; allow the
+        # remaining linear methods and MoE once validated.
+        if (
+            spec.hadamard_size is not None
+            and cls not in _ONLINE_HADAMARD_LINEAR_METHODS
+        ):
+            raise NotImplementedError(
+                f"hadamard_size is not yet supported for online {cls.__name__}; "
+                "supported: "
+                f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
             )
         return cls
 
@@ -273,9 +328,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
             prefix: Fully qualified layer name.
 
         Returns:
-            A tuple of source, quantization key string, target pattern, spec,
-            and method class. Returns None when online quantization does not
-            apply to the layer.
+            A tuple of source, quantization key string, target pattern, spec
+            with its resolved activation key, and method class. Returns None
+            when online quantization does not apply to the layer. The returned
+            spec's `fields_set` is not user input.
 
         """
         quant_spec: QuantSpec | None
@@ -312,6 +368,30 @@ class OnlineQuantizationConfig(QuantizationConfig):
         if quant_method_cls is None:
             return None
         assert quant_spec is not None
+        assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+        if issubclass(layer_cls, ParallelLMHead) and not getattr(
+            quant_method_cls, "supports_lm_head", False
+        ):
+            # Per-tensor reduces its amax across TP ranks and per-block assumes
+            # 128-aligned shards, neither validated on a padded, sharded vocab.
+            raise NotImplementedError(
+                f"{prefix}: {quant_method_cls.__name__} does not support the "
+                "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
+                "with `activation: null`)."
+            )
+        explicit = "activation" in quant_spec.fields_set
+        quant_spec = QuantSpec(
+            weight=quant_spec.weight,
+            activation=quant_method_cls.resolve_activation_quant_key(
+                quant_spec.activation
+                if explicit
+                else getattr(quant_method_cls, "activation_quant_key", None),
+                explicit=explicit,
+            ),
+            # Carried so `get_quant_method` can wrap the method in
+            # `InputHadamardLinearMethod`.
+            hadamard_size=quant_spec.hadamard_size,
+        )
         return source, quant_key_str, target_pattern, quant_spec, quant_method_cls
 
     def _resolve_targets_quant_method_metadata(
@@ -342,6 +422,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         matches = _find_matching_targets(
             prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
         )
+        if issubclass(layer_cls, ParallelLMHead):
+            # Broad patterns keep meaning linear and MoE layers: a target
+            # selects the lm_head only by naming it.
+            head_name = prefix.rsplit(".", 1)[-1]
+            matches = [pattern for pattern in matches if head_name in pattern]
         if ignored and matches:
             raise ValueError(
                 f"Layer {prefix} matches both quantization_config.ignore "
@@ -357,13 +442,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"one target."
             )
         target_pattern = matches[0]
-        quant_key_str = self.args.targets[target_pattern]
-        shorthand = _ONLINE_SHORTHANDS[quant_key_str]
-        if issubclass(layer_cls, LinearBase):
-            quant_spec = shorthand.linear
+        target = self.args.targets[target_pattern]
+        if isinstance(target, str):
+            shorthand = _ONLINE_SHORTHANDS[target]
+            quant_key_str = target
+            quant_spec = (
+                shorthand.linear
+                if issubclass(layer_cls, (LinearBase, ParallelLMHead))
+                else shorthand.moe
+            )
+        else:
+            quant_spec = target
+            quant_key_str = str(quant_spec)
+        if issubclass(layer_cls, (LinearBase, ParallelLMHead)):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
-            quant_spec = shorthand.moe
             table = _ONLINE_MOE_METHODS
         else:
             raise ValueError(
@@ -373,7 +466,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         if quant_spec is None:
             raise ValueError(
-                f"targets pattern {target_pattern} = {quant_key_str} does "
+                f"targets pattern {target_pattern} = {target} does "
                 f"not define a QuantSpec for {layer_cls.__name__} layers "
                 f"(matched at {prefix})."
             )
@@ -391,18 +484,30 @@ class OnlineQuantizationConfig(QuantizationConfig):
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
         if resolved is not None:
-            source, quant_key_str, target_pattern, _, quant_method_cls = resolved
+            source, quant_key_str, target_pattern, quant_spec, quant_method_cls = (
+                resolved
+            )
             self.quantized_layers[prefix] = (
                 source.value,
                 quant_key_str,
                 target_pattern,
             )
+            assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+            kwargs = {}
+            if quant_method_cls.accepts_activation_override:
+                kwargs["activation_quant_key"] = quant_spec.activation
             if isinstance(layer, RoutedExperts):
-                assert issubclass(quant_method_cls, FusedMoEMethodBase)
-                return quant_method_cls(moe=layer.moe_config)
+                assert issubclass(quant_method_cls, OnlineMoEMethodBase)
+                return quant_method_cls(moe=layer.moe_config, **kwargs)
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            return quant_method_cls()
+            if quant_spec.hadamard_size is not None:
+                return InputHadamardLinearMethod(
+                    quant_method_cls(**kwargs),
+                    quant_spec.hadamard_size,
+                    rotate_weight=True,
+                )
+            return quant_method_cls(**kwargs)
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
