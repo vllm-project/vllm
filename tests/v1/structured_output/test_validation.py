@@ -313,11 +313,11 @@ def test_unhandled_spec_is_a_validation_error(validate):
 @pytest.mark.parametrize(
     "schema, expected_backend",
     [
-        # multipleOf is unsupported by xgrammar.
+        # multipleOf is unsupported by xgrammar for number and for bounded integer.
         (
             {
                 "type": "object",
-                "properties": {"n": {"type": "integer", "multipleOf": 2}},
+                "properties": {"n": {"type": "integer", "multipleOf": 2, "minimum": 0}},
             },
             "guidance",
         ),
