@@ -541,6 +541,7 @@ class InputProcessor:
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_input.get("cache_salt"),
+            cache_salt_start_idx=decoder_input.get("cache_salt_start_idx"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,

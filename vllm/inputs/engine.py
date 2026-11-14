@@ -26,6 +26,13 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    cache_salt_start_idx: NotRequired[int]
+    """Token index from which the cache salt applies (divergence-point
+    salting). Blocks covering tokens before this index hash without the
+    salt and stay shareable across tenants; blocks at/after it are
+    tenant-private. Must be block-aligned to be effective; None or 0 keeps
+    the default all-or-nothing behavior."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""
