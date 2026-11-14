@@ -316,6 +316,9 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
                         std::optional<torch::stable::Tensor> weight,
                         double epsilon) {
   STD_TORCH_CHECK(input.scalar_type() == residual.scalar_type());
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "fused_add_rms_norm: input must have unit stride in the "
+                  "last dimension");
   STD_TORCH_CHECK(residual.stride(-1) == 1);
   if (weight.has_value()) {
     STD_TORCH_CHECK(weight->scalar_type() == input.scalar_type());
