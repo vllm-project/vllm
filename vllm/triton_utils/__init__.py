@@ -24,7 +24,10 @@ else:
     gl = TritonLanguagePlaceholder()
     aggregate = TritonLanguagePlaceholder()
 
-from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+from vllm.triton_utils.tensor_descriptor import (
+    tensor_descriptor_compatible,
+    use_tensor_descriptor,
+)
 
 # Replace Autotuner.run so it always picks the first valid configuration, to
 # eliminate autotune variability. Installed here rather than in
@@ -50,5 +53,6 @@ __all__ = [
     "gluon",
     "gl",
     "aggregate",
+    "tensor_descriptor_compatible",
     "use_tensor_descriptor",
 ]

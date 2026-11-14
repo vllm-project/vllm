@@ -690,9 +690,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # have a TD path: unified attention (`triton_attn` backend), the fused
     # MoE kernels (`fused_moe_kernel` for unquantized weights,
     # `fused_moe_kernel_gptq_awq` for grouped int4_w4a16 weights, batched
-    # MoE) and the compressed-tensors `triton_scaled_mm`.  Enables HW 2D
-    # block reads on Intel XPU; the non-TD branch is dead-code-eliminated
-    # at Triton compile time so other platforms see no overhead.
+    # MoE), the compressed-tensors `triton_scaled_mm` and the Mamba2 SSD
+    # prefill kernels (`_chunk_scan_fwd_kernel`, `_chunk_state_fwd_kernel`).
+    # Enables HW 2D block reads on Intel XPU; the non-TD branch is
+    # dead-code-eliminated at Triton compile time so other platforms see no
+    # overhead.
     # Tri-state override: unset (default) auto-enables TD on XPU only;
     # ``1`` forces TD on (on CUDA the MoE TD paths need sm100+; the int4
     # WNA16 MoE kernel stays on the pointer path below sm100 and for shapes
