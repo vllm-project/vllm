@@ -994,6 +994,102 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     assert req_c.status == RequestStatus.WAITING
 
 
+def _scheduler_with_lora_slots_full() -> Scheduler:
+    """max_loras=1, with the only slot held by a running request."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=1))
+    (running,) = create_requests(num_requests=1, num_tokens=8, req_ids=["running"])
+    running.lora_request = LoRARequest("lora-1", 1, "/path/1")
+    scheduler.add_request(running)
+    assert scheduler.schedule().num_scheduled_tokens == {"running": 8}
+    return scheduler
+
+
+def _add_requests_with_loras(
+    scheduler: Scheduler, loras: dict[str, int | None]
+) -> list[Request]:
+    requests = create_requests(
+        num_requests=len(loras), num_tokens=8, req_ids=list(loras)
+    )
+    for request, lora_id in zip(requests, loras.values()):
+        if lora_id is not None:
+            request.lora_request = LoRARequest(f"lora-{lora_id}", lora_id, "/p")
+        scheduler.add_request(request)
+    return requests
+
+
+def test_max_loras_blocked_waiting_requests_left_in_place():
+    """Once max_loras adapters are scheduled, the FCFS scan stops when no
+    waiting request can use them instead of popping and re-queueing each one
+    every step, and the requests it leaves in place are admitted in order once
+    the adapter slot frees."""
+    scheduler = _scheduler_with_lora_slots_full()
+    blocked = _add_requests_with_loras(scheduler, {f"b{i}": 2 for i in range(8)})
+    pop_request = Mock(wraps=scheduler.waiting.pop_request)
+    scheduler.waiting.pop_request = pop_request
+
+    for _ in range(2):
+        assert scheduler.schedule().scheduled_new_reqs == []
+    # Only the head is popped each step; a per-request scan pops all 8.
+    assert pop_request.call_count == 2
+    assert list(scheduler.waiting) == blocked
+    assert scheduler.deferred_waiting == set(blocked)
+
+    scheduler.finish_requests("running", RequestStatus.FINISHED_ABORTED)
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == [
+        r.request_id for r in blocked
+    ]
+
+
+def test_max_loras_scan_admits_requests_behind_blocked_ones():
+    """Requests the scheduled adapters admit, or without an adapter, are still
+    found behind blocked ones; the scan stops once no such request is left."""
+    scheduler = _scheduler_with_lora_slots_full()
+    reqs = _add_requests_with_loras(
+        scheduler, {"b1": 2, "b2": 2, "b3": 3, "d": 1, "c": None, "e": 3, "f": 3}
+    )
+    pop_request = Mock(wraps=scheduler.waiting.pop_request)
+    scheduler.waiting.pop_request = pop_request
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["d", "c"]
+    # Every request but f is popped once; a per-request scan also pops f.
+    assert pop_request.call_count == 6
+    assert [r.request_id for r in scheduler.waiting] == ["b1", "b2", "b3", "e", "f"]
+    assert scheduler.deferred_waiting == {reqs[i] for i in (0, 1, 2, 5, 6)}
+
+
+def test_max_loras_scan_visits_requests_waiting_for_grammar():
+    """A request waiting for its grammar is still visited when its adapter
+    cannot be scheduled, so a failed grammar compilation is reported."""
+    scheduler = _scheduler_with_lora_slots_full()
+    manager = scheduler.structured_output_manager
+    manager.backend = Mock()
+    manager.backend_name = "xgrammar"
+    manager.backend.compile_grammar.side_effect = RuntimeError("bad grammar")
+    manager._use_async_grammar_compilation = False
+    structured_outputs = StructuredOutputsParams(regex="[0-9]+")
+    structured_outputs._backend = "xgrammar"
+    (req_c,) = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        req_ids=["c"],
+        sampling_params=SamplingParams(
+            max_tokens=16, structured_outputs=structured_outputs
+        ),
+    )
+    req_c.lora_request = LoRARequest("lora-2", 2, "/p")
+    assert req_c.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    manager.grammar_init(req_c)
+    _add_requests_with_loras(scheduler, {"b": 2})
+    scheduler.add_request(req_c)
+    _add_requests_with_loras(scheduler, {"d": 2})
+    assert req_c in scheduler.deferred_waiting
+
+    scheduler.schedule()
+    assert "c" in scheduler.grammar_compile_error_reqs
+
+
 @pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
 @pytest.mark.parametrize("cached_first_image", [False, True])
 def test_encoder_cache_pressure_respects_disabled_chunked_prefill(

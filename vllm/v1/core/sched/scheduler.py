@@ -82,6 +82,16 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Statuses `_handle_blocked_waiting_request` acts on; the max_loras lookahead
+# stops at them.
+_BLOCKED_WAITING_STATUSES = frozenset(
+    (
+        RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        RequestStatus.WAITING_FOR_STREAMING_REQ,
+    )
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -236,7 +246,7 @@ class Scheduler(SchedulerInterface):
         # separate so throttling their loads doesn't block local requests.
         self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
-        # scan or enqueued in a blocked status.
+        # scan or its max_loras lookahead, or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
         self.running: list[Request] = []
 
@@ -1044,6 +1054,7 @@ class Scheduler(SchedulerInterface):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
+            fcfs = self.policy == SchedulingPolicy.FCFS
             num_async_kv_loads = 0
             max_async_kv_loads = (
                 self.scheduler_config.max_async_kv_loads_per_step or float("inf")
@@ -1104,6 +1115,21 @@ class Scheduler(SchedulerInterface):
                 ):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
+                    # Under FCFS, defer the requests the scan would only skip,
+                    # without a visit each. Only on self.waiting (reached after
+                    # kv_holding_waiting is drained) and with no async KV load to
+                    # start, so the break skips no queue the scan would visit.
+                    if (
+                        fcfs
+                        and request_queue is self.waiting
+                        and not (take_async_kv and self.async_kv_waiting)
+                    ):
+                        num_ahead = self._lora_lookahead(scheduled_loras)
+                        if num_ahead is None:
+                            self.deferred_waiting.update(self.waiting)
+                            break
+                        for _ in range(num_ahead):
+                            skip_request(self.waiting)
                     continue
 
                 num_external_computed_tokens = 0
@@ -2699,11 +2725,7 @@ class Scheduler(SchedulerInterface):
 
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
-        return status in (
-            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
-            RequestStatus.WAITING_FOR_REMOTE_KVS,
-            RequestStatus.WAITING_FOR_STREAMING_REQ,
-        )
+        return status in _BLOCKED_WAITING_STATUSES
 
     @staticmethod
     def _holds_kv_blocks(request: Request) -> bool:
@@ -2774,6 +2796,29 @@ class Scheduler(SchedulerInterface):
         self.waiting.remove_requests(head)
         for request in reversed(reordered):
             self.waiting.prepend_request(request)
+
+    def _lora_lookahead(self, scheduled_loras: set[int]) -> int | None:
+        """Return the index of the next request the waiting scan must visit.
+
+        Called once `scheduled_loras` holds `max_loras` adapters, as it then does
+        for the rest of the step, so a request on another adapter would only be
+        skipped. FCFS only: iterating a priority queue heap-pops a copy of it.
+
+        Returns:
+            The index in `self.waiting` of the first request that has no adapter,
+            a scheduled one, or a blocked status, or None if there is none.
+
+        """
+        return next(
+            (
+                i
+                for i, r in enumerate(self.waiting)
+                if r.status in _BLOCKED_WAITING_STATUSES
+                or not r.lora_request
+                or r.lora_request.lora_int_id in scheduled_loras
+            ),
+            None,
+        )
 
     def _next_waiting_queue(self, take_async_kv: bool) -> RequestQueue:
         """self.waiting or self.async_kv_waiting, whichever head goes first."""
