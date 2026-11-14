@@ -10,7 +10,7 @@ from vllm.distributed import get_tp_group
 from vllm.platforms import current_platform
 
 from ...ops.cute_dsl import AllReduceMHC
-from .. import FUSED_MHC_MAX_ROWS
+from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS
 
 
 class BoundaryAllReduce(AllReduceMHC):
@@ -31,6 +31,11 @@ class BoundaryAllReduce(AllReduceMHC):
             device=current_platform.current_device(),
             quantize_layer_input=quantize_layer_input,
             residual_only=True,
+            # The plain and quant consumers' dependents read only weights before their
+            # own wait; the finalize-publish triggers its consumer after its own wait.
+            plain_trigger="poll",
+            quant_trigger="start",
+            finalize_trigger_max_rows=LOW_BATCH_MAX_ROWS,
         )
         group = get_tp_group()
         self.tp = group.world_size
