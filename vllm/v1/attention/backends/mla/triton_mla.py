@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import get_rdna_mla_decode
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -136,6 +137,12 @@ class TritonMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        if (
+            kv_cache_spec is not None
+            and kv_cache_spec.dtype == torch.bfloat16
+            and get_rdna_mla_decode() is not None
+        ):
+            return [16]
         return [MultipleOf(16)]
 
     @classmethod
@@ -266,6 +273,16 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = current_platform.num_compute_units()
         self._vllm_config = get_current_vllm_config()
+        use_aiter_mla = (
+            sliding_window is None
+            and not self.need_to_return_lse_for_decode
+            and not envs.VLLM_BATCH_INVARIANT
+            and all(
+                dim > 0 and dim & (dim - 1) == 0
+                for dim in (self.kv_lora_rank, self.qk_rope_head_dim)
+            )
+        )
+        self._aiter_mla_decode = get_rdna_mla_decode() if use_aiter_mla else None
 
     def reserve_workspace(self) -> None:
         # The builder reserves after memory profiling; reserve its upper bound
@@ -350,6 +367,36 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         q_num_heads = q.shape[1]
+        page_size = kv_c_and_k_pe_cache.shape[1]
+        if (
+            self._aiter_mla_decode is not None
+            and q.dtype == torch.bfloat16
+            and kv_c_and_k_pe_cache.dtype == torch.bfloat16
+            and attn_metadata.causal
+            and B > 0
+            and attn_metadata.decode.seq_lens.shape[0] == B
+            and page_size == 16
+        ):
+            # Padded seq_len=0 rows may be undefined; only active rows are consumed.
+            out = q.new_empty((B, q_num_heads, self.kv_lora_rank))
+            self._aiter_mla_decode(
+                q=q,
+                kv_buffer=kv_c_and_k_pe_cache.unsqueeze(2),
+                out=out,
+                cu_seqlens_q=attn_metadata.query_start_loc[: B + 1],
+                seqused_k=attn_metadata.decode.seq_lens,
+                max_seqlen_kv=attn_metadata.max_seq_len,
+                block_tables=attn_metadata.decode.block_table,
+                softmax_scale=self.scale,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                causal=True,
+                q_descale=None,
+                kv_descale=None,
+                skip_reduce=False,
+            )
+            return out, None
+
         o = torch.zeros(
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
