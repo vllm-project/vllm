@@ -55,6 +55,18 @@ def _fp32x2_to_fp4x2(x_lo, x_hi):
 
 
 @triton.jit
+def _fp32x2_to_fp4x2_rocm(x_lo, x_hi):
+    return tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_fp4_f32 $0, $1, $2, $3",
+        constraints="=v,v,v,v",
+        args=[x_lo, x_hi, 1.0],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    ).to(tl.uint8)
+
+
+@triton.jit
 def _quantize_mxfp4_pair(x_lo, x_hi):
     """Quantize a block of MXFP4_BLOCK_SIZE fp32 values given as two
     interleaved halves (x_lo = values at even positions in the block,

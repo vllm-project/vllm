@@ -37,6 +37,7 @@ from vllm.models.deepseek_v41.attention import (
 )
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
+    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v41.sparse_mla import (
@@ -46,6 +47,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV41SparseSWAMetadataBuilder,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
@@ -143,6 +145,9 @@ def apply_pre_quantized_block_scaled_mm(
         A=x_fp8, B=params.weight, As=x_scale, Bs=weight_scale
     )
     return out.to(dtype=kernel.config.out_dtype)
+
+
+_DIRECT_FP4_PREFILL_QUERY_CHUNK_SIZE = 4096
 
 
 @triton.jit
@@ -539,11 +544,33 @@ class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         *DeepseekV4SparseMLABackend.supported_kv_cache_dtypes,
         "fp8_e4m3",
+        "mxfp4_ds_mla",
+        "nvfp4_ds_mla",
     ]
 
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if kv_cache_dtype in (
+            "mxfp4_ds_mla",
+            "nvfp4_ds_mla",
+        ) and device_capability != DeviceCapability(9, 5):
+            return "DeepSeek V4.1 FP4 compressed KV cache requires ROCm gfx950"
+        return None
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -612,9 +639,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self._has_foreign_kv_writer
-        )
+        self._use_aiter_sparse_mla = self.kv_cache_dtype not in (
+            "mxfp4_ds_mla",
+            "nvfp4_ds_mla",
+        ) and _aiter_sparse_mla_enabled(self._has_foreign_kv_writer)
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
         if self._plain_fp8_kv:
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
@@ -1290,6 +1318,85 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         else:
             top_k = 0
             N = 0
+
+        # The gfx950 decode kernel already implements the heterogeneous
+        # V4.1 layout directly: FP8 SWA pages plus FP4 compressed pages. Reuse
+        # it for prefill by treating every prefill query token as a one-token
+        # decode row. This avoids materializing the whole compressed context
+        # as BF16 before sparse attention.
+        direct_fp4_prefill = (
+            _ON_GFX950
+            and not swa_only
+            and compressed_k_cache is not None
+            and compressed_k_cache.dtype == torch.uint8
+            and compressed_k_cache.shape[-1] in (272, 288)
+        )
+        if direct_fp4_prefill:
+            if mxfp8_out is not None:
+                (output,) = current_workspace_manager().get_simultaneous(
+                    (
+                        (num_prefill_tokens, self.n_local_heads, self.head_dim),
+                        torch.bfloat16,
+                    )
+                )
+            assert output is not None
+            assert attn_metadata is not None
+            assert swa_metadata.token_to_req_indices is not None
+            assert swa_metadata.is_valid_token is not None
+            assert swa_metadata.prefill_swa_indices is not None
+            assert swa_metadata.prefill_swa_lens is not None
+
+            compressed_block_size = attn_metadata.block_size // self.compress_ratio
+            for query_start in range(
+                0, num_prefill_tokens, _DIRECT_FP4_PREFILL_QUERY_CHUNK_SIZE
+            ):
+                query_end = min(
+                    query_start + _DIRECT_FP4_PREFILL_QUERY_CHUNK_SIZE,
+                    num_prefill_tokens,
+                )
+                prefill_slice = slice(
+                    num_decode_tokens + query_start,
+                    num_decode_tokens + query_end,
+                )
+                global_topk_indices, global_topk_lens = (
+                    compute_global_topk_indices_and_lens(
+                        topk_indices[query_start:query_end],
+                        swa_metadata.token_to_req_indices[prefill_slice],
+                        attn_metadata.block_table,
+                        compressed_block_size,
+                        swa_metadata.is_valid_token[prefill_slice],
+                    )
+                )
+                rocm_sparse_attn_decode(
+                    q=q[query_start:query_end],
+                    kv_cache=compressed_k_cache,
+                    swa_k_cache=swa_k_cache,
+                    swa_only=False,
+                    topk_indices=global_topk_indices,
+                    topk_lens=global_topk_lens,
+                    swa_indices=swa_metadata.prefill_swa_indices[query_start:query_end],
+                    swa_lens=swa_metadata.prefill_swa_lens[query_start:query_end],
+                    swa_ragged_indices=None,
+                    swa_ragged_indptr=None,
+                    topk_ragged_indices=None,
+                    topk_ragged_indptr=None,
+                    attn_sink=self.attn_sink,
+                    scale=self.scale,
+                    head_dim=self.head_dim,
+                    nope_head_dim=self.nope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                    output=output[query_start:query_end],
+                )
+            if mxfp8_out is not None:
+                rocm_inverse_rope_mxfp8_rows(
+                    output,
+                    positions[:num_prefill_tokens],
+                    self.rotary_emb.cos_sin_cache,
+                    self.rope_head_dim,
+                    mxfp8_out[0][:num_prefill_tokens],
+                    mxfp8_out[1][:num_prefill_tokens],
+                )
+            return
 
         M = N + self.window_size + self.max_num_batched_tokens
         chunk_plan = swa_metadata.get_prefill_chunk_plan(
