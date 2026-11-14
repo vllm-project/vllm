@@ -504,6 +504,19 @@ Supported models:
 
 Flags: `--tool-call-parser glm47`
 
+### Gemma 4 Models (`gemma4`)
+
+Use the Gemma 4 tool parser with the bundled chat template:
+
+```bash
+vllm serve google/gemma-4-26B-A4B-it \
+    --enable-auto-tool-choice \
+    --tool-call-parser gemma4 \
+    --chat-template examples/tool_chat_template_gemma4.jinja
+```
+
+In multi-turn conversations, keep the assistant's `content` and `tool_calls` in the same message, followed by the corresponding `role: "tool"` results. The template renders the assistant's text before its tool calls and the tool results, preserving the order of a pre-tool explanation. A final tool result leaves the model turn open for the next assistant continuation.
+
 ### FunctionGemma Models (`functiongemma`)
 
 Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.

@@ -88,6 +88,7 @@ steps:
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - examples/tool_chat_template_gemma4.jinja
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/serve
