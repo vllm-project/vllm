@@ -154,6 +154,58 @@ def _mask_candidates_kernel(
     )
 
 
+_SCORES_KEY = "dsa_candidate_block_scores"
+
+
+def reserve_candidate_scores(max_elems: int, device: torch.device) -> None:
+    """Pin the block-scores buffer in the workspace while it is still unlocked.
+
+    ``select_candidate_blocks`` scores every row of every step; sized by the
+    live decode rows, a fresh tensor per step outgrows the allocator's cached
+    blocks while the batch ramps up and the outgrown copies pile up in
+    reserved memory. One buffer sized for the largest step avoids that.
+    """
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    current_workspace_manager().get_persistent_resource(
+        _SCORES_KEY,
+        lambda: torch.empty((max_elems,), dtype=torch.float32, device=device),
+    )
+
+
+class _NotReserved(Exception):
+    pass
+
+
+def _scores_buffer(
+    logits: torch.Tensor, rows: int, nblocks: int, dtype: torch.dtype
+) -> torch.Tensor:
+    from vllm.v1.worker.workspace import (
+        current_workspace_manager,
+        is_workspace_manager_initialized,
+    )
+
+    if is_workspace_manager_initialized():
+
+        def missing() -> torch.Tensor:
+            raise _NotReserved
+
+        try:
+            buf = current_workspace_manager().get_persistent_resource(
+                _SCORES_KEY, missing
+            )
+        except (_NotReserved, AssertionError):
+            buf = None  # no profiling pass reserved the buffer (locked or not)
+        if (
+            buf is not None
+            and buf.device == logits.device
+            and buf.dtype == dtype
+            and buf.numel() >= rows * nblocks
+        ):
+            return buf[: rows * nblocks].view(rows, nblocks)
+    return logits.new_empty((rows, nblocks), dtype=dtype)
+
+
 def select_candidate_blocks(
     logits: torch.Tensor,
     row_ks: torch.Tensor | None,
@@ -191,7 +243,7 @@ def select_candidate_blocks(
             and is_deep_select_supported(scores, topk_blocks)
         )
     else:
-        scores = logits.new_empty((rows, nblocks), dtype=score_dtype)
+        scores = _scores_buffer(logits, rows, nblocks, score_dtype)
     valid_blocks = torch.empty(rows, dtype=torch.int32, device=logits.device)
     _block_scores_kernel[(rows, 32)](
         logits,
