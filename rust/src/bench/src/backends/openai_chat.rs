@@ -138,6 +138,7 @@ impl OpenAIChatBackend {
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
                 } else {
                     let status = response.status();
+                    output.status_code = Some(status.as_u16());
                     let body = response.text().await.unwrap_or_default();
                     output.error = if body.is_empty() {
                         format!("HTTP {status}")
