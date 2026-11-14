@@ -411,10 +411,10 @@ class MoRIIOConfig:
             dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
         )
         backend = str(extra_config.get("backend", "rdma")).lower()
-        if backend not in ("rdma", "xgmi"):
+        if backend not in ("rdma", "xgmi", "ofi"):
             raise ValueError(
                 f"Invalid MoRIIO backend {backend!r} in kv_connector_extra_config; "
-                "must be one of 'rdma' or 'xgmi'."
+                "must be one of 'rdma', 'xgmi', or 'ofi'."
             )
 
         transfer_timeout = _positive_finite_timeout(
