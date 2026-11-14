@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import vllm.models.muse_spark.amd.model as amd_model
+from vllm.config import EPLBConfig
 from vllm.models.muse_spark.amd.model import (
     MuseSparkForCausalLM,
     MuseSparkModel,
@@ -201,6 +202,34 @@ def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(
     assert per_expert_calls == [[name for name, _ in individual]]
 
 
+def test_consolidated_loader_fills_every_initial_redundant_replica() -> None:
+    """EPLB's initial placement maps physical expert p to logical p % num_logical."""
+    num_logical, num_physical = 4, 6
+    calls: list[tuple[str, int, float]] = []
+
+    def weight_loader(*, param, loaded_weight, weight_name, shard_id, expert_id):
+        calls.append((shard_id, expert_id, loaded_weight.item()))
+
+    experts = MuseSparkConsolidatedRoutedExperts.__new__(
+        MuseSparkConsolidatedRoutedExperts
+    )
+    object.__setattr__(
+        experts,
+        "moe_config",
+        SimpleNamespace(num_experts=num_physical, num_logical_experts=num_logical),
+    )
+    object.__setattr__(
+        experts, "w2_weight", SimpleNamespace(weight_loader=weight_loader)
+    )
+
+    w2 = torch.arange(num_logical, dtype=torch.float32).view(num_logical, 1)
+    assert list(experts.load_weights([("w2_weight", w2)])) == ["w2_weight"]
+    assert sorted(calls) == sorted(
+        ("w2", physical, float(physical % num_logical))
+        for physical in range(num_physical)
+    )
+
+
 def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
     from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.models.muse_spark.amd.model import MuseSparkMoE
@@ -280,3 +309,26 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         spec, ["attn"], default_vllm_config, torch.device("cpu")
     )
     assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)
+
+
+@pytest.mark.parametrize(
+    "use_async,communicator,warns",
+    [
+        (False, "pynccl", False),
+        (False, "torch_nccl", False),
+        (False, "nixl", True),
+        (True, "nixl", True),
+        (True, "torch_gloo", True),
+    ],
+)
+def test_eplb_warns_on_async_or_nixl(
+    monkeypatch, use_async: bool, communicator: str, warns: bool
+) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(amd_model.logger, "warning_once", messages.append)
+    amd_model.warn_on_async_eplb(
+        EPLBConfig(use_async=use_async, communicator=communicator)
+    )
+    assert bool(messages) == warns
+    if warns:
+        assert "pynccl" in messages[0]
