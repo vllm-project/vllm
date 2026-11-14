@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from vllm.config import SpeculativeConfig
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
@@ -151,3 +153,21 @@ def get_parallel_drafting_token_id(hf_config) -> int:
         " `mask_token_id`, `dspark_noise_token_id`, `pard_token`, or"
         " `ptd_token_id` for parallel drafting."
     )
+
+
+def check_draft_context_window(
+    speculative_config: SpeculativeConfig,
+    attn_layers: dict[str, AttentionLayerBase],
+    draft_layer_names: set[str],
+) -> None:
+    """Raise if `draft_context_window` is set but a draft layer ignores it."""
+    window = speculative_config.draft_context_window
+    if window is None:
+        return
+    for name in sorted(draft_layer_names):
+        if getattr(attn_layers[name], "sliding_window", None) != window:
+            raise ValueError(
+                f"draft_context_window is set but draft layer {name} does "
+                "not apply it. Only drafters built on the Llama EAGLE-3 model "
+                "code support it."
+            )

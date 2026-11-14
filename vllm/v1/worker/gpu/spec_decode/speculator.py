@@ -43,6 +43,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.utils import check_draft_context_window
 from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 if TYPE_CHECKING:
@@ -303,6 +304,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
         for layer_name in self.draft_attn_layer_names:
             all_attn_layers[layer_name].is_draft_layer = True
+        check_draft_context_window(
+            self.speculative_config, all_attn_layers, self.draft_attn_layer_names
+        )
 
         target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)
