@@ -51,7 +51,7 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankLocalTransform:
     """Marks a weights transform that is safe to run on only the weights this
     rank loads.
