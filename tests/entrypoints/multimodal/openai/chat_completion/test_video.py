@@ -37,15 +37,14 @@ def server():
         json.dumps({"video": MAXIMUM_VIDEOS}),
         "--media-io-kwargs",
         json.dumps({"video": {"num_frames": 32}}),
+        "--trust-request-mm-kwargs",
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # video processing when downloading multiple videos from external sources
+    # ROCm: Allow more time to download videos from external sources.
     env_overrides = {}
     if current_platform.is_rocm():
         env_overrides = {
             "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
         }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
@@ -97,7 +96,7 @@ def describe_video_messages(
     family of tests. *extra_video_fields* is merged into the top-level
     video content block (for uuid / bad-key tests).
 
-    Pass ``None`` for *video_url* to omit media (uuid-backed cache hits).
+    Pass `None` for *video_url* to omit media (uuid-backed cache hits).
     """
     video_block: dict = {
         "type": "video_url",

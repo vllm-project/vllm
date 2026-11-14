@@ -48,9 +48,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
-    InternVLVideoProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
+    InternVLChatVideoProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -134,7 +134,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -145,7 +145,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: InternVLProcessor,
+        processor: InternVLChatProcessor,
     ) -> int:
         return processor.get_num_image_tokens(
             image_width=image_width,
@@ -261,7 +261,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()
@@ -333,7 +333,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
     def get_video_processor(self, **kwargs):
         config = self.get_hf_config()
@@ -342,7 +342,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
 
-        return InternVLVideoProcessor(**kwargs)
+        return InternVLChatVideoProcessor(**kwargs)
 
     @cached_property
     def ctx_video_token(self):
@@ -363,7 +363,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         return ctx_video_token
 
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -378,7 +378,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             self.get_video_processor(**kwargs) if ctx_video_token else None
         )
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=video_processor,
@@ -393,17 +393,13 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
         processor = self.get_hf_processor()
         num_image_token = processor.image_seq_length
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
+        max_total_frames = seq_len // num_image_token
+        max_frames_per_video = max_total_frames // max(num_videos, 1)
 
         return max(max_frames_per_video, 1)
 
@@ -428,10 +424,10 @@ class InternVLDummyInputsBuilder(
         if self.info.ctx_video_token:
             config = self.info.get_hf_config()
             image_size: int = config.vision_config.image_size
-            target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
-            )
             num_videos = mm_counts.get("video", 0)
+            target_num_frames = self.info.get_num_frames_with_most_features(
+                seq_len, num_videos
+            )
             video_overrides = mm_options.get("video")
             dummy_video = {
                 "video": self._get_dummy_videos(
@@ -498,7 +494,7 @@ class InternVLMultiModalProcessor(
     def _get_prompt_repl_video(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()

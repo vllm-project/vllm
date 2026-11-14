@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import time
+from typing import Self
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -10,11 +11,14 @@ from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
     from ray import serve as ray_serve
+except ImportError:
+    ray_serve = None
+
+try:
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
-    ray_serve = None
 import regex as re
 
 
@@ -58,7 +62,7 @@ class RayPrometheusMetric:
 
         return {k: v if isinstance(v, str) else str(v) for k, v in labelskwargs.items()}
 
-    def labels(self, *labels, **labelskwargs) -> "RayPrometheusMetric":
+    def labels(self, *labels, **labelskwargs) -> Self:
         if self._is_labeled:
             raise ValueError("labels() cannot be called on an already-labeled metric.")
         clone = copy.copy(self)
@@ -204,8 +208,3 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
-
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # No-op on purpose
-        pass

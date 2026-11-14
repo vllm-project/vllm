@@ -12,7 +12,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
@@ -56,6 +56,21 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"min_p": 0.1},
+        {"logit_bias": {0: 1.0}},
+        {"min_p": 0.05, "logit_bias": {1: -1.0}},
+    ],
+)
+def test_spec_decode_accepts_min_p_and_logit_bias(kwargs: dict):
+    """min_p and logit_bias are applied to target logits before rejection
+    sampling, so a speculative config must not reject the request."""
+    params = SamplingParams(**kwargs)
+    params.verify(MockModelConfig(), object(), None, None)
+
+
 def test_verify_leaves_logits_processors_to_admission():
     """verify() is runner-agnostic; LP validation lives in the admission
     layer, so an unimportable FQCN must not fail verify()."""
@@ -71,7 +86,6 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         params,
         canvas_length=canvas_length,
         vocab_size=model_config.get_vocab_size(),
-        async_scheduling=True,
     )
 
 
@@ -100,7 +114,7 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
         {"diffusion_canvas_length": 8},
     ],
 )
-def test_narrow_diffusion_canvas_requires_async_scheduling(
+def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     async_scheduling, extra_args
 ):
     processor = SimpleNamespace(
@@ -113,13 +127,10 @@ def test_narrow_diffusion_canvas_requires_async_scheduling(
         diffusion_config=DiffusionConfig(canvas_length=8),
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
     params = SamplingParams(extra_args=extra_args)
-    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
-        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
-            InputProcessor._validate_params(processor, params, ("generate",))
-    else:
-        InputProcessor._validate_params(processor, params, ("generate",))
+    InputProcessor._validate_params(processor, params, ("generate",))
 
 
 @pytest.mark.parametrize(

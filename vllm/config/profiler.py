@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any, Literal
+from typing import Literal, Self
 
 from pydantic import Field, model_validator
-from typing_extensions import Self
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
@@ -20,6 +18,34 @@ ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
 ProtonHook = Literal["triton"]
 ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
+
+
+def validate_profile_prefix(prefix: str | None) -> str | None:
+    """Validate a trace filename prefix supplied for one profiling session."""
+    if prefix is None:
+        return None
+    if (
+        not 1 <= len(prefix) <= 128
+        or not prefix.isascii()
+        or not prefix[0].isalnum()
+        or any(not (char.isalnum() or char in "._-") for char in prefix[1:])
+    ):
+        raise ValueError(
+            "profile_prefix must be 1-128 ASCII characters, start with a letter "
+            "or number, and contain only letters, numbers, '.', '_', or '-'"
+        )
+    return prefix
+
+
+def validate_profile_iteration_bounds(
+    delay_iterations: int | None,
+    max_iterations: int | None,
+) -> None:
+    """Validate iteration bounds supplied for one profiling session."""
+    if delay_iterations is not None and delay_iterations < 0:
+        raise ValueError("delay_iterations must be greater than or equal to 0")
+    if max_iterations is not None and max_iterations < 0:
+        raise ValueError("max_iterations must be greater than or equal to 0")
 
 
 def _is_uri_path(path: str) -> bool:
@@ -63,29 +89,29 @@ class ProfilerConfig:
     separate rank-qualified file."""
 
     proton_context: ProtonContext = "shadow"
-    """Proton context source. ``shadow`` records explicit scopes with low
-    overhead; ``python`` records Python call stacks."""
+    """Proton context source. `shadow` records explicit scopes with low
+    overhead; `python` records Python call stacks."""
 
     proton_data: ProtonData = "tree"
-    """Proton output type. ``tree`` produces Hatchet data and ``trace``
+    """Proton output type. `tree` produces Hatchet data and `trace`
     produces a Chrome trace."""
 
     proton_backend: ProtonBackend | None = None
-    """Proton GPU backend. ``None`` lets Proton select CUPTI automatically."""
+    """Proton GPU backend. `None` lets Proton select CUPTI automatically."""
 
     proton_mode: str | None = None
-    """Optional backend-specific Proton mode string, such as ``pcsampling``."""
+    """Optional backend-specific Proton mode string, such as `pcsampling`."""
 
     proton_hook: ProtonHook | None = None
-    """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""
+    """Optional Proton hook. Use `triton` to add Triton launch metadata."""
 
     proton_output_format: ProtonOutputFormat | None = None
-    """Optional format passed to Proton when finalizing a profile. ``None``
-    uses the default format for ``proton_data``."""
+    """Optional format passed to Proton when finalizing a profile. `None`
+    uses the default format for `proton_data`."""
 
     proton_graph_attribution: bool = False
     """Observe CUDA graph capture so replayed kernels can be attributed.
-    Requires Triton >= 3.7 and ``proton_data='tree'``."""
+    Requires Triton >= 3.7 and `proton_data='tree'`."""
 
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
@@ -109,9 +135,8 @@ class ProfilerConfig:
     Disabled by default."""
 
     capture_torch_profiler: bool = False
-    """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
-    Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
-    Requires `profiler` to be set to 'torch'."""
+    """Deprecated and has no effect: only the removed Model Runner V1 profiled CUDA
+    graph capture. It will be removed in a future release."""
 
     detailed_trace_annotation: bool = False
     """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
@@ -136,6 +161,16 @@ class ProfilerConfig:
     Defaults to 0, meaning no limit.
     """
 
+    @property
+    def should_profile_frontend(self) -> bool:
+        """Whether the frontend CPU profiler should be enabled."""
+        activities = self.torch_profiler_activities
+        return (
+            self.profiler == "torch"
+            and not self.ignore_frontend
+            and (activities is None or "CPU" in activities)
+        )
+
     warmup_iterations: int = Field(default=0, ge=0)
     """Number of warmup iterations for PyTorch profiler schedule.
     During warmup, the profiler runs but data is discarded. This helps reduce
@@ -157,22 +192,14 @@ class ProfilerConfig:
     Defaults to 0 (no wait period).
     """
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
@@ -188,13 +215,7 @@ class ProfilerConfig:
                 raise ValueError(
                     "torch_profiler_activities must not contain duplicates"
                 )
-        records_cpu_activity = activities is None or "CPU" in activities
-        if (
-            self.profiler == "torch"
-            and has_delay_or_limit
-            and not self.ignore_frontend
-            and records_cpu_activity
-        ):
+        if has_delay_or_limit and self.should_profile_frontend:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
@@ -271,6 +292,11 @@ class ProfilerConfig:
             raise ValueError(
                 "capture_torch_profiler is only applicable when profiler is "
                 "set to 'torch'"
+            )
+        if self.capture_torch_profiler:
+            logger.warning_once(
+                "capture_torch_profiler is deprecated and has no effect. It will "
+                "be removed in a future release."
             )
 
         return self

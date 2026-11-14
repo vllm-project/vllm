@@ -3,12 +3,12 @@
 """Unit tests for the test-tethering pre-commit check.
 
 The check answers one question - "does any Buildkite job (in
-``.buildkite/test_areas/`` or the legacy ``.buildkite/test-amd.yaml``) collect
-this test file?" - by parsing job ``commands`` as shell. The risk that
+`.buildkite/test_areas/` or the legacy `.buildkite/test-amd.yaml`) collect
+this test file?" - by parsing job `commands` as shell. The risk that
 matters is a *false tether*: a misparse that invents coverage makes the gate
 pass while the test still never runs, which is the exact failure the check
 exists to catch. So the parser cases below pin both directions, and
-:func:`test_no_selection_matches_everything` guards the catastrophic version of
+`test_no_selection_matches_everything` guards the catastrophic version of
 it.
 """
 
@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def runs(command: str, test_file: str) -> bool:
-    """True if `command` collects `test_file` (path relative to ``tests/``)."""
+    """True if `command` collects `test_file` (path relative to `tests/`)."""
     return any(sel.runs(test_file) for sel in _parse_command(command))
 
 
@@ -173,6 +173,31 @@ def test_ignore_and_deselect(command, test_file, expected):
         ("pytest kernels/test_a.py ; pytest lora/test_b.py", "lora/test_b.py", True),
         # An unresolvable $VAR path yields no coverage rather than a guess.
         ("pytest -v -s $TEST_TARGET", "kernels/test_a.py", False),
+        # `\`-continued lines (one path per line in a yaml `|` block) are one
+        # command: the indented continuation is not a match-everything path and
+        # a continued --ignore still ignores.
+        (
+            "pytest -v -s kernels -m core_model \\\n  --ignore kernels/test_a.py",
+            "lora/test_b.py",
+            False,
+        ),
+        (
+            "pytest -v -s \\\nkernels \\\n--ignore=kernels/test_a.py",
+            "kernels/test_a.py",
+            False,
+        ),
+        (
+            "pytest -v -s \\\nkernels \\\n--ignore=kernels/test_a.py",
+            "kernels/test_b.py",
+            True,
+        ),
+        (
+            'bash run.sh 30m "\npytest -x \\\nkernels \\\n--ignore=kernels/test_a.py"',
+            "kernels/test_a.py",
+            False,
+        ),
+        # An escaped backslash before a newline is not a continuation.
+        ("pytest -v -s kernels/test_a.py \\\\\n", "lora/test_b.py", False),
     ],
 )
 def test_option_and_token_handling(command, test_file, expected):
@@ -675,7 +700,7 @@ def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):
 
 def test_non_mapping_yaml_is_fatal(tmp_path, monkeypatch):
     """A yaml that parses but isn't a pipeline mapping (a bare list or scalar)
-    must raise the actionable error, not crash on ``.get``."""
+    must raise the actionable error, not crash on `.get`."""
     with pytest.raises(SystemExit):
         _write_area(tmp_path, monkeypatch, "- just\n- a\n- list\n")
 

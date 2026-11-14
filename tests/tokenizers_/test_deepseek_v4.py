@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.entrypoints.chat_utils import parse_chat_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.renderers.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
@@ -159,13 +160,17 @@ def test_deepseek_v4_does_not_transition_after_mid_conversation_system():
     [
         (
             False,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
         (
             True,
-            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
-            "<｜end▁of▁sentence｜>",
+            (
+                "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer"
+                "<｜end▁of▁sentence｜>"
+            ),
         ),
     ],
 )
@@ -387,6 +392,26 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
 
 
 @pytest.mark.parametrize(
+    ("effort_map", "expected_prefix"),
+    [
+        (None, "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"),
+        ({"xhigh": "max"}, "<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"),
+        ({"xhigh": "low"}, "<｜begin▁of▁sentence｜><｜User｜>Hello"),
+    ],
+)
+def test_deepseek_v4_respects_reasoning_effort_map(effort_map, expected_prefix):
+    messages = [{"role": "user", "content": "Hello"}]
+    request = ChatCompletionRequest(messages=messages, reasoning_effort="xhigh")
+    params = request.build_chat_params(None, "auto", effort_map)
+
+    prompt = _tokenizer().apply_chat_template(
+        messages, tokenize=False, **params.get_apply_chat_template_kwargs()
+    )
+
+    assert prompt.startswith(expected_prefix)
+
+
+@pytest.mark.parametrize(
     ("case_id", "kwargs"),
     [
         (1, {"thinking": True, "reasoning_effort": "low"}),
@@ -452,7 +477,7 @@ def test_deepseek_v4_image_blocks_become_placeholders():
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
     """The borrowed sentinel ids must line up with the reserved
-    ``<|place_holder_mm_span_XXXX|>`` tokens in the tokenizer."""
+    `<|place_holder_mm_span_XXXX|>` tokens in the tokenizer."""
     from vllm.models.deepseek_v4.common.mm_preprocess import (
         IMAGE_SENTINEL_BASE_ID,
         IMAGE_SENTINEL_TOKEN_NAMES,

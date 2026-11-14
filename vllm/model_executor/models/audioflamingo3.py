@@ -284,9 +284,7 @@ def _build_audio_encoder_attention_mask(
     )
     padding_mask = seq_range >= conv_lengths[:, None]
 
-    attention_mask = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-        batch_size, 1, max_seq_len, max_seq_len
-    )
+    attention_mask = padding_mask[:, None, None, :]
     attention_mask = attention_mask.to(dtype=dtype, device=device)
     attention_mask.masked_fill_(padding_mask[:, None, None, :], float("-inf"))
 

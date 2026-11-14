@@ -44,7 +44,7 @@ def make_random_kv_cache(
 ):
     """Create a random fp8 KV cache mimicking the production allocation.
 
-    Physical layout: [L, B, H, N, 2 * hs] permuted by ``layout.stride_order``
+    Physical layout: [L, B, H, N, 2 * hs] permuted by `layout.stride_order`
     Returned view:   (num_blocks, 2, num_kv_heads, block_size, head_size)
     with non-contiguous strides under cross-layer layouts (they skip over
     num_layers), matching the actual forward path.

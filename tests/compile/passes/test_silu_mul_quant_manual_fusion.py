@@ -84,7 +84,7 @@ def test_manual_fusion_fp8_static_with_linear(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    force_kernel: FP8ScaledMMLinearKernel,
+    force_kernel: type[FP8ScaledMMLinearKernel],
 ):
     """Test manual fusion with real FP8 linear layer (kFp8StaticTensorSym).
 

@@ -4,6 +4,7 @@
 
 import ast
 import inspect
+from collections.abc import MutableMapping
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from vllm.model_executor.models.transformers.fusers import (
     packed_qkv,
     qkv,
 )
+from vllm.model_executor.models.transformers.fusers.glu import ActAndMulQuant
 from vllm.model_executor.models.transformers.fx_utils import (
     bypass_existence_guard,
     trace,
@@ -745,7 +747,10 @@ def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
         if gate.bias is not None:
             merged.bias.copy_(torch.cat([gate.bias, up.bias], dim=0))
     setattr(module, fuser.merged_name, merged)
-    setattr(module, fuser.act_name, SiluAndMulStub())
+    act = SiluAndMulStub()
+    setattr(
+        module, fuser.act_name, ActAndMulQuant(act) if fuser.fuses_act_quant else act
+    )
     delattr(module, fuser.gate_name)
     delattr(module, fuser.up_name)
     module.forward = MethodType(fuser.fused_forward, module)
@@ -804,6 +809,8 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     names = fuser.fused_forward.__code__.co_names
     assert "gate_up_proj" in names and "act_fn" in names and "down_proj" in names
     assert not {"gate_proj", "up_proj"} & set(names)
+    # The activation can fuse with the down projection's input quantization
+    assert fuser.fuses_act_quant
 
     # Numerics: the fused forward must match the original on a real instance.
     real = mlp_cls(bias=bias)
@@ -838,9 +845,14 @@ def test_glu_identifies_down_projection():
     matches the column-parallel merged gate/up; `None` when there is no such
     projection to force (fusion of gate/up still applies)."""
     with torch.device("meta"):
-        assert get_fuser(GLUMLP(), GLUFuser).down_name == "down_proj"
-        assert get_fuser(ReversedGLUMLP(), GLUFuser).down_name == "down_proj"
-        assert get_fuser(NoDownGLU(), GLUFuser).down_name is None
+        for cls, down_name in [
+            (GLUMLP, "down_proj"),
+            (ReversedGLUMLP, "down_proj"),
+            (NoDownGLU, None),
+        ]:
+            fuser = get_fuser(cls(), GLUFuser)
+            assert fuser is not None
+            assert fuser.down_name == down_name
 
 
 @pytest.mark.parametrize("attn_cls", [FakeAttention, ReversedFakeAttention])
@@ -891,14 +903,19 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
 
 def test_qkv_identifies_output_projection():
     with torch.device("meta"):
-        assert get_fuser(FakeAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(ReversedFakeAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(ExtraProjAttention(), QKVFuser).o_name == "o_proj"
-        # Norm children (q_norm/k_norm) must not disturb o_proj identification.
-        assert get_fuser(QKNormAttention(), QKVFuser).o_name == "o_proj"
-        assert get_fuser(PerHeadQKNormAttention(), QKVFuser).o_name == "o_proj"
-        # A module between o_proj and the return is transparent.
-        assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
+        for cls in [
+            FakeAttention,
+            ReversedFakeAttention,
+            ExtraProjAttention,
+            # Norm children must not disturb o_proj identification.
+            QKNormAttention,
+            PerHeadQKNormAttention,
+            # A module between o_proj and the return is transparent.
+            ResidDropoutAttention,
+        ]:
+            fuser = get_fuser(cls(), QKVFuser)
+            assert fuser is not None
+            assert fuser.o_name == "o_proj"
 
 
 @pytest.mark.parametrize(
@@ -1265,6 +1282,7 @@ def test_fuser_is_cached_per_class_and_structure():
         fuser_a = get_fuser(GLUMLP(), GLUFuser)
         fuser_b = get_fuser(GLUMLP(), GLUFuser)
     assert fuser_a is fuser_b
+    assert get_fusers.cache is not None
     assert any(key[0] is GLUMLP for key in get_fusers.cache)
 
 
@@ -1297,8 +1315,10 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
     with torch.device("meta"):
         glu_fuser = get_fuser(GLUMLP(), GLUFuser)
         qkv_fuser = get_fuser(FakeAttention(), QKVFuser)
+    assert glu_fuser is not None and qkv_fuser is not None
 
     mapper = WeightsMapper()
+    assert isinstance(mapper.orig_to_new_stacked, MutableMapping)
     for prefix in ("model.layers.0.mlp", "model.layers.1.mlp"):
         mapper.orig_to_new_stacked.update(glu_fuser.orig_to_new_stacked(prefix))
     mapper.orig_to_new_stacked.update(
