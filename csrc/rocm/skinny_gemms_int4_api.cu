@@ -30,6 +30,15 @@ torch::Tensor wvSplitK_int4_g(VLLM_SKINNY_INT4_SIG) {
     case 5:
       return wvSplitK_int4_g_impl<5>(in_a, in_b, in_scale, in_zero_points,
                                      in_bias, CuCount, group_size);
+    case 6:
+      return wvSplitK_int4_g_impl<6>(in_a, in_b, in_scale, in_zero_points,
+                                     in_bias, CuCount, group_size);
+    case 7:
+      return wvSplitK_int4_g_impl<7>(in_a, in_b, in_scale, in_zero_points,
+                                     in_bias, CuCount, group_size);
+    case 8:
+      return wvSplitK_int4_g_impl<8>(in_a, in_b, in_scale, in_zero_points,
+                                     in_bias, CuCount, group_size);
     default:
       throw std::runtime_error("Unsupported N value: " +
                                std::to_string(in_b.size(0)));
