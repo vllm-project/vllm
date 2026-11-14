@@ -88,11 +88,6 @@ class UVAOffloader(BaseOffloader):
         # use pin_memory if possible, which helps cudagraph capture speed
         offloaded_parameters = False
         for name, p in module.named_parameters():
-            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
-                # we use per-parameter offloading
-                # one module might have some parameters offloaded and some not
-                break
-
             # Skip parameters an earlier wrap_modules call already offloaded.
             # The UVA path leaves p.device as the accelerator (a view of CPU
             # memory), so the marker is the only way to recognize those.
@@ -111,6 +106,11 @@ class UVAOffloader(BaseOffloader):
                 if not should_offload:
                     continue
 
+            parameter_bytes = p.data.numel() * p.data.element_size()
+            if self.cpu_offload_bytes + parameter_bytes > self.cpu_offload_max_bytes:
+                # One module might have some parameters offloaded and some not.
+                break
+
             cpu_data = p.data.to(device="cpu")
             if self.pin_memory:
                 cpu_data = cpu_data.pin_memory()
@@ -121,7 +121,7 @@ class UVAOffloader(BaseOffloader):
                 p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
                 p._vllm_is_uva_offloaded = True
 
-            self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
+            self.cpu_offload_bytes += parameter_bytes
             offloaded_parameters = True
 
         if offloaded_parameters and not self.uva_offloading:
