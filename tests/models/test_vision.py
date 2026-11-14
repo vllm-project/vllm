@@ -251,6 +251,20 @@ class SimpleMRopeVisionModel(torch.nn.Module):
             )
 
 
+class MixedDtypeMRopeVisionModel(SimpleMRopeVisionModel):
+    """Keeps its first parameter in fp32 but returns bf16, like MiniMax-M3's
+    vision tower (fp32 patch embedding)."""
+
+    def __init__(self, declare_dtype: bool = True):
+        super().__init__()
+        self.linear.to(torch.float32)
+        if declare_dtype:
+            self.dtype = torch.bfloat16
+
+    def forward(self, pixel_values: torch.Tensor, grid_thw_list: list[list[int]]):
+        return super().forward(pixel_values, grid_thw_list).to(torch.bfloat16)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "batch_size",
@@ -274,8 +288,24 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
     )
 
 
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_mixed_dtype():
+    """One image on two ranks leaves a rank empty; its output must take the
+    model's compute dtype, not the dtype of its first (fp32) parameter."""
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_vs_direct,
+        args=(world_size, 1, get_open_port(), True),
+        nprocs=world_size,
+    )
+
+
 def run_dp_sharded_mrope_vision_model_vs_direct(
-    local_rank: int, world_size: int, batch_size: int, master_port: int
+    local_rank: int,
+    world_size: int,
+    batch_size: int,
+    master_port: int,
+    mixed_dtype: bool = False,
 ):
     """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
@@ -319,7 +349,9 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
     pixel_values = torch.cat(pixel_values_list, dim=0)
 
     # Create a simple mrope vision model
-    vision_model = SimpleMRopeVisionModel()
+    vision_model = (
+        MixedDtypeMRopeVisionModel() if mixed_dtype else SimpleMRopeVisionModel()
+    )
 
     # Run the model directly on the full input (only on rank 0)
     if local_rank == 0:
@@ -338,8 +370,9 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
 
     # Compare outputs (only on rank 0)
     if local_rank == 0:
-        # Check that the outputs have the same shape
+        # Check that the outputs have the same shape and dtype
         assert direct_output.shape == sharded_output.shape
+        assert direct_output.dtype == sharded_output.dtype
         # Check that the outputs are close (they should be identical)
         assert torch.allclose(direct_output, sharded_output, rtol=1e-5, atol=1e-5)
 
@@ -390,6 +423,55 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
         )
 
     assert len(output) == 0
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_undeclared_dtype_raises():
+    """A tower whose output dtype differs from its first parameter and that
+    does not declare `dtype` breaks the contract; the guard must raise. Each
+    rank gets an image, so both raise and none waits in the all-gather; this
+    does not cover terminating an empty peer."""
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_undeclared_dtype_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_undeclared_dtype_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    device = f"{current_platform.device_type}:{local_rank}"
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    init_distributed_environment()
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # One image per rank, so every rank reaches the check before the all-gather.
+    grid_thw_list = [[1, 4, 4], [1, 4, 4]]
+    pixel_values = torch.randn(32, 768)
+    vision_model = MixedDtypeMRopeVisionModel(declare_dtype=False)
+
+    with (
+        torch.inference_mode(),
+        pytest.raises(ValueError, match="Define `dtype` on the vision model"),
+    ):
+        run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list, rope_type="rope_3d"
+        )
 
 
 @multi_gpu_test(num_gpus=4)
