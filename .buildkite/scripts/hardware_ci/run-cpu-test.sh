@@ -96,10 +96,30 @@ rm -f "$build_log"
 # lifetime, so every run re-fetches them from the network on the "offline"
 # attempt and unconditionally falls back to the online retry.
 OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)|Invalid repository ID or local directory specified|Cannot find any model weights with'
+
+# On main builds the pipeline generator traces this script's command on the
+# host and sets CI_INFRA_TRACE_ID. Pass that trace context into the container
+# and load the same helpers there, so pytest records per-test timings
+# (.buildkite/scripts/ci-otel/README.md). Without a trace ID nothing changes.
+OTEL_DOCKER_ARGS=()
+OTEL_SETUP=""
+if [ -n "${CI_INFRA_TRACE_ID:-}" ]; then
+    OTEL_DOCKER_ARGS=(-e CI_INFRA_TRACE_ID -e CI_INFRA_COMMAND_SPAN_ID
+        -e BUILDKITE -e BUILDKITE_AGENT_ACCESS_TOKEN -e BUILDKITE_AGENT_ENDPOINT
+        -e BUILDKITE_JOB_ID -e BUILDKITE_BUILD_ID -e BUILDKITE_BUILD_NUMBER
+        -e BUILDKITE_BUILD_URL -e BUILDKITE_BRANCH -e BUILDKITE_COMMIT
+        -e BUILDKITE_LABEL -e BUILDKITE_PIPELINE_SLUG
+        -e BUILDKITE_ORGANIZATION_SLUG -e BUILDKITE_AGENT_META_DATA_QUEUE)
+    # Inside `if`, so a missing or broken helper skips tracing instead of
+    # failing the job.
+    # shellcheck disable=SC2016  # expanded by the container's shell, not here
+    OTEL_SETUP='CI_INFRA_OTEL_DIR=/vllm-workspace/.buildkite/scripts/ci-otel; if [ -f "$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && sh -n "$CI_INFRA_OTEL_DIR/ci_otel.sh" && . "$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else echo "vLLM CI OTel: tracing setup skipped" >&2; fi;'
+fi
+
 run_test() {
     local hf_offline=$1
-    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm:/root/.cache/vllm --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g "$IMAGE_NAME" \
-        timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
+    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm:/root/.cache/vllm --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 ${OTEL_DOCKER_ARGS[@]+"${OTEL_DOCKER_ARGS[@]}"} --shm-size=4g "$IMAGE_NAME" \
+        timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; ${OTEL_SETUP} echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
 }
 
 test_log="$(mktemp)"
