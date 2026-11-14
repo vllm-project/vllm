@@ -128,6 +128,7 @@ def _mega_moe_worker(pgi, vllm_config, cpu_group, k, n, topk, swiglu_limit, fse)
             max_num_tokens=MAX_NUM_TOKENS,
         ),
         moe_parallel_config=parallel,
+        num_fused_shared_experts=int(fse),
     )
     w13_q, w2_q, w13_s, w2_s, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
         backend,
@@ -152,7 +153,17 @@ def _mega_moe_worker(pgi, vllm_config, cpu_group, k, n, topk, swiglu_limit, fse)
     experts.process_weights_after_loading(layer)
     kernel = FusedMoEKernel(prepare, experts)
 
+    def append_shared(weights, ids, shared_id):
+        if not fse:
+            return weights, ids
+        shared_ids = torch.full_like(ids[:, :1], shared_id)
+        shared_weights = torch.ones_like(weights[:, :1])
+        weights = torch.cat([weights, shared_weights], -1)
+        return weights, torch.cat([ids, shared_ids], -1)
+
     def run(x, weights, ids):
+        # The router appends the shared route at global id NUM_EXPERTS.
+        weights, ids = append_shared(weights, ids, NUM_EXPERTS)
         with set_forward_context(None, vllm_config):
             return kernel.apply(
                 x,
@@ -176,10 +187,7 @@ def _mega_moe_worker(pgi, vllm_config, cpu_group, k, n, topk, swiglu_limit, fse)
         weights = torch.randn(m, topk).softmax(dim=-1)
 
         actual = run(x, weights, ids)
-        if fse:
-            shared = torch.full((m, 1), NUM_EXPERTS + pgi.rank, dtype=ids.dtype)
-            ids = torch.cat([ids, shared], dim=-1)
-            weights = torch.cat([weights, torch.ones(m, 1)], dim=-1)
+        weights, ids = append_shared(weights, ids, NUM_EXPERTS + pgi.rank)
         rel_l2 = _rel_l2(actual, _reference(x, weights, ids, w13, w2, swiglu_limit))
         assert rel_l2 < REL_L2_BUDGET, f"m={m} relL2={rel_l2:.4f}"
 

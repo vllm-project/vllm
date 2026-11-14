@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import typing
 import weakref
 from collections.abc import Callable, Iterable
@@ -27,9 +26,6 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
-    load_aiter_mega_moe_expert,
-)
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
@@ -54,13 +50,6 @@ from vllm.model_executor.layers.mhc import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.online.base import (
-    ONLINE_SHARED_EXPERT_QUANTIZERS,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_and_maybe_dequant_weights,
-    kMxfp4Static,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -650,20 +639,13 @@ class DeepseekV4MoE(nn.Module):
                 quant_config, prefix, disable_under_ep=True
             )
 
-        self.fuse_mega_moe_shared_expert = (
+        if (
             vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
             and config.n_shared_experts == 1
-            and resolve_layer_fused_shared_expert(
+        ):
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix, moe_backend="aiter_mega_moe"
             )
-        )
-        shared_quant_config = quant_config
-        if self.fuse_mega_moe_shared_expert:
-            # The checkpoint's shared expert is loaded as is, then requantized
-            # into the MegaMoE shared slot by fuse_mega_moe_shared_experts.
-            assert quant_config is not None
-            shared_quant_config = copy.copy(quant_config)
-            shared_quant_config.online_quantization_config = None
 
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
@@ -675,7 +657,7 @@ class DeepseekV4MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 swiglu_limit=self.swiglu_limit,
-                quant_config=shared_quant_config,
+                quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -688,9 +670,7 @@ class DeepseekV4MoE(nn.Module):
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
         fuse_shared_into_routed = (
-            self.is_fused_shared_expert_enabled
-            or self.fuse_heterogeneous_shared_expert
-            or self.fuse_mega_moe_shared_expert
+            self.is_fused_shared_expert_enabled or self.fuse_heterogeneous_shared_expert
         )
         self.experts = FusedMoEFactory(
             shared_experts=(None if fuse_shared_into_routed else self.shared_experts),
@@ -707,6 +687,7 @@ class DeepseekV4MoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            shared_expert_prefix=f"{prefix}.shared_experts",
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
@@ -746,39 +727,6 @@ class DeepseekV4MoE(nn.Module):
         )
 
         return final_hidden_states.view(org_shape)
-
-    def load_mega_moe_shared_expert(self) -> None:
-        """Requantize the loaded shared expert to MXFP4 into its MegaMoE slot,
-        the last local expert."""
-        mlp = self.shared_experts
-        assert mlp is not None
-        quantize = ONLINE_SHARED_EXPERT_QUANTIZERS[kMxfp4Static]
-        w13, w13_scale = quantize(
-            get_and_maybe_dequant_weights(mlp.gate_up_proj, torch.bfloat16)
-        )
-        w2, w2_scale = quantize(
-            get_and_maybe_dequant_weights(mlp.down_proj, torch.bfloat16)
-        )
-        routed = self.experts.routed_experts
-        load_aiter_mega_moe_expert(
-            routed,
-            routed.w13_weight.shape[0] - 1,
-            w13.view(torch.uint8),
-            w2.view(torch.uint8),
-            w13_scale.view(torch.uint8),
-            w2_scale.view(torch.uint8),
-        )
-        self.shared_experts = None
-
-
-def fuse_mega_moe_shared_experts(model: nn.Module) -> None:
-    for module in list(model.modules()):
-        if (
-            isinstance(module, DeepseekV4MoE)
-            and module.fuse_mega_moe_shared_expert
-            and module.shared_experts is not None
-        ):
-            module.load_mega_moe_shared_expert()
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
@@ -1394,10 +1342,13 @@ def _redirect_shared_expert_name(
     if ".ffn.shared_experts.w" not in name:
         return name
     if extract_layer_index(name) in fuse_by_layer:
-        return name.replace(
-            ".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w"
-        )
+        return redirect_fused_shared_expert_name(name, n_routed_experts)
     return name.replace(".ffn.shared_experts.w2", ".ffn.shared_experts.down_proj")
+
+
+def redirect_fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
+    """Route a DSV4 shared-expert checkpoint name to its routed-expert slot."""
+    return name.replace(".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w")
 
 
 def _make_deepseek_v4_weights_mapper(
@@ -1413,8 +1364,14 @@ def _make_deepseek_v4_weights_mapper(
         #
         #  - DeepSeek native ``.scale``: expert scales -> ``.weight_scale``,
         #    everything else -> ``.weight_scale_inv``.
+        # Fused shared experts load into the MXFP4 routed expert slots.
+        experts = (
+            r"(?:experts\.\d+|shared_experts)"
+            if fuse_shared_experts
+            else r"experts\.\d+"
+        )
         scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+            re.compile(rf"(\.{experts}\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
     else:
@@ -1526,8 +1483,6 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        # Must precede the gate_up preshuffle of the shared experts.
-        fuse_mega_moe_shared_experts(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
         for module in self.modules():

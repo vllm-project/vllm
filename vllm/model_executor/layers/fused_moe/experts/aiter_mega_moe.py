@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -37,8 +38,6 @@ logger = init_logger(__name__)
 MAX_EP_SIZE = 8
 MAX_TOPK = 16
 MAX_LOCAL_EXPERTS = 256
-
-KERNEL_WEIGHT_NAMES = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
 
 
 def shuffle_aiter_mega_moe_weights(
@@ -66,58 +65,24 @@ def shuffle_aiter_mega_moe_weights(
     )
 
 
-def load_aiter_mega_moe_expert(
-    layer: torch.nn.Module,
-    expert: int,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> None:
-    """Write one local expert into a layer whose weights are already shuffled.
-
-    The shuffle is per expert, so the expert is shuffled on its own and copied
-    into its slot.
-    """
-    shuffled = shuffle_aiter_mega_moe_weights(
-        w13[None], w2[None], w13_scale[None], w2_scale[None]
-    )
-    num_experts = layer.w13_weight.shape[0]
-    for name, src in zip(KERNEL_WEIGHT_NAMES, shuffled):
-        dst = getattr(layer, name)
-        dst.view(num_experts, -1)[expert].copy_(src.reshape(-1))
-
-
 @triton.jit
-def _append_shared_expert_kernel(
+def _remap_fused_shared_expert_ids_kernel(
     topk_ids_ptr,
-    topk_weights_ptr,
     out_ids_ptr,
-    out_weights_ptr,
-    num_tokens,
-    shared_expert_id,
-    TOPK: tl.constexpr,
+    numel,
+    num_routed_experts,
+    local_shared_base,
     ROUTED_PER_RANK: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    NUM_SHARED: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    mask = rows < num_tokens
-    for k in tl.static_range(TOPK):
-        e = tl.load(topk_ids_ptr + rows * TOPK + k, mask=mask, other=0)
-        w = tl.load(topk_weights_ptr + rows * TOPK + k, mask=mask, other=0.0)
-        e = tl.where(e >= 0, e + e // ROUTED_PER_RANK, e)
-        tl.store(out_ids_ptr + rows * (TOPK + 1) + k, e, mask=mask)
-        tl.store(out_weights_ptr + rows * (TOPK + 1) + k, w, mask=mask)
-    tl.store(
-        out_ids_ptr + rows * (TOPK + 1) + TOPK,
-        tl.zeros_like(rows) + shared_expert_id,
-        mask=mask,
-    )
-    tl.store(
-        out_weights_ptr + rows * (TOPK + 1) + TOPK,
-        tl.full([BLOCK_M], 1.0, tl.float32),
-        mask=mask,
-    )
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    routed = e + (e // ROUTED_PER_RANK) * NUM_SHARED
+    shared = local_shared_base + e - num_routed_experts
+    e = tl.where(e >= num_routed_experts, shared, tl.where(e >= 0, routed, e))
+    tl.store(out_ids_ptr + offs, e, mask=mask)
 
 
 def aiter_mega_moe_unsupported_reasons(moe_config: FusedMoEConfig) -> list[str]:
@@ -144,9 +109,7 @@ def aiter_mega_moe_unsupported_reasons(moe_config: FusedMoEConfig) -> list[str]:
         )
     if moe_config.num_local_experts > MAX_LOCAL_EXPERTS:
         reasons.append(f"{moe_config.num_local_experts} experts per rank")
-    num_shared = _num_fused_shared_experts(moe_config)
-    if num_shared > 1:
-        reasons.append(f"{num_shared} fused shared experts")
+    num_shared = moe_config.num_fused_shared_experts
     if moe_config.experts_per_token + num_shared > MAX_TOPK:
         reasons.append(f"top-k {moe_config.experts_per_token + num_shared}")
     if moe_config.has_bias:
@@ -177,18 +140,10 @@ def _init_mori_shmem(default_heap_size: str) -> None:
     _mori_shmem_initialized = True
 
 
-def _num_fused_shared_experts(moe_config: FusedMoEConfig) -> int:
-    # Every rank holds its own copy of a fused shared expert after its routed
-    # experts, and routes each of its tokens to that local copy.
-    ep_size = moe_config.moe_parallel_config.ep_size
-    return moe_config.num_local_experts - moe_config.num_experts // ep_size
-
-
 class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
     # MegaMoEV2 owns large symmetric-heap buffers, so every layer with the same
     # problem shares one runtime and passes its own weights per call.
     _runtime_cache: dict[tuple, Any] = {}
-    appends_fused_shared_experts = True
 
     def __init__(
         self,
@@ -196,7 +151,7 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ) -> None:
         super().__init__(moe_config, quant_config)
-        self.num_fused_shared_experts = _num_fused_shared_experts(moe_config)
+        self.num_fused_shared_experts = moe_config.num_fused_shared_experts
         # (max_tok_per_rank, runtime), ascending by capacity.
         self._runtimes: list[tuple[int, Any]] = []
 
@@ -239,7 +194,7 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return weight_key == kMxfp4Static and activation_key is None
+        return weight_key == kMxfp4Static and activation_key == kMxfp8Dynamic
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -251,6 +206,7 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
+        # The kernel quantizes its BF16 inputs to MXFP8 itself.
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -364,32 +320,30 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
             f"{num_tokens} tokens exceeds MegaMoE capacity {self._runtimes[-1][0]}"
         )
 
-    def _append_shared_expert(
-        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Map routed ids onto the per-rank (routed + shared) expert layout and
-        append a weight-1.0 route to this rank's own shared expert."""
+    def _remap_fused_shared_expert_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        """Map router ids, with the fused shared experts at
+        `[num_experts, num_experts + n)`, onto the per-rank (routed + shared)
+        expert layout, sending the shared routes to this rank's own copy."""
         moe = self.moe_config
         ep = moe.moe_parallel_config
         routed_per_rank = moe.num_experts // ep.ep_size
-        num_tokens, top_k = topk_ids.shape
-        shape = (num_tokens, top_k + self.num_fused_shared_experts)
-        out_ids = topk_ids.new_empty(shape, dtype=torch.int32)
-        out_weights = topk_weights.new_empty(shape, dtype=torch.float32)
-        if num_tokens:
-            block_m = 64
-            _append_shared_expert_kernel[(triton.cdiv(num_tokens, block_m),)](
-                topk_ids.contiguous(),
-                topk_weights.to(torch.float32).contiguous(),
+        num_shared = self.num_fused_shared_experts
+        assert topk_ids.shape[1] == moe.experts_per_token + num_shared
+        topk_ids = topk_ids.contiguous()
+        out_ids = torch.empty_like(topk_ids, dtype=torch.int32)
+        numel, block = topk_ids.numel(), 1024
+        if numel:
+            _remap_fused_shared_expert_ids_kernel[(triton.cdiv(numel, block),)](
+                topk_ids,
                 out_ids,
-                out_weights,
-                num_tokens,
+                numel,
+                moe.num_experts,
                 ep.ep_rank * moe.num_local_experts + routed_per_rank,
-                TOPK=top_k,
                 ROUTED_PER_RANK=routed_per_rank,
-                BLOCK_M=block_m,
+                NUM_SHARED=num_shared,
+                BLOCK=block,
             )
-        return out_weights, out_ids
+        return out_ids
 
     def apply(
         self,
@@ -413,7 +367,7 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
             raise RuntimeError("AITER MegaMoE weights have not been processed")
         runtime = self._select_runtime(hidden_states.shape[0])
         if self.num_fused_shared_experts:
-            topk_weights, topk_ids = self._append_shared_expert(topk_weights, topk_ids)
+            topk_ids = self._remap_fused_shared_expert_ids(topk_ids)
         # MegaMoEV2 reads these per launch; rebind to this layer's experts.
         runtime._s1_w1 = w1
         runtime._s1_w1_scale = self.quant_config.w1_scale

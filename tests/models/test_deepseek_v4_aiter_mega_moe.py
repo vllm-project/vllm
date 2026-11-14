@@ -27,11 +27,11 @@ from vllm.model_executor.layers.fused_moe.experts import (
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
     AiterMegaMoEExperts,
-    load_aiter_mega_moe_expert,
-    shuffle_aiter_mega_moe_weights,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
+    _backend_activation_key,
+    _get_requested_backends,
     backend_to_kernel_cls,
     make_mxfp4_moe_quant_config,
     map_mxfp4_backend,
@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
@@ -76,7 +77,7 @@ def _ep_moe_config(ep_size=8, hidden=HIDDEN, inter=INTER, **kwargs):
     return moe
 
 
-def _support_reason(moe, activation_key=None) -> str:
+def _support_reason(moe, activation_key=kMxfp8Dynamic) -> str:
     supported, reason = AiterMegaMoEExperts.is_supported_config(
         AiterMegaMoEExperts,
         moe,
@@ -111,6 +112,13 @@ def test_aiter_mega_moe_is_an_mxfp4_oracle_backend():
     assert backend_to_kernel_cls(Mxfp4MoeBackend.AITER_MEGA_MOE) == [
         AiterMegaMoEExperts
     ]
+    # Selected for checkpoints without an activation scheme or with MXFP8 ones.
+    assert _backend_activation_key(Mxfp4MoeBackend.AITER_MEGA_MOE) == kMxfp8Dynamic
+    for activation_key in (None, kMxfp8Dynamic):
+        assert _get_requested_backends(AITER_MEGA_MOE, activation_key) == [
+            Mxfp4MoeBackend.AITER_MEGA_MOE
+        ]
+    assert _get_requested_backends(AITER_MEGA_MOE, kMxfp4Dynamic) == []
     # MegaMoEV2 is built for the model's own dimensions.
     assert mxfp4_round_up_hidden_size_and_intermediate_size(
         Mxfp4MoeBackend.AITER_MEGA_MOE, 2880, 1440
@@ -141,8 +149,11 @@ def test_aiter_mega_moe_binds_the_passthrough_all2all_backend():
 
 def test_aiter_mega_moe_reports_its_constraints(mega_moe_host, monkeypatch):
     assert _support_reason(_ep_moe_config()) == ""
-    # MegaMoEV2 quantizes activations itself and takes them in bf16.
-    assert "quantization scheme" in _support_reason(_ep_moe_config(), kMxfp4Dynamic)
+    # MegaMoEV2 computes in MXFP8 activations, quantized from BF16 by itself.
+    for activation_key in (None, kMxfp4Dynamic):
+        assert "quantization scheme" in _support_reason(
+            _ep_moe_config(), activation_key
+        )
 
     no_ep = _ep_moe_config()
     no_ep.moe_parallel_config = replace(no_ep.moe_parallel_config, use_ep=False)
@@ -164,14 +175,12 @@ def test_aiter_mega_moe_reports_its_constraints(mega_moe_host, monkeypatch):
     too_many_routes.experts_per_token = 17
     assert "top-k 17" in _support_reason(too_many_routes)
 
-    # A fused shared expert is one extra local expert and one extra route.
+    # A fused shared expert is one extra route.
     fused_shared = _ep_moe_config()
-    fused_shared.num_local_experts += 1
+    fused_shared.num_fused_shared_experts = 1
     assert _support_reason(fused_shared) == ""
     fused_shared.experts_per_token = 16
     assert "top-k 17" in _support_reason(fused_shared)
-    fused_shared.num_local_experts += 1
-    assert "2 fused shared experts" in _support_reason(fused_shared)
 
     monkeypatch.setattr(vllm.utils.import_utils, "has_mori", lambda: False)
     assert "missing MoRI" in _support_reason(_ep_moe_config())
@@ -356,54 +365,18 @@ def test_runtime_selected_by_max_tokens_across_dp(
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 def test_fused_shared_expert_routes_to_the_local_copy():
     moe = _ep_moe_config(ep_rank=3)
-    moe.num_local_experts += 1
+    moe.num_local_experts += 2
+    moe.num_fused_shared_experts = 2
     experts = _make_experts(moe)
-    assert experts.num_fused_shared_experts == 1
 
-    # The experts take only the routed top-k and append the shared route.
-    assert AiterMegaMoEExperts.appends_fused_shared_experts
+    # The router appends the shared routes at [NUM_EXPERTS, NUM_EXPERTS + 2).
     ids = torch.randint(0, NUM_EXPERTS, (37, TOPK), device="cuda", dtype=torch.int32)
     ids[::5, 1] = -1
-    weights = torch.rand(37, TOPK, device="cuda")
-    out_weights, out_ids = experts._append_shared_expert(weights, ids)
+    shared = torch.tensor([NUM_EXPERTS, NUM_EXPERTS + 1], device="cuda")
+    ids = torch.cat([ids, shared.to(ids.dtype).expand(37, 2)], dim=1)
 
-    routed = torch.where(ids >= 0, ids + ids // 48, -1)
-    shared = torch.full_like(ids[:, :1], 3 * 49 + 48)
-    torch.testing.assert_close(out_ids, torch.cat([routed, shared], dim=1))
-    torch.testing.assert_close(
-        out_weights, torch.cat([weights, torch.ones_like(weights[:, :1])], dim=1)
-    )
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
-def test_load_one_expert_matches_shuffling_all_experts():
-    num_experts, hidden, inter = 3, 512, 256
-
-    def rand(*shape):
-        return torch.randint(0, 256, shape, dtype=torch.uint8, device="cuda")
-
-    raw = (
-        rand(num_experts, 2 * inter, hidden // 2),
-        rand(num_experts, hidden, inter // 2),
-        rand(num_experts, 2 * inter, hidden // 32),
-        rand(num_experts, hidden, inter // 32),
-    )
-    expected = shuffle_aiter_mega_moe_weights(*raw)
-
-    missing_last = [t.clone() for t in raw]
-    for t in missing_last:
-        t[-1] = 0
-    layer = SimpleNamespace(
-        **dict(
-            zip(
-                ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-                shuffle_aiter_mega_moe_weights(*missing_last),
-            )
-        )
-    )
-    load_aiter_mega_moe_expert(layer, num_experts - 1, *(t[-1] for t in raw))
-
-    torch.testing.assert_close(layer.w13_weight, expected[0], rtol=0, atol=0)
-    torch.testing.assert_close(layer.w2_weight, expected[1], rtol=0, atol=0)
-    torch.testing.assert_close(layer.w13_weight_scale, expected[2], rtol=0, atol=0)
-    torch.testing.assert_close(layer.w2_weight_scale, expected[3], rtol=0, atol=0)
+    routed = ids[:, :TOPK]
+    routed = torch.where(routed >= 0, routed + routed // 48 * 2, -1)
+    local_shared = torch.tensor([3 * 50 + 48, 3 * 50 + 49], device="cuda")
+    expected = torch.cat([routed, local_shared.to(ids.dtype).expand(37, 2)], dim=1)
+    torch.testing.assert_close(experts._remap_fused_shared_expert_ids(ids), expected)

@@ -72,6 +72,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Static32BlockE8M0Sym,
+    kFp8Static128BlockE8M0Sym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
@@ -81,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Static,
     kNvfp4Static,
+    scaled_dequantize,
 )
 
 logger = init_logger(__name__)
@@ -126,12 +129,27 @@ ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
     kMxfp4Static: mxfp4_quantize,
 }
 
+
+def _fp8_block_e8m0_dequantizer(
+    key: QuantKey,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def dequantize(weight: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
+        weight_scale = weight_scale.view(torch.float8_e8m0fnu)
+        return scaled_dequantize(
+            weight, weight_scale, key.scale.group_shape, torch.bfloat16
+        )
+
+    return dequantize
+
+
 # Dequantizers `(weight, weight_scale) -> high precision weight` of quantized fused
 # shared-expert checkpoint weights, keyed by the checkpoint weight QuantKey.
 ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
     QuantKey, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 ] = {
     kMxfp8Static: dequant_mxfp8_to_bf16,
+    kFp8Static128BlockE8M0Sym: _fp8_block_e8m0_dequantizer(kFp8Static128BlockE8M0Sym),
+    kFp8Static32BlockE8M0Sym: _fp8_block_e8m0_dequantizer(kFp8Static32BlockE8M0Sym),
 }
 
 

@@ -1440,3 +1440,30 @@ def test_nvfp4_oracle_only_skipped_for_requantized_layers(
     )
     assert isinstance(layers[1].quant_method, CompressedTensorsW4A4Nvfp4MoEMethod)
     assert not is_requantization_source()
+
+
+@pytest.mark.parametrize("block", [32, 128])
+def test_block_fp8_e8m0_shared_experts_are_dequantized(block: int, monkeypatch) -> None:
+    """DeepSeek-V4-style block-FP8 shared experts are detected and dequantized."""
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.online.base import (
+        ONLINE_SHARED_EXPERT_DEQUANTIZERS,
+    )
+    from vllm.model_executor.layers.quantization.utils.config_utils import (
+        get_checkpoint_quant_keys,
+    )
+
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[block, block]
+    )
+    monkeypatch.setattr(quant_config, "is_scale_e8m0", True, raising=False)
+    key, _ = get_checkpoint_quant_keys(quant_config, "shared_experts.w2", LinearBase)
+    assert key is not None and key.scale.group_shape == (block, block)
+
+    weight = torch.randn(2, 3 * block, 4 * block).to(torch.float8_e4m3fn)
+    scale = torch.randint(120, 130, (2, 3, 4), dtype=torch.uint8)
+    scale_blocks = scale.view(torch.float8_e8m0fnu).float()
+    scale_blocks = scale_blocks.repeat_interleave(block, 1).repeat_interleave(block, 2)
+    actual = ONLINE_SHARED_EXPERT_DEQUANTIZERS[key](weight, scale)
+    torch.testing.assert_close(actual, (weight.float() * scale_blocks).bfloat16())

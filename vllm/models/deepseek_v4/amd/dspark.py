@@ -47,7 +47,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 
 from .model import (
     DeepseekV4DecoderLayer,
-    fuse_mega_moe_shared_experts,
+    redirect_fused_shared_expert_name,
 )
 
 logger = init_logger(__name__)
@@ -381,12 +381,17 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         Non-mtp weights (embed/head/main layers) belong to the target model and
         are skipped here. `embed_tokens`/`lm_head` are aliased from the target.
         """
+        fuse_shared_experts = any(
+            getattr(layer.ffn, "is_fused_shared_expert_enabled", False)
+            for layer in self.model.layers
+        )
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts
+            + (self.config.n_shared_experts if fuse_shared_experts else 0),
             routed_experts_prefix="routed_experts",
         )
         expert_scale_suffix = (
@@ -411,6 +416,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             if mapped is None:
                 continue
             name = mapped
+            if fuse_shared_experts:
+                name = redirect_fused_shared_expert_name(
+                    name, self.config.n_routed_experts
+                )
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -473,9 +482,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        fuse_mega_moe_shared_experts(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.

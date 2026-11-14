@@ -504,6 +504,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.AITER_MEGA_MOE,
     ):
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
@@ -2211,7 +2212,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
-        # MegaMoEV2 takes bf16 activations and quantizes them internally.
+        # MegaMoEV2 takes BF16 activations and quantizes them to MXFP8 itself.
         Mxfp4MoeBackend.AITER_MEGA_MOE,
         Mxfp4MoeBackend.CPU,
     ):
