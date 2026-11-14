@@ -14,6 +14,8 @@ import sys
 # `openai`, `fastapi` and `starlette` belong to the frontend layer; `vllm.config`
 # (imported by every process) and the engine core's `vllm.v1.structured_output`
 # must not pull them in.
+# `vllm.utils.deep_gemm` is imported by the API server and the engine core
+# (via `vllm.forward_context`) and must not `torch.compile` at import time.
 module_names = [
     "torch._inductor.async_compile",
     "cv2",
@@ -31,3 +33,4 @@ for module_name in module_names:
 import vllm  # noqa
 import vllm.config  # noqa
 import vllm.v1.structured_output  # noqa
+import vllm.utils.deep_gemm  # noqa
