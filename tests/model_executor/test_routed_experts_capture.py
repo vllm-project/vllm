@@ -805,6 +805,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
 
 
 def test_aux_output_worker_connector_default_capacity(monkeypatch):
+    import vllm.distributed.aux_output_connector.connector as aux_output_connector
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
@@ -817,9 +818,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     )
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", Mock())
     monkeypatch.setattr(
-        aux_output_worker,
-        "resolve_kv_cache_block_sizes",
-        lambda *_: (32, 16),
+        aux_output_connector, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
     )
     monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
     monkeypatch.setattr(

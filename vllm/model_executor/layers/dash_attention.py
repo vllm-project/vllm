@@ -7,7 +7,7 @@ generated tokens are visible only in the local output window.
 """
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 import torch
 import torch.nn.functional as F
@@ -331,7 +331,8 @@ class DASHAttentionMetadataBuilder(TritonAttentionMetadataBuilder):
                 for request, length in enumerate(lengths)
                 if length > 0 and starts[request + 1] > starts[request]
             )
-        return DASHAttentionMetadata(**vars(metadata), requests=requests)
+        triton_fields = {f.name: getattr(metadata, f.name) for f in fields(metadata)}
+        return DASHAttentionMetadata(**triton_fields, requests=requests)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
