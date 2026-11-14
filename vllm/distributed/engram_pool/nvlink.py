@@ -18,15 +18,16 @@ def _gather_kernel(
     TABLES: tl.constexpr,
     K: tl.constexpr,
     WORDS: tl.constexpr,
-    BLOCK_W: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """Load `[..., TABLES, K]` rows from their owners into `[TABLES, ..., K]`
-    rows; dead ids give zeros. `meta` rows hold rows per shard, rows and a
-    device array of shard addresses (words 1, 2, 3)."""
-    item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    rows, one 8-byte word per lane; dead ids give zeros. `meta` rows hold rows
+    per shard, rows and a device array of shard addresses (words 1, 2, 3)."""
+    word = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    item = word // WORDS
     valid = item < num_items
-    table = meta + (item // K % TABLES) * 8
+    index = item // K % TABLES
+    table = meta + index * 8
     row = tl.load(ids + item, mask=valid, other=-1).to(tl.int64)
     rows_per_shard = tl.load(table + 1, mask=valid, other=1)
     live = valid & (row >= 0) & (row < tl.load(table + 2, mask=valid, other=0))
@@ -34,17 +35,12 @@ def _gather_kernel(
     local = row - owner * rows_per_shard
     shards = tl.load(table + 3, mask=live, other=0).to(tl.pointer_type(tl.int64))
     base = tl.load(shards + owner, mask=live, other=0).to(tl.pointer_type(tl.uint64))
-    words = tl.arange(0, BLOCK_W)
-    in_row = words[None, :] < WORDS
-    data = tl.load(
-        base[:, None] + local[:, None] * WORDS + words[None, :],
-        mask=live[:, None] & in_row,
-        other=0,
-    )
-    index = item // K % TABLES
+    column = word - item * WORDS
+    data = tl.load(base + local * WORDS + column, mask=live, other=0)
     place = index * (num_items // TABLES) + item // (TABLES * K) * K + item % K
-    dst = out.to(tl.pointer_type(tl.uint64)) + place[:, None] * WORDS + words[None, :]
-    tl.store(dst, data, mask=valid[:, None] & in_row)
+    tl.store(
+        out.to(tl.pointer_type(tl.uint64)) + place * WORDS + column, data, mask=valid
+    )
 
 
 class NvlinkTransport:
@@ -89,7 +85,7 @@ class NvlinkTransport:
         slots: torch.Tensor,
     ) -> None:
         if n := ids.numel():
-            _gather_kernel[(triton.cdiv(n, 64),)](
+            _gather_kernel[(triton.cdiv(n * words, 1024),)](
                 ids,
                 meta,
                 out,
@@ -97,6 +93,5 @@ class NvlinkTransport:
                 TABLES=meta.shape[0],
                 K=ids.shape[-1],
                 WORDS=words,
-                BLOCK_W=triton.next_power_of_2(words),
-                BLOCK=64,
+                BLOCK=1024,
             )
