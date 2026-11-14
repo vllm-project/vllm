@@ -549,6 +549,63 @@ def test_greedy_argmax_matches_torch(dtype, vocab):
     torch.testing.assert_close(greedy_argmax(logits), expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("vocab", [4096, 4097, 129280])
+@pytest.mark.parametrize("rows", [0, 1, 32])
+def test_greedy_argmax_fused_bias_matches_unfused(dtype, vocab, rows):
+    """A DSpark step view and independently strided bias preserve draft ids."""
+    torch.manual_seed(0)
+    logits = torch.randn(rows, 3, vocab, device=DEVICE, dtype=dtype)[:, 1]
+    bias = torch.randn(rows, vocab + 1, device=DEVICE, dtype=dtype)[:, 1:]
+    original_logits, original_bias = logits.clone(), bias.clone()
+    expected = greedy_argmax(logits + bias)
+    torch.testing.assert_close(greedy_argmax(logits, bias), expected, rtol=0, atol=0)
+    assert torch.equal(logits, original_logits)
+    assert torch.equal(bias, original_bias)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_greedy_argmax_fused_bias_rounding_and_nonfinite(dtype):
+    """Round before reducing; ignore NaNs from addition and keep first ties."""
+    logits = torch.zeros(6, 4097, dtype=dtype, device=DEVICE)
+    bias = torch.zeros_like(logits)
+    logits[0, [0, 4096]] = 1
+    bias[0, 4096] = torch.finfo(dtype).eps / 4
+    logits[1, 0], bias[1, 0] = torch.inf, -torch.inf
+    bias[1, 4096] = 2
+    logits[2].fill_(torch.inf)
+    bias[2].fill_(-torch.inf)
+    logits[3].fill_(-torch.inf)
+    bias[4, [3, 4096]] = torch.inf
+    bias[5, [0, 4096]] = torch.nan
+    expected = greedy_argmax(logits + bias)
+    assert expected.tolist() == [0, 4096, 0, 0, 3, 1]
+    torch.testing.assert_close(greedy_argmax(logits, bias), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "case", ["cpu", "small", "fp16", "mixed", "broadcast", "strided", "rank3"]
+)
+def test_greedy_argmax_bias_fallback_matches_unfused(case):
+    """Unsupported fusion layouts and dtypes retain torch addition semantics."""
+    torch.manual_seed(0)
+    device = "cpu" if case == "cpu" else DEVICE
+    dtype = torch.float16 if case == "fp16" else torch.bfloat16
+    vocab = 17 if case == "small" else 4097
+    logits = torch.randn(2, vocab, dtype=dtype, device=device)
+    bias = torch.randn_like(logits)
+    if case == "mixed":
+        bias = bias.float()
+    elif case == "broadcast":
+        bias = bias[0]
+    elif case == "strided":
+        bias = torch.randn(vocab, 2, dtype=dtype, device=device).T
+    elif case == "rank3":
+        logits, bias = logits.unsqueeze(0), bias.unsqueeze(0)
+    expected = greedy_argmax(logits + bias)
+    torch.testing.assert_close(greedy_argmax(logits, bias), expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_gumbel_combine_preserves_first_nan_and_maximum(dtype):
     """Combining block partials preserves argmax/gather's tie and NaN ordering."""
