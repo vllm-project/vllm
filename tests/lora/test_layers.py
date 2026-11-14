@@ -871,7 +871,7 @@ def test_column_parallel_packed(
                 else QKVParallelLinearWithShardedLoRA(linear)
             )
 
-        @dataclass
+        @dataclass(slots=True)
         class FakeConfig:
             hidden_size = 4096
             num_key_value_heads = 32

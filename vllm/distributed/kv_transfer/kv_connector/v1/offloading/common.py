@@ -50,7 +50,7 @@ class TransferStats:
         return self.load.is_empty() and self.store.is_empty()
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferJob:
     """A transfer job bundling request context with transfer spec.
 

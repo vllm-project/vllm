@@ -219,7 +219,7 @@ def _merge_moss_audio_processor_configs(
     return merged
 
 
-@dataclass
+@dataclass(slots=True)
 class MossAudioEncoderConfig:
     d_model: int = 1280
     output_dim: int = 1280

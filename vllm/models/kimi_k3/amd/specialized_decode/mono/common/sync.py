@@ -102,7 +102,7 @@ def ld_health(health, i):
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Addr:
     """A mailbox region's address: the region's name and space, recorded when the
     kernel is traced (`trace`), and the traced address. The space also

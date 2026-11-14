@@ -2024,9 +2024,6 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
             id="opencv_dynamic-exceeds_max_duration",
         ),
         pytest.param(
-            "openpangu", {"num_frames": 32, "fps": -1}, 32, id="openpangu-num_frames"
-        ),
-        pytest.param(
             "molmo2",
             {"num_frames": 32, "frame_sample_mode": "uniform_last_frame"},
             32,

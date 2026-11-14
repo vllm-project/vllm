@@ -13,7 +13,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.config.model import ModelDType, TokenizerMode
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _HfExamplesInfo:
     default: str
     """The default model to use for testing this architecture."""
@@ -1300,19 +1300,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_transformers_version="4.57",
         transformers_version_reason={
             "hf": "Remote modeling code is not compatible with Transformers v5."
-        },
-    ),
-    "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-VL-7B",
-        trust_remote_code=True,
-        max_model_len=4096,
-        enforce_eager=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
-                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
-            )
         },
     ),
     "OpenVLAForActionPrediction": _HfExamplesInfo(

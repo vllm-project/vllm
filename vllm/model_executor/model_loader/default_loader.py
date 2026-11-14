@@ -60,7 +60,7 @@ class DefaultModelLoader(BaseModelLoader):
     # default number of thread when enable multithread weight loading
     DEFAULT_NUM_THREADS = 8
 
-    @dataclasses.dataclass
+    @dataclasses.dataclass(slots=True)
     class Source:
         """A source for weights."""
 

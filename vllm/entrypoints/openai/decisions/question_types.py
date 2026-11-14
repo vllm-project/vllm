@@ -23,13 +23,13 @@ class StructuredDecisionError(ValueError):
 LABELS = tuple(string.ascii_uppercase)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Option:
     name: str
     description: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Question:
     id: str
     type: "QuestionType"

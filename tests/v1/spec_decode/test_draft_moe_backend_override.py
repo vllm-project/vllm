@@ -17,17 +17,17 @@ from vllm.config import LoadConfig, SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
-@dataclass
+@dataclass(slots=True)
 class _KernelConfig:
     moe_backend: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _CacheConfig:
     cache_dtype: str = "auto"
 
 
-@dataclass
+@dataclass(slots=True)
 class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
@@ -41,7 +41,7 @@ class _SpeculativeConfig:
     apply_draft_eplb_overrides = SpeculativeConfig.apply_draft_eplb_overrides
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmConfig:
     kernel_config: _KernelConfig
     cache_config: _CacheConfig

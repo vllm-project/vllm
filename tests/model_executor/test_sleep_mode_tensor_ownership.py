@@ -17,7 +17,7 @@ from ..models.utils import dummy_hf_overrides
 from ..utils import create_new_process_for_each_test
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SleepModelCase:
     name: str
     architecture: str

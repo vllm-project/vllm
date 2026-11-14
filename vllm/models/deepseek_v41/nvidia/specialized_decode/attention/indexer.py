@@ -176,7 +176,7 @@ def _all_gather_rows(
     buffer[:num_rows].copy_(gathered[:num_rows])
 
 
-@dataclass
+@dataclass(slots=True)
 class DecodeRowsPlan:
     """The rows a rank scores in `finish_decode_rows` and their schedule."""
 

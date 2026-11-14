@@ -53,7 +53,7 @@ _GATHER_MIN_CUT_PREFILL = 1.5
 _DECODE_SHARD_MIN_ROWS = 64
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4PrefillPlan:
     """One prefill chunk as the requests the kernel launches on, all in one
     launch: the kernel finds each row's request through query_start_loc, and
@@ -78,7 +78,7 @@ class RocmMxfp4PrefillPlan:
     use_gather: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4GatherLaunch:
     """Query rows [token_start, token_end) of one request, which the candidate
     consumers score against the pool in one launch."""
@@ -96,7 +96,7 @@ class RocmMxfp4GatherLaunch:
     reused by the rest."""
 
 
-@dataclass
+@dataclass(slots=True)
 class RocmMxfp4NativeDecode:
     """A decode step whose requests all have next_n query rows, as the
     kernel's sequences: a workgroup then walks a KV tile once for up to
@@ -137,7 +137,7 @@ def native_decode(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeRowShard:
     start: int
     stop: int

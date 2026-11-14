@@ -900,7 +900,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
 class CombineTopkSwaIndicesKernel(
     VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         TOP_K: int
         COMPRESS_RATIO: int

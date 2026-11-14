@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingPublication:
     request: Request
     num_computed_tokens: int
@@ -46,7 +46,7 @@ class _PendingPublication:
     num_cached_blocks: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _HiSparseRequestState:
     """Residency bookkeeping for one request.
 
@@ -72,7 +72,7 @@ class _HiSparseRequestState:
     stale_pages: set[int] = field(default_factory=set)
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingSpill:
     transfer_id: int
     page: tuple[str, int]
