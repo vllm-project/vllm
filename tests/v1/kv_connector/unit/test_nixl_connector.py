@@ -1870,6 +1870,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, meta)
 
             # Must validate cleanly (used to raise AssertionError).
             worker.add_remote_agent(meta, remote_tp_size=remote_tp)
@@ -1895,6 +1896,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            bad_meta.region_members = meta.region_members
             worker.dst_num_blocks["remote_engine_bad"] = 1
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=remote_tp)
@@ -5354,7 +5356,7 @@ def test_gqa_replicated_pull_round_trip(
         )
         vllm_config.cache_config.kv_cache_layout = "LBHNC"
         vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-        spec = FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=max(1, num_kv_heads // tp_size),
             head_size=head_size,
@@ -5364,7 +5366,7 @@ def test_gqa_replicated_pull_round_trip(
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+            kv_cache_groups=[new_kv_cache_group(layers, spec)],
         )
         # Views are [B, H, N, C] per layer.
         views = dense_kv_cache_views(
