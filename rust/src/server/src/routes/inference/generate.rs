@@ -97,22 +97,8 @@ pub async fn generate(
     );
 
     let api_server_options = state.api_server_options;
-    let n = prepared.n.get();
-    if let Err(error) = validate_n_limit(n, api_server_options.max_n_sequences) {
+    if let Err(error) = validate_n_limit(prepared.n.get(), api_server_options.max_n_sequences) {
         return error.into_response();
-    }
-    // Like Python's generate route, which fans `n` out within one scheduler
-    // batch.
-    let max_num_seqs = state.engine_core_client().ready_response().max_num_seqs;
-    if u64::from(n) > max_num_seqs {
-        return ApiError::invalid_request(
-            format!(
-                "sampling_params.n must be at most the server's max_num_seqs \
-                 ({max_num_seqs}), got {n}."
-            ),
-            Some("n"),
-        )
-        .into_response();
     }
 
     let stream = prepared.stream;

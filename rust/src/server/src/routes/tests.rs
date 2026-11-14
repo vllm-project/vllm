@@ -7195,10 +7195,8 @@ async fn raw_generate_rejects_empty_token_ids() {
 async fn raw_generate_rejects_invalid_parallel_sampling() {
     let mut app = test_app().await;
 
-    // The mock engine reports `max_num_seqs = 256`.
     for (sampling_params, message) in [
         (json!({"n": 0}), "n must be at least 1"),
-        (json!({"n": 257}), "at most the server's max_num_seqs (256)"),
         (
             json!({"n": 2, "temperature": 0.0}),
             "n must be 1 when using greedy sampling",
