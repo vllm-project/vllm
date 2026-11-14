@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+from typing import cast
+
 import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
@@ -41,7 +44,8 @@ class MistralCommonImageProcessor(ImageProcessingMixin):
         height: int,
         width: int,
     ) -> tuple[int, int, int]:
-        image = Image.new("RGB", (width, height))
+        # The encoder's sizing routine only reads size, not pixel data.
+        image = cast(Image.Image, SimpleNamespace(size=(width, height)))
         ncols, nrows = self.mm_encoder._image_to_num_tokens(image)
         return ncols * nrows, nrows, ncols
 
