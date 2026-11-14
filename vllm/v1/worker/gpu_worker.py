@@ -587,6 +587,7 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         self._init_workspace_and_model_runner()
+        self.iteration_timer = make_iteration_timer(self.vllm_config, self.rank)
 
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
@@ -601,7 +602,6 @@ class Worker(WorkerBase):
         )
         with self._maybe_get_memory_pool_context(tag="runtime"):
             self.model_runner: GPUModelRunner = self._make_model_runner()
-        self.iteration_timer = make_iteration_timer(self.vllm_config, self.rank)
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
