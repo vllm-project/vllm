@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 current_platform.import_kernels()
 
@@ -776,6 +776,22 @@ def causal_conv1d_update_cpu(
         -1,
         is_weight_packed,
     )
+
+
+def supports_fused_gdn_convs() -> bool:
+    # macOS builds leave out these kernels.
+    has_kernels = all(
+        hasattr(torch.ops._C, name)
+        for name in (
+            "causal_conv1d_weight_pack",
+            "causal_conv1d_fwd_cpu",
+            "causal_conv1d_update_cpu",
+        )
+    )
+    is_arm_bf16 = current_platform.get_cpu_architecture() == CpuArchEnum.ARM and (
+        torch.cpu.get_capabilities().get("bf16", False)
+    )
+    return has_kernels and (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
 
 
 class CPUDNNLGEMMHandler:

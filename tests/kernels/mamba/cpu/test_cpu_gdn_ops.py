@@ -758,7 +758,7 @@ def test_spec_aware_nonspec_materializes_state_indices(
         out = torch.zeros(1, 4, 1, 1)
         return out, kwargs["initial_state"]
 
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention.ops, "supports_fused_gdn_convs", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention.ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
@@ -801,10 +801,7 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize(("has_amx", "has_arm_bf16"), [(True, False), (False, True)])
 def test_spec_forward_prepares_native_conv_metadata(
-    has_amx: bool,
-    has_arm_bf16: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     block_table = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
@@ -834,8 +831,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         forwarded_is_weight_packed = kwargs["is_weight_packed"]
         return kwargs["x"]
 
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: has_amx)
-    monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: has_arm_bf16)
+    monkeypatch.setattr(gdn_attention.ops, "supports_fused_gdn_convs", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
@@ -886,13 +882,12 @@ def test_spec_forward_conv_tracks_accepted_tokens(
     drafts whose previous step accepted more tokens than it now carries
     (MRV2 keeps such rows as spec rows), must convolve over exactly the
     accepted token history."""
-    if use_native and not (
-        torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()
-    ):
-        pytest.skip("native causal conv1d requires AMX or Arm BF16 support")
+    if use_native and not ops.supports_fused_gdn_convs():
+        pytest.skip("C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support")
     if not use_native:
-        monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
-        monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: False)
+        monkeypatch.setattr(
+            gdn_attention.ops, "supports_fused_gdn_convs", lambda: False
+        )
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention.ops,
@@ -1036,8 +1031,8 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 
 @pytest.mark.skipif(
-    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
-    reason="native causal conv1d requires AMX or Arm BF16 support",
+    not ops.supports_fused_gdn_convs(),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @torch.inference_mode()
 def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
@@ -1116,8 +1111,8 @@ def _ref_causal_conv1d_update_cpu_multi(
 
 
 @pytest.mark.skipif(
-    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
-    reason="native causal conv1d requires AMX or Arm BF16 support",
+    not ops.supports_fused_gdn_convs(),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize(
     (
@@ -1188,8 +1183,8 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
 
 
 @pytest.mark.skipif(
-    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
-    reason="native causal conv1d requires AMX or Arm BF16 support",
+    not ops.supports_fused_gdn_convs(),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("num_accepted", [0, 17])
 @torch.inference_mode()
@@ -1218,7 +1213,7 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
 
 
 @pytest.mark.skipif(
-    not (torch.cpu._is_avx512_bf16_supported() or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="causal_conv1d_fwd_cpu requires AVX-512BF16"
     " (Intel Xeon or AMD EPYC) or Arm BF16 support",
 )
@@ -1262,8 +1257,8 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
 
 
 @pytest.mark.skipif(
-    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
-    reason="native causal conv1d requires AMX or Arm BF16 support",
+    not ops.supports_fused_gdn_convs(),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @torch.inference_mode()
 def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
@@ -1321,8 +1316,6 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
 # C++ conv (conv.cpp) uses AArch64BF16 or VDPBF16PS, not AMX tiles, so it can
 # run on any AVX-512BF16 CPU; weight is packed on this same predicate at load time.
 # ---------------------------------------------------------------------------
-
-_HAS_AVX512_BF16 = torch.cpu._is_avx512_bf16_supported()
 
 _STATE_LEN = CONV_KERNEL - 1
 
@@ -1547,7 +1540,7 @@ def test_causal_conv1d_update_cpu_ds_adapter_wide_multi_token_copyback(
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
@@ -1562,7 +1555,7 @@ def test_conv_cpp_matches_torch(seq_lens):
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
@@ -1582,7 +1575,7 @@ def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
@@ -1600,7 +1593,7 @@ def test_conv_cpp_weight_packed_matches_torch(seq_lens):
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("batch", DECODE_BATCH_SIZES)
@@ -1658,7 +1651,7 @@ def test_conv_update_cpp_matches_torch(
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @torch.inference_mode()
@@ -1683,7 +1676,7 @@ def test_conv_weight_pack_roundtrip_unpacked_matches():
 
 
 @pytest.mark.skipif(
-    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    not ops.supports_fused_gdn_convs(),
     reason="C++ causal_conv1d requires AVX-512BF16 or AArch64 BF16",
 )
 @torch.inference_mode()

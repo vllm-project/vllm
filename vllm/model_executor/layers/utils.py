@@ -778,15 +778,7 @@ def dispatch_cpu_unquantized_gemm(
             and layer.weight.size(2) == 4
             and layer.weight.dtype == torch.bfloat16
         )
-        is_arm_bf16 = (
-            current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-            and torch.cpu.get_capabilities().get("bf16", False)
-        )
-        if (
-            (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
-            and is_causal_conv1d_weight
-            and hasattr(cpu_ops, "causal_conv1d_weight_pack")
-        ):
+        if is_causal_conv1d_weight and cpu_ops.supports_fused_gdn_convs():
             # prepack conv weight
             unpacked = (
                 layer.weight.view(
