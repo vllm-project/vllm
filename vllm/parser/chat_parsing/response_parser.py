@@ -59,6 +59,10 @@ def _coerce(raw: str, types: tuple[str, ...]) -> Any:
                         continue
                     return int(number)
             if type_name == "number":
+                try:
+                    return int(raw)  # float() would round integers above 2**53
+                except ValueError:
+                    pass
                 number = float(raw)
                 if number != number or number in (float("inf"), float("-inf")):
                     continue  # NaN / inf are not valid JSON numbers
