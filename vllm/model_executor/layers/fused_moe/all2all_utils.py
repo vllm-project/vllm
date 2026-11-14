@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
 from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
     PassThroughPrepareAndFinalize,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
@@ -187,6 +188,10 @@ def maybe_roundup_layer_hidden_size(
         )
 
     return hidden_size
+
+
+# Elements per E8M0 exponent in AITER's per_1x32 MXFP8 activation quant.
+MXFP8_GROUP_SIZE = 32
 
 
 def maybe_make_prepare_finalize(
@@ -366,14 +371,28 @@ def maybe_make_prepare_finalize(
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
         # block scales, which the experts consume without re-quantizing.
         use_fp4_dispatch = quant_config.use_mxfp4_w4a4
+        # Experts that quantize their BF16 input to group-32 MXFP8 themselves
+        # say so in the quant config. Doing that in prepare() instead means a
+        # token is quantized once by the rank that owns it rather than once
+        # per rank it was replicated to, and halves the dispatch payload.
+        use_mxfp8_dispatch = (
+            not use_fp4_dispatch
+            and quant_config.deferred_activation_key == kMxfp8Dynamic
+        )
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = not use_fp4_dispatch and (
+        use_fp8_dispatch = not (use_fp4_dispatch or use_mxfp8_dispatch) and (
             quant_config.is_per_act_token
             or quant_config.is_block_quantized
             or quant_config.is_per_tensor
         )
-        if use_fp4_dispatch:
+        if use_mxfp8_dispatch:
+            # One e8m0 scale per 32-element block, one byte each, not the fp32
+            # the per-token/per-tensor FP8 paths below assume.
+            quant_dtype = current_platform.fp8_dtype()
+            scale_dim = moe.hidden_dim // MXFP8_GROUP_SIZE
+            scale_type_size = torch.float8_e8m0fnu.itemsize
+        elif use_fp4_dispatch:
             # One e8m0 scale per 32-element block. token_hidden_size stays
             # the unpacked hidden size: mori sizes its token buffers by the
             # BF16 input type, which also covers the BF16 combine.
@@ -417,6 +436,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
             use_fp4_dispatch=use_fp4_dispatch,
+            use_mxfp8_dispatch=use_mxfp8_dispatch,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
