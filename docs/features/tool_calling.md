@@ -600,8 +600,8 @@ Flags: `--tool-call-parser apertus`
 The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
 Enable tool calling with `--enable-auto-tool-choice`,
 `--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark` is an
-alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
-their original channel semantics, including recipient-less tool-parser content.
+alias for both parsers. The `muse_glimmer` entry points keep their original channel semantics, including
+recipient-less tool-parser content.
 
 The parsers route `to=self` and recipient-less messages to reasoning,
 `to=user` and `to=commentary` messages to content, and tool recipients to
