@@ -238,7 +238,10 @@ def begin_online_reload(model: torch.nn.Module, defer: bool = False) -> None:
             set(layer._non_persistent_buffers_set),
         )
         # until processed, the layer shows its checkpoint format, as other
-        # layers do during an update
+        # layers do during an update, and as its PWAL saw it at cold start:
+        # parameters that PWAL created are hidden (`_restore` brings them back)
+        for name in [n for n in layer._parameters if n not in state.ckpt]:
+            delattr(layer, name)
         for name, meta in state.ckpt.items():
             layer.register_parameter(name, meta)
         state.seen.clear()
