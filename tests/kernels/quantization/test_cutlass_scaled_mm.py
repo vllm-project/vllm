@@ -147,7 +147,16 @@ def cutlass_int8_gemm_helper(
     opcheck(torch.ops._C.cutlass_scaled_mm, (out, a, b, scale_a, scale_b, bias))
 
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize(
+    "m,n,k",
+    MNK_FACTORS
+    + [
+        (1023, 4096, 2048),
+        (1024, 4096, 2048),
+        (1025, 4096, 2048),
+        (2048, 12288, 4096),
+    ],
+)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
