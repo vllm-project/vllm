@@ -105,8 +105,12 @@ attention module. `"attn"` is chosen deliberately to match the mappings generate
 
 
 class _MissingPositionEmbedding(PPMissingLayer):
-    def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        return position_ids.new_zeros(())
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("zero", torch.zeros(()), persistent=False)
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        return self.zero
 
 
 class PreTrainedModelClasses(NamedTuple):
@@ -436,15 +440,25 @@ class Base(
             i for i, name in enumerate(names) if attrgetter(name)(module) is layers
         )
 
+        # Only consider position tables on the decoder containing the layers.
+        # A nested encoder or attention module can have its own position tables.
+        parent, _, _ = names[module_list_idx].rpartition(".")
+        decoder = module.get_submodule(parent)
+        input_embeddings = set(self.model.get_input_embeddings().modules())
+        position_embeddings = {
+            maybe_prefix(parent, name)
+            for name, table in decoder.named_children()
+            if name in {"wpe", "embed_positions", "position_embeddings"}
+            and isinstance(table, nn.Embedding)
+            and table not in input_embeddings
+            and table.weight.requires_grad
+            and table.embedding_dim == self.text_config.hidden_size
+        }
+
         # Layers before module list
         for name in names[:module_list_idx]:
-            if (
-                not self.pp_group.is_first_rank
-                and self.text_config.model_type == "gpt_bigcode"
-                and name == "wpe"
-            ):
-                # GPTBigCode adds wpe(position_ids) to its inputs on every
-                # forward. Later stages already receive position-aware states.
+            if not self.pp_group.is_first_rank and name in position_embeddings:
+                # Incoming hidden states already include the learned positions.
                 attrsetter(name)(module, _MissingPositionEmbedding())
                 continue
             if (

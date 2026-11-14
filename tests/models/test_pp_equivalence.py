@@ -285,6 +285,50 @@ def test_pp_equivalence_small_subset(vllm_runner, arch: str):
 
 
 @pytest.mark.timeout(CASE_TIMEOUT_S)
+@multi_gpu_test(num_gpus=2)
+def test_transformers_pp_additive_position_embeddings(vllm_runner, tmp_path):
+    """OPT adds embed_positions(mask, past_length, position_ids=...) to its inputs."""
+    from transformers import OPTConfig, OPTForCausalLM
+
+    config = OPTConfig(
+        vocab_size=256,
+        hidden_size=128,
+        ffn_dim=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        max_position_embeddings=64,
+        do_layer_norm_before=False,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(0)
+        OPTForCausalLM(config).save_pretrained(tmp_path)
+
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=4,
+        ignore_eos=True,
+        detokenize=False,
+        prompt_logprobs=0,
+        logprobs=0,
+    )
+    prompt = TokensPrompt(prompt_token_ids=[7, 13, 29, 37, 11])
+    results = []
+    for pp_size in (1, 2):
+        with vllm_runner(
+            str(tmp_path),
+            model_impl="transformers",
+            pipeline_parallel_size=pp_size,
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+        ) as runner:
+            (out,) = runner.llm.generate(prompt, params)
+            sample = out.outputs[0]
+            results.append((sample.token_ids, out.prompt_logprobs, sample.logprobs))
+    assert results[0] == results[1]
+
+
+@pytest.mark.timeout(CASE_TIMEOUT_S)
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("arch", _params(PP_ARCHS))
 def test_pp_equivalence_middle_stages(vllm_runner, arch: str):
