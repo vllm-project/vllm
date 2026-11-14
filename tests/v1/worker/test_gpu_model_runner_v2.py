@@ -642,9 +642,14 @@ def test_standalone_draft_kv_dtype_override(
         kv_cache_dtype=draft_dtype,
         moe_backend=draft_moe,
         attention_backend=draft_attn,
+        draft_enable_eplb=True,
+        resolved_draft_num_redundant_experts=None,
         draft_parallel_config=ParallelConfig(),
     )
     spec.apply_draft_overrides = partial(SpeculativeConfig.apply_draft_overrides, spec)
+    spec.apply_draft_eplb_overrides = partial(
+        SpeculativeConfig.apply_draft_eplb_overrides, spec
+    )
     speculator.speculative_config = spec
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
