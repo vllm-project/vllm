@@ -163,6 +163,20 @@ torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
     --case prefill=8192 --case mix=2048,8*1@4096
 ```
 
+With `--data-parallel-size`, every DP rank runs the case's batch by default. To give each
+rank its own batch, separate per-rank request lists with `|` (one list per DP rank), or use
+`"dp_requests"` in a `--shapes` file. The ranks agree on one CUDA graph mode and padded size
+as serving does (the lowest mode any rank needs), so imbalanced steps are timed as they run;
+latency is the maximum across ranks. Steps with eager work start each replay after a host
+barrier, so bind ranks to their GPU's NUMA node (`torchrun --numa-binding node`) for
+reproducible timing. For example, with four DP ranks under expert parallelism:
+
+```bash
+torchrun --nproc-per-node=4 --numa-binding node -m vllm.entrypoints.cli.main bench forward \
+    --model MODEL --data-parallel-size 4 --enable-expert-parallel \
+    --case "imbalanced=8192|16*6@65536:5|16*6@65536:5|2048,8*6@65536:5"
+```
+
 With `--pipeline-parallel-size`, the benchmark streams identical microbatches
 through captured stages. `median_us` measures each microbatch from its first
 stage's forward start to its last stage's forward completion, including PP
