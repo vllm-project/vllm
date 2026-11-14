@@ -143,7 +143,7 @@ def test_hunyuan_a13b_tool_parser_extract(
             ],
             [make_tool_call("get_weather", {"city": "Boston"})],
         ),
-        pytest.param(
+        (
             [
                 '<tool_calls>[{"name": "complex_tool",',
                 ' "arguments": ',
@@ -156,9 +156,6 @@ def test_hunyuan_a13b_tool_parser_extract(
                     "complex_tool", {"level1": {"level2": {"level3": {"value": 123}}}}
                 )
             ],
-            marks=pytest.mark.xfail(
-                reason="stream parsing not support nested json yet."
-            ),
         ),
     ],
 )
@@ -177,6 +174,49 @@ def test_hunyuan_a13b_tool_parser_streaming(model_deltas, expected_tool_calls):
         reconstructor.tool_calls[idx].id = expected_tool_calls[idx].id
 
     assert reconstructor.tool_calls == expected_tool_calls
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        pytest.param([("f", {"a": "{"})], id="open_brace_in_string"),
+        pytest.param([("f", {"a": "}"})], id="close_brace_in_string"),
+        pytest.param([("f", {"a": '"}'})], id="brace_after_escaped_quote"),
+        pytest.param([("f", {"a": "\\", "b": "}"})], id="brace_after_backslash"),
+        pytest.param(
+            [("f", {"a": "},{"}), ("g", {"b": 2})], id="call_separator_in_string"
+        ),
+        pytest.param(
+            [("f", {"a": '"arguments": {'}), ("g", {"b": 2})],
+            id="arguments_key_in_string",
+        ),
+        pytest.param(
+            [("f", {"a": {"b": {"c": 1}}}), ("g", {"b": 2})],
+            id="depth_3_before_second_call",
+        ),
+        pytest.param(
+            [("f", {"a": 1}), ("g", {"a": {"b": {"c": 1}}})],
+            id="depth_3_in_second_call",
+        ),
+    ],
+)
+def test_hunyuan_a13b_tool_parser_streaming_matches_non_streaming(
+    calls, default_tokenizer
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
+        default_tokenizer
+    )
+    body = ", ".join(json.dumps({"name": n, "arguments": a}) for n, a in calls)
+    model_output = f"<tool_calls>[{body}]</tool_calls>"
+    expected = [make_tool_call(name, args).function for name, args in calls]
+
+    _, tool_calls = run_tool_extraction(tool_parser, model_output, streaming=False)
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, list(model_output), assert_one_tool_per_delta=False
+    )
+
+    assert [call.function for call in tool_calls] == expected
+    assert [call.function for call in reconstructor.tool_calls] == expected
 
 
 def test_hunyuan_a13b_tool_parser_non_ascii():
