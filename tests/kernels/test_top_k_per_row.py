@@ -3167,3 +3167,83 @@ def test_decode_chunk_budget_disabled_fitting_and_invalid():
         _decode_chunk_ranges(32, 1024, -1, 2)
     with pytest.raises(ValueError, match="16 logits rows"):
         _decode_chunk_ranges(32, 1024, 1024, 2)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "values,topk",
+    [
+        (None, 64),
+        ([-0.0, 0.0], 1),
+        ([-float("nan"), float("nan"), float("inf")], 1),
+        ([1.0, float("nan"), float("inf"), 2.0, 0.0, -1.0, 3.0, -2.0], 4),
+        ([4.0, 1.0], 4),
+        ([], 4),
+        ([4.0, 1.0], 0),
+    ],
+)
+def test_top_k_per_row_batch_invariant(device, values, topk, monkeypatch):
+    """Stable selection and padding must survive batch and memory-chunk boundaries."""
+    from vllm.model_executor.layers import indexer_topk
+
+    torch.manual_seed(1234)
+    if values is None:
+        logits = torch.randn(100, 300, device=device)
+        logits[:, :50] = 1.5
+    else:
+        logits = torch.tensor([values], device=device, dtype=torch.float32).repeat(
+            100, 1
+        )
+    ends = torch.tensor(
+        [300, 200, 64, 10, 1, 0, 64, 300, 130, 101, 50, 65, 299, 2, 128, 63] * 7,
+        device=device,
+        dtype=torch.int32,
+    )[:100].clamp_max(logits.shape[1])
+    monkeypatch.setattr(
+        indexer_topk, "_BI_TOPK_MAX_KEY_ELEMS", max(1, 17 * logits.shape[1])
+    )
+    expected = torch.full((100, topk), -1, device=device, dtype=torch.int32)
+    for i, end in enumerate(ends.tolist()):
+        cols = torch.argsort(logits[i, :end], descending=True, stable=True)[:topk]
+        expected[i, : cols.numel()] = cols.sort().values.to(torch.int32)
+    for rows in (1, 64, 65, 100):
+        output = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        indexer_topk.top_k_per_row_batch_invariant(
+            logits[:rows], ends[:rows], output, topk
+        )
+        torch.testing.assert_close(output, expected[:rows], rtol=0, atol=0)
+
+
+def test_sparse_indexer_topk_bi_selection(monkeypatch) -> None:
+    """BI pins FP32 per-row selection and rejects quantized sparse MLA caches."""
+    if not current_platform.is_cuda():
+        pytest.skip("requires CUDA")
+
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+
+    bf16 = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert SparseIndexerTopk("auto").resolve_backend(bf16, 2048, 8) == "per_row"
+    assert not SparseIndexerTopk("auto").takes_bf16_logits(bf16, 2048, 8)
+
+    def combination(kv_dtype):
+        return FlashMLASparseBackend.supports_combination(
+            head_size=576,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=kv_dtype,
+            block_size=64,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=True,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(10, 0),
+        )
+
+    if current_platform.is_device_capability_family(100):
+        assert FlashMLASparseBackend.supports_batch_invariance()
+        assert combination("fp8_ds_mla") is not None
+        assert combination("bfloat16") is None
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT")
+    assert combination("fp8_ds_mla") is None

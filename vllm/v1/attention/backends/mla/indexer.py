@@ -220,6 +220,11 @@ class PrepareUniformDecodeKernel(
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Only the SM100 DSA path has BI-gated selection.
+        return current_platform.is_device_capability_family(100)
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         return True
 
@@ -250,6 +255,10 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
 
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if kv_cache_spec is not None:
@@ -264,6 +273,10 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):
     """Storage-only backend for the GLM-5.3-Flash kpool tail cache."""
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -287,6 +300,10 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         return (
@@ -312,6 +329,10 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return False
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"

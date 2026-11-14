@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
@@ -132,6 +133,9 @@ def _is_masked_mha_available(
 def _use_dense_mha_prefill(
     vllm_config: "VllmConfig", prefill_max_seq_len: int, topk_tokens: int
 ) -> bool:
+    # Keep the prefill route independent of the longest request.
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     attention_config = vllm_config.attention_config
     return (
         attention_config.hisparse_config is None

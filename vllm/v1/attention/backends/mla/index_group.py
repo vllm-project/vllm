@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
@@ -118,7 +119,11 @@ class SparseMLAIndexGroup:
         idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        if (
+            num_tokens > self.physical_topk_indices.shape[0]
+            # Avoid side-stream writes racing a later batch's attention.
+            or envs.VLLM_BATCH_INVARIANT
+        ):
             return triton_convert_req_index_to_global_index(
                 req_id_per_token,
                 block_table,

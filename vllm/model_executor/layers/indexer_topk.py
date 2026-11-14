@@ -7,6 +7,7 @@ import time
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import init_logger
@@ -141,6 +142,76 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
+_BI_TOPK_MAX_KEY_ELEMS = 64 * 1024 * 1024  # 512 MiB
+
+
+def top_k_per_row_batch_invariant(
+    logits: torch.Tensor,
+    row_ends: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+) -> None:
+    """Select by score then smaller column; write ascending indices and -1 padding.
+
+    NaNs rank above +inf. Unique int64 keys provide deterministic selection;
+    chunks bound temporary memory independently of the batch size.
+
+    Args:
+        logits: `[num_rows, width]` float32, contiguous within each row.
+        row_ends: `[num_rows]` exclusive bounds, excluding garbage columns.
+        topk_indices: `[num_rows, topk_tokens]` int32 output.
+        topk_tokens: Number of indices per row.
+
+    """
+    assert logits.dtype == torch.float32 and logits.dim() == 2
+    assert logits.stride(1) == 1
+    num_rows, width = logits.shape
+    if topk_tokens > width:
+        topk_indices[:, width:topk_tokens].fill_(-1)
+    if num_rows == 0 or width == 0 or topk_tokens == 0:
+        return
+
+    max_rows = max(1, _BI_TOPK_MAX_KEY_ELEMS // width)
+    for start in range(0, num_rows, max_rows):
+        _bi_topk_chunk(
+            logits[start : start + max_rows],
+            row_ends[start : start + max_rows],
+            topk_indices[start : start + max_rows],
+            topk_tokens,
+        )
+
+
+def _bi_topk_chunk(logits, row_ends, topk_indices, topk_tokens) -> None:
+    num_rows, width = logits.shape
+    k = min(topk_tokens, width)
+    if num_rows == 0 or k == 0:
+        return
+    device = logits.device
+    # Signed integer order follows float order. Canonicalize numerical ties.
+    bits = logits.view(torch.int32)
+    key32 = bits.bitwise_right_shift(31)
+    key32.bitwise_and_(0x7FFFFFFF).bitwise_xor_(bits)
+    key32.masked_fill_(logits == 0, 0)
+    key32.masked_fill_(torch.isnan(logits), 0x7FFFFFFF)
+    key = key32.to(torch.int64)
+    del key32
+    key.bitwise_left_shift_(32)
+    key.bitwise_or_((width - 1) - torch.arange(width, device=device))
+    # Exclude garbage columns with a key below every valid score, including -inf.
+    key.masked_fill_(
+        torch.arange(width, device=device).unsqueeze(0)
+        >= row_ends.to(torch.int64).unsqueeze(1),
+        torch.iinfo(torch.int64).min,
+    )
+    cols = torch.topk(key, k, dim=-1).indices
+    del key
+    keyed = torch.sort(
+        torch.where(cols < row_ends.to(torch.int64).unsqueeze(1), cols, width), dim=-1
+    ).values
+    out = torch.where(keyed < width, keyed.to(torch.int32), -1)
+    topk_indices[:, :k].copy_(out)
+
+
 @functools.cache
 def get_indexer_topk(backend: str) -> "SparseIndexerTopk":
     return SparseIndexerTopk(backend)
@@ -269,6 +340,9 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> bool:
         """Whether this decode call can consume BF16 without a full FP32 copy."""
+        # Match prefill's FP32 selection.
+        if envs.VLLM_BATCH_INVARIANT:
+            return False
         if logits.dtype != torch.bfloat16 or logits.stride(1) != 1:
             return False
         if self._backend == "deep_select":
@@ -305,6 +379,9 @@ class SparseIndexerTopk(torch.nn.Module):
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
         """
+        if envs.VLLM_BATCH_INVARIANT:
+            # Avoid batch-dependent algorithms and tie-breaking.
+            return "per_row"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):

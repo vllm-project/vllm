@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -211,6 +212,11 @@ class FlashMLASparseBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # SM90 selects a bf16 kernel variant by batch size.
+        return current_platform.is_device_capability_family(100)
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
@@ -227,6 +233,15 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        ):
+            return (
+                "batch invariance requires an unquantized KV cache (the "
+                "fp8/nvfp4 sparse decode split plan depends on the batch); "
+                "rerun with --kv-cache-dtype bfloat16"
+            )
         if head_size == 512:
             # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
             # head_size 512 and is served here on SM90, either by the direct

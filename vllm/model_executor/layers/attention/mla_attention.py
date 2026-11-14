@@ -1472,6 +1472,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
         if self.hisparse_cache is not None:
             return False
+        if envs.VLLM_BATCH_INVARIANT:
+            # Use sparse MQA regardless of the surrounding prefills.
+            return False
         # ShardQ steps' top-k are compact per rank and run through forward_mqa.
         if getattr(attn_metadata, "shardq", None) is not None:
             return False
