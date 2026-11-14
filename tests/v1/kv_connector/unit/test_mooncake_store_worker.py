@@ -27,7 +27,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     sliding_window_layer,
 )
 from vllm.distributed import mooncake_store
-from vllm.distributed.kv_events import KVEventAggregator
+from vllm.distributed.kv_events import MEDIUM_CPU, KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     transfer_engine_registry,
 )
@@ -4440,6 +4440,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     )
 
     full_event, swa_event = thread.get_kv_events()
+    assert full_event.medium == swa_event.medium == MEDIUM_CPU
     assert full_event.group_idx == 0
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
