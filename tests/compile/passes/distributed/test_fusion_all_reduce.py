@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from importlib.util import find_spec
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -121,6 +123,32 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
         speculative_config=SimpleNamespace(draft_model_config=None),
     )
     assert _fused_ar_workspace_hidden_dim(config) == 2048
+
+
+def test_allreduce_fusion_pass_gc_does_not_destroy_workspace(monkeypatch):
+    # Regression test for #67629: the FlashInfer all-reduce workspace is
+    # process-global and shared across compiled callables, CUDA graphs, and
+    # communicators. Garbage-collecting an AllReduceFusionPass instance must
+    # not call destroy_fi_ar_workspace().
+    import vllm.compilation.passes.fusion.allreduce_rms_fusion as ar_fusion_mod
+
+    destroy_mock = Mock()
+    monkeypatch.setattr(
+        ar_fusion_mod, "destroy_fi_ar_workspace", destroy_mock, raising=False
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.flashinfer_all_reduce."
+        "destroy_fi_ar_workspace",
+        destroy_mock,
+    )
+
+    assert "__del__" not in AllReduceFusionPass.__dict__
+    pass_instance = AllReduceFusionPass.__new__(AllReduceFusionPass)
+    pass_instance.disabled = False
+    del pass_instance
+    gc.collect()
+
+    destroy_mock.assert_not_called()
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
