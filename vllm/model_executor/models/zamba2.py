@@ -43,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid
@@ -197,6 +198,7 @@ class Zamba2Attention(nn.Module):
                     self.attention_head_dim,
                     self.scale,
                     cache_config=cache_config,
+                    quant_config=quant_config,
                     prefix=f"{prefix}.attn.{j}",
                 )
                 j += 1
@@ -295,6 +297,35 @@ class Zamba2Attention(nn.Module):
         y = self.dpa_list[block_idx](query_states, key_states, value_states)
         y, _ = self.o_proj(y)
         return y
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load the shared block, giving its KV-cache scales to every attention layer.
+
+        The checkpoint stores one set of scales per shared block (mapped to
+        `attn.k_scale` etc.), while vLLM has one `Attention` per hybrid layer
+        that uses the block.
+        """
+        loaded: set[str] = set()
+
+        def load_attn_scales(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if not name.startswith("attn."):
+                    yield name, weight
+                    continue
+                scale_name = name.removeprefix("attn.")
+                for i, layer in enumerate(self.dpa_list):
+                    if isinstance(layer, Attention):
+                        param = getattr(layer, scale_name)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, weight)
+                        loaded.add(f"dpa_list.{i}.{scale_name}")
+
+        loaded |= AutoWeightsLoader(self).load_weights(load_attn_scales(weights))
+        return loaded
 
 
 class Zamba2MLP(nn.Module):
@@ -716,6 +747,8 @@ class Zamba2Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        # Lets AutoWeightsLoader map checkpoint KV-cache scale names.
+        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
 
