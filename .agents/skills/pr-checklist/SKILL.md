@@ -62,7 +62,7 @@ Changes which increase the complexity of the codebase should be carefully scruti
 
 Consider whether the added complexity could be mitigated through refactoring, modularization, or other design improvements. Aim to keep the codebase as simple and understandable as possible while still achieving the desired functionality.
 
-Prefer defaults or automatic selection based on existing hardware, model, and workload information. Before adding an environment variable, config field, or CLI flag, explain why existing controls or automatic selection are insufficient. Validate correctness, compatibility, and performance across affected configurations before choosing the default; an opt-in switch does not replace this assessment.
+Prefer defaults or automatic selection based on existing hardware and model. Before adding an environment variable, config field, or CLI flag, explain why existing controls or automatic selection are insufficient. Validate correctness, compatibility, and performance across affected configurations before choosing the default; an opt-in switch does not replace this assessment.
 
 As a rule of thumb, the complexity of a change can be estimated by the number of new lines of code added to the main codebase:
 
