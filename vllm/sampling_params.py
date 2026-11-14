@@ -1318,7 +1318,11 @@ class SamplingParams(
         from vllm.v1.structured_output.backend_outlines import (
             validate_structured_output_request_outlines,
         )
-        from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+        from vllm.v1.structured_output.backend_xgrammar import (
+            XgrammarUnsupportedJsonFeaturesError,
+            is_legacy_structural_tag_shape,
+            validate_xgrammar_grammar,
+        )
         from vllm.v1.structured_output.utils import grammar_is_likely_lark
 
         if backend.startswith("xgrammar"):
@@ -1385,46 +1389,76 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except VLLMValidationError:
+            except VLLMValidationError as exc:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
-                skip_guidance = _is_non_tekken_mistral(tokenizer)
-
-                # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
-                if not skip_guidance and so_params.json:
-                    if isinstance(so_params.json, str):
-                        try:
-                            schema = json_mod.loads(so_params.json)
-                        except json_mod.JSONDecodeError as e:
-                            raise VLLMValidationError(
-                                "Invalid JSON grammar specification."
-                            ) from e
-                    else:
-                        schema = so_params.json
-                    skip_guidance = has_guidance_unsupported_json_features(schema)
-
-                if skip_guidance:
-                    # Fall back to outlines for non-Tekken Mistral tokenizers or
-                    # schemas containing features unsupported by guidance.
-                    validate_structured_output_request_outlines(self)
-                    self.structured_outputs._backend = "outlines"
-                else:
-                    # Fall back to guidance by default.
-                    if not GuidanceBackend.is_tokenizer_supported(tokenizer):
-                        raise VLLMValidationError(
-                            "No compatible structured output backend was found for "
-                            "this request. XGrammar rejected the constraint, and "
-                            "Guidance does not support this tokenizer. Configure a "
-                            "fast tokenizer or select a compatible backend explicitly."
-                        ) from None
-                    validate_guidance_grammar(
-                        self,
-                        tokenizer=_get_llg_tokenizer(tokenizer),
+                if (
+                    isinstance(exc, XgrammarUnsupportedJsonFeaturesError)
+                    and so_params.structural_tag is not None
+                    and not is_legacy_structural_tag_shape(so_params.structural_tag)
+                ):
+                    # The nested schemas use features xgrammar silently drops,
+                    # and no other structured-output backend supports the
+                    # new-style structural tag format: guidance only
+                    # understands the legacy structures/triggers shape (see
+                    # #55153, still open). Until a backend can enforce the
+                    # constraint, keep main's behavior: serve the request
+                    # with xgrammar, which drops the unsupported keywords
+                    # from the compiled grammar, and warn about it instead
+                    # of rejecting a request main accepted. This matters
+                    # because tool parsers (Harmony/gpt-oss, strict tools,
+                    # Cohere Command) wrap plain response_format schemas
+                    # into new-style structural tags, so rejecting here
+                    # would turn working requests into 400s for users who
+                    # never sent a structural tag.
+                    logger.warning_once(
+                        "The structural tag contains JSON schemas with "
+                        "features not supported by the xgrammar backend, "
+                        "which xgrammar silently drops from the compiled "
+                        "grammar. The request is served with xgrammar as "
+                        "before; remove the unsupported keywords from the "
+                        "nested schema(s) to have the constraint enforced."
                     )
-                    self.structured_outputs._backend = "guidance"
+                    self.structured_outputs._backend = "xgrammar"
+                else:
+                    skip_guidance = _is_non_tekken_mistral(tokenizer)
+
+                    # Check if schema has features unsupported by guidance
+                    if not skip_guidance and so_params.json:
+                        if isinstance(so_params.json, str):
+                            try:
+                                schema = json_mod.loads(so_params.json)
+                            except json_mod.JSONDecodeError as e:
+                                raise VLLMValidationError(
+                                    "Invalid JSON grammar specification."
+                                ) from e
+                        else:
+                            schema = so_params.json
+                        skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                    if skip_guidance:
+                        # Fall back to outlines for non-Tekken Mistral tokenizers or
+                        # schemas containing features unsupported by guidance.
+                        validate_structured_output_request_outlines(self)
+                        self.structured_outputs._backend = "outlines"
+                    else:
+                        # Fall back to guidance by default.
+                        if not GuidanceBackend.is_tokenizer_supported(tokenizer):
+                            raise VLLMValidationError(
+                                "No compatible structured output backend was found "
+                                "for this request. XGrammar rejected the constraint, "
+                                "and Guidance does not support this tokenizer. "
+                                "Configure a fast tokenizer or select a compatible "
+                                "backend explicitly."
+                            ) from None
+                        validate_guidance_grammar(
+                            self,
+                            tokenizer=_get_llg_tokenizer(tokenizer),
+                        )
+                        self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
 

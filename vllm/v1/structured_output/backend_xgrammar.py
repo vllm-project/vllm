@@ -34,6 +34,15 @@ else:
 logger = init_logger(__name__)
 
 
+class XgrammarUnsupportedJsonFeaturesError(VLLMValidationError):
+    """A JSON schema uses features the xgrammar backend does not support.
+
+    Unlike a malformed schema, the request itself is valid: in `auto` backend
+    mode the engine falls back to another structured-output backend instead
+    of rejecting it.
+    """
+
+
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
@@ -466,6 +475,77 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
+def _structural_tag_json_schemas(s_tag: Any) -> list[dict[str, Any]]:
+    """Extract the JSON schemas embedded in a structural tag payload.
+
+    Handles both the new shape ({"type": "structural_tag", "format": ...}),
+    where schemas appear as {"type": "json_schema", "json_schema": {...}} or
+    {"type": "qwen_xml_parameter", "json_schema": {...}} nodes nested anywhere
+    inside "format", and the legacy shape
+    ({"structures": [{"begin", "schema", "end"}], "triggers": [...]}).
+
+    Args:
+        s_tag: The parsed structural tag payload.
+
+    Returns:
+        The embedded JSON schemas. Malformed payloads yield an empty list;
+        payload validity is checked separately by the grammar compilation.
+
+    """
+    schemas: list[dict[str, Any]] = []
+    if not isinstance(s_tag, dict):
+        return schemas
+
+    if "structures" in s_tag:
+        structures = s_tag["structures"]
+        if isinstance(structures, list):
+            for structure in structures:
+                if isinstance(structure, dict):
+                    schema = structure.get("schema")
+                    if isinstance(schema, dict):
+                        schemas.append(schema)
+        return schemas
+
+    # Format node types that embed a JSON schema directly. "json_schema" is
+    # the current type; "qwen_xml_parameter" is deprecated in xgrammar in
+    # favour of {"type": "json_schema", "style": "qwen_xml"}, but existing
+    # serialized tags with that type can still be loaded, so both must be
+    # checked.
+    _SCHEMA_NODE_TYPES = ("json_schema", "qwen_xml_parameter")
+
+    def _collect(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") in _SCHEMA_NODE_TYPES:
+                json_schema = node.get("json_schema")
+                if isinstance(json_schema, dict):
+                    schemas.append(json_schema)
+            for value in node.values():
+                _collect(value)
+        elif isinstance(node, list):
+            for item in node:
+                _collect(item)
+
+    _collect(s_tag.get("format"))
+    return schemas
+
+
+def is_legacy_structural_tag_shape(structural_tag: str | None) -> bool:
+    """Whether a structural tag uses the legacy structures/triggers shape.
+
+    The guidance fallback backend only understands the legacy shape; new-style
+    structural tags ({"type": "structural_tag", "format": ...}) cannot fall
+    back to it. Unparseable payloads return False; their validity is reported
+    separately by the grammar compilation.
+    """
+    if not structural_tag:
+        return False
+    try:
+        s_tag = json.loads(structural_tag)
+    except Exception:
+        return False
+    return isinstance(s_tag, dict) and "structures" in s_tag
+
+
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -518,15 +598,13 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         else:
             schema = so_params.json
 
+        if has_xgrammar_unsupported_json_features(schema):
+            raise XgrammarUnsupportedJsonFeaturesError(
+                "The provided JSON schema contains features not supported by xgrammar."
+            )
+
         try:
-            if has_xgrammar_unsupported_json_features(schema):
-                raise VLLMValidationError(
-                    "The provided JSON schema contains features not supported "
-                    "by xgrammar."
-                )
             xgr.Grammar.from_json_schema(schema)
-        except VLLMValidationError:
-            raise
         except Exception as err:
             raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
@@ -552,7 +630,10 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         check_json_nesting(so_params.structural_tag, structural_tag=True)
         try:
             s_tag = json.loads(so_params.structural_tag)
+        except Exception as e:
+            raise VLLMValidationError("Invalid structural tag specification.") from e
 
+        try:
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:
                 tags = [
@@ -568,6 +649,22 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
+
+        # Check nested schemas only after a successful compile. xgrammar
+        # silently ignores some JSON-schema keywords (e.g. multipleOf) when
+        # it compiles a structural tag, so a nested schema with unsupported
+        # features would otherwise validate successfully while its
+        # constraint is dropped from the compiled grammar. Checking before
+        # compilation would let a malformed tag hide behind the feature
+        # error: request-level validation swallows that error (the tag is
+        # well-formed, only its schemas use unsupported features), so the
+        # malformed tag would pass validation.
+        for schema in _structural_tag_json_schemas(s_tag):
+            if has_xgrammar_unsupported_json_features(schema):
+                raise XgrammarUnsupportedJsonFeaturesError(
+                    "The provided JSON schema contains features not supported "
+                    "by xgrammar."
+                )
         return
 
     raise VLLMValidationError(
