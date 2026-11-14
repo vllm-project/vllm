@@ -133,6 +133,11 @@ def is_layer_gptq_quantized(
 
     quantized_layers = flatten_list(quantized_layers)
 
+    # Empty means no metadata could be read at all, not that the checkpoint
+    # holds no quantized layer, and loading GPTQ weights unquantized cannot work.
+    if not quantized_layers:
+        return True
+
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
@@ -162,6 +167,40 @@ def is_layer_gptq_quantized(
 
     assert is_quantized is not None
     return is_quantized
+
+
+def is_moe_layer_gptq_quantized(prefix: str, quantized_layers: list[str]) -> bool:
+    """Whether the routed experts at `prefix` are quantized in the checkpoint.
+
+    `prefix` is the absolute name of the fused expert layer
+    (`...mlp.experts`), while `modules_in_block_to_quantize` names the
+    individual expert projections (`...mlp.experts.0.down_proj`) or the fused
+    expert module itself, using either absolute or block-relative names. Match
+    on the `experts` portion of the name so that a layer whose experts are
+    stored unquantized -- e.g. the MTP layer of a partially quantized
+    checkpoint -- is not given a quantized method.
+
+    Configs that enumerate no expert module at all say nothing about the
+    experts, so the layer is assumed to be quantized.
+    """
+    expert_parents = set()
+    for layer in flatten_list(quantized_layers):
+        head, sep, _ = layer.partition(".experts.")
+        parent = f"{head}.experts" if sep else layer
+        if parent.rsplit(".", 1)[-1] == "experts":
+            expert_parents.add(parent)
+
+    if not expert_parents:
+        return True
+
+    # The runtime prefix can also be the parent of the experts module, e.g.
+    # DBRX's `...ffn` with checkpoint names `...ffn.experts.*`.
+    return any(
+        prefix == parent
+        or prefix.endswith(f".{parent}")
+        or parent.startswith(f"{prefix}.")
+        for parent in expert_parents
+    )
 
 
 def get_linear_quant_method(

@@ -19,10 +19,9 @@ DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
 CACHE_MAX_AGE=${CACHE_MAX_AGE:-24h}
 
 # Reclaim disk only when the host is under pressure, aging out anything unused
-# for less than CACHE_MAX_AGE so hot layers survive -- same `--filter
-# until=<N>h` pattern the TPU CI scripts already rely on. `docker buildx
-# prune --max-used-space` is a no-op on this host's `docker` driver (BuildKit
-# embedded in dockerd never enforces the size cap), so we don't use it.
+# for less than CACHE_MAX_AGE so hot layers survive (`--filter until=<N>h`).
+# `docker buildx prune --max-used-space` is a no-op on this host's `docker`
+# driver (BuildKit embedded in dockerd never enforces the size cap), so we don't use it.
 prune_if_disk_pressure() {
     local docker_root disk_usage
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)

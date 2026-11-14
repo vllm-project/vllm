@@ -26,14 +26,16 @@ def _force_cpu_default_device():
     torch.set_default_device(original)
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyConfig:
     spatial_conv_size: int = 2
     temporal_conv_size: int = 2
 
 
 def make_model(config: DummyConfig) -> Ernie4_5_VLMoeForConditionalGeneration:
-    model = object.__new__(Ernie4_5_VLMoeForConditionalGeneration)
+    model = object.__new__(
+        Ernie4_5_VLMoeForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     model.config = config
     return model
 

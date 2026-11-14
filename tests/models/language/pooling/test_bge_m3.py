@@ -15,10 +15,14 @@ MAX_MODEL_LEN = 512
 # Example from https://huggingface.co/BAAI/bge-m3
 sentences_1 = ["What is BGE M3?", "Definition of BM25"]
 sentences_2 = [
-    "BGE M3 is an embedding model supporting dense retrieval, "
-    "lexical matching and multi-vector interaction.",
-    "BM25 is a bag-of-words retrieval function that ranks a set "
-    "of documents based on the query terms appearing in each document",
+    (
+        "BGE M3 is an embedding model supporting dense retrieval, "
+        "lexical matching and multi-vector interaction."
+    ),
+    (
+        "BM25 is a bag-of-words retrieval function that ranks a set "
+        "of documents based on the query terms appearing in each document"
+    ),
 ]
 
 similarity_reference = [[0.6259, 0.3474], [0.3309, 0.6734]]
@@ -52,7 +56,13 @@ async def test_bge_m3_api_server_embedding(server, pooling_task):
     client = server.get_async_client()
 
     if pooling_task != "embed":
-        with pytest.raises(openai.InternalServerError):
+        # The OpenAI client sends base64 by default; token_embed accepts only float.
+        expected_error = (
+            openai.BadRequestError
+            if pooling_task == "token_embed"
+            else openai.InternalServerError
+        )
+        with pytest.raises(expected_error):
             await run_client_embeddings(
                 client,
                 MODEL_NAME,

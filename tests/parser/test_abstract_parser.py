@@ -142,6 +142,8 @@ class TestToolChoice_Plus_ResponseFormat:
         )
         parser = self._setup_qwen_parser(tools)
         out = parser.adjust_request(request)
+        # adjust_request hands back the request type it was given.
+        assert isinstance(out, ChatCompletionRequest)
 
         # Now check that request does not have response_format anymore
         # but instead has structured_outputs set as structural tag
@@ -180,6 +182,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -201,6 +204,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -226,6 +230,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -255,6 +260,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is not None
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
@@ -262,7 +268,8 @@ class TestToolChoice_Plus_ResponseFormat:
     def test_auto_with_lark_grammar(self):
         """Conrer case based on Vadim's feedback in PR #56086
         https://github.com/vllm-project/vllm/pull/56086#pullrequestreview-5329203459
-        Lark grammars are converted to EBNF before being merged into the tag.
+        Lark grammars are merged into the tag as Lark, so the engine compiles them
+        with the tokenizer like a native Lark grammar.
         """
         tools = self._tools(strict=True)
         request = ChatCompletionRequest(
@@ -276,7 +283,10 @@ class TestToolChoice_Plus_ResponseFormat:
         out = parser.adjust_request(request)
 
         assert out.structured_outputs is not None
-        grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
+        structural_tag = out.structured_outputs.structural_tag
+        assert structural_tag is not None
+        assert '"grammar": "start: \\"ok\\"", "syntax": "lark"' in structural_tag
+        grammar = Grammar.from_structural_tag(structural_tag)
         assert _is_grammar_accept_string(grammar, "ok")
         assert not _is_grammar_accept_string(grammar, "bad")
         assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
@@ -298,6 +308,7 @@ class TestToolChoice_Plus_ResponseFormat:
         with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
             out = parser.adjust_request(request)
 
+        assert isinstance(out, ChatCompletionRequest)
         assert out.response_format is None
         assert out.structured_outputs is not None
         grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)

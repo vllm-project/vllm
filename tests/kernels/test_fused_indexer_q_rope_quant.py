@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
@@ -215,6 +216,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
         )
 
     # fp8 tensors aren't directly comparable via torch.equal — reinterpret as int8.
+    assert isinstance(q_quant_fused, torch.Tensor)
     ref_bits = q_quant_ref.view(torch.int8)
     fused_bits = q_quant_fused.view(torch.int8)
     assert torch.equal(ref_bits, fused_bits), (
@@ -249,13 +251,13 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
 @pytest.mark.parametrize("n_head", [32, 64])
 @torch.inference_mode()
 def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
-    """The cutedsl kernels must not store past ``num_tokens``.
+    """The cutedsl kernels must not store past `num_tokens`.
 
-    The launcher rounds ``num_tokens * threads_per_token`` up to whole 128-thread
+    The launcher rounds `num_tokens * threads_per_token` up to whole 128-thread
     blocks, so the trailing block is only partially in range unless
-    ``threads_per_token`` is itself a multiple of the block size. With 32 heads
+    `threads_per_token` is itself a multiple of the block size. With 32 heads
     and coarsen=4 (picked for >= 512 tokens) a token needs 64 threads, so an odd
-    token count leaves half of the last block addressing token ``num_tokens``.
+    token count leaves half of the last block addressing token `num_tokens`.
     Every output gets one extra sentinel row that the kernel must leave alone.
     """
     mod = importlib.import_module(CUTEDSL_MODULE)
@@ -347,6 +349,10 @@ def _indexer_k_reference(
     exponent = k.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-4) / 448
     scale = exponent.log2().ceil().exp2()
     values = (k.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+    if mqa_logits_use_mx_scales():
+        # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+        ue8m0 = (scale.view(torch.int32) >> 23).to(torch.uint8)
+        return values.view(torch.uint8), ue8m0.repeat(1, 4)
     return values.view(torch.uint8), scale.view(torch.uint8)
 
 
@@ -438,7 +444,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
     torch.testing.assert_close(storage, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm kernel")
 @pytest.mark.parametrize("use_fp4", [False, True])
 @torch.inference_mode()
 def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):
@@ -497,9 +503,9 @@ def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):
 def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_ratio):
     """ROCm reads the indexer K cache back with the 16x16-tiled value layout.
 
-    ``cp_gather_indexer_k_quant_cache_triton`` (prefill) and aiter's
-    ``Preshuffle=True`` paged kernel (decode) both pick that layout whenever
-    ``block_size > 1``, so a row-major store would feed the indexer permuted
+    `cp_gather_indexer_k_quant_cache_triton` (prefill) and aiter's
+    `Preshuffle=True` paged kernel (decode) both pick that layout whenever
+    `block_size > 1`, so a row-major store would feed the indexer permuted
     key bytes and randomize its top-k. Assert the write/read pair is exact.
     """
     from vllm.models.deepseek_v41.common.ops.indexer_k_store import (

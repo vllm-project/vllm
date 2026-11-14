@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -78,7 +78,7 @@ _CACHE_UNREADABLE = "unreadable"
 def _generated_cache_prefixes() -> tuple[str, ...]:
     """Path prefixes of the generated caches an engine process keeps open.
 
-    vLLM redirects Inductor and Triton under ``VLLM_CACHE_ROOT`` when it
+    vLLM redirects Inductor and Triton under `VLLM_CACHE_ROOT` when it
     compiles, but a process can still hold their upstream defaults open.
     A cache root is resolved and separator-terminated so that it still matches
     the kernel-canonical descriptor targets under a symlinked root, and so that
@@ -115,7 +115,7 @@ def _close_pidfds(handles: Iterable[tuple[int, int]]) -> None:
             os.close(pidfd)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProcessInventory:
     root_pid: int
     process_tree: tuple[int, ...]
@@ -124,7 +124,7 @@ class ProcessInventory:
     external_cache_files: tuple[tuple[str, str], ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TcpSocketRecord:
     family: str
     local_raw: str
@@ -140,7 +140,7 @@ def _process_comm(pid: int) -> str:
 
 
 def _decode_endpoint(family: str, raw: str) -> str:
-    """Render a ``/proc/net/tcp`` ``HEXADDR:HEXPORT`` field as ``ip:port``.
+    """Render a `/proc/net/tcp` `HEXADDR:HEXPORT` field as `ip:port`.
 
     The kernel prints the address as little-endian 32-bit words: one for IPv4,
     four in order for IPv6.
@@ -872,7 +872,7 @@ class LocalSnapshotTools:
         return SnapshotManifest(
             schema_version=1,
             boundary="post-engine-init-reloadable-state-released",
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
             **identity.model_dump(),
             model=source_model,

@@ -4,12 +4,12 @@
 
 Shared by both UniProcExecutor (TP=1) and MultiprocExecutor (TP>1).
 All transport-specific env vars and sysfs lookups live here so executor
-files only need to call ``set_worker_net_device(local_rank, vllm_config)``.
+files only need to call `set_worker_net_device(local_rank, vllm_config)`.
 
 Requires two env vars set together:
-- ``VLLM_GPU_NIC_PCIE_MAPPING`` -- comma-separated GPU_BDF=NIC_BDF pairs.
-- ``VLLM_NIC_SELECTION_VARS`` -- comma-separated list of env vars to set,
-  each optionally suffixed (e.g. ``UCX_NET_DEVICES:1,NCCL_IB_HCA:1``).
+- `VLLM_GPU_NIC_PCIE_MAPPING` -- comma-separated GPU_BDF=NIC_BDF pairs.
+- `VLLM_NIC_SELECTION_VARS` -- comma-separated list of env vars to set,
+  each optionally suffixed (e.g. `UCX_NET_DEVICES:1,NCCL_IB_HCA:1`).
 """
 
 import os
@@ -27,11 +27,11 @@ def normalize_pci(addr: str) -> tuple[int, int, int, int]:
     """Parse PCI BDF/domain-bus-device-function into comparable ints (all hex).
 
     Supported shapes:
-    - ``domain:bus:dev.fn`` -- domain width varies (e.g. ``00000001:00:00.0``,
-      ``0001:00:00.0``, ``0000:3f:00.0``).
-    - ``bus:dev.fn`` -- domain **0** (e.g. ``01:00.0``, ``40:00.0``).
+    - `domain:bus:dev.fn` -- domain width varies (e.g. `00000001:00:00.0`,
+      `0001:00:00.0`, `0000:3f:00.0`).
+    - `bus:dev.fn` -- domain **0** (e.g. `01:00.0`, `40:00.0`).
 
-    Function suffix is hex (typically ``0``--``7``). Raises ``ValueError`` if malformed.
+    Function suffix is hex (typically `0`--`7`). Raises `ValueError` if malformed.
     """
     s = addr.strip().lower().replace(" ", "")
     if s.startswith("0x"):
@@ -87,11 +87,11 @@ def parse_gpu_nic_mapping(
 def rdma_name_for_nic_pci(nic_pci: tuple[int, int, int, int]) -> str:
     """Map NIC PCI BDF to sysfs RDMA name (mlx5_*, ibp*, ...).
 
-    Under ``/sys/class/infiniband/<name>/``, ``device`` is a **symlink** to the PCI
-    device directory (e.g. ``.../0101:00:00.0``). We take ``Path(...).resolve().name``
+    Under `/sys/class/infiniband/<name>/`, `device` is a **symlink** to the PCI
+    device directory (e.g. `.../0101:00:00.0`). We take `Path(...).resolve().name`
     as the BDF string.
 
-    ``VLLM_GPU_NIC_PCIE_MAPPING`` NIC keys must **normalize** (via ``normalize_pci``)
+    `VLLM_GPU_NIC_PCIE_MAPPING` NIC keys must **normalize** (via `normalize_pci`)
     to the same tuple as this basename.
     """
     ib = Path("/sys/class/infiniband")
@@ -118,9 +118,9 @@ def rdma_name_for_nic_pci(nic_pci: tuple[int, int, int, int]) -> str:
 
 
 def parse_nic_selection_vars(raw: str) -> list[tuple[str, str]]:
-    """Parse ``VLLM_NIC_SELECTION_VARS`` into ``(env_var_name, suffix)`` pairs.
+    """Parse `VLLM_NIC_SELECTION_VARS` into `(env_var_name, suffix)` pairs.
 
-    Each entry is ``VAR_NAME`` or ``VAR_NAME:<suffix>``.  The colon and
+    Each entry is `VAR_NAME` or `VAR_NAME:<suffix>`.  The colon and
     everything after it is appended verbatim to the RDMA device name.
     """
     result: list[tuple[str, str]] = []
@@ -139,7 +139,7 @@ def parse_nic_selection_vars(raw: str) -> list[tuple[str, str]]:
 def set_worker_gpu_nic_mapping(local_rank: int) -> None:
     """Set NIC selection env vars from VLLM_GPU_NIC_PCIE_MAPPING for a worker.
 
-    Which env vars are set is controlled by ``VLLM_NIC_SELECTION_VARS``.
+    Which env vars are set is controlled by `VLLM_NIC_SELECTION_VARS`.
     """
     raw = envs.VLLM_GPU_NIC_PCIE_MAPPING.strip()
     if not raw:
@@ -191,37 +191,11 @@ def set_worker_gpu_nic_mapping(local_rank: int) -> None:
     )
 
 
-def _dp_adjusted_local_rank(tp_local_rank: int, vllm_config: VllmConfig) -> int:
-    """Compute the node-wide GPU index accounting for data parallelism.
-
-    On CUDA-alike platforms without env-var device isolation (the common
-    MP-backend path), the worker sees *all* GPUs on the node and selects
-    its device via ``torch.accelerator.set_device_index()`` using::
-
-        dp_local_rank * tp_pp_world_size + tp_local_rank
-
-    This mirrors the adjustment in ``Worker.init_device()`` so we resolve
-    the correct GPU PCI address *before* the CUDA device is initialised.
-    """
-    pc = vllm_config.parallel_config
-    if (
-        pc.distributed_executor_backend not in ("ray", "external_launcher")
-        and pc.data_parallel_backend != "ray"
-        and pc.nnodes_within_dp == 1
-    ):
-        dp_local_rank = pc.data_parallel_rank_local
-        if dp_local_rank is None:
-            dp_local_rank = pc.data_parallel_index
-        tp_pp_world_size = pc.pipeline_parallel_size * pc.tensor_parallel_size
-        return dp_local_rank * tp_pp_world_size + tp_local_rank
-    return tp_local_rank
-
-
 def set_worker_net_device(local_rank: int, vllm_config: VllmConfig) -> None:
     """Top-level entry point for both UniProcExecutor and MultiprocExecutor.
 
-    Sets NIC selection env vars from ``VLLM_GPU_NIC_PCIE_MAPPING`` and
-    ``VLLM_NIC_SELECTION_VARS`` if present; no-op otherwise.
+    Sets NIC selection env vars from `VLLM_GPU_NIC_PCIE_MAPPING` and
+    `VLLM_NIC_SELECTION_VARS` if present; no-op otherwise.
     """
     has_pcie_mapping = bool(envs.VLLM_GPU_NIC_PCIE_MAPPING.strip())
     has_selection_vars = bool(envs.VLLM_NIC_SELECTION_VARS.strip())
@@ -239,5 +213,6 @@ def set_worker_net_device(local_rank: int, vllm_config: VllmConfig) -> None:
     if not has_pcie_mapping and not has_selection_vars:
         return
     # Both env vars are present, so set the NIC selection env vars.
-    adjusted_rank = _dp_adjusted_local_rank(local_rank, vllm_config)
-    set_worker_gpu_nic_mapping(adjusted_rank)
+    # Resolve the node-wide GPU index before the CUDA device is initialised.
+    gpu_index = vllm_config.parallel_config.get_local_gpu_index(local_rank)
+    set_worker_gpu_nic_mapping(gpu_index)

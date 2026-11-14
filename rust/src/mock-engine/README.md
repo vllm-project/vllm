@@ -3,7 +3,8 @@
 `vllm-mock-engine` is a small engine-side process for frontend stress testing. It
 joins a frontend-owned startup handshake, reports a large ready response, treats
 prefill as instant, and emits random decode tokens until each request reaches
-its `max_tokens`.
+its `max_tokens`. Requests that ask for sample or prompt logprobs get random
+ones, with the sampled or prompt token ranked first.
 
 The frontend must own the handshake socket. Start the frontend first, then start
 the mock engine with the same handshake address.

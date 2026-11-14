@@ -4,12 +4,15 @@
 underlying packing helpers, plus Cohere-specific serving helpers."""
 
 import struct
+from unittest.mock import Mock
 
 import numpy as np
 import pybase64 as base64
 import pytest
 
+from vllm.config import ModelConfig, PoolerConfig
 from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingCompletionRequest,
     build_typed_embeddings,
 )
 
@@ -76,9 +79,9 @@ class TestBuildTypedEmbeddingsBinary:
         assert result.binary[0] == [127]
 
     def test_negative_zero_treated_as_positive(self):
-        """Packing follows ``value >= 0``, not the IEEE-754 sign bit.
+        """Packing follows `value >= 0`, not the IEEE-754 sign bit.
 
-        ``-0.0 >= 0`` is True, so these bits must be set. An implementation
+        `-0.0 >= 0` is True, so these bits must be set. An implementation
         reading the sign bit instead would pack -128 here.
         """
         result = build_typed_embeddings([[-0.0] * 8], ["binary"])
@@ -89,7 +92,7 @@ class TestBuildTypedEmbeddingsBinary:
         """Sign is decided at float64 precision.
 
         The smallest float64 denormal underflows to -0.0 in float32, where
-        ``>= 0`` is True; narrowing the comparison would wrongly pack 127.
+        `>= 0` is True; narrowing the comparison would wrongly pack 127.
         """
         result = build_typed_embeddings([[-5e-324] * 8], ["binary"])
         assert result.binary is not None
@@ -105,7 +108,7 @@ class TestBuildTypedEmbeddingsBinary:
         """A malformed batch must raise rather than pack along the last axis.
 
         Packing a 1D or 3D input would silently emit wrongly shaped
-        ``binary``/``ubinary`` values instead of reporting an error.
+        `binary`/`ubinary` values instead of reporting an error.
         """
         with pytest.raises(ValueError, match="2D batch"):
             build_typed_embeddings(embs, ["binary"])
@@ -162,3 +165,59 @@ class TestBuildTypedEmbeddingsMultiple:
     def test_unknown_type_ignored(self, sample_embeddings: list[list[float]]):
         result = build_typed_embeddings(sample_embeddings, ["float", "unknown_type"])
         assert result.float is not None
+
+
+def _embedding_model_config(
+    *,
+    max_model_len: int = 128,
+    max_embed_len: int | None = None,
+    enable_chunked_processing: bool = False,
+) -> Mock:
+    model_config = Mock(spec=ModelConfig)
+    model_config.max_model_len = max_model_len
+    model_config.encoder_config = None
+    model_config.pooler_config = PoolerConfig(
+        seq_pooling_type="CLS",
+        max_embed_len=max_embed_len,
+        enable_chunked_processing=enable_chunked_processing,
+    )
+    return model_config
+
+
+class TestMaxEmbedLenCapsInput:
+    """`build_tok_params` used to enforce `max_embed_len` indirectly, by
+    setting `max_output_tokens = max_model_len - max_embed_len` and relying on
+    `max_input_tokens == max_total_tokens - max_output_tokens`. The cap is now
+    expressed directly as `max_total_tokens`."""
+
+    def test_non_chunked_max_embed_len_caps_input(self):
+        cfg = _embedding_model_config(max_model_len=128, max_embed_len=64)
+
+        tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
+            cfg
+        )
+
+        assert tok_params.max_input_tokens == 64
+        assert tok_params.max_output_tokens == 0
+
+    def test_chunked_max_embed_len_caps_input(self):
+        cfg = _embedding_model_config(
+            max_model_len=128, max_embed_len=64, enable_chunked_processing=True
+        )
+
+        tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
+            cfg
+        )
+
+        assert tok_params.max_input_tokens == 64
+        assert tok_params.max_output_tokens == 0
+
+    def test_no_max_embed_len_falls_back_to_model_len(self):
+        cfg = _embedding_model_config(max_model_len=128)
+
+        tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
+            cfg
+        )
+
+        assert tok_params.max_input_tokens == 128
+        assert tok_params.max_output_tokens == 0

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
+
+from vllm.model_executor.utils import replace_parameter
 
 from .inc_wna16_linear import INCXPULinearMethod
 
@@ -10,8 +11,8 @@ from .inc_wna16_linear import INCXPULinearMethod
 class INCXPUW4A8LinearMethod(INCXPULinearMethod):
     """XPU linear method for INC int4 weights with dynamic int8 activations.
 
-    Uses the same GPTQ-packed "NT" qweight layout as ``INCXPULinearMethod`` —
-    ``int4_gemm_w4a8`` and ``int4_gemm_w4a16`` accept bit-identical weights, so
+    Uses the same GPTQ-packed "NT" qweight layout as `INCXPULinearMethod` —
+    `int4_gemm_w4a8` and `int4_gemm_w4a16` accept bit-identical weights, so
     no extra repacking is needed. Activations are dynamically quantized
     per-token to symmetric int8, which keeps the GEMM on the int8 datapath
     instead of upconverting the weights to the activation dtype. That is a win
@@ -22,7 +23,7 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
     regardless of the activation dtype, so bf16 scales are silently
     misinterpreted. The activations themselves may be bf16 or fp16.
 
-    Opt in with ``VLLM_XPU_INC_WNA16_BACKEND=w4a8``. Whether this beats ARK is
+    Opt in with `VLLM_XPU_INC_WNA16_BACKEND=w4a8`. Whether this beats ARK is
     device-dependent, so it is not the default: it was measured faster on B70
     (Xe2), where ARK cannot use its XMX int8 path and falls back to fp16.
     """
@@ -78,9 +79,7 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
         super().process_weights_after_loading(layer)
         # The kernel reads both scale tensors as fp16; keep an fp16 copy for the
         # w4a8 path and leave ``scales`` untouched for the w4a16 fallback.
-        layer.scales_fp16 = Parameter(
-            layer.scales.data.to(torch.float16), requires_grad=False
-        )
+        replace_parameter(layer, "scales_fp16", layer.scales.data.to(torch.float16))
 
     def apply_weights(
         self,

@@ -14,18 +14,24 @@ test_sharded_rdt_producer.py.
 
 import itertools
 from dataclasses import asdict
+from functools import cached_property
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from tests.distributed.test_sharded_rdt_plan import consumer_engine
 from tests.distributed.test_weight_transfer import RecordingClient
 from vllm.distributed.weight_transfer import (
-    ModuleSource,
     ParamMeta,
     WeightSource,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import layerwise_groups
+from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+    ShardedRDTWeightTransferUpdateInfo,
+    _CallPlan,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -39,11 +45,12 @@ class _ListSource(WeightSource):
     def __init__(self, pairs):
         self._pairs = list(pairs)
 
+    @cached_property
     def metadata(self):
         return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
-    def __iter__(self):
-        return iter(self._pairs)
+    def iter_full(self):
+        yield from self._pairs
 
 
 class _FakeProducerServer:
@@ -52,7 +59,7 @@ class _FakeProducerServer:
     it is published (simulating the consumers' free_group barrier) so the
     gather loop's credit gate never parks. Mirrors the real server's
     per-group barrier: publish/free are keyed by GROUP INDEX, signals count
-    to the ``begin_sync`` live total, publish_group returns nothing, and freed
+    to the `begin_sync` live total, publish_group returns nothing, and freed
     groups flow back only through wait_freed / end_sync (see
     test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne)."""
 
@@ -70,10 +77,11 @@ class _FakeProducerServer:
     def inflight(self):
         return self._inflight_groups
 
-    def begin_sync(self, live_count, live_consumer_ids=None):
+    def begin_sync(self, live_count, live_consumer_ids=None, sync_idx=None):
         self.order.append("begin")
         self.live_count = max(1, int(live_count))
         self.live_ids = live_consumer_ids
+        self.sync_idx = sync_idx
 
     def publish_group(self, group_idx, entries):
         self.order.append("publish")
@@ -97,7 +105,7 @@ class _FakeProducerServer:
         """The engine's credit gate. The real server blocks here; the fake
         must already have a banked credit when the gate asks (auto_free, or a
         test's own free_group) — anything else is the deadlock the real
-        watchdog would kill, so fail loudly. Not appended to ``order``: it is
+        watchdog would kill, so fail loudly. Not appended to `order`: it is
         pacing, not a lifecycle milestone."""
         assert self._pending_freed, (
             "wait_freed with nothing freed: the gather loop would deadlock"
@@ -117,7 +125,7 @@ class _FakeProducerServer:
 
 
 def _rdt_engine_with_fake_server(
-    source, *, is_sender, client, server, monkeypatch, fleet_owned=None
+    source, *, is_sender, client, server, monkeypatch, world=1
 ):
     """Build a ShardedRDTTrainerWeightTransferEngine wired to an in-process fake
     server (no Ray, no CUDA IPC): bypass trainer_init's spawn, set the
@@ -131,36 +139,12 @@ def _rdt_engine_with_fake_server(
     engine = ShardedRDTTrainerWeightTransferEngine(
         client=client, source=source, is_sender=is_sender, init_info=init_info
     )
-    engine._meta = list(source.metadata())
+    engine._meta = list(source.metadata)
     names = [m.name for m in engine._meta]
     engine._groups = layerwise_groups(names)
     engine._server = server
     engine._rpc = lambda method, *args: getattr(server, method)(*args)
-    # What trainer_init resolves from the source's held names + the fleet's
-    # all-gather. ``fleet_owned`` stands in for that all-gather so a partial-
-    # ownership rank can be tested without a real process group; the fleet must
-    # cover every name or the transpose rejects it (nothing would serve the rest).
-    if fleet_owned is None:
-        engine._resolve_ownership(1, 0)
-    else:
-        # Stands in for the (metadata digest, held-name bitmask) all-gather:
-        # each rank's group list becomes the mask its held names would set.
-        names = [m.name for m in engine._meta]
-        groups = engine._groups
-
-        def _fake_gather(_world, mine):
-            out = []
-            for owned in fleet_owned:
-                held = {n for gi in owned for n in groups[gi]}
-                mask = bytearray((len(names) + 7) // 8)
-                for i, n in enumerate(names):
-                    if n in held:
-                        mask[i >> 3] |= 1 << (i & 7)
-                out.append((mine[0], bytes(mask)))
-            return out
-
-        monkeypatch.setattr(engine, "_all_gather_owned", _fake_gather)
-        engine._resolve_ownership(len(fleet_owned), 0)
+    engine._resolve_ownership(world, init_info.rank)
     return engine
 
 
@@ -250,7 +234,7 @@ def test_sharded_rdt_send_weights_drives_client_in_order(monkeypatch):
 def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
     # Source whose iteration order disagrees with its metadata order.
     class _BadSource(_ListSource):
-        def __iter__(self):
+        def iter_full(self):
             reordered = list(self._pairs)
             reordered[0], reordered[1] = reordered[1], reordered[0]
             return iter(reordered)
@@ -263,7 +247,7 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
         server=server,
         monkeypatch=monkeypatch,
     )
-    with pytest.raises(RuntimeError, match="iteration order must match"):
+    with pytest.raises(RuntimeError, match="must yield the owned names"):
         engine.send_weights()
     assert "error" in server.order  # gather error propagated to the server
 
@@ -319,66 +303,90 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
         engine.send_weights()
 
 
-class _OwnedSource(_ListSource):
-    """A source holding only some groups' names, like a pipeline-parallel rank.
-    Takes group indices for convenience and declares the names inside them."""
+class _DeclaredSource(_ListSource):
+    """A source that declares owners per name and yields only what this rank
+    owns."""
 
-    def __init__(self, pairs, owned_group_idx):
+    def __init__(self, pairs, owners, rank):
         super().__init__(pairs)
-        self._owned = list(owned_group_idx)
-        groups = layerwise_groups([n for n, _ in pairs])
-        self._owned_names = [n for gi in self._owned for n in groups[gi]]
+        self._owners = owners
+        self._rank = rank
 
-    def held_names(self):
-        return list(self._owned_names)
+    @cached_property
+    def metadata(self):
+        return [
+            ParamMeta(n, t.dtype, tuple(t.shape), owners=self._owners.get(n))
+            for n, t in self._pairs
+        ]
 
-    def __iter__(self):
-        by_name = dict(self._pairs)
-        return iter([(n, by_name[n]) for n in self._owned_names])
+    def iter_full(self):
+        for n, t in self._pairs:
+            if n not in self._owners or self._rank in self._owners[n]:
+                yield n, t
+
+
+# embed and layer 0 on stage 0, layer 1 on stage 1, norm everywhere.
+_PP_OWNERS = {
+    "embed.weight": (0,),
+    "model.layers.0.w": (0,),
+    "model.layers.1.w": (1,),
+}
+
+
+def test_sharded_rdt_plans_ownership_from_metadata(monkeypatch):
+    """Owners come from metadata alone, so every rank builds the same table."""
+    owned = [
+        {"embed.weight", "model.layers.0.w", "norm.weight"},
+        {"model.layers.1.w", "norm.weight"},
+    ]
+    tables = []
+    for rank in (0, 1):
+        engine = _rdt_engine_with_fake_server(
+            _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, rank),
+            is_sender=rank == 0,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+            world=2,
+        )
+        tables.append((engine._owner_sets, engine._name_owner_class))
+        assert engine._owned_names == owned[rank]
+    assert tables[0] == tables[1] == ([[0], [1], [0, 1]], [0, 0, 1, 2])
 
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="the gather loop's CUDA-IPC export needs a device",
 )
-def test_sharded_rdt_publishes_only_the_groups_it_holds(monkeypatch):
+def test_sharded_rdt_publishes_only_the_groups_it_owns(monkeypatch):
+    """The engine groups the source's stream per layer and publishes only the
+    groups this rank owns part of."""
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
-        _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
+        _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, 1),
         is_sender=False,
         client=RecordingClient(),
         server=server,
         monkeypatch=monkeypatch,
-        fleet_owned=[[1, 2], [0, 3]],  # this rank holds the layers, rank 1 the rest
+        world=2,
     )
     engine.send_weights()
-
-    assert server.published == [1, 2]
+    assert server.published == [2, 3]
     assert server.order == ["begin", "publish", "publish", "end"]
-    assert engine._inflight == {}
-    # embed + norm on rank 1, the two layers here: two distinct owner sets,
-    # numbered by first appearance in metadata order.
-    assert engine._owner_sets == [[1], [0]]
-    assert engine._name_owner_class == [0, 1, 1, 0]
 
 
-def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
-    class _MisorderedOwned(_OwnedSource):
-        def __iter__(self):
-            return iter(list(super().__iter__())[::-1])
-
-    server = _FakeProducerServer(auto_free=True)
-    engine = _rdt_engine_with_fake_server(
-        _MisorderedOwned(_rdt_source_two_layers()._pairs, [1, 2]),
-        is_sender=False,
-        client=RecordingClient(),
-        server=server,
-        monkeypatch=monkeypatch,
-        fleet_owned=[[1, 2], [0, 3]],
-    )
-    with pytest.raises(RuntimeError, match="iteration order must match"):
-        engine.send_weights()
-    assert "error" in server.order
+def test_sharded_rdt_rejects_owners_outside_the_trainer(monkeypatch):
+    with pytest.raises(ValueError, match="only 2 trainer ranks"):
+        _rdt_engine_with_fake_server(
+            _DeclaredSource(
+                _rdt_source_two_layers()._pairs, {"embed.weight": (0, 2)}, 0
+            ),
+            is_sender=True,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+            world=2,
+        )
 
 
 @pytest.mark.skipif(
@@ -403,19 +411,18 @@ def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
 
 
 class TestLiveCountPlumbing:
-    """``send_weights(live_consumer_ids)`` -> the barrier target. The
+    """`send_weights(live_consumer_ids)` -> the barrier target. The
     provisioned geometry is frozen; a degraded sync only lowers the target and
     narrows each slot-sharing group's rendezvous."""
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
-        engine = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=RecordingClient(),
+            source=object(),  # send_weights asserts a source is present
+            is_sender=rank == 0,
+            init_info=ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers),
         )
-        engine._init_info = ShardedRDTTrainerInitInfo(
-            rank=rank, num_consumers=num_consumers
-        )
-        engine.source = object()  # send_weights asserts a source is present
         received: list = []
         engine._send_weights_inner = lambda count, ids: received.append((count, ids))
         return engine, received
@@ -456,104 +463,138 @@ class TestLiveCountPlumbing:
         assert ids == [0, 2, 6] and count == len(ids)
 
 
+class TestSyncIndexPlumbing:
+    @staticmethod
+    def _worker(calls):
+        engine = consumer_engine()
+        engine._cached_plan = _CallPlan(chunks=[], pre_free=[0, 1])
+        engine._router = SimpleNamespace(
+            free_group=lambda group_idx, sync_idx: (
+                calls.append((group_idx, sync_idx)) or []
+            )
+        )
+        return engine
+
+    def test_worker_attaches_update_index_to_every_free_signal(self):
+        calls: list[tuple[int, int | None]] = []
+        self._worker(calls).receive_weights(
+            ShardedRDTWeightTransferUpdateInfo(sync_idx=4)
+        )
+        assert calls == [(0, 4), (1, 4)]
+
+    def test_default_update_sends_untagged_free_signals(self):
+        calls: list[tuple[int, int | None]] = []
+        self._worker(calls).receive_weights(ShardedRDTWeightTransferUpdateInfo())
+        assert calls == [(0, None), (1, None)]
+
+    @pytest.mark.parametrize("sync_idx", ["4", 4.0, True, None, -2])
+    def test_worker_rejects_a_malformed_update_index(self, sync_idx):
+        """A payload whose index is not an int at or above -1 fails the sync
+        with an error that names the field and the value, before any free
+        signal goes out; -1 is the untagged default, so it is not malformed."""
+        calls: list[tuple[int, int | None]] = []
+        with pytest.raises(ValueError) as excinfo:
+            self._worker(calls).receive_weights(
+                ShardedRDTWeightTransferUpdateInfo(sync_idx=sync_idx)
+            )
+        assert f"sync_idx={sync_idx!r}" in str(excinfo.value)
+        assert calls == []
+
+    @staticmethod
+    def _trainer(*, is_sender):
+        class _RecordingUpdates(RecordingClient):
+            def __init__(self):
+                super().__init__()
+                self.updates = []
+
+            def update_weights(self, update_info):
+                self.updates.append(update_info)
+                super().update_weights(update_info)
+
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=_RecordingUpdates(),
+            source=SimpleNamespace(iter_full=lambda: iter(())),
+            is_sender=is_sender,
+            init_info=ShardedRDTTrainerInitInfo(
+                rank=0 if is_sender else 1, num_consumers=2
+            ),
+        )
+        producer_calls = []
+
+        def _rpc(method, *args):
+            producer_calls.append((method, args))
+            return [] if method == "end_sync" else None
+
+        engine._rpc = _rpc
+        return engine, producer_calls
+
+    def test_sender_uses_same_index_for_producers_and_workers(self):
+        engine, producer_calls = self._trainer(is_sender=True)
+        engine.send_weights()
+        engine.send_weights()
+
+        producer_indices = [
+            args[2] for method, args in producer_calls if method == "begin_sync"
+        ]
+        worker_indices = [update["sync_idx"] for update in engine.client.updates]
+        assert producer_indices == worker_indices == [0, 1]
+
+    def test_non_sender_increments_the_same_producer_sequence(self):
+        engine, producer_calls = self._trainer(is_sender=False)
+        engine.send_weights()
+        engine.send_weights()
+
+        assert [
+            args[2] for method, args in producer_calls if method == "begin_sync"
+        ] == [0, 1]
+        assert engine.client.updates == []
+
+
 def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
     import json
 
-    server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
-        _OwnedSource(_rdt_source_two_layers()._pairs, [0, 1]),
+        _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, 0),
         is_sender=True,
-        client=RecordingClient(),
-        server=server,
-        monkeypatch=monkeypatch,
-        fleet_owned=[[0, 1], [2, 3]],
-    )
-    worker_init = engine._build_worker_init_info(["srv_rk0", "srv_rk1"])
-    assert worker_init.owner_sets == [[0], [1]]
-    assert worker_init.name_owner_class == [0, 0, 1, 1]
-    assert len(worker_init.name_owner_class) == len(worker_init.names)
-    # The payload crosses the control plane as JSON: nested lists must survive.
-    round_tripped = json.loads(json.dumps(asdict(worker_init)))
-    assert round_tripped["owner_sets"] == [[0], [1]]
-    assert round_tripped["name_owner_class"] == [0, 0, 1, 1]
-
-
-def test_weight_source_holds_everything_by_default():
-    """The contract's default: a source that says nothing holds the whole model."""
-    src = _rdt_source_two_layers()
-    assert src.held_names() is None
-    assert ModuleSource(torch.nn.Linear(2, 2)).held_names() is None
-
-
-def test_sharded_rdt_rejects_a_held_name_outside_metadata(monkeypatch):
-    class _BadHeld(_OwnedSource):
-        def held_names(self):
-            return ["embed.weight", "not.a.real.name"]
-
-    with pytest.raises(ValueError, match="not"):
-        _rdt_engine_with_fake_server(
-            _BadHeld(_rdt_source_two_layers()._pairs, [0]),
-            is_sender=False,
-            client=RecordingClient(),
-            server=_FakeProducerServer(),
-            monkeypatch=monkeypatch,
-        )
-
-
-def test_sharded_rdt_rejects_a_rank_holding_nothing(monkeypatch):
-    class _HoldsNothing(_ListSource):
-        def held_names(self):
-            return []
-
-    with pytest.raises(ValueError, match="empty"):
-        _rdt_engine_with_fake_server(
-            _HoldsNothing(_rdt_source_two_layers()._pairs),
-            is_sender=False,
-            client=RecordingClient(),
-            server=_FakeProducerServer(),
-            monkeypatch=monkeypatch,
-        )
-
-
-def test_sharded_rdt_rejects_a_name_no_rank_holds(monkeypatch):
-    """Every name must be held somewhere or it can never be served — caught
-    when the holdings are transposed, naming the orphan."""
-    with pytest.raises(ValueError, match="no trainer rank holds"):
-        _rdt_engine_with_fake_server(
-            _OwnedSource(_rdt_source_two_layers()._pairs, [0, 1]),
-            is_sender=False,
-            client=RecordingClient(),
-            server=_FakeProducerServer(),
-            monkeypatch=monkeypatch,
-            fleet_owned=[[0, 1], [2]],  # nobody holds group 3
-        )
-
-
-def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
-    """Only the sender's metadata reaches the consumers, so a rank describing
-    just its own share must fail loudly rather than silently drop the rest."""
-    engine = _rdt_engine_with_fake_server(
-        _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
-        is_sender=False,
         client=RecordingClient(),
         server=_FakeProducerServer(auto_free=True),
         monkeypatch=monkeypatch,
-        fleet_owned=[[1, 2], [0, 3]],  # a covering fleet, so construction succeeds
+        world=2,
     )
-    # Now rank 1 reports a DIFFERENT metadata digest for the same model.
-    monkeypatch.setattr(
-        engine,
-        "_all_gather_owned",
-        lambda w, mine: [mine, ("deadbeefdeadbeef", mine[1])],
+    worker_init = engine._build_worker_init_info(["srv_rk0", "srv_rk1"])
+    # The payload crosses the control plane as JSON: nested lists must survive.
+    round_tripped = json.loads(json.dumps(asdict(worker_init)))
+    assert round_tripped["owner_sets"] == [[0], [1], [0, 1]]
+    assert round_tripped["name_owner_class"] == [0, 0, 1, 2]
+
+
+def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
+    """Each rank plans ownership from its own metadata, so a rank whose owners
+    differ must fail at init rather than serve a plan the consumers don't route
+    by. The digest rides on the server-name all-gather."""
+    engine = _rdt_engine_with_fake_server(
+        _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, 0),
+        is_sender=True,
+        client=RecordingClient(),
+        server=_FakeProducerServer(),
+        monkeypatch=monkeypatch,
+        world=2,
     )
+    engine._server_name = "srv_rk0"
+
+    def _fake_all_gather(out, mine):
+        out[:] = [mine, ("srv_rk1", "deadbeefdeadbeef")]
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _fake_all_gather)
     with pytest.raises(ValueError, match="disagrees across trainer ranks"):
-        engine._resolve_ownership(2, 0)
+        engine._all_gather_server_names(2, 0)
 
 
 def _serve_ring_server(src_name, src):
     """A producer server with one cached tensor and a pre-seeded serve ring, so a
     pull needs no Ray and no NIXL registration. Returns (server, serve) where
-    ``serve(chain)`` packs one spec into the SAME ring slot every time — which is
+    `serve(chain)` packs one spec into the SAME ring slot every time — which is
     what puts the destination-view cache, and only it, under test."""
     from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
         _RDTProducerServer,
@@ -610,11 +651,11 @@ def test_serve_does_not_reuse_packed_views_of_another_shape():
 def test_serve_does_not_reuse_packed_views_of_another_dtype():
     """The SILENT case of the same cache: two requests whose slices have the same
     name and the same shape but different dtypes pack at identical offsets, so
-    reusing the stale views raises nothing — ``copy_`` just casts, and the blob
+    reusing the stale views raises nothing — `copy_` just casts, and the blob
     carries the wrong bytes with no check downstream.
 
-    ``view(dtype)`` rather than ``to(dtype)`` because the chain is replayed under
-    ``ALLOWED_OPS``, which rejects ``to``: same-itemsize dtypes keep the byte
+    `view(dtype)` rather than `to(dtype)` because the chain is replayed under
+    `ALLOWED_OPS`, which rejects `to`: same-itemsize dtypes keep the byte
     length identical, which is exactly what makes the stale view fit.
     """
     name = "model.layers.0.w"

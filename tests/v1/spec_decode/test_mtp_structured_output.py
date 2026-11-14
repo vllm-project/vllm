@@ -11,6 +11,7 @@ from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -113,12 +114,16 @@ class _EngineReasonerStub(ParserEngineReasoningAdapter):
     def reasoning_end_token_ids(self):
         return self._end_token_ids
 
-    def find_reasoning_end_offset(self, token_ids):
+    @property
+    def implicit_reasoning_end_token_ids(self):
+        return frozenset()
+
+    def find_reasoning_end(self, token_ids):
         self.windows.append(list(token_ids))
         for offset, token in enumerate(token_ids):
             if token in self._end_token_ids:
-                return offset
-        return len(token_ids)
+                return ReasoningEnd(offset, False)
+        return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids):
         return any(token in self._end_token_ids for token in input_ids)
@@ -152,7 +157,7 @@ def test_bitmask_engine_reasoner_ends_midwindow_with_padding(backend):
     )
 
     assert bitmask is not None
-    assert bitmask.shape[0] == len(drafts) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert (bitmask[0] == -1).all()
     assert (bitmask[1] == -1).all()
     assert not (bitmask[2] == -1).all()

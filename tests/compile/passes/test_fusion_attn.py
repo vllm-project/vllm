@@ -93,7 +93,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         self.block_size = block_size
 
-        # Initialize attn MetadataBuilder (match Attention.get_kv_cache_spec)
+        # Initialize attn MetadataBuilder (match Attention.get_kv_cache_config)
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
@@ -318,10 +318,10 @@ def test_attention_quant_pattern(
 ):
     """Test AttentionStaticQuantPattern fusion pass."""
     if backend == AttentionBackendEnum.FLASHINFER and (
-        not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
+        not (current_platform.is_device_capability_family(100)) or not has_flashinfer()
     ):
         # This also captures the FP4 case
-        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+        pytest.skip("FlashInfer attn fusion requires SM100/SM107 and flashinfer")
     if kv_cache_dtype == "nvfp4" and backend != AttentionBackendEnum.FLASHINFER:
         pytest.skip("NVFP4 KV cache is only supported by FlashInfer")
 
