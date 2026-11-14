@@ -81,6 +81,7 @@ steps:
     - vllm/platforms/
     - vllm/pooling_params.py
     - vllm/profiler/
+    - vllm/renderers/base.py
     - vllm/sampling_params.py
     - vllm/tokenizers/
     - vllm/transformers_utils/

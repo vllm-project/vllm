@@ -12,6 +12,7 @@ from vllm.entrypoints.serve import create_error_response
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -224,3 +225,35 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     )
 
     assert processed_mm_uuids == expected
+
+
+def _render_image_mm_hash(renderer: HfRenderer, image) -> str:
+    _, inputs = renderer.render_chat(
+        [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_pil", "image_pil": image},
+                        {"type": "text", "text": "What is in this image?"},
+                    ],
+                }
+            ]
+        ],
+        ChatParams(),
+    )
+    return inputs[0]["mm_hashes"]["image"][0]
+
+
+def test_request_local_mm_uuids_differ_across_renderers():
+    """Request-local IDs reach KV connector keys, so two renderers (two
+    instances, or one instance before and after a restart) must not give
+    different images the same ID."""
+    renderers = [
+        _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False) for _ in range(2)
+    ]
+
+    cherry_hash = _render_image_mm_hash(renderers[0], cherry_pil_image)
+    stop_hash = _render_image_mm_hash(renderers[1], stop_pil_image)
+
+    assert cherry_hash != stop_hash
