@@ -19,6 +19,10 @@ that vLLM's sampler (DSparkSpeculator._sample_logits) draws from the logits the
 fused launch cached for that request and step, and those cached logits must be
 the base logits plus the reference GEMV's bias of the fused previous token
 (within the same last-bit tolerance).
+
+The other tests cover the speculator's fallback cases (why_not), the padded
+sample rows of graph capture (no request, position 0) and 200 replays of a
+captured draft step against eager calls.
 """
 
 from types import SimpleNamespace
@@ -144,6 +148,29 @@ def _run(monkeypatch, s, num_reqs, fused: bool):
     return s.draft_tokens.clone(), s.draft_logits.values.clone()
 
 
+def _spy_run(monkeypatch):
+    """Record what each markov_sample.run call returns."""
+    from vllm.models.kimi_k3.amd.ops import markov_sample
+
+    ran = []
+    real = markov_sample.run
+
+    def run(*args, **kwargs):
+        ran.append(real(*args, **kwargs))
+        return ran[-1]
+
+    monkeypatch.setattr(markov_sample, "run", run)
+    return ran
+
+
+def _assert_slots_clear():
+    from vllm.models.kimi_k3.amd.ops import markov_sample
+
+    assert markov_sample._SLOTS
+    for slots in markov_sample._SLOTS.values():
+        assert not bool(slots.view(torch.int64).any())
+
+
 def _cache_rows(s, num_reqs):
     """Cache row of each request (-1 when another rank caches it)."""
     slots = s.sample_idx_mapping[: num_reqs * N_SPEC : N_SPEC].long()
@@ -166,12 +193,13 @@ def test_k31_fused_markov_matches_vllm_loop(monkeypatch, num_reqs, temp, row_map
     assert markov_sample.why_not(s, num_reqs) is None
 
     ref_tok, ref_cache = _run(monkeypatch, s, num_reqs, fused=False)
+    ran = _spy_run(monkeypatch)
     got_tok, got_cache = _run(monkeypatch, s, num_reqs, fused=True)
-    # The fused launches ran, and left their slots cleared for the next call
-    # (or graph replay).
-    assert markov_sample._SLOTS
-    for slots in markov_sample._SLOTS.values():
-        assert not bool(slots.view(torch.int64).any())
+    # The fused launches ran (no silent fallback to vLLM's loop), and left
+    # their slots cleared for the next call (or graph replay).
+    assert ran == [True]
+    assert DSparkSpeculator._fused_markov_ok(s, num_reqs)
+    _assert_slots_clear()
 
     rows = _cache_rows(s, num_reqs)
     local = rows >= 0
@@ -226,3 +254,94 @@ def test_k31_fused_markov_matches_vllm_loop(monkeypatch, num_reqs, temp, row_map
         assert torch.equal(drawn[local], fused[local]), (
             f"draft step {k}: fused {fused.tolist()}, vLLM draws {drawn.tolist()}"
         )
+
+
+def test_k31_fused_markov_why_not():
+    """The cases where the fused launches would not sample as vLLM's loop."""
+    from vllm.models.kimi_k3.amd.ops import markov_sample
+
+    s = _speculator(1.0, seed=3, row_mapped=False)
+    assert markov_sample.why_not(s, 1) is None
+    assert markov_sample.why_not(s, 2) is not None  # MAX_ROWS = 1
+    model = s.model
+    s.model = SimpleNamespace(**vars(model))  # not a Kimi-K3 DSpark draft
+    assert markov_sample.why_not(s, 1) is not None
+    s.model = model
+    s.draft_watermarker = object()
+    assert markov_sample.why_not(s, 1) is not None
+    s.draft_watermarker = None
+    cache, s.draft_logits = s.draft_logits, None  # greedy drafts
+    assert markov_sample.why_not(s, 1) is not None
+    s.draft_logits = cache
+    s.use_fp64_gumbel = True
+    assert markov_sample.why_not(s, 1) is not None
+
+
+@pytest.mark.parametrize("row_mapped", [False, True])
+def test_k31_fused_markov_padded_rows(monkeypatch, row_mapped):
+    """The capture state of DFlashSpeculator.capture(): sample rows of no
+    request (-1) at position 0. Nothing is cached and the tokens stay in the
+    vocabulary."""
+    s = _speculator(1.0, seed=11, row_mapped=row_mapped)
+    s.sample_idx_mapping.fill_(-1)
+    s.sample_pos.zero_()
+    ran = _spy_run(monkeypatch)
+    tok, cache = _run(monkeypatch, s, 1, fused=True)
+    assert ran == [True]
+    _assert_slots_clear()
+    assert not bool(cache.view(torch.int16).any())
+    assert bool(((tok[0] >= 0) & (tok[0] < VOCAB)).all()), tok[0].tolist()
+
+
+@pytest.mark.parametrize("row_mapped", [False, True])
+def test_k31_fused_markov_graph_replay(monkeypatch, row_mapped):
+    """One request's draft step captured in a graph, as in the DFlash FULL
+    graph, and replayed with new base logits, seeds and anchors: each replay
+    matches an eager call, keeps the tokens in the vocabulary and leaves the
+    slots cleared for the next replay (the last launch clears what it read)."""
+    import vllm.envs as envs
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    s = _speculator(1.0, seed=7, row_mapped=row_mapped)
+    monkeypatch.setattr(envs, "VLLM_K31_BEAT_MARKOV", True, raising=False)
+    ran = _spy_run(monkeypatch)
+    hidden = torch.zeros(MAX_REQS * N_SPEC, 8, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(2):
+            DSparkSpeculator._sample_sequential(s, 1, hidden)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        DSparkSpeculator._sample_sequential(s, 1, hidden)
+    assert ran == [True] * 3
+
+    g = torch.Generator(device="cuda").manual_seed(1234)
+    for i in range(200):
+        s.model.base.copy_(
+            torch.randn(s.model.base.shape, generator=g, device="cuda") * 3
+        )
+        s.seeds.copy_(
+            torch.randint(0, 2**62, s.seeds.shape, generator=g, device="cuda")
+        )
+        s.input_buffers.input_ids.copy_(
+            torch.randint(
+                0, VOCAB, s.input_buffers.input_ids.shape, generator=g, device="cuda"
+            )
+        )
+        graph.replay()
+        torch.accelerator.synchronize()
+        g_tok = s.draft_tokens[0].clone()
+        g_cache = s.draft_logits.values.clone()
+        assert bool(((g_tok >= 0) & (g_tok < VOCAB)).all()), (i, g_tok.tolist())
+        _assert_slots_clear()
+        DSparkSpeculator._sample_sequential(s, 1, hidden)
+        torch.accelerator.synchronize()
+        assert torch.equal(s.draft_tokens[0], g_tok), (
+            i,
+            g_tok.tolist(),
+            s.draft_tokens[0].tolist(),
+        )
+        assert torch.equal(s.draft_logits.values, g_cache), i
+        _assert_slots_clear()
