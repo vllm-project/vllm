@@ -27,9 +27,9 @@ projections are Triton GEMMs (main's split-K GEMM is tcgen05). Nothing of the
 stock modules is patched or copied.
 """
 
-import re
 from dataclasses import dataclass
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -370,7 +370,7 @@ class HopperDsaLayer:
             self.forward(x, inputs, caches, q)
             if self.draft:
                 self.forward(x, inputs, caches, q, skip_topk=True)
-        torch.cuda.synchronize(dev)
+        torch.accelerator.synchronize(dev)
 
     # ------------------------------------------------------------------ run
 
@@ -383,7 +383,7 @@ class HopperDsaLayer:
 
     __call__ = run
 
-    def _gemm(self, name, x, segments, out, m, n, k, swn, swk, *, sxm, som,
+    def _gemm(self, name, x, segments, out, m, n, k, swn, swk, *, sxm, s_om,
               batch=1, sxb=0, swb=0, sob=0, counters=0):  # fmt: skip
         early = m not in LATE_TRIGGER_TOKENS
         bn, bk, stages, split, warps = GEMM_TACTICS[name]
@@ -396,7 +396,7 @@ class HopperDsaLayer:
         grid = (triton.cdiv(n, bn), split, batch)
         K.gemm_kernel[grid](
             x, w0, w1, w2, out, self.ws.split_k, self.ws.counters[counters:],
-            m, sxm, sxb, swb, som, sob, n0, n1,
+            m, sxm, sxb, swb, s_om, sob, n0, n1,
             N=n, K=k, SWN=swn, SWK=swk, BM=_bm(m), BN=bn, BK=bk, SPLIT=split,
             NSTAGE=stages, EARLY=early, num_warps=warps, launch_pdl=True,
         )  # fmt: skip
@@ -424,7 +424,7 @@ class HopperDsaLayer:
         # 1. a-projections (and, with the indexer, its key / gate / head weights)
         segments = [w.qkv_a] if skip_topk else [w.qkv_a, w.gate, w.wk_weights]
         self._gemm("g1", x, segments, y, m, GATE if skip_topk else G1_COLS, HIDDEN,
-                   HIDDEN, 1, sxm=HIDDEN, som=G1_COLS, counters=0)  # fmt: skip
+                   HIDDEN, 1, sxm=HIDDEN, s_om=G1_COLS, counters=0)  # fmt: skip
         # 2. norms, KV insert, indexer key and kpool
         ring = tail.shape[2]
         K.post_g1_kernel[(m * (2 if skip_topk else 3),)](
@@ -442,7 +442,8 @@ class HopperDsaLayer:
         qn = HEADS * NOPE
         segments = [w.q_b] if skip_topk else [w.q_b, w.wq_b]
         self._gemm("g2", ws.qc, segments, ws.q, m, qn * (1 if skip_topk else 2),
-                   Q_LORA, Q_LORA, 1, sxm=Q_LORA, som=2 * qn, counters=512)  # fmt: skip
+                   Q_LORA, Q_LORA, 1, sxm=Q_LORA, s_om=2 * qn,
+                   counters=512)  # fmt: skip
         # 4. W_UK absorb: qabs[t, h] = q[t, h] @ W_UK_T[h]
         uk = w.w_uk_t
         if m in ABSORB_GEMV_TOKENS and uk.stride(2) == 1:
@@ -452,7 +453,7 @@ class HopperDsaLayer:
         else:
             uk = self.w_uk_kmajor
             self._gemm("g3", ws.q, [uk], ws.qabs, m, LATENT, NOPE, uk.stride(1),
-                       uk.stride(2), sxm=2 * qn, som=HEADS * LATENT, batch=HEADS,
+                       uk.stride(2), sxm=2 * qn, s_om=HEADS * LATENT, batch=HEADS,
                        sxb=NOPE, swb=uk.stride(0), sob=LATENT,
                        counters=1024)  # fmt: skip
         # 5. top-k selection -> MLA KV rows
@@ -517,7 +518,7 @@ class HopperDsaLayer:
         # 8. W_UV: ao[t, h] = ob[t, h] @ W_UV[h]
         uv = w.w_uv
         self._gemm("g4", ws.ob, [uv], ws.ao, m, VALUE, LATENT, uv.stride(2),
-                   uv.stride(1), sxm=HEADS * LATENT, som=HEADS * VALUE, batch=HEADS,
+                   uv.stride(1), sxm=HEADS * LATENT, s_om=HEADS * VALUE, batch=HEADS,
                    sxb=LATENT, swb=uv.stride(0), sob=VALUE, counters=1536)  # fmt: skip
         # 9. o_proj (TP-partial)
         skinny = self.o_proj
@@ -525,6 +526,6 @@ class HopperDsaLayer:
             return skinny(ws.ao[:m])
         out = torch.empty((m, HIDDEN), dtype=torch.bfloat16, device=dev)
         self._gemm("g5", ws.ao, [w.o_proj], out, m, HIDDEN, HEADS * VALUE,
-                   HEADS * VALUE, 1, sxm=HEADS * VALUE, som=HIDDEN,
+                   HEADS * VALUE, 1, sxm=HEADS * VALUE, s_om=HIDDEN,
                    counters=3072)  # fmt: skip
         return out

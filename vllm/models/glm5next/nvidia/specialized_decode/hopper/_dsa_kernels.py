@@ -30,7 +30,7 @@ def gemm_kernel(
     sxm,
     sxb,
     swb,
-    som,
+    s_om,
     sob,
     N0,
     N1,
@@ -113,7 +113,7 @@ def gemm_kernel(
             tl.store(ctr_ptr + tile, 0)
     if last:
         tl.store(
-            o_ptr + pid_b * sob + rm[None, :] * som + rn[:, None],
+            o_ptr + pid_b * sob + rm[None, :] * s_om + rn[:, None],
             acc.to(o_ptr.dtype.element_ty),
             mask=nm & mm,
         )
@@ -167,8 +167,8 @@ def post_g1_kernel(
     kv_ptr,
     kv_sb,
     kslot_ptr,
-    knw_ptr,
-    knb_ptr,
+    kn_w_ptr,
+    kn_b_ptr,
     keps,
     ape_ptr,
     pos_ptr,
@@ -231,9 +231,9 @@ def post_g1_kernel(
         idx = pid - 2 * M
         t = idx % NEXT_N
         offs = tl.arange(0, HD)
-        knw = tl.load(knw_ptr + offs)
-        knb = tl.load(knb_ptr + offs)
-        key = _layer_norm(_ld_bf16(y_ptr, idx * SY + KEY + offs, offs < HD), knw, knb,
+        kn_w = tl.load(kn_w_ptr + offs)
+        kn_b = tl.load(kn_b_ptr + offs)
+        key = _layer_norm(_ld_bf16(y_ptr, idx * SY + KEY + offs, offs < HD), kn_w, kn_b,
                           keps, HD)  # fmt: skip
         score = _ld_bf16(y_ptr, idx * SY + GATE + offs, offs < HD)
         cache_loc = tl.load(islot_ptr + idx)
@@ -270,7 +270,7 @@ def post_g1_kernel(
                 else:
                     k_now = _layer_norm(
                         _ld_bf16(y_ptr, (idx - back) * SY + KEY + offs, ~ring),
-                        knw, knb, keps, HD,
+                        kn_w, kn_b, keps, HD,
                     )  # fmt: skip
                 acc += tl.where(ring, k, k_now) * prob
             x = (acc / denom).to(tl.bfloat16).to(tl.float32)

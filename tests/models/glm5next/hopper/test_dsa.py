@@ -167,7 +167,7 @@ def _run(contexts, q, seed=0, padded=0):
     before = step.clone_caches()
     layer = _layer(weights, step.tokens, q)
     out = layer.forward(step.x, step.inputs, step.caches, q)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return weights, step, before, out, _ws(layer, step.tokens)
 
 
@@ -276,7 +276,7 @@ def _index_logits(w, step, ws):
     values = flat[:, : PAGE * IDIM].contiguous().view(torch.float8_e4m3fn)
     values = values.view(pages, PAGE, IDIM).double()
     scales = flat[:, PAGE * IDIM :].contiguous().view(torch.float32)
-    out = []
+    out: list[tuple[torch.Tensor, int] | None] = []
     inp = step.inputs
     for row in range(step.tokens):
         if int(inp.kv_slots[row]) < 0:
@@ -401,7 +401,7 @@ def test_select_is_exact_top512_of_its_logits(contexts, q, distinct, levels, pat
     topk = torch.full((step.tokens, 2176), -7, dtype=torch.int32, device="cuda")
     layer = _layer(weights, step.tokens, q, topk_buffer=topk)
     layer.forward(step.x, step.inputs, step.caches, q)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     topk0, counts0 = topk.clone(), layer.ws.counts[: step.tokens].clone()
     assert not layer.ws.histograms.any()
     seen = set()
@@ -426,7 +426,7 @@ def test_select_is_exact_top512_of_its_logits(contexts, q, distinct, levels, pat
             assert 0 < above < 512 < above + int((logits == thr).sum()), row
     assert seen == paths
     layer.forward(step.x, step.inputs, step.caches, q)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert not layer.ws.histograms.any()
     assert torch.equal(layer.ws.counts[: step.tokens], counts0)
     for row in range(step.tokens):
@@ -481,7 +481,7 @@ def test_cuda_graph_replay_follows_inputs(q):
     layer = _layer(weights, a.tokens, q)
     layer.forward(a.x, a.inputs, a.clone_caches(), q)  # compile
     caches = a.clone_caches()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         out = layer.forward(a.x, a.inputs, caches, q)
@@ -494,7 +494,7 @@ def test_cuda_graph_replay_follows_inputs(q):
     eager_caches = b.clone_caches()
     graph.replay()
     eager = layer.forward(b.x, b.inputs, eager_caches, q)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(out, eager)
     for name in ("kv", "index", "tail"):
         assert torch.equal(getattr(caches, name), getattr(eager_caches, name))
@@ -510,7 +510,7 @@ def test_draft_reuses_logical_topk():
     rows = layer.ws.rows[: step.tokens].clone()
     counts = layer.ws.counts[: step.tokens].clone()
     layer.forward(step.x, step.inputs, step.caches, 6, skip_topk=True)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(layer.ws.counts[: step.tokens], counts)
     for row in range(step.tokens):
         n = int(counts[row])
