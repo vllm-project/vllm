@@ -444,6 +444,10 @@ else
     cd "${REPO_ROOT}"
 fi
 
+########################################
+# Numba
+########################################
+
 NUMBA_REQUIREMENT=$(grep -E '^numba[[:space:]]*(==|>=|<=|~=)' \
     requirements/cpu.txt |
     sed -E 's/^numba[[:space:]]*//' |
@@ -453,7 +457,53 @@ NUMBA_REQUIREMENT=$(grep -E '^numba[[:space:]]*(==|>=|<=|~=)' \
     head -n1)
 
 echo "Numba requirement: ${NUMBA_REQUIREMENT}"
-try_install_from_devpi "numba${NUMBA_REQUIREMENT}"
+NUMBA_VERSION=${NUMBA_REQUIREMENT#==}
+# The llvmlite release numba ${NUMBA_VERSION} needs, and the LLVM it is built
+# against when DevPI has no wheels. Keep in sync with docker/Dockerfile.s390x.
+LLVMLITE_VERSION=${LLVMLITE_VERSION:-0.50.0}
+LLVM_VERSION=${LLVM_VERSION:-22.1.8}
+
+if is_available_on_devpi "numba" "${NUMBA_VERSION}" &&
+    is_available_on_devpi "llvmlite" "${LLVMLITE_VERSION}"; then
+    try_install_from_devpi "numba${NUMBA_REQUIREMENT}"
+else
+    echo "Numba/llvmlite wheels not available on DevPI. Building LLVM ${LLVM_VERSION}, llvmlite==${LLVMLITE_VERSION} and numba==${NUMBA_VERSION} from source."
+    microdnf install -y tar xz
+
+    TEMP_BUILD_DIR=$(mktemp -d)
+    # Subshell: keep the LLVM ${LLVM_VERSION} settings away from the rest of
+    # this script, which uses LLVM 15.
+    (
+        cd "${TEMP_BUILD_DIR}"
+        curl -sSfLO "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz"
+        tar -xf "llvm-project-${LLVM_VERSION}.src.tar.xz"
+        cmake -G Ninja -S "llvm-project-${LLVM_VERSION}.src/llvm" -B llvm-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${TEMP_BUILD_DIR}/llvm" \
+            -DLLVM_TARGETS_TO_BUILD="PowerPC" \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_UTILS=ON \
+            -DLLVM_BUILD_EXAMPLES=OFF \
+            -DLLVM_BUILD_TESTS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+        ninja -C llvm-build -j "${MAX_JOBS}" install
+
+        git clone --recursive https://github.com/numba/llvmlite.git -b "v${LLVMLITE_VERSION}"
+        git clone --recursive https://github.com/numba/numba.git -b "${NUMBA_VERSION}"
+
+        export CMAKE_PREFIX_PATH="${TEMP_BUILD_DIR}/llvm"
+        uv build --wheel --out-dir "${WHEEL_DIR}" --no-build-isolation llvmlite
+        uv build --wheel --out-dir "${WHEEL_DIR}" --no-build-isolation numba
+    )
+
+    uv pip install \
+        "${WHEEL_DIR}"/llvmlite-"${LLVMLITE_VERSION}"-*.whl \
+        "${WHEEL_DIR}"/numba-"${NUMBA_VERSION}"-*.whl
+    rm -rf "${TEMP_BUILD_DIR}"
+fi
 
 ########################################
 # install built wheels
