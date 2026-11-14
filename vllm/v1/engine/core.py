@@ -1358,6 +1358,9 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        # Monotonic time at which a drain stops waiting and aborts what is
+        # left; None when no drain is in progress.
+        self._shutdown_deadline: float | None = None
         self.reject_new_requests = False
 
         # Receiver for tensor IPC
@@ -1906,10 +1909,7 @@ class EngineCoreProc(EngineCore):
                         "[shutdown] EngineCore: aborting in-flight requests count=%d",
                         num_requests,
                     )
-                aborted_reqs = self.scheduler.finish_requests(
-                    None, RequestStatus.FINISHED_ABORTED
-                )
-                self._send_abort_outputs(aborted_reqs)
+                self._abort_unfinished_requests()
             else:
                 num_requests = self.scheduler.get_num_unfinished_requests()
                 if num_requests > 0:
@@ -1919,8 +1919,25 @@ class EngineCoreProc(EngineCore):
                         num_requests,
                         shutdown_timeout,
                     )
+                self._shutdown_deadline = time.monotonic() + shutdown_timeout
 
             self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
+
+        # Abort whatever the drain did not finish by its deadline, so clients
+        # get a final "abort" output before the process manager kills us.
+        if (
+            self._shutdown_deadline is not None
+            and time.monotonic() >= self._shutdown_deadline
+        ):
+            self._shutdown_deadline = None
+            num_requests = self.scheduler.get_num_unfinished_requests()
+            if num_requests > 0:
+                logger.info(
+                    "[shutdown] EngineCore: drain deadline reached; "
+                    "aborting in-flight requests count=%d",
+                    num_requests,
+                )
+                self._abort_unfinished_requests()
 
         # Exit when no work remaining
         if not self.has_work():
@@ -1931,6 +1948,14 @@ class EngineCoreProc(EngineCore):
             return False
 
         return True
+
+    def _abort_unfinished_requests(self) -> None:
+        """Abort every unfinished request and send its client a final
+        "abort" output."""
+        aborted_reqs = self.scheduler.finish_requests(
+            None, RequestStatus.FINISHED_ABORTED
+        )
+        self._send_abort_outputs(aborted_reqs)
 
     def _wait_for_output(self, future: Future[Any]) -> Any:
         """Wait for a step's model output, meanwhile handling new requests and
