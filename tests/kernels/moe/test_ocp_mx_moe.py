@@ -2537,6 +2537,8 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         ([[30, 2], [2, 17], [9, 30], [17, 4]], 5),
         # 9 of 32, past a quarter: every expert is dequantized.
         ([[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]], 32),
+        # One token: the capture-safe sort() path.
+        ([[30, 2]], 2),
     ],
 )
 @torch.inference_mode()
@@ -2645,13 +2647,23 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
 
     routed = run()
     assert dequantized == [num_routed, num_routed]
-    # The routed path is skipped under graph capture; use that to get the
-    # full-dequant reference.
+    # Under graph capture only the single-token path stays routed.
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    dequantized.clear()
+    captured = run()
+    num_captured = num_routed if num_tokens == 1 else num_experts
+    assert dequantized == [num_captured, num_captured]
+    # Full-dequant reference.
+    monkeypatch.setattr(
+        OCP_MXQuantizationEmulationTritonExperts,
+        "_routed_experts",
+        staticmethod(lambda topk_ids, num_experts: None),
+    )
     dequantized.clear()
     full = run()
     assert dequantized == [num_experts, num_experts]
     assert torch.equal(routed, full)
+    assert torch.equal(captured, full)
 
 
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)

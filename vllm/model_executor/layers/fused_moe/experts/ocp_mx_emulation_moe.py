@@ -171,6 +171,32 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
 
+    @staticmethod
+    def _routed_experts(
+        topk_ids: torch.Tensor, num_experts: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Experts used by this batch and topk_ids renumbered onto them, or
+        None to dequantize every expert."""
+        # Past a quarter of the experts, the gather costs about as much as the
+        # full dequantization saves.
+        limit = num_experts // 4
+        if topk_ids.size(0) == 1:
+            # One token (single-sequence decode), following #40055: sort() keeps
+            # the shape static and needs no host sync, so this also runs under
+            # graph capture. Repeated ids would only cost a duplicate gather.
+            if not 0 < topk_ids.numel() <= limit:
+                return None
+            flat = topk_ids.view(-1)
+            order = flat.argsort()
+            return flat[order], order.argsort()
+        # torch.unique syncs with the host, hence not under graph capture.
+        if torch.cuda.is_current_stream_capturing():
+            return None
+        used, local_ids = torch.unique(topk_ids, return_inverse=True)
+        if not 0 < used.numel() <= limit:
+            return None
+        return used, local_ids
+
     def apply(
         self,
         output: torch.Tensor,
@@ -206,13 +232,10 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             and self._lora_context is None
             and self.quant_config.w1_bias is None
             and self.quant_config.w2_bias is None
-            and not torch.cuda.is_current_stream_capturing()
         ):
-            # torch.unique syncs with the host, hence not under graph capture.
-            used, local_ids = torch.unique(topk_ids, return_inverse=True)
-            # Past a quarter of the experts, the gather costs about as much as
-            # the full dequantization saves.
-            if 0 < used.numel() <= w1.size(0) // 4:
+            routed = self._routed_experts(topk_ids, w1.size(0))
+            if routed is not None:
+                used, local_ids = routed
                 assert w1_scale is not None and w2_scale is not None
                 w1, w2 = w1[used], w2[used]
                 w1_scale, w2_scale = w1_scale[used], w2_scale[used]
