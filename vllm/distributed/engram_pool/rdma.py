@@ -421,11 +421,12 @@ def _place_kernel(
     waiting = tl.sum(
         (tl.load(at, mask=mask, other=seq, volatile=True) != seq).to(tl.int32)
     )
-    failed = tl.load(ctrl + DONE, volatile=True) == -seq
+    # Only a fetch with rows still to come can have failed.
+    failed = (waiting > 0) & (tl.load(ctrl + DONE, volatile=True) == -seq)
     while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
         landed = tl.load(at, mask=mask, other=seq, volatile=True)
         waiting = tl.sum((landed != seq).to(tl.int32))
-        failed = tl.load(ctrl + DONE, volatile=True) == -seq
+        failed = (waiting > 0) & (tl.load(ctrl + DONE, volatile=True) == -seq)
     if failed | (waiting > 0):
         tl.device_print("Engram pool RDMA fetch failed (1) or timed out (0):", failed)
         tl.inline_asm_elementwise(

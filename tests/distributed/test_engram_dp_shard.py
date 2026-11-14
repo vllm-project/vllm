@@ -316,6 +316,11 @@ def _check_pool_tables(store_dir: str):
         table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
         table.process_weights_after_loading()
         ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
+        # A first fetch with no remote rows (profile runs) must not fail.
+        dead = torch.full_like(ids, -1)
+        torch.testing.assert_close(
+            table(dead), _reference(weight.cuda(), scale.cuda(), dead), atol=0, rtol=0
+        )
         ids[0, 0] = -1
         expected = _reference(weight.cuda(), scale.cuda(), ids)
         torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
