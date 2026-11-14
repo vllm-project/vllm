@@ -50,6 +50,25 @@ async def test_background(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_background_stream_generation_error(client: openai.AsyncOpenAI):
+    # top_logprobs above --max-logprobs (20) is only rejected by the engine,
+    # after the background response has been queued.
+    stream = await client.responses.create(
+        input="Hello!",
+        background=True,
+        stream=True,
+        include=["message.output_text.logprobs"],
+        top_logprobs=21,
+    )
+    async with asyncio.timeout(60):
+        events = [event async for event in stream]
+
+    assert events[-1].type == "response.failed"
+    response = await client.responses.retrieve(events[-1].response.id)
+    assert response.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_background_error(client: openai.AsyncOpenAI):
     with pytest.raises(
         openai.BadRequestError, match="background can only be used when `store` is true"
