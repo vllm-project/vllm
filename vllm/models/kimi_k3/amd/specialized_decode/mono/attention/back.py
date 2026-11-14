@@ -37,7 +37,6 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
     bf16r,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
-    CM_NT,
     bf2_f32,
     bf16_pair,
     bf16_round,
@@ -147,17 +146,24 @@ def scratch_layout(s: int, nblocks: int) -> dict:
     return pair_layout(pairs.items())
 
 
-def o_loads(c, rg):
+def o_loads(c, rg, live=None):
     """Rows 16 rg .. of o_proj, this wave's K chunks (wave, wave + 8 < 12): a lane
-    64 B of its row a chunk."""
+    64 B of its row a chunk. Plain loads (NT is slower, cold or warm); a chunk
+    past 11 or a task off ``live`` reads past the buffer's end: zeros, no
+    memory request."""
     lane, wave = c["lane"], c["wave"]
-    r_w = rsrc(c["args"]["w_o"])
+    r_w = rsrc(c["args"]["w_o"], OROWS * OK * 2)
     row = rg * ROWS + lane % ROWS
     g = lane // ROWS
+    oob = OROWS * OK // 2
     out = []
     for i in range(2):
         ch = fx.min(wave + WAVES * i, OKCH - 1)
         base = (row * OK + ch * 128 + g * 8) // 2
+        if i == 1:
+            base = (wave + WAVES < OKCH).select(base, oob)
+        if live is not None:
+            base = live.select(base, oob)
         out.append(
             [
                 fx.Vector(
@@ -166,7 +172,6 @@ def o_loads(c, rg):
                         base + 16 * q,
                         vec_width=4,
                         dtype=T.i32,
-                        cache_modifier=CM_NT,
                     )
                 )
                 for q in range(4)

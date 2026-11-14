@@ -433,7 +433,14 @@ def stage_oproj(c, gi):
     """o_proj tasks gi, gi + 200, gi + 400 (< 448): every task's weights in
     flight at once (one memory latency, not three), then the MFMAs a core tile
     of 16 rows at a time."""
-    ops = [k2a.o_loads(c, fx.min(gi + O_N * j, OTASKS - 1)) for j in range(O_ROUNDS)]
+    ops = [
+        k2a.o_loads(
+            c,
+            fx.min(gi + O_N * j, OTASKS - 1),
+            (gi + O_N * j < OTASKS) if (j + 1) * O_N > OTASKS else None,
+        )
+        for j in range(O_ROUNDS)
+    ]
     for t0, n in gemv.token_tiles(c["S"]):
         cm = 0
         if const_expr(c["m1b"]):
