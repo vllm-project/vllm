@@ -17,7 +17,10 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
@@ -435,6 +438,35 @@ class WhisperEncoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"hidden_states": [0, 1]},
+    mark_unbacked_dims={"hidden_states": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
+class WhisperEncoderLayers(nn.ModuleList):
+    """Encoder transformer layer stack, compiled as a single graph when
+    `compilation_config.compile_mm_encoder` is enabled.
+
+    Subclasses `nn.ModuleList` so parameter names (`layers.{i}.*`) and
+    iteration/indexing by models that reuse `WhisperEncoder` are unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        layers: nn.ModuleList,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__(layers)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        for layer in self:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
 class WhisperDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -525,7 +557,7 @@ class WhisperEncoder(nn.Module):
             )
 
         if enable_pp:
-            self.start_layer, self.end_layer, self.layers = make_layers(
+            self.start_layer, self.end_layer, layers = make_layers(
                 config.encoder_layers,
                 create_layer,
                 prefix=f"{prefix}.layers",
@@ -533,12 +565,15 @@ class WhisperEncoder(nn.Module):
         else:
             self.start_layer = 0
             self.end_layer = config.encoder_layers
-            self.layers = nn.ModuleList(
+            layers = nn.ModuleList(
                 get_offloader().wrap_modules(
                     create_layer(prefix=f"{prefix}.layers.{idx}")
                     for idx in range(config.encoder_layers)
                 )
             )
+        self.layers = WhisperEncoderLayers(
+            layers=layers, vllm_config=vllm_config, prefix=f"{prefix}.layers"
+        )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         if self.pos_embed_type not in (
@@ -586,9 +621,7 @@ class WhisperEncoder(nn.Module):
         else:
             hidden_states = torch.stack(hidden_states, dim=0)
 
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states)
-
+        hidden_states = self.layers(hidden_states)
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
