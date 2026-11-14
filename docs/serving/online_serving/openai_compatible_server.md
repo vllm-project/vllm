@@ -161,6 +161,10 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
+#### Logprobs
+
+`top_logprobs` is a dict keyed by each candidate's decoded text, so two candidates that decode to the same string share one entry. This happens with byte-fallback tokens that each hold part of a multi-byte character (Thai, CJK or emoji text), which decode to `""`. When the token at that position (the sampled token, or the prompt token with `echo`) is one of them, the entry keeps that token's logprob, so `top_logprobs[i][tokens[i]] == token_logprobs[i]` holds at every position. A client that instead reads `max(top_logprobs[i].values())` as the top candidate's logprob, as the greedy check in lm-evaluation-harness does, can then take that token for the top pick. Set `return_tokens_as_token_ids` to key every candidate by its token ID (`token_id:{id}`) instead.
+
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
