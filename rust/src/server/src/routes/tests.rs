@@ -2985,6 +2985,53 @@ async fn kv_event_sources_reports_each_ready_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn kv_identity_reports_each_engine_current_identity() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("get_kv_identity"));
+            let call_id = array[1].as_u64().expect("call id");
+            let result = utility_result_value((
+                1,
+                json!({
+                    "kv_identity": "abc",
+                    "components": {"weights": "w", "weights_source": "weight_version"},
+                }),
+            ));
+            send_outputs(push, utility_outputs(call_id, result)).await;
+        })
+    })
+    .await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_identity")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "kv_identity": "abc",
+                "components": {"weights": "w", "weights_source": "weight_version"},
+            }
+        })
+    );
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
     let (mut app, _engine_task) = test_app().await;
     let response = app

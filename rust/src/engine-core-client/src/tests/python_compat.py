@@ -549,6 +549,8 @@ class EngineCoreReadyResponse:
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
     cache_config_info: dict[str, str] | None = None
+    kv_identity: str | None = None
+    kv_identity_components: dict[str, str] | None = None
     config_hash: str | None = None
     enable_expert_parallel: bool = False
 
@@ -598,6 +600,8 @@ ready_response = EngineCoreReadyResponse(
         "speculative_config": None,
     },
     cache_config_info={"block_size": "16", "mamba_block_size": "None"},
+    kv_identity="abc",
+    kv_identity_components={"weights": "w", "weights_source": "hf_cache"},
     config_hash="0123456789",
     enable_expert_parallel=True,
 )

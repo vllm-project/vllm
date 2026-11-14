@@ -939,6 +939,10 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+        # The startup identity, for the cache_config_info metric.
+        if response.kv_identity is not None and cache_config.kv_identity is None:
+            cache_config.kv_identity = response.kv_identity
+            cache_config.kv_identity_components = response.kv_identity_components
 
         parallel_config = vllm_config.parallel_config
         if response.coord_store_port:
@@ -1488,6 +1492,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def get_kv_identities_async(self) -> dict[int, dict[str, Any]]:
+        """Current KV identity of each engine, keyed by DP rank."""
+        return dict(await self.call_utility_all_async("get_kv_identity"))
 
     async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
         per_engine = await self.call_utility_all_async("compute_weight_checksums")
