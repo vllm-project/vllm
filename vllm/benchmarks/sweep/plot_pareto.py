@@ -312,7 +312,7 @@ def plot_pareto(
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SweepPlotParetoArgs:
     output_dir: Path
     user_count_var: str | None

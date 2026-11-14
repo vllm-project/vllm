@@ -32,7 +32,7 @@ gathers the vocab-parallel logits. A few hundred kilobytes at most, so the
 latency of the collective, not its bandwidth, is what counts.
 
 vLLM's custom all-gather has a Lamport kernel for NVLink multicast
-(``mnnvl_lamport_all_gather``), but it never waits for the rank's own
+(`mnnvl_lamport_all_gather`), but it never waits for the rank's own
 multicast copy: it takes its own slot from registers, and a copy that lands
 after the next call has cleaned its stage stays there. A later gather of
 another size lays the slots out differently and can read that word as a
@@ -48,16 +48,16 @@ The mailbox is symmetric memory with a multicast mapping, laid out as
 A call runs one kernel, one thread a 16-byte pack of the rank's input:
 
 1. Publish: the thread stores its pack through the multicast address into
-   every rank's ``mailbox[g][rank][pack]``. A word equal to the Lamport
-   sentinel (``0x80000000``: FP32 negative zero, INT32_MIN) goes out as 0.
-2. Collect: it polls ``mailbox[g][r][pack]`` of every rank ``r``, its own
+   every rank's `mailbox[g][rank][pack]`. A word equal to the Lamport
+   sentinel (`0x80000000`: FP32 negative zero, INT32_MIN) goes out as 0.
+2. Collect: it polls `mailbox[g][r][pack]` of every rank `r`, its own
    included, until no word of it is the sentinel; writes each rank's pack to
    the output, rank-major as NCCL lays out a dim-0 gather; and stores the
    sentinel back into the slots it read. Every slot a call writes is read
    after it has landed and reset by the same call, so no call leaves a word
    for a later one, whatever the sizes.
-3. Generation: ``state[0]`` is the call's generation. Each CTA reads it once
-   and counts itself in ``state[1]``; the last CTA to arrive advances the
+3. Generation: `state[0]` is the call's generation. Each CTA reads it once
+   and counts itself in `state[1]`; the last CTA to arrive advances the
    generation and clears the count. A rank can be at most one call ahead of
    a peer (finishing a call needs every rank's payload), so a rank writing
    the next generation never touches the slots a slower peer still reads;
@@ -142,7 +142,7 @@ def _store_u32x4(
     loc=None,
     ip=None,
 ) -> None:
-    """One 16-byte pack, through a multicast address (``multimem.st``, which
+    """One 16-byte pack, through a multicast address (`multimem.st`, which
     moves the bits unchanged) or to a local one."""
     opcode = (
         "multimem.st.relaxed.sys.global.v4.f32" if multicast else "st.global.v4.u32"
@@ -201,7 +201,7 @@ def _arrive(address: Int64, *, loc=None, ip=None) -> Uint32:
 
 
 class _AllGatherKernel:
-    """One thread a 16-byte pack of the rank's input, ``THREADS`` a CTA."""
+    """One thread a 16-byte pack of the rank's input, `THREADS` a CTA."""
 
     def __init__(self, rank: int, world_size: int, rank_packs: int) -> None:
         self.rank = rank
@@ -219,7 +219,7 @@ class _AllGatherKernel:
         packs: Int32,
         stream: cuda.CUstream,
     ) -> None:
-        """Launch on ``stream``; addresses are byte addresses, ``packs`` the
+        """Launch on `stream`; addresses are byte addresses, `packs` the
         rank's input size in 16-byte packs."""
         self.kernel(inp, out, mailbox, multicast, state, packs).launch(
             grid=((packs + THREADS - 1) // THREADS, 1, 1),
@@ -326,11 +326,11 @@ class _AllGatherKernel:
 
 class LamportAllGather:
     """TP all-gather along dim 0 over NVLink multicast, for inputs of up to
-    ``rank_capacity_bytes`` a rank (a multiple of 16 bytes).
+    `rank_capacity_bytes` a rank (a multiple of 16 bytes).
 
     Construction is collective over the TP group: every rank compiles the
     kernel and allocates its mailbox, and it raises when NVLink multicast is
-    unavailable. ``accepts`` tells whether a tensor fits, from its size
+    unavailable. `accepts` tells whether a tensor fits, from its size
     alone, so every rank decides alike.
     """
 
@@ -372,13 +372,13 @@ class LamportAllGather:
         dist.barrier(group=group)
 
     def accepts(self, inp: torch.Tensor) -> bool:
-        """Whether ``inp`` fits: 1 to ``rank_capacity_bytes`` bytes, a
+        """Whether `inp` fits: 1 to `rank_capacity_bytes` bytes, a
         multiple of 16."""
         return 0 < inp.nbytes <= self.rank_capacity_bytes and not inp.nbytes % 16
 
     def __call__(self, inp: torch.Tensor) -> torch.Tensor:
-        """Every rank's ``inp`` concatenated along dim 0 in rank order, on the
-        current stream. Words equal to ``0x80000000`` arrive as 0, on every
+        """Every rank's `inp` concatenated along dim 0 in rank order, on the
+        current stream. Words equal to `0x80000000` arrive as 0, on every
         rank (FP32 negative zero becomes positive zero)."""
         if not self.accepts(inp):
             raise ValueError(

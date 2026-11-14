@@ -26,8 +26,8 @@ COUNTS = [2, 3, 1, 5]
 
 
 def reference_logits(head, hidden, token_ids, embedding, question_spans, spans):
-    """``JointSchemaHead.forward`` of the checkpoint's joint_schema_model.py
-    for one record, with ``spans`` the option spans of each question."""
+    """`JointSchemaHead.forward` of the checkpoint's joint_schema_model.py
+    for one record, with `spans` the option spans of each question."""
     hidden = head.hidden_norm(hidden)
     memory = head.memory_projection(hidden).unsqueeze(0)
     global_vector = hidden[-1]

@@ -78,7 +78,7 @@ def _describe_tensor(t: torch.Tensor | None, name: str) -> str:
         return f"{name} : {t.shape} {t.dtype} {t.device}"
 
 
-@dataclass
+@dataclass(slots=True)
 class Config:
     Ms: list[int] | int
     K: int
@@ -256,7 +256,7 @@ class Config:
     def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
         """Derive the (weight_quant_key, activation_quant_key) pair an FP8
         quant config of this shape corresponds to (either OCP or FNUZ FP8,
-        see ``current_platform.fp8_dtype()``)."""
+        see `current_platform.fp8_dtype()`)."""
         if self.quant_block_shape is not None:
             return kFp8Static128BlockSym, kFp8Dynamic128Sym
         if self.is_per_out_ch_quant:
@@ -488,7 +488,7 @@ class Config:
         return True, None
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightTensors:
     w1: torch.Tensor
     w2: torch.Tensor
@@ -552,15 +552,14 @@ class WeightTensors:
             in_dtype=config.dtype,
             quant_dtype=config.weight_dtype,
             block_shape=config.quant_block_shape,
-            # or config.is_per_out_ch_quant
-            per_out_ch_quant=config.is_per_act_token_quant,
+            per_out_ch_quant=config.is_per_out_ch_quant,
         )
         return WeightTensors(
             w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RankTensors:
     hidden_states: torch.Tensor
     hidden_states_scale: torch.Tensor | None

@@ -46,7 +46,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
         generators.append(generator)
 
     all_gens = merge_async_iterators(*generators)
-    async for i, res in all_gens:
+    async for _ in all_gens:
         pass
 
     end = time.perf_counter()

@@ -180,7 +180,7 @@ def test_pack_unpack_roundtrip_fp8():
         (15, 8, 16, 3, [7, 5, 3]),
     ]
 
-    for N, H, D, B, lengths_list in test_cases:
+    for N, H, D, _, lengths_list in test_cases:
         # Create input tensor with small values for fp8
         x = torch.randn(N, H, D, dtype=torch.float32, device=device) * 0.1
         x = x.to(dtype=dtype)

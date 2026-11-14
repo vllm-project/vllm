@@ -460,6 +460,17 @@ def test_prepare_object_to_dump():
 
     assert prepare_object_to_dump(CustomClass(1, "b")) == "CustomClass(a=1, b='b')"
 
+    @dataclass(slots=True)
+    class SlottedClass:
+        a: int
+        b: tuple[str, ...]
+
+    # Must recurse into the fields rather than falling through to repr(), which
+    # would dump values that the recursive path anonymizes.
+    assert prepare_object_to_dump(SlottedClass(1, ("x",))) == (
+        "SlottedClass(a=1, b=['x'])"
+    )
+
 
 # Add vllm prefix to make sure logs go through the vllm logger
 test_logger = init_logger("vllm.test_logger")

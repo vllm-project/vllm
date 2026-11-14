@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Truncation must bound the prompt *after* multimodal placeholders expand.
 
-``TokenizeParams.apply_post_tokenization`` truncates the unexpanded prompt, so
+`TokenizeParams.apply_post_tokenization` truncates the unexpanded prompt, so
 one placeholder token can expand into many and push the result back over
-``truncate_prompt_tokens`` (vllm-project/vllm#57038).
+`truncate_prompt_tokens` (vllm-project/vllm#57038).
 """
 
 import numpy as np

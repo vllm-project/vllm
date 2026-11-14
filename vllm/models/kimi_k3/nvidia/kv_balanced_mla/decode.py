@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The decode of the KIMI_K3_KV_BALANCED_MLA attention backend (``backend.py``) on
+"""The decode of the KIMI_K3_KV_BALANCED_MLA attention backend (`backend.py`) on
 the KV-balanced kernel. It covers the target verify and the DSpark draft, with or
 without DCP. Per forward, the first MLA layer of each decode shape plans the split-KV
 work list from this rank's KV lengths, and every later layer of that forward reuses
@@ -46,7 +46,7 @@ _PLANNED: dict[int, tuple[object, int, "KvBalancedMla"]] = {}
 
 
 class KvBalancedDecode:
-    """The KV-balanced decode of one MLA layer with ``num_heads`` local heads."""
+    """The KV-balanced decode of one MLA layer with `num_heads` local heads."""
 
     def __init__(self, num_heads: int):
         from . import core
@@ -93,7 +93,7 @@ class KvBalancedDecode:
         self._buffers()
 
     def _buffers(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """This layer shape's plan buffers (``counts``, ``work``) of the current
+        """This layer shape's plan buffers (`counts`, `work`) of the current
         micro-batch lane, and the split-KV scratch."""
         manager = current_workspace_manager()
         counts = manager.get_persistent(
@@ -140,7 +140,7 @@ class KvBalancedDecode:
         attn_metadata: "MLACommonMetadata",
         layer: "AttentionLayer",
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """``impl``'s ``forward_mqa`` on the kernel."""
+        """`impl`'s `forward_mqa` on the kernel."""
         if isinstance(q, tuple) or q.dtype != torch.float8_e4m3fn:
             raise ValueError(
                 "KIMI_K3_KV_BALANCED_MLA needs the packed FP8 query, got "
@@ -158,13 +158,17 @@ class KvBalancedDecode:
                     requests > self.max_requests,
                 ),
                 (
-                    f"{tokens} tokens over {requests} requests (uniform, at most "
-                    f"{self.max_q} each)",
+                    (
+                        f"{tokens} tokens over {requests} requests (uniform, at most "
+                        f"{self.max_q} each)"
+                    ),
                     tokens % requests or tokens // requests > self.max_q,
                 ),
                 (
-                    f"a query of shape {tuple(q.shape)} (expected "
-                    f"({tokens}, {self.heads}, {LATENT + ROPE}), contiguous)",
+                    (
+                        f"a query of shape {tuple(q.shape)} (expected "
+                        f"({tokens}, {self.heads}, {LATENT + ROPE}), contiguous)"
+                    ),
                     q.shape != (tokens, self.heads, LATENT + ROPE)
                     or not q.is_contiguous(),
                 ),

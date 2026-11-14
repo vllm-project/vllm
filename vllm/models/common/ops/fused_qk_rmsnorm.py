@@ -17,7 +17,7 @@ from vllm.utils.math_utils import next_power_of_2
 
 
 class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         q_size: int
@@ -89,7 +89,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         y = x * rrms * w
         tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

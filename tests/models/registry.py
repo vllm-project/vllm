@@ -13,7 +13,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from vllm.config.model import ModelDType, TokenizerMode
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _HfExamplesInfo:
     default: str
     """The default model to use for testing this architecture."""
@@ -458,6 +458,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
+    "MistralLarge4ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B", is_available_online=False
+    ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {
@@ -589,12 +592,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleChat2ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat2-3B", trust_remote_code=True
-    ),
-    "TeleChat3ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
@@ -839,7 +836,13 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AriaForConditionalGeneration": _HfExamplesInfo(
+        "rhymes-ai/Aria",
+        min_transformers_version="5.18.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/48907"
+        },
+    ),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf"
     ),
@@ -947,7 +950,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-12B-it",
-        is_available_online=False,
     ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
@@ -1066,6 +1068,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "KimiK3ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         trust_remote_code=True,
+    ),
+    "KimiK31ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K3.1",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
@@ -1293,19 +1300,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_transformers_version="4.57",
         transformers_version_reason={
             "hf": "Remote modeling code is not compatible with Transformers v5."
-        },
-    ),
-    "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-VL-7B",
-        trust_remote_code=True,
-        max_model_len=4096,
-        enforce_eager=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
-                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
-            )
         },
     ),
     "OpenVLAForActionPrediction": _HfExamplesInfo(
@@ -1632,6 +1626,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="Inferact/Muse-Spark-Open-DSpark",
         is_available_online=False,
     ),
+    "MistralLarge4DSparkModel": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B",
+        speculative_model="mistralai/Mistral-Large-4-1T-A52B",  # mtp_dspark.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
@@ -1738,30 +1738,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model=(
             "inference-optimization/"
             "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
-        ),
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    # [PEagle]
-    "PEagleDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleLlamaForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
-        tokenizer="Qwen/Qwen3-8B",
-        use_original_num_layers=True,
-    ),
-    "PeagleQwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        trust_remote_code=True,
-        speculative_model=(
-            "inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4"
         ),
         tokenizer="Qwen/Qwen3-8B",
         use_original_num_layers=True,
@@ -1948,6 +1924,9 @@ _TRANSFORMERS_BACKEND_MODELS = {
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForTranscription": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR-HF"
+    ),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
     "TransformersForMTP": _HfExamplesInfo(
         "zai-org/GLM-4.5",

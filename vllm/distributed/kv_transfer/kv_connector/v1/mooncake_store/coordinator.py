@@ -1,0 +1,477 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""External-store cache-hit coordinator for MooncakeStoreConnector."""
+
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import TYPE_CHECKING, cast
+
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    eagle_proof_margin,
+    is_mamba_group,
+    resolve_dcp_kv_block_size,
+)
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroup,
+    ManagerConfig,
+    prefix_lookup_groups,
+)
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+class ExternalCachedBlockPool:
+    """Duck-typed BlockPool backed by a `(group_id, hash)` exists set."""
+
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
+        # ``exists=None`` is used on the recv side where hit_length is already
+        # determined and we just want each spec's manager to apply its own mask.
+        self._exists = exists
+        self.hash_block_size = hash_block_size
+        self.null_block = KVCacheBlock(block_id=0)
+        # Dummy ID 1 for present block for duck-typing.
+        self._present_block = KVCacheBlock(block_id=1)
+
+    def get_cached_block(
+        self,
+        block_hash: BlockHash,
+        group_ids: list[int],
+    ) -> list[KVCacheBlock] | None:
+        # Mirrors BlockPool.get_cached_block: hit only when every group_id
+        # (groups sharing a spec) has the hash cached.
+        if self._exists is None:
+            return [self._present_block] * len(group_ids)
+        h = bytes(block_hash)
+        if all((g, h) in self._exists for g in group_ids):
+            return [self._present_block] * len(group_ids)
+        return None
+
+    def contains(self, group_id: int, block_hash: BlockHash) -> bool:
+        """Return whether a group has a loadable key for this hash."""
+        return (
+            self._exists is not None and (group_id, bytes(block_hash)) in self._exists
+        )
+
+
+class MooncakeStoreCoordinator:
+    """Mirror of `HybridKVCacheCoordinator.find_longest_cache_hit` over an
+    `ExternalCachedBlockPool`."""
+
+    def __init__(
+        self,
+        kv_cache_groups: list[KVCacheGroup],
+        scheduler_block_size: int,
+        hash_block_size: int,
+        use_eagle: bool = False,
+        retention_interval: int | None = None,
+        enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
+    ) -> None:
+        # Match core's alignment requirements for prefix-cacheable groups.
+        assert all(
+            g.block_size % hash_block_size == 0
+            for g in kv_cache_groups
+            if g.prefix_cacheable
+        ), "block_size must be divisible by hash_block_size"
+        assert scheduler_block_size % hash_block_size == 0, (
+            f"scheduler_block_size ({scheduler_block_size}) must be a multiple of "
+            f"hash_block_size ({hash_block_size})"
+        )
+        assert all(
+            scheduler_block_size % g.block_size == 0
+            for g in kv_cache_groups
+            if g.prefix_cacheable
+        ), "scheduler_block_size must be a multiple of each group's block_size"
+        self.kv_cache_groups = kv_cache_groups
+        self.mamba_group_ids = {
+            group_id
+            for group_id, group in enumerate(kv_cache_groups)
+            if is_mamba_group(group)
+        }
+        self.hash_block_size = hash_block_size
+        self.lcm_block_size = scheduler_block_size
+        # Core's decision: whether hits land on the hash unit, below the block.
+        self.enable_partial_hash_hits = enable_partial_hash_hits
+        # Lookahead hashes key the drafter's KV past each block, so no group
+        # drops its trailing block.
+        self.use_eagle = use_eagle and not num_hash_lookahead_tokens
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
+        # Mirror vLLM core's KVCacheCoordinator.retention_interval.
+        self.retention_interval = retention_interval
+        self._verify_and_split_kv_cache_groups()
+
+    @classmethod
+    def from_kv_cache_config(
+        cls,
+        kv_cache_config: KVCacheConfig,
+        vllm_config: "VllmConfig",
+        scheduler_block_size: int,
+        hash_block_size: int,
+    ) -> "MooncakeStoreCoordinator":
+        """Build the coordinator the connector's scheduler and workers share.
+
+        Block sizes are DCP-resolved, so a block spans the tokens of one block-table
+        entry. Partial hits follow core's hit alignment, which checks every KV
+        cache group and its manager, not only the groups the store transfers;
+        unset (a config the engine core did not resolve) keeps hits on the
+        block.
+        """
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        spec_config = vllm_config.speculative_config
+        alignment = kv_cache_config.cache_hit_alignment_tokens
+        return cls(
+            [
+                replace(
+                    group, block_size=resolve_dcp_kv_block_size(group, dcp_world_size)
+                )
+                for group in kv_cache_config.prefix_cacheable_groups
+            ],
+            scheduler_block_size,
+            hash_block_size,
+            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
+            retention_interval=kv_cache_config.prefix_cache_retention_interval,
+            enable_partial_hash_hits=(
+                alignment is not None and alignment < scheduler_block_size
+            ),
+        )
+
+    def align_lookup_length(self, length: int) -> int:
+        alignment = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        return length // alignment * alignment
+
+    def _verify_and_split_kv_cache_groups(self) -> None:
+        """Group the prefix-cacheable groups into joint cache-hit lookups."""
+        groups = self.kv_cache_groups
+        attention_groups = [
+            g._replace(
+                manager_config=_coverage_config(g.manager_config),
+                use_eagle=not self.num_hash_lookahead_tokens
+                and any(groups[i].is_eagle_group for i in g.group_ids),
+            )
+            for g in prefix_lookup_groups(groups)
+        ]
+        # Full attention first (matches upstream convergence ordering).
+        attention_groups.sort(
+            key=lambda g: not issubclass(g.manager_cls, FullAttentionManager)
+        )
+        # Conservatively flag all groups when use_eagle is set but none is flagged.
+        if self.use_eagle and not any(g.use_eagle for g in attention_groups):
+            attention_groups = [g._replace(use_eagle=True) for g in attention_groups]
+        self.attention_groups = attention_groups
+        # Apply the merged spec group's Eagle setting to each member's masks.
+        self.eagle_group_ids = {
+            gid for g in attention_groups if g.use_eagle for gid in g.group_ids
+        }
+        self.eagle_proof_margin_by_group = {
+            gid: eagle_proof_margin(
+                group.block_size,
+                self.hash_block_size,
+                self.enable_partial_hash_hits
+                and group.manager_cls.supports_fine_grained_hash_lookup,
+            )
+            for group in attention_groups
+            if group.use_eagle and not issubclass(group.manager_cls, MambaManager)
+            for gid in group.group_ids
+        }
+
+    def find_longest_cache_hit(
+        self,
+        block_hashes: Sequence[BlockHash],
+        max_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+        *,
+        apply_eagle: bool = True,
+    ) -> tuple[tuple[list[bool], ...], int]:
+        """Returns `(load_mask_per_group, hit_length)`. `mask[g][i]` is True iff
+        group `g` populates physical block `i` (e.g. SWA and Mamba tail-only);
+        recv-side callers skip False slots.
+
+        `apply_eagle` controls whether the per-spec `use_eagle` last-block
+        pop is applied. Lookup callers want it (the drafter requires recomputing
+        the last block); load-mask callers must not, because `token_len`
+        already reflects the eagle-pruned hit length and a second pop would
+        leave the trailing block unloaded.
+        """
+        blocks_per_group, hit_length = self._find_hit_blocks(
+            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
+        )
+        masks = tuple(
+            [blk is not cached_block_pool.null_block for blk in blocks]
+            for blocks in blocks_per_group
+        )
+        return masks, hit_length
+
+    def load_mask(
+        self,
+        block_hashes: Sequence[BlockHash],
+        token_len: int,
+    ) -> tuple[list[bool], ...]:
+        """Per-group load masks: `mask[g][i]` is True iff group `g`'s
+        spec would populate physical block `i` at length `token_len`
+        (e.g. SWA / Mamba tail-only).
+        """
+        # Lookup has already applied Eagle's last-block drop.
+        masks, _ = self.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size),
+            apply_eagle=False,
+        )
+        return masks
+
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        start_token: int = 0,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group store masks for the suffix starting at `start_token`.
+
+        `mask[g][i]` is True iff the i-th physical block of group `g` *after*
+        `start_token` should be written to the store so a future cache hit
+        can consume it. `None` is the all-True sentinel for the suffix.
+
+        Reuses the engine's `SingleTypeKVCacheManager.reachable_block_mask`
+        so the store retains exactly the blocks the local prefix cache would.
+
+        Mamba groups are all-False; checkpoint block IDs arrive through
+        `SchedulerOutput.kv_connector_block_state.boundary_state_offloads`.
+        """
+        return self._reachable_masks(
+            aligned_token_len,
+            start_token,
+            retention_interval=self.retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+            exclude_mamba=True,
+        )
+
+    def lookup_mask(
+        self,
+        aligned_token_len: int,
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group lookup masks.
+
+        `mask[g][i]` is True iff physical block `i` of group `g` should be
+        looked up as an aligned hit boundary. `None` is the all-True
+        sentinel.
+        """
+        return self._reachable_masks(
+            aligned_token_len,
+            0,
+            retention_interval=None,
+            num_prompt_tokens=None,
+        )
+
+    def _reachable_masks(
+        self,
+        aligned_token_len: int,
+        start_token: int,
+        *,
+        retention_interval: int | None,
+        num_prompt_tokens: int | None,
+        exclude_mamba: bool = False,
+    ) -> tuple[list[bool] | None, ...]:
+        mask_alignment = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        assert aligned_token_len % mask_alignment == 0, (
+            f"aligned_token_len ({aligned_token_len}) must be a multiple of "
+            f"{mask_alignment}"
+        )
+        reachable_boundaries = (
+            ()
+            if num_prompt_tokens is None
+            else replay_boundaries(
+                num_prompt_tokens,
+                self.lcm_block_size,
+                use_eagle=bool(self.eagle_group_ids),
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            )
+        )
+        masks: list[list[bool] | None] = []
+        for g_idx, g in enumerate(self.kv_cache_groups):
+            end_block = aligned_token_len // g.block_size
+            start_block = min(end_block, max(0, cdiv(start_token, g.block_size)))
+            if exclude_mamba and g_idx in self.mamba_group_ids:
+                masks.append([False] * (end_block - start_block))
+                continue
+            use_eagle = g_idx in self.eagle_group_ids
+            mask = g.manager_cls.reachable_block_mask(
+                start_block=start_block,
+                end_block=end_block,
+                alignment_tokens=self.lcm_block_size,
+                block_size=g.block_size,
+                manager_config=_coverage_config(g.manager_config),
+                use_eagle=use_eagle,
+                retention_interval=retention_interval,
+                reachable_boundaries=reachable_boundaries,
+                # Worker initialization has already resolved DCP in this block size.
+                dcp_world_size=1,
+            )
+            if mask is not None:
+                assert len(mask) == end_block - start_block
+            masks.append(mask)
+        return tuple(masks)
+
+    def _find_hit_blocks(
+        self,
+        block_hashes: Sequence[BlockHash],
+        max_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+        *,
+        apply_eagle: bool = True,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Converge registered managers' hits as in HybridKVCacheCoordinator."""
+        alignment_tokens = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        if len(self.attention_groups) == 1:
+            manager_config, block_size, group_ids, group_eagle = self.attention_groups[
+                0
+            ]
+            manager_cls = manager_config.manager_cls
+            hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
+                block_hashes=block_hashes,  # type: ignore[arg-type]
+                max_length=max_length,
+                kv_cache_group_ids=group_ids,
+                block_pool=cast(BlockPool, cached_block_pool),
+                block_size=block_size,
+                manager_config=manager_config,
+                drop_eagle_block=apply_eagle and group_eagle,
+                alignment_tokens=alignment_tokens,
+            )
+            num_groups = len(self.kv_cache_groups)
+            blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+            for gid, blks in zip(group_ids, hit_blocks, strict=True):
+                blocks_by_group[gid] = blks
+            return tuple(blocks_by_group), hit_length
+
+        num_groups = len(self.kv_cache_groups)
+        hit_length = max_length
+        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_length_by_group: list[int] = [0] * num_groups
+
+        is_simple_hybrid = len(self.attention_groups) == 2 and issubclass(
+            self.attention_groups[0].manager_cls, FullAttentionManager
+        )
+        eagle_verified: set[int] = set()
+
+        while True:
+            curr_hit_length = hit_length
+
+            for idx, (manager_config, block_size, group_ids, group_eagle) in enumerate(
+                self.attention_groups
+            ):
+                manager_cls = manager_config.manager_cls
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
+                if issubclass(manager_cls, FullAttentionManager) and cached is not None:
+                    curr_hit_length = min(
+                        curr_hit_length, hit_length_by_group[first_group_id]
+                    )
+                    continue
+
+                drop_eagle_block = (
+                    apply_eagle and group_eagle and idx not in eagle_verified
+                )
+                _max_length = curr_hit_length
+                # No eagle peek margin for a recurrent (Mamba) group: its finder
+                # never drops a block, so a widened bound would match past the
+                # attention-verified hit and resume from speculative state (#43559).
+                if drop_eagle_block and not issubclass(manager_cls, MambaManager):
+                    eagle_margin = eagle_proof_margin(
+                        block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
+                    )
+                    _max_length = min(
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
+                    )
+                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
+                    block_hashes=block_hashes,  # type: ignore[arg-type]
+                    max_length=_max_length,
+                    kv_cache_group_ids=group_ids,
+                    block_pool=cast(BlockPool, cached_block_pool),
+                    block_size=block_size,
+                    manager_config=manager_config,
+                    drop_eagle_block=drop_eagle_block,
+                    alignment_tokens=alignment_tokens,
+                )
+                if drop_eagle_block:
+                    eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    eagle_verified.clear()
+                curr_hit_length = _new_hit_length
+                for gid, blocks in zip(group_ids, hit_blocks, strict=True):
+                    hit_blocks_by_group[gid] = blocks
+                    hit_length_by_group[gid] = _new_hit_length
+
+            if curr_hit_length >= hit_length:
+                break
+            hit_length = curr_hit_length
+            if is_simple_hybrid:
+                break
+
+        # Truncate full-attention hit_blocks to final converged length;
+        # other specs already trim themselves inside their hit logic. cdiv keeps
+        # the partial tail block when hit_length is not block-aligned.
+        for group in self.attention_groups:
+            if not issubclass(group.manager_cls, FullAttentionManager):
+                continue
+            num_blocks = cdiv(hit_length, group.block_size)
+            for group_id in group.group_ids:
+                full_blks = hit_blocks_by_group[group_id]
+                assert full_blks is not None
+                del full_blks[num_blocks:]
+                hit_length_by_group[group_id] = hit_length
+
+        return (
+            tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
+            hit_length,
+        )
+
+
+def _coverage_config(config: ManagerConfig) -> ManagerConfig:
+    """The config whose window covers every block an external hit restores.
+
+    An external SWA hit allocates the MTP re-prefill tail
+    (`extra_retained_tokens`) below the window, so lookup, load and store
+    must cover it too, as the offloading connector does.
+    """
+    if (
+        isinstance(config.params, SlidingWindowManager.Params)
+        and config.params.extra_retained_tokens
+    ):
+        return config.replace_params(
+            sliding_window=config.params.sliding_window
+            + config.params.extra_retained_tokens,
+            extra_retained_tokens=0,
+        )
+    return config
