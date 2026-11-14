@@ -10,8 +10,15 @@
 # ruff: noqa: E501
 
 
+from functools import cache
+
 import torch
 
+from vllm.models.glm5next.amd.ops.kda_spec_decode_gluon import (
+    kda_spec_decode_defer,
+    supports_kda_spec_decode_gluon,
+)
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
@@ -33,6 +40,15 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
+@cache
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -52,15 +68,32 @@ def fused_recurrent_kda_fwd(
     g_bias: torch.Tensor | None = None,
     compute_gate: bool = False,
     lower_bound: float | None = -5.0,
+    defer_spec_state: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = next_power_of_2(K), min(next_power_of_2(V), 8)
+    # The deferred mode records k and g once per program, so it uses fewer,
+    # larger programs.
+    BK = next_power_of_2(K)
+    BV = min(next_power_of_2(V), 32 if defer_spec_state else 8)
     NK, NV = cdiv(K, BK), cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
-    num_warps = 1
+    num_warps = 2 if defer_spec_state else 1
+
+    if defer_spec_state:
+        assert (
+            inplace_final_state
+            and num_accepted_tokens is not None
+            and ssm_state_indices is not None
+            and ssm_state_indices.ndim == 2
+        )
+        # Replay matches the per-token states exactly only if the state is
+        # never rounded between tokens.
+        assert initial_state.dtype == torch.float32
+        # Each slot holds one record per program.
+        assert NV * (2 * BK + 2 * BV) <= V * K
 
     if compute_gate:
         assert a_log is not None and g_bias is not None, (
@@ -94,6 +127,39 @@ def fused_recurrent_kda_fwd(
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    # The Gluon kernel's records differ from this kernel's, so the choice
+    # depends only on the model and the device, never on the batch.
+    if (
+        defer_spec_state
+        and compute_gate
+        and use_qk_l2norm_in_kernel
+        and sigmoid_beta
+        and _on_gfx950()
+        and supports_kda_spec_decode_gluon(K, V, beta.ndim == v.ndim)
+    ):
+        assert cu_seqlens is not None
+        kda_spec_decode_defer(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            scale,
+            initial_state,
+            cu_seqlens,
+            ssm_state_indices,
+            num_accepted_tokens,
+            a_log,
+            g_bias,
+            lower_bound,
+            o,
+            token_stride(q),
+            token_stride(k),
+            token_stride(v),
+            token_stride(beta),
+        )
+        return o, final_state
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -136,6 +202,7 @@ def fused_recurrent_kda_fwd(
         COMPUTE_GATE=compute_gate,
         SAFE_GATE=True,
         LOWER_BOUND=lower_bound if lower_bound is not None else -5.0,
+        DEFER_SPEC_STATE=defer_spec_state,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -162,8 +229,16 @@ def fused_recurrent_kda(
     g_bias: torch.Tensor | None = None,
     compute_gate: bool = False,
     lower_bound: float | None = -5.0,
+    defer_spec_state: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """With defer_spec_state, a spec-decode step keeps the state after its
+    first token in slot 0 of each row of ssm_state_indices and records the
+    inputs of each later token t in slot t, rather than storing a state per
+    token. The next step replays num_accepted_tokens - 1 records onto slot 0.
+    Every spec-decode step of a request must then use this mode, and nothing
+    else may read the per-token slots.
+    """
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
@@ -194,6 +269,7 @@ def fused_recurrent_kda(
         g_bias=g_bias,
         compute_gate=compute_gate,
         lower_bound=lower_bound,
+        defer_spec_state=defer_spec_state,
     )
     return o, final_state
 
