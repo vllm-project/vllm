@@ -12,6 +12,9 @@ import pytest
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
 from vllm.renderers.chat_utils import BaseMultiModalItemTracker
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.params import ChatParams
@@ -35,6 +38,33 @@ def tool_call(name):
         "type": "function",
         "function": {"name": name, "arguments": "{}"},
     }
+
+
+@pytest.mark.parametrize(
+    "message", [{"role": "developer", "content": ""}, {"role": "developer"}]
+)
+def test_empty_developer_content_is_a_client_error(message):
+    with pytest.raises(ValueError) as exc_info:
+        render([message], thinking=False)
+
+    error = create_error_response(exc_info.value)
+    assert error.error.code == 400
+    assert error.error.type == "BadRequestError"
+    assert error.error.message == "Developer message content must not be empty."
+    assert "_image_indices" not in error.model_dump_json()
+    assert str(message) not in error.error.message
+
+
+def test_valid_developer_content_renders_as_user_turn():
+    assert render(
+        [{"role": "developer", "content": "answer briefly"}], thinking=False
+    ) == ("<｜begin▁of▁sentence｜><｜User｜>answer briefly<｜Assistant｜></think>")
+
+
+def test_empty_system_content_remains_valid():
+    assert render([{"role": "system", "content": ""}], thinking=False) == (
+        "<｜begin▁of▁sentence｜><｜System｜>"
+    )
 
 
 @pytest.mark.parametrize("case_id", [1, 2, 3, 4, 5])

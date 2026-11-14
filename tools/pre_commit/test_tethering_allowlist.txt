@@ -179,7 +179,6 @@ tests/test_version.py  # CI jobs disabled pending locked cmake installation
 tests/test_zen_cpu_platform_detection.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_basic.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_deepseek_v4.py  # CI jobs disabled pending locked cmake installation
-tests/tokenizers_/test_deepseek_v41.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_detokenize.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_hf.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_mistral.py  # CI jobs disabled pending locked cmake installation
