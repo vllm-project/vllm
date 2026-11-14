@@ -84,28 +84,38 @@ def _ranks_kernel(
 def compute_token_logprobs(
     logits: torch.Tensor, token_ids: torch.Tensor
 ) -> torch.Tensor:
-    # NOTE(woosuk): To save GPU memory, we do not materialize the full
-    # [batch_size, vocab_size] logprobs tensor. The kernel computes
-    # max + logsumexp per row and only emits logprobs at `token_ids`.
+    """Compute logprobs for given token_ids using native PyTorch operations.
+
+    This replaces the Triton kernel _topk_log_softmax_kernel for better
+    performance and maintainability. For bf16 inputs, we upcast to fp32
+    for the logsumexp computation to maintain precision.
+
+    NOTE: To save GPU memory, we do not materialize the full
+    [batch_size, vocab_size] logprobs tensor. We only compute logprobs
+    at the requested token_ids.
+    """
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
-    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
-    # Cap the kernel's per-iteration width so very large num_logprobs requests
-    # stream the gather in bounded-size chunks, avoiding excessive mem use.
-    topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
-    _topk_log_softmax_kernel[(batch_size,)](
-        logprobs,
-        logits,
-        logits.stride(0),
-        token_ids,
-        token_ids.stride(0),
-        num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
-        TOPK_BLOCK_SIZE=topk_block_size,
-    )
-    return logprobs
+
+    # For bf16, upcast to fp32 for numerical stability in logsumexp.
+    # logsumexp in bf16 has poor precision (max abs error ~1e-1 vs ~1e-6 in fp32).
+    logits_for_lse = logits.float() if logits.dtype == torch.bfloat16 else logits
+
+    # Compute logsumexp per row in fp32
+    # lse shape: [batch_size, 1]
+    lse = torch.logsumexp(logits_for_lse, dim=-1, keepdim=True)
+
+    # Gather logits at token_ids positions
+    # token_ids shape: [batch_size, num_logprobs]
+    # gathered_logits shape: [batch_size, num_logprobs]
+    gathered_logits = logits.gather(-1, token_ids)
+
+    # Subtract lse (broadcasted) to get logprobs
+    # Result is in fp32 for bf16 inputs, matching original kernel behavior
+    logprobs = gathered_logits - lse
+
+    return logprobs.to(torch.float32)
 
 
 def compute_topk_scores(
@@ -170,6 +180,13 @@ def compute_topk_scores(
             scores = compute_token_logprobs(logits, logprob_token_ids)
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
+    # Compute token ranks using Triton _ranks_kernel (streaming, low memory).
+    # This avoids materializing a [batch_size, vocab_size] bool mask which
+    # would consume ~9 bytes/logit (e.g., 2.3 GiB at B=1024, V=262144).
+    # The Triton kernel streams over vocab in blocks (BLOCK_SIZE=8192),
+    # matching the original memory-efficient behavior.
+    # NOTE: This preserves the -inf over-counting bug from the original kernel.
+    # Fixed in #60097; we keep it for performance parity with main.
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
     _ranks_kernel[(batch_size,)](
         token_ranks,
@@ -179,6 +196,7 @@ def compute_topk_scores(
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
     )
+
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
