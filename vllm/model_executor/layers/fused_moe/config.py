@@ -1117,7 +1117,11 @@ class FusedMoEParallelConfig:
 
     @property
     def needs_round_robin_routing_tables(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_nixl_ep_kernels
+            or self.use_mooncake_ep_kernels
+        )
 
     @property
     def use_ag_rs_all2all_kernels(self):
@@ -1152,6 +1156,10 @@ class FusedMoEParallelConfig:
             and self.all2all_backend == "mori"
             and self.mori_ep_v2
         )
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mooncake_ep"
 
     @property
     def use_nixl_ep_kernels(self):
@@ -1501,6 +1509,7 @@ class FusedMoEConfig:
         if (
             conf.use_deepep_ll_kernels
             or conf.use_nixl_ep_kernels
+            or conf.use_mooncake_ep_kernels
             or conf.use_alltoall_batched_kernels
             or self.moe_backend == "batched_triton"
         ):
@@ -1671,6 +1680,10 @@ class FusedMoEConfig:
     @property
     def use_alltoall_batched_kernels(self):
         return self.moe_parallel_config.use_alltoall_batched_kernels
+
+    @property
+    def use_mooncake_ep_kernels(self):
+        return self.moe_parallel_config.use_mooncake_ep_kernels
 
     @property
     def use_nixl_ep_kernels(self):
