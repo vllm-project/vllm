@@ -35,6 +35,27 @@ for a Gemma 4 assistant checkpoint, that release is treating the assistant as a
 generic draft model and may fail during initialization for multimodal Gemma 4
 targets. Upgrade to a version with Gemma 4 MTP support instead.
 
+### KV-sharing fast prefill
+
+Combining Gemma 4 MTP with KV-sharing fast prefill requires Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). For example, for Gemma 4 E2B:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve google/gemma-4-E2B-it \
+    --max-model-len 8192 \
+    --speculative-config '{"method":"mtp","model":"gg-hf-am/gemma-4-E2B-it-assistant","num_speculative_tokens":1}' \
+    --kv-sharing-fast-prefill
+```
+
+Fast prefill is opt-in and disabled by default. The target computes full prompt KV in its
+non-shared layers, while the trailing KV-sharing layers process only the
+positions needed for output logits and speculative verification.
+
+The Gemma 4 assistant reads the target KV cache, so it does not need complete
+prompt hidden states to build a separate draft KV cache. Other EAGLE-style
+speculators remain incompatible with this option. Prompt logprobs are not
+supported with fast prefill.
+
 ## Offline Example
 
 ```python
