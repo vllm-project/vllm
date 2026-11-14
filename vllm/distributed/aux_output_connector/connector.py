@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedBlockHashes:
     """Contiguous, self-contained block hashes for scheduler-worker IPC."""
 
@@ -35,7 +35,7 @@ class PackedBlockHashes:
             yield self.data[start : start + self.item_size]
 
 
-@dataclass
+@dataclass(slots=True)
 class AuxOutputConnectorMetadata:
     generation: int
     requests: dict[str, int]
@@ -45,7 +45,7 @@ class AuxOutputConnectorMetadata:
     released_block_hashes: PackedBlockHashes | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray

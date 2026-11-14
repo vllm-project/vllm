@@ -227,6 +227,19 @@ def test_resolve_linear_activation_key(override, checkpoint, monkeypatch):
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("checkpoint", [None, kMxfp4Dynamic])
+def test_resolve_linear_activation_key_explicit_null(checkpoint, monkeypatch):
+    """An explicit `activation: null` runs the layer weight-only."""
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override_is_set", lambda: True
+    )
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: None
+    )
+    assert linear_kernels._resolve_linear_activation_key(checkpoint) is None
+
+
+@pytest.mark.cpu_test
 def test_quantization_config_parses_int8_activation():
     args = QuantizationConfigArgs(linear={"activation": "int8_per_group_32"})
     assert args.linear is not None

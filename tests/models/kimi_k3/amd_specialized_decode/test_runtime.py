@@ -35,12 +35,31 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     mla_weight_reasons,
     weight_reasons,
 )
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+
+def test_dsa_layers_use_k2_after_sparse_attention():
+    """Sparse attention supplies gated pre-o_proj activations to K2."""
+    config = KimiLinearConfig(
+        num_hidden_layers=16,
+        num_experts=896,
+        first_k_dense_replace=1,
+        attn_res_block_size=12,
+        linear_attn_config={
+            "kda_layers": [i for i in range(1, 17) if i % 4],
+            "full_attn_layers": [4, 8, 12, 16],
+        },
+        dsa_config={"dsa_layers": [4, 8, 12, 16]},
+    )
+    kinds = layer_kinds(config)
+    assert kinds == {i: WHOLE if config.is_kda_layer(i) else FFN for i in range(1, 16)}
 
 
 def _vllm_config(**over) -> SimpleNamespace:
     """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens,
     max_num_seqs 1, an fp8 KV cache, FULL graphs, MRV2.
-    ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
+    `over` sets dotted paths, e.g. `{"parallel_config.data_parallel_size": 2}`."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
         enable_adaptive_verification=False,
@@ -90,7 +109,7 @@ def _vllm_config(**over) -> SimpleNamespace:
         weight_transfer_config=None,
         speculative_config=spec,
         scheduler_config=SimpleNamespace(max_num_seqs=1),
-        use_v2_model_runner=True,
+        attention_config=SimpleNamespace(backend=None),
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -107,7 +126,10 @@ def _vllm_config(**over) -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def fp4_bmm(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
 
 
 @pytest.fixture
@@ -116,29 +138,57 @@ def on_mi355x(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "k, want",
+    "seqs, k, want",
     [
-        (7, (8, 16)),
-        (3, (4, 8, 12, 16)),
-        (1, tuple(range(2, 17, 2))),
-        (15, (16,)),
+        (1, 7, (8,)),
+        (2, 7, (8, 16)),
+        (1, 3, (4,)),
+        (2, 3, (4, 8)),
+        (4, 3, (4, 8, 12, 16)),
+        (1, 1, (2,)),
+        (8, 1, tuple(range(2, 17, 2))),
+        (1, 15, (16,)),
     ],
 )
-def test_widths_are_whole_requests_up_to_max_rows(k, want):
-    assert DecodeConfig(q=k + 1).widths == want
+def test_widths_are_whole_requests_up_to_max_num_seqs(seqs, k, want):
+    """No width wider than a full step: vLLM captures no uniform decode graph
+    wider than max_num_seqs x q, and wider eager steps are not uniform."""
+    assert DecodeConfig(q=k + 1, max_num_seqs=seqs).widths == want
+
+
+def test_decode_config_carries_max_num_seqs(on_mi355x):
+    cfg = _step(8, 2, 3)
+    assert specialized_decode_config(cfg) == DecodeConfig(q=4, max_num_seqs=2)
+
+
+@pytest.mark.parametrize(
+    "seqs, want",
+    [
+        (1, (1,)),
+        (3, (1, 2, 3)),
+        (4, (1, 2, 3, 4)),
+        (16, tuple(range(1, 17))),
+        (17, tuple(range(1, 17))),
+        (32, tuple(range(1, 17))),
+    ],
+)
+def test_regular_decode_widths_follow_max_num_seqs_up_to_max_rows(seqs, want):
+    assert DecodeConfig(q=1, max_num_seqs=seqs).widths == want
 
 
 def _k3_text_config():
     """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
     layer 0 dense."""
     mla = {i for i in range(93) if i % 4 == 3} | {92}
-    return SimpleNamespace(
+    return KimiLinearConfig(
         num_hidden_layers=93,
         attn_res_block_size=12,
         num_experts=896,
         first_k_dense_replace=1,
-        moe_layer_freq=1,
-        is_kda_layer=lambda i: i not in mla,
+        linear_attn_config={
+            "kda_layers": [i + 1 for i in range(93) if i not in mla],
+            "full_attn_layers": [i + 1 for i in sorted(mla)],
+        },
     )
 
 
@@ -173,7 +223,6 @@ def test_supported_config_is_accepted(supported_vllm_config):
 def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # CUDA must not auto-enable a process-wide setting in this ROCm fixture.
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     KimiLinearConfig(
@@ -217,6 +266,15 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
     assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
+def test_mooncake_consumer_is_supported(supported_vllm_config):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"mooncake_protocol": "rdma"},
+    )
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -225,6 +283,8 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
         {"kv_connector_module_path": "custom.connector"},
         {"kv_role": "kv_producer"},
         {"kv_role": "kv_both"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_producer"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_both"},
     ],
 )
 def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
@@ -243,6 +303,24 @@ def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
 
 
 @pytest.mark.parametrize("dcp", [1, 8])
+@pytest.mark.parametrize(
+    "cache_dtype, m1",
+    [("fp8", True), ("auto", False)],
+    ids=["m1", "vllm-mla-ops"],
+)
+def test_regular_decode_config_is_accepted(on_mi355x, dcp, cache_dtype, m1):
+    """Ordinary decode retains DCP1 and DCP8 support, with or without M1."""
+    cfg = _vllm_config(
+        speculative_config=None,
+        **{
+            "parallel_config.decode_context_parallel_size": dcp,
+            "cache_config.cache_dtype": cache_dtype,
+        },
+    )
+    assert specialized_decode_config(cfg) == DecodeConfig(q=1, m1=m1)
+
+
+@pytest.mark.parametrize("dcp", [1, 8])
 @pytest.mark.parametrize("interleave", [1, 16])
 def test_any_interleave_is_accepted(on_mi355x, dcp, interleave):
     """M1a writes the slots vLLM maps, M1b masks a request's empty shards."""
@@ -255,16 +333,31 @@ def test_any_interleave_is_accepted(on_mi355x, dcp, interleave):
     assert specialized_decode_config(cfg) == DecodeConfig(q=8, interleave=interleave)
 
 
+_NO_AITER_MLA = [
+    # ROCm then offers only TRITON_MLA
+    ({}, {"VLLM_ROCM_USE_AITER_MLA": "0"}),
+    ({"attention_config.backend": AttentionBackendEnum.TRITON_MLA}, {}),
+    ({"attention_config.backend": AttentionBackendEnum.ROCM_AITER_TRITON_MLA}, {}),
+]
+
+
 @pytest.mark.parametrize(
     "over, env, why",
     [
-        ({"cache_config.cache_dtype": "auto"}, "1", "an fp8 KV cache"),
-        ({}, "0", "VLLM_ROCM_USE_AITER_FP4BMM=1"),
+        ({"cache_config.cache_dtype": "auto"}, {}, "an fp8 (E4M3) KV cache"),
+        ({"cache_config.cache_dtype": "fp8_e5m2"}, {}, "an fp8 (E4M3) KV cache"),
+        (
+            {},
+            {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
+            "VLLM_ROCM_USE_AITER_FP4BMM=1",
+        ),
+        *((o, e, "the ROCM_AITER_MLA attention backend") for o, e in _NO_AITER_MLA),
     ],
 )
 def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
     """What only M1 needs is no refusal: the MLA layers run vLLM's ops, K2."""
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", env)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     cfg = _vllm_config(**over)
     assert runtime.unsupported(cfg) == []
     reasons = runtime.m1_reasons(cfg)
@@ -287,13 +380,11 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
             },
             "KV transfer connectors",
         ),
-        ({"speculative_config": None}, "without speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 16}, "more than 15"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
         ({"cache_config.use_replayssm": True}, "ReplaySSM"),
-        ({"use_v2_model_runner": False}, "V1 model runner"),
         (
             {"compilation_config.mode": CompilationMode.STOCK_TORCH_COMPILE},
             "torch.compile",
@@ -304,6 +395,17 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
 def test_refusals(on_mi355x, over, reason):
     reasons = runtime.unsupported(_vllm_config(**over))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+@pytest.mark.parametrize("env", ["VLLM_ROCM_USE_AITER", "VLLM_ROCM_USE_AITER_MOE"])
+@pytest.mark.parametrize("dcp", [1, 8])
+def test_aiter_off_is_refused(on_mi355x, monkeypatch, env, dcp):
+    """K2's MoE needs AITER's: refused at config time, before the weight load."""
+    monkeypatch.setenv(env, "0")
+    reasons = runtime.unsupported(
+        _vllm_config(**{"parallel_config.decode_context_parallel_size": dcp})
+    )
+    assert reasons and "VLLM_ROCM_USE_AITER=1" in reasons[0], reasons
 
 
 def _step(dcp: int, seqs: int, k: int) -> SimpleNamespace:
@@ -339,7 +441,7 @@ def test_served_steps_are_accepted(on_mi355x, dcp, seqs, k):
         (1, 2, 15, "max_num_seqs 2 at 15"),
         # 3 requests at qlen 4 (12 rows): M1c's 80 splits do not share out
         (1, 4, 3, "DCP1 runs M1c only"),
-        # no M1c at qlen 2 / 16: AITER's asm decode
+        # no M1c at qlen 2 / 16 (AITER's asm decode is not served at DCP1)
         (1, 1, 1, "DCP1 runs M1c only"),
         (1, 8, 1, "DCP1 runs M1c only"),
         (1, 1, 15, "DCP1 runs M1c only"),
@@ -348,6 +450,25 @@ def test_served_steps_are_accepted(on_mi355x, dcp, seqs, k):
 def test_unserved_steps_are_refused(on_mi355x, dcp, seqs, k, reason):
     reasons = runtime.unsupported(_step(dcp, seqs, k))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+@pytest.mark.parametrize("over, env", _NO_AITER_MLA)
+def test_dcp1_without_aiter_mla_is_refused(on_mi355x, monkeypatch, over, env):
+    """M1 reads AITER MLA's decode metadata: DCP1 without it is refused at
+    startup, not an AttributeError at the first verify step."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    cfg = _vllm_config(**over, **{"parallel_config.decode_context_parallel_size": 1})
+    reasons = runtime.unsupported(cfg)
+    assert len(reasons) == 1, reasons
+    assert "DCP1 without M1 (the ROCM_AITER_MLA attention backend)" in reasons[0]
+
+
+def test_aiter_mla_backend_is_served(on_mi355x):
+    cfg = _vllm_config(
+        **{"attention_config.backend": AttentionBackendEnum.ROCM_AITER_MLA}
+    )
+    assert runtime.m1_reasons(cfg) == []
 
 
 def test_dcp1_without_m1_is_refused(on_mi355x):
@@ -359,19 +480,19 @@ def test_dcp1_without_m1_is_refused(on_mi355x):
         }
     )
     reasons = runtime.unsupported(cfg)
-    assert len(reasons) == 1 and "DCP1 without M1 (an fp8 KV cache)" in reasons[0]
+    assert (
+        len(reasons) == 1 and "DCP1 without M1 (an fp8 (E4M3) KV cache)" in reasons[0]
+    )
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch):
     monkeypatch.setattr(
         runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]
     )
-    cfg = _vllm_config(
-        **{"parallel_config.tensor_parallel_size": 4, "use_v2_model_runner": False}
-    )
+    cfg = _vllm_config(**{"parallel_config.tensor_parallel_size": 4})
     with pytest.raises(ValueError) as e:
         specialized_decode_config(cfg)
-    for reason in ("TP 4", "V1 model runner", "this GPU", "decode_backend=auto"):
+    for reason in ("TP 4", "this GPU", "decode_backend=auto"):
         assert reason in str(e.value)
 
 
@@ -409,6 +530,7 @@ def _kda_metadata(**md):
         num_decodes=0,
         num_spec_decodes=1,
         spec_state_indices_tensor=torch.zeros(1, 4, dtype=torch.int32),
+        non_spec_state_indices_tensor=None,
         uniform_spec_sequence_length=4,
     )
     for k, v in md.items():
@@ -429,11 +551,91 @@ def _kda_metadata(**md):
     ],
 )
 def test_steps_must_be_pure_uniform_spec_verify(width, md, why):
-    assert step_reason(_kda_metadata(**md), "kda", width) == why
+    assert step_reason(_kda_metadata(**md), "kda", width, q=4) == why
 
 
 def test_steps_need_metadata():
-    assert step_reason(None, "kda", 4) == "no metadata"
+    assert step_reason(None, "kda", 4, q=4) == "no metadata"
+
+
+@pytest.mark.parametrize("width", [1, 4, 8, 16])
+def test_steps_accept_pure_regular_decode(width):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(width, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", width, q=1) is None
+
+
+def test_regular_decode_falls_back_when_speculation_is_configured():
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(4, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", 4, q=4) == "not spec-verify"
+
+
+@pytest.mark.parametrize(
+    "width, state_indices",
+    [
+        (4, torch.arange(3, dtype=torch.int32)),
+        (4, torch.arange(4, dtype=torch.int32).view(2, 2)),
+        (4, None),
+    ],
+)
+def test_regular_decode_requires_one_state_slot_per_row(width, state_indices):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=state_indices,
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", width, q=1) == "not uniform"
+
+
+def test_regular_decode_k1_metadata_uses_one_accepted_token_per_row():
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k1_metadata
+
+    state_indices = torch.tensor([7, 11, 13, 17], dtype=torch.int32)
+    accepted = torch.ones(8, dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=0,
+        non_spec_state_indices_tensor=state_indices,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(
+        m, SimpleNamespace(regular_num_accepted=accepted)
+    )
+    assert qlen == 1
+    assert state_view.shape == (4, 1)
+    assert state_view[:, 0].tolist() == state_indices.tolist()
+    assert num_accepted.data_ptr() == accepted.data_ptr()
+    assert num_accepted.tolist() == [1, 1, 1, 1]
+
+
+def test_spec_decode_k1_metadata_is_unchanged():
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k1_metadata
+
+    state_indices = torch.arange(8, dtype=torch.int32).view(2, 4)
+    accepted = torch.tensor([2, 4], dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=2,
+        spec_state_indices_tensor=state_indices,
+        num_accepted_tokens=accepted,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(m, SimpleNamespace())
+    assert qlen == 4
+    assert state_view is state_indices
+    assert num_accepted is accepted
 
 
 @pytest.mark.parametrize(
@@ -465,7 +667,7 @@ def test_steps_check_the_mla_decode(mla, why):
         for k, v in mla.items():
             setattr(a, k, v)
         md["mla"] = a
-    assert step_reason(md, "kda", 4, "mla") == why
+    assert step_reason(md, "kda", 4, q=4, mla_prefix="mla") == why
 
 
 class _Kernel:
@@ -473,12 +675,12 @@ class _Kernel:
         return "kernel", step.width
 
 
-def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
+def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None, q=4, mla_prefix=""):
     """An executor with kernels on layers 1 and 2 at widths 4 and 8, bound to a
-    KV cache, under a forward context of ``mode``."""
+    KV cache, under a forward context of `mode`."""
     decode = object.__new__(SpecializedDecode)
-    decode.config = DecodeConfig(q=4)
-    decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix="")
+    decode.config = DecodeConfig(q=q)
+    decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix=mla_prefix)
     # Launch-only stand-ins for the GPU kernels.
     decode.kernels = {
         w: {1: _Kernel(), 2: _Kernel()}  # type: ignore[dict-item]
@@ -500,6 +702,41 @@ def test_plan_runs_the_kernels_of_its_width(monkeypatch):
     assert step is not None and step.width == 4
     assert step.layer(1)(None, None, None, None) == ("kernel", 4)
     assert step.layer(0) is None and step.layer(3) is None
+
+
+@pytest.mark.parametrize("mla_prefix", ["", "mla"], ids=["vllm-mla-ops", "m1"])
+def test_plan_runs_regular_decode(monkeypatch, mla_prefix):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(4, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    if mla_prefix:
+        md[mla_prefix] = SimpleNamespace(
+            decode=SimpleNamespace(max_qo_len=1),
+            num_prefills=0,
+            num_decode_tokens=4,
+        )
+    step = _decode(monkeypatch, md=md, q=1, mla_prefix=mla_prefix).plan(
+        torch.zeros(4), None
+    )
+    assert step is not None and step.width == 4
+
+
+def test_plan_runs_regular_decode_above_max_rows_stock(monkeypatch):
+    width = 17
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(width, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert _decode(monkeypatch, md=md, q=1).plan(torch.zeros(width), None) is None
 
 
 @pytest.mark.parametrize(
@@ -525,6 +762,23 @@ def test_plan_runs_stock_before_a_kv_cache_is_bound(monkeypatch):
 def test_plan_refuses_a_kv_cache_bound_behind_its_back(monkeypatch):
     decode = _decode(monkeypatch)
     monkeypatch.setattr(SpecializedDecode, "_kv_key", lambda self: (3, 4))
+    with pytest.raises(RuntimeError, match="without prepare_kv"):
+        decode.plan(torch.zeros(4), None)
+
+
+def test_plan_accepts_the_cache_rebound_at_another_block_count(monkeypatch):
+    """An extensible KV cache re-binds its views at the same addresses with the
+    final block count; any other change still needs prepare_kv."""
+    kv_key = SpecializedDecode._kv_key
+    decode = _decode(monkeypatch)
+    monkeypatch.setattr(SpecializedDecode, "_kv_key", kv_key)
+    pool = torch.zeros(8, 2, 3)
+    attn = SimpleNamespace(kv_cache=(None, pool))
+    decode.kda = [SimpleNamespace(layer=SimpleNamespace(self_attn=attn))]
+    decode._kv = decode._kv_key()
+    attn.kv_cache = (None, pool[:5])
+    assert decode.plan(torch.zeros(4), None) is not None
+    attn.kv_cache = (None, pool.view(8, 3, 2))
     with pytest.raises(RuntimeError, match="without prepare_kv"):
         decode.plan(torch.zeros(4), None)
 
@@ -600,9 +854,10 @@ def test_qkv_gate_weights_split_the_merged_gate():
     assert mla.qkv_gate_weights(wrapper) == (w, gw)
 
 
-def test_m1c_falls_back_where_its_splits_dont_share_out():
-    """M1c's KV splits share out evenly over a width's requests or the width
-    runs the asm decode: qlen 4's 80 splits over 12 rows (3 requests) don't."""
+def test_m1c_runs_where_its_splits_share_out():
+    """M1c's KV splits share out evenly over a width's requests: qlen 4's 80
+    splits over 12 rows (3 requests) don't (DCP1 refuses that step,
+    `test_unserved_steps_are_refused`)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,

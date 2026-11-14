@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
@@ -23,6 +23,9 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
+COMMAND_ROCM_CACHE = "/ci rocm cache"
+COMMAND_ROCM_NOCACHE = "/ci rocm nocache"
+ROCM_CACHE_COMMANDS = frozenset({COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE})
 ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
@@ -53,6 +56,7 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
+        *ROCM_CACHE_COMMANDS,  # they start AMD CI builds
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
@@ -79,6 +83,20 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
+# pre-commit.yml fails a PR that changes these until a reply of the bot to
+# /ci rocm cache or /ci rocm nocache carries this marker.
+ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
+ROCM_CACHE_MARKER = "<!-- vllm-ci-rocm-base-image -->"
+ROCM_CACHE_DONE = (
+    f"Re-run the failed `pre-commit` check to unblock this PR.\n\n{ROCM_CACHE_MARKER}"
+)
+# build.sh promote copies only images built with main's versions of these.
+ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
+# build.sh base mode records the stack pair under this key only when it pushed
+# them itself, not when it reused a tag another PR's CI could have pushed.
+ROCM_STACK_BUILT_KEY = "rocm-rocm-stack-built"
+BUILDS_PER_PAGE = 100
+MAX_BUILD_PAGES = 100
 
 
 class ApiError(RuntimeError):
@@ -334,6 +352,24 @@ class GitHubClient:
             method="POST",
         )
 
+    def list_pr_files(self, number: int) -> list[str]:
+        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
+        return [
+            str(path)
+            for file in files
+            for path in (file["filename"], file.get("previous_filename"))
+            if path
+        ]
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
+        except ApiError as error:
+            if error.status == 404:
+                return "none"
+            raise
+
 
 class BuildkiteClient:
     def __init__(
@@ -401,12 +437,18 @@ class BuildkiteClient:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: Sequence[str] = (),
+        page: int = 1,
+        created_from: str | None = None,
     ) -> list[dict[str, Any]]:
         query = [
             ("exclude_jobs", "true"),
             ("exclude_pipeline", "true"),
-            ("per_page", "100"),
+            ("per_page", str(BUILDS_PER_PAGE)),
         ]
+        if page > 1:
+            query.append(("page", str(page)))
+        if created_from:
+            query.append(("created_from", created_from))
         if commit:
             query.append(("commit", commit))
         if branch:
@@ -421,6 +463,9 @@ class BuildkiteClient:
         return response
 
     def create_build(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        # Bot builds are explicit commands. Pipeline branch settings gate
+        # webhooks and would otherwise reject them, e.g. amd-ci on main.
+        body = {**body, "ignore_pipeline_branch_filters": True}
         return self._request(body=body, method="POST")
 
     def retry_failed_jobs(
@@ -548,8 +593,10 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can use CI commands before CI is "
-            "delegated to the PR author.",
+            (
+                "Only reviewers with write access can use CI commands before CI is "
+                "delegated to the PR author."
+            ),
         )
     if pr["draft"]:
         return False, "PR authors cannot run CI while the PR is a draft."
@@ -559,8 +606,10 @@ def authorize(
         return True, "approval from a trusted reviewer"
     return (
         False,
-        f"A reviewer with write access must run `{run_command}`, approve the PR, "
-        "or add the `ready` label first.",
+        (
+            f"A reviewer with write access must run `{run_command}`, approve the PR, "
+            "or add the `ready` label first."
+        ),
     )
 
 
@@ -588,6 +637,20 @@ def has_trusted_approval(
         if is_trusted_permission(github.get_permission(login)):
             return True
     return False
+
+
+def iter_builds(
+    buildkite: Any, *, branch: str, created_from: str | None = None
+) -> Iterator[dict[str, Any]]:
+    """Yield a branch's builds across every page."""
+    for page in range(1, MAX_BUILD_PAGES + 1):
+        builds = buildkite.list_builds(
+            None, branch=branch, page=page, created_from=created_from
+        )
+        yield from builds
+        if len(builds) < BUILDS_PER_PAGE:
+            return
+    raise ApiError(None, "Buildkite API pagination exceeded 10,000 builds.")
 
 
 def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
@@ -663,7 +726,6 @@ def create_build_payload(
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
-        "ignore_pipeline_branch_filters": True,
         "env": env,
         "meta_data": {
             "github-comment-id": str(comment_id),
@@ -1182,6 +1244,96 @@ def handle_cancel_ci(
     )
 
 
+def handle_rocm_cache(
+    *,
+    actor: str,
+    buildkite: BuildkiteClient,
+    ci_buildkite: BuildkiteClient,
+    command: str,
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+) -> str:
+    """Cache this PR's ROCm base image for main, or knowingly not."""
+    if not set(ROCM_STACK_INPUTS) & set(github.list_pr_files(pr["number"])):
+        return "This PR does not change the ROCm base image, so there is nothing to do."
+    if command == COMMAND_ROCM_NOCACHE:
+        return (
+            f"@{actor} chose not to cache the ROCm base image. Main will build it "
+            f"after the merge. {ROCM_CACHE_DONE}"
+        )
+    # The images this PR's own CI pushed, by the digests it recorded: copied as
+    # built, whatever happens to their tags afterwards. Its pull request is
+    # checked, not is_build_for_pr's github-pr-number fallback, which is
+    # metadata that any job can write. Builds are created under the head label
+    # (owner:branch); older ones under the bare ref, unless that is the base
+    # branch, whose builds are not this PR's.
+    branches = dict.fromkeys(
+        branch
+        for branch in (pr["head"].get("label"), pr["head"]["ref"])
+        if branch and branch != pr["base"]["ref"]
+    )
+    sources = [
+        build
+        for client in (buildkite, ci_buildkite)
+        for branch in branches
+        for build in iter_builds(
+            client, branch=branch, created_from=pr.get("created_at")
+        )
+        if str((build.get("pull_request") or {}).get("id")) == str(pr["number"])
+        and (build.get("meta_data") or {}).get(ROCM_STACK_BUILT_KEY)
+    ]
+    source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
+    if source is None:
+        raise CiPreparationError(
+            "Can't cache: no CI build of this PR built the ROCm base image itself. "
+            f"Run `{COMMAND_RUN_CI}`, then `{COMMAND_ROCM_CACHE}` once it passes. "
+            f"If CI reuses an existing image, use `{COMMAND_ROCM_NOCACHE}`."
+        )
+    sha = source["commit"]
+    head_sha = pr["head"]["sha"]
+    if any(
+        github.get_file_sha(p, sha) != github.get_file_sha(p, head_sha)
+        for p in ROCM_STACK_INPUTS
+    ):
+        raise CiPreparationError(
+            "Can't cache yet: CI hasn't built the ROCm base image for this PR's "
+            f"latest changes to it. Run `{COMMAND_RUN_CI}`, then "
+            f"`{COMMAND_ROCM_CACHE}` once it passes. If CI reuses an existing "
+            f"image, use `{COMMAND_ROCM_NOCACHE}`."
+        )
+    # The stack was built with the source commit's recipe and main keeps the PR
+    # head's after the merge, so both must match main's. Merging main does not
+    # help when main changed them: the merge reuses the stack, so no build of
+    # this PR pushes one with main's recipe.
+    if any(
+        github.get_file_sha(p, "main") != github.get_file_sha(p, ref)
+        for p in ROCM_RECIPE
+        for ref in (sha, head_sha)
+    ):
+        raise CiPreparationError(
+            "Can't cache: this PR changes `build.sh` or `docker-bake-rocm.hcl`, or "
+            "its CI built the ROCm base image before main changed them. Use "
+            f"`{COMMAND_ROCM_NOCACHE}`."
+        )
+    build = buildkite.create_build(
+        {
+            "commit": "HEAD",
+            "branch": "main",
+            "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
+            "env": {
+                "ROCM_PROMOTE_PR": str(pr["number"]),
+                "ROCM_PROMOTE_SHA": sha,
+                "ROCM_PROMOTE_IMAGES": source["meta_data"][ROCM_STACK_BUILT_KEY],
+            },
+        }
+    )
+    return (
+        f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
+        f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
+        f"built at `{sha[:12]}`. {ROCM_CACHE_DONE}"
+    )
+
+
 def reply_unrecognized_command(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1210,6 +1362,7 @@ def run(
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
     branch_updater: GitHubClient | None = None,
+    ci_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1284,6 +1437,19 @@ def run(
                 github=github,
                 pr=pr,
             )
+        elif command in ROCM_CACHE_COMMANDS:
+            if not is_trusted_permission(permission):
+                raise CiPreparationError(
+                    f"Only maintainers with write access can use `{command}`."
+                )
+            message = handle_rocm_cache(
+                actor=actor,
+                buildkite=buildkite,
+                ci_buildkite=ci_buildkite or buildkite,
+                command=command,
+                github=github,
+                pr=pr,
+            )
         elif command in CANCEL_COMMANDS:
             message = handle_cancel_ci(
                 buildkite=buildkite,
@@ -1350,11 +1516,9 @@ def main() -> None:
         amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
         upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
     )
-    buildkite = BuildkiteClient(
-        os.environ.get("BUILDKITE_API_TOKEN", ""),
-        os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
-        pipeline,
-    )
+    buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
+    organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
+    buildkite = BuildkiteClient(buildkite_token, organization, pipeline)
     branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
@@ -1364,6 +1528,9 @@ def main() -> None:
         GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
         if branch_update_token
         else None,
+        BuildkiteClient(
+            buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
+        ),
     )
 
 
