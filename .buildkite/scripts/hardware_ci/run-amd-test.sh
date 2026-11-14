@@ -155,13 +155,19 @@ diagnostics() {
     df -h /tmp /dev/shm "$HF_HOME"
     free -g
     echo "--- devices ---"
-    ls -l /dev/kfd /dev/dri
+    ls -l /dev/kfd /dev/dri /sys/class/kfd
+    grep '^Sig' /proc/self/status
   } >"$d/diagnostics.log" 2>&1
 }
 
 # ---------------------------------------------------------------------------
 # Preflight: verify imports and GPU visibility
 # ---------------------------------------------------------------------------
+# Pods on nodes without KFD sysfs, or with fault signals ignored or blocked, break
+# tests that expect a crash; log both with the node so a bad node stands out.
+echo "pod: node=${VLLM_CI_K8S_NODE_NAME:-?}" \
+  "kfd_topology_nodes=$(find /sys/class/kfd/kfd/topology/nodes -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)" \
+  "$(grep -E '^Sig(Blk|Ign)' /proc/self/status | tr '\t\n' '  ')"
 # -P: the checkout (cwd) has a vllm/ source tree that would shadow the installed package.
 python3 -P -c "import vllm, torch, transformers, ray" || exit 1
 
