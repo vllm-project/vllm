@@ -361,3 +361,114 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         )
 
     _assert_embeddings_close(vllm_outputs, hf_embeddings)
+
+
+def test_colbert_long_pair_worker_maxsim(tmp_path, vllm_runner):
+    """Score a real token-embedding pair larger than the worker matrix budget."""
+    from safetensors.torch import save_file
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from tokenizers.processors import TemplateProcessing
+    from transformers import BertConfig, BertModel, TokenizersBackend
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(19)
+        config = BertConfig(
+            vocab_size=16,
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=128,
+            max_position_embeddings=8193,
+            pad_token_id=0,
+        )
+        reference = BertModel(config, add_pooling_layer=False).eval()
+        projection = torch.randn(8, 64) * 0.1
+
+    config.architectures = ["HF_ColBERT"]
+    config.save_pretrained(tmp_path)
+    state = {
+        "bert." + name: value.contiguous()
+        for name, value in reference.state_dict().items()
+    }
+    state["linear.weight"] = projection
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+
+    vocabulary = {
+        "[PAD]": 0,
+        "[UNK]": 1,
+        "[CLS]": 2,
+        "[SEP]": 3,
+        "alpha": 4,
+        "beta": 5,
+        "gamma": 6,
+    }
+    vocabulary.update({f"unused{i}": i for i in range(7, 16)})
+    backend = Tokenizer(WordLevel(vocabulary, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    backend.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[CLS]", 2), ("[SEP]", 3)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    from vllm import PoolingParams
+    from vllm.v1.pool.late_interaction import (
+        build_late_interaction_doc_params,
+        build_late_interaction_query_params,
+    )
+
+    query = {"prompt_token_ids": [4, 5] * 4096 + [4]}
+    document = {"prompt_token_ids": [6, 5] * 4096 + [6]}
+    with vllm_runner(
+        str(tmp_path),
+        runner="pooling",
+        dtype="float32",
+        max_model_len=8193,
+        max_num_batched_tokens=16386,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        pooler_config={"enable_flash_late_interaction": False},
+    ) as model:
+        embeddings = model.llm.encode(
+            [query, document], pooling_task="token_embed", use_tqdm=False
+        )
+        query_embedding, document_embedding = [
+            output.outputs.data for output in embeddings
+        ]
+        assert len(query_embedding) * len(document_embedding) > 64_000_000
+        expected = (query_embedding @ document_embedding.T).amax(dim=-1).sum().item()
+        del embeddings, query_embedding, document_embedding
+        model.llm.encode(
+            [query],
+            pooling_task="token_embed",
+            pooling_params=PoolingParams(
+                task="token_embed",
+                late_interaction_params=build_late_interaction_query_params(
+                    query_key="long-pair", query_uses=1
+                ),
+            ),
+            use_tqdm=False,
+        )
+        (result,) = model.llm.encode(
+            [document],
+            pooling_task="token_embed",
+            pooling_params=PoolingParams(
+                task="token_embed",
+                late_interaction_params=build_late_interaction_doc_params(
+                    query_key="long-pair"
+                ),
+            ),
+            use_tqdm=False,
+        )
+        assert result.outputs.data.item() == pytest.approx(expected, rel=1e-5, abs=1e-5)

@@ -303,3 +303,90 @@ def test_prune_configs_no_rejected_fallback(monkeypatch):
     assert len(survivors) == 1
     smallest = min(_common._get_configs(), key=lambda c: _est(c, 1024))
     assert survivors[0].kwargs == smallest.kwargs
+
+
+@pytest.mark.parametrize("budget", [1, 5, 37, 256, 4096])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_maxsim_single_pair_budget_preserves_scores(budget, dtype):
+    generator = torch.Generator().manual_seed(41)
+    queries = [
+        torch.randn(8, 13, generator=generator).T.to(dtype),
+        -torch.ones(3, 8, dtype=dtype),
+        torch.randn(8, 1, generator=generator).T.to(dtype),
+    ]
+    docs = [
+        torch.randn(8, 19, generator=generator).T.to(dtype),
+        torch.ones(7, 8, dtype=dtype),
+        torch.randn(8, 41, generator=generator).T.to(dtype),
+    ]
+    saved = [tensor.clone() for tensor in [*queries, *docs]]
+    expected = [
+        (query.float() @ document.float().T).amax(dim=-1).sum()
+        for query, document in zip(queries, docs)
+    ]
+    actual = compute_maxsim_score_batched(
+        queries, docs, max_batch_size=3, max_score_matrix_elements=budget
+    )
+    for result, reference in zip(actual, expected):
+        torch.testing.assert_close(result, reference, rtol=1e-5, atol=1e-5)
+        assert result.dtype == torch.float32
+        assert result.device.type == "cpu"
+    for tensor, original in zip([*queries, *docs], saved):
+        torch.testing.assert_close(tensor, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_length,doc_length", [(256, 1024), (1, 32769)])
+def test_maxsim_single_pair_score_matrix_allocation_is_bounded(
+    query_length, doc_length
+):
+    from torch.profiler import ProfilerActivity, profile
+
+    budget = 32768
+    query = torch.ones(query_length, 4, requires_grad=True)
+    document = -torch.ones(doc_length, 4, requires_grad=True)
+    with (
+        torch.no_grad(),
+        profile(activities=[ProfilerActivity.CPU], profile_memory=True) as trace,
+    ):
+        (score,) = compute_maxsim_score_batched(
+            [query], [document], max_score_matrix_elements=budget
+        )
+
+    assert score.item() == -4 * query_length
+    allocations = [
+        event.cpu_memory_usage
+        for event in trace.events()
+        if event.name in ("aten::matmul", "aten::mm", "aten::bmm")
+    ]
+    assert allocations
+    assert max(allocations) <= budget * query.element_size()
+
+
+@pytest.mark.parametrize(
+    "query_grad,doc_grad,tied",
+    [(True, True, False), (True, False, True), (False, True, True), (True, True, True)],
+)
+def test_maxsim_single_pair_keeps_existing_autograd_path(query_grad, doc_grad, tied):
+    from torch.profiler import ProfilerActivity, profile
+
+    if tied:
+        query = torch.ones(1, 1, requires_grad=query_grad)
+        document = torch.ones(3, 1, requires_grad=doc_grad)
+    else:
+        generator = torch.Generator().manual_seed(43)
+        query = torch.randn(11, 7, generator=generator, requires_grad=query_grad)
+        document = torch.randn(17, 7, generator=generator, requires_grad=doc_grad)
+    reference = (query @ document.T).amax(dim=-1).sum()
+
+    with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as trace:
+        (score,) = compute_maxsim_score_batched(
+            [query], [document], max_score_matrix_elements=1
+        )
+
+    torch.testing.assert_close(score, reference, rtol=1e-5, atol=1e-5)
+    assert score.requires_grad
+    # The inference budget must not replace the existing autograd reduction.
+    allocations = [
+        event.cpu_memory_usage for event in trace.events() if event.name == "aten::bmm"
+    ]
+    assert allocations == [len(query) * len(document) * query.element_size()]
