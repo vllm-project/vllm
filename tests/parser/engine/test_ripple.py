@@ -7,6 +7,7 @@ answer. The chat template frames markers with newlines, which must not leak
 into reasoning or content.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -22,7 +23,7 @@ from vllm.parser.engine.registered_adapters import (
     RippleParserToolAdapter,
 )
 from vllm.parser.parser_manager import ParserManager
-from vllm.parser.ripple import RippleParser
+from vllm.parser.ripple import RippleParser, _ripple_arg_converter, ripple_config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 
@@ -156,3 +157,97 @@ def test_structured_output_applies_from_first_token(tokenizer):
     # "</think>" the model may never emit.
     parser = RippleParser(tokenizer)
     assert parser.is_reasoning_end([1, ord("u"), 2, 1])
+
+
+def _write_call(arguments: str) -> str:
+    return f'\n<tool_call>\n{{"name": "write", "arguments": {arguments}}}\n</tool_call>'
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"path": "a.py", "content": "line 1\\nprint(\\"hi\\\\\\\\there\\")\\n"}',
+        '{"content": "x \\\\\\" y", "mode": "w"}',
+        '{"edits": [{"path": "a.py", "text": "nested \\"value\\""}], "n": 2}',
+        '{"tags": ["a", "b\\\\"], "meta": {"k": "v"}, "content": "end"}',
+        '{"content": "trailing backslash \\\\\\\\"}',
+        '{"content": "partial with \\"escape\\" and no end',
+        '{"data": [0, 12, 345], "k0": -6.5e3,\n\t"k1": true, "k2": null}',
+        '{"count": 123456',
+    ],
+    ids=[
+        "escapes",
+        "escaped_quote_then_key",
+        "nested_string",
+        "array_strings",
+        "trailing_backslash",
+        "truncated",
+        "numbers_and_literals",
+        "truncated_number",
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [1, 2, 5])
+def test_arg_value_extender_matches_conversion(tokenizer, arguments, chunk_size):
+    text = _write_call(arguments)
+    tokens = [(ord(ch) + 1000, ch) for ch in text]
+    outputs = []
+    for config in (
+        ripple_config(),
+        dataclasses.replace(
+            ripple_config(), arg_value_extender=None, arg_structural_chars=None
+        ),
+    ):
+        parser = RippleParser(tokenizer, parser_engine_config=config)
+        results = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=TOOLS,
+        )
+        # Compare every delta so a skipped conversion cannot delay output.
+        per_delta = [
+            [
+                (tc.index, tc.function.name, tc.function.arguments)
+                for tc in getattr(delta, "tool_calls", None) or []
+                if tc.function is not None
+            ]
+            for delta in results
+        ]
+        outputs.append((per_delta, collect_output(results).tool_calls))
+    assert outputs[0] == outputs[1]
+    assert outputs[0][1][0]["name"] == "write"
+
+
+@pytest.mark.parametrize(
+    ("key", "quote", "unit"),
+    [("content", '"', ' lorem \\"ipsum\\"'), ("size", "", "9")],
+    ids=["long_string", "long_number"],
+)
+def test_long_argument_converts_a_constant_number_of_times(tokenizer, key, quote, unit):
+    counts = []
+    for n in (50, 500):
+        calls = 0
+
+        def counting_converter(raw_args: str, partial: bool) -> str:
+            nonlocal calls
+            calls += 1
+            return _ripple_arg_converter(raw_args, partial)
+
+        config = dataclasses.replace(ripple_config(), arg_converter=counting_converter)
+        arguments = f'{{"path": "a.txt", "{key}": {quote}{unit * n}{quote}}}'
+        text = _write_call(arguments)
+        output = collect_output(
+            replay_streaming(
+                RippleParser(tokenizer, parser_engine_config=config),
+                [(ord(ch) + 1000, ch) for ch in text],
+                chunk_size=1,
+                finished_on_last=True,
+                tools=TOOLS,
+            )
+        )
+        assert [json.loads(tc["arguments"]) for tc in output.tool_calls] == [
+            json.loads(arguments)
+        ]
+        counts.append(calls)
+    assert counts[0] == counts[1]
