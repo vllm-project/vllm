@@ -323,7 +323,7 @@ class EplbState:
         """
         Device index for the async EPLB worker thread.
         """
-        if self.device.type in ("cuda", "xpu"):
+        if self.device.type in ("cuda", "xpu", "npu"):
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
