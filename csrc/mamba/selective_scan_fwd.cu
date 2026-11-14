@@ -159,8 +159,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
     }
 
-    // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
-    const int block_size = params.cache_enabled ? params.block_size : 2048;
+    // Use block_size for chunking when APC is enabled, otherwise the slots one block holds
+    const int block_size = params.cache_enabled ? params.block_size : Ktraits::kNThreads * kNItems;
 
     const int* batch_cache_indices = cache_indices != nullptr ?
                                      cache_indices + batch_id * params.cache_indices_stride : nullptr;
@@ -427,13 +427,13 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
     #ifndef USE_ROCM
         if (params.cache_enabled && params.block_size == 1024) {
             selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 128) {
+        } else if (params.max_seqlen <= 128) {
             selective_scan_fwd_launch<32, 4, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 256) {
+        } else if (params.max_seqlen <= 256) {
             selective_scan_fwd_launch<32, 8, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 512) {
+        } else if (params.max_seqlen <= 512) {
             selective_scan_fwd_launch<32, 16, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 1024) {
+        } else if (params.max_seqlen <= 1024) {
             selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
         } else {
             selective_scan_fwd_launch<128, 16, input_t, weight_t, state_t>(params, stream);
@@ -441,11 +441,11 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
     #else
         if (params.cache_enabled && params.block_size == 1024) {
             selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 256) {
+        } else if (params.max_seqlen <= 256) {
             selective_scan_fwd_launch<64, 4, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 512) {
+        } else if (params.max_seqlen <= 512) {
             selective_scan_fwd_launch<64, 8, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 1024) {
+        } else if (params.max_seqlen <= 1024) {
             selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
         } else {
             selective_scan_fwd_launch<128, 16, input_t, weight_t, state_t>(params, stream);
@@ -663,7 +663,8 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                   const std::optional<torch::stable::Tensor> &block_idx_last_scheduled_token,
                   const std::optional<torch::stable::Tensor> &initial_state_idx,
                   const std::optional<torch::stable::Tensor> &cu_chunk_seqlen,
-                  const std::optional<torch::stable::Tensor> &last_chunk_indices) {
+                  const std::optional<torch::stable::Tensor> &last_chunk_indices,
+                  int64_t max_seqlen) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     STD_TORCH_CHECK(input_type == torch::headeronly::ScalarType::Float || input_type == torch::headeronly::ScalarType::Half || input_type == torch::headeronly::ScalarType::BFloat16);
@@ -812,6 +813,8 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                        cu_chunk_seqlen,
                        last_chunk_indices
                        );
+    params.max_seqlen = (varlen && !params.cache_enabled && !cu_chunk_seqlen.has_value() && max_seqlen > 0 && max_seqlen < seqlen)
+        ? static_cast<int>(max_seqlen) : seqlen;
 
     
     const torch::stable::accelerator::DeviceGuard device_guard(u.get_device_index());

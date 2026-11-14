@@ -735,6 +735,7 @@ def selective_scan_fn(
     initial_state_idx=None,
     cu_chunk_seqlen=None,
     last_chunk_indices=None,
+    max_seqlen=0,
 ) -> torch.Tensor:
     """u: (dim, total_length) for varlen or (batch, dim, seqlen)
         applies changes in place.
@@ -781,6 +782,11 @@ def selective_scan_fn(
     initial_state_idx: (batch,), dtype int32
         The pointer into cache_indices, where the cache block
         containing the initial state is located.
+    max_seqlen: int
+        The length of the longest sequence in a varlen batch, used to
+        size the kernel launch. Ignored for non-varlen input, with
+        cu_chunk_seqlen, or with prefix caching; 0 falls back to
+        total_length.
 
     Returns:
         Output of shape (dim, total_length) for varlen or (batch, dim, seqlen);
@@ -830,6 +836,7 @@ def selective_scan_fn(
             initial_state_idx,
             cu_chunk_seqlen,
             last_chunk_indices,
+            max_seqlen,
         )
     else:
         ops.selective_scan_fwd(
@@ -853,6 +860,7 @@ def selective_scan_fn(
             initial_state_idx,
             cu_chunk_seqlen,
             last_chunk_indices,
+            max_seqlen,
         )
 
     if z is None:

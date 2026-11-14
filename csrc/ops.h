@@ -568,7 +568,8 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
     const std::optional<torch::stable::Tensor>& initial_state_idx,
     const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
-    const std::optional<torch::stable::Tensor>& last_chunk_indices);
+    const std::optional<torch::stable::Tensor>& last_chunk_indices,
+    int64_t max_seqlen);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

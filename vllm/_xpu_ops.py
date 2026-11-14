@@ -1149,6 +1149,7 @@ class xpu_ops:
         initial_state_idx: torch.Tensor | None = None,
         cu_chunk_seqlen: torch.Tensor | None = None,
         last_chunk_indices: torch.Tensor | None = None,
+        max_seqlen: int = 0,
     ) -> None:
         varlen = query_start_loc is not None
         batch_size = (

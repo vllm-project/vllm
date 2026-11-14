@@ -1949,6 +1949,7 @@ def selective_scan_fwd(
     initial_state_idx: torch.Tensor | None = None,
     cu_chunk_seqlen: torch.Tensor | None = None,
     last_chunk_indices: torch.Tensor | None = None,
+    max_seqlen: int = 0,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -1971,6 +1972,7 @@ def selective_scan_fwd(
         initial_state_idx,
         cu_chunk_seqlen,
         last_chunk_indices,
+        max_seqlen,
     )
 
 
