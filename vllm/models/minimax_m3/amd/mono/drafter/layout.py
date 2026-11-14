@@ -39,10 +39,12 @@ NATT = 48
 NORM0 = 240
 NP = 34  # partitions: a request's window spans <= 34 blocks
 MAXB = 34
-# requests a draft step takes, in launches of up to 8: 1..2 run the narrow
-# kernel, 3..8 the wide one. A FULL graph replay pads 9 requests to 10; the
-# kernels treat a padded request (seq_len 0) as one with no keys.
-MAX_REQS = 10
+# requests a draft step takes: 1..2 run the narrow kernel, 3..8 the wide one,
+# WIDE_R_MIN_REQS..MAX_REQS one wide-R launch (`wide_r`); larger steps keep the
+# stock draft layers. A FULL graph replay may pad the request count; the kernels
+# treat a padded request (seq_len 0) as one with no keys.
+WIDE_R_MIN_REQS = 9
+MAX_REQS = 32
 
 QKV_R = 12
 O_R = 32

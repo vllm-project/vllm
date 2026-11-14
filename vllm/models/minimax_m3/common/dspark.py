@@ -34,7 +34,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     Qwen3DSparkForCausalLM,
     Qwen3DSparkModel,
 )
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.models.minimax_m3.common.ops.dspark_context_kv import (
     DSparkContextKVWriter,
     rotary_dims_supported,
@@ -324,18 +324,32 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         hidden_size, eps = self.config.hidden_size, self.config.rms_norm_eps
         self.hidden_norm = _gemma_rms_norm(hidden_size, eps=eps)
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
-        # VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1: supported draft steps run the draft
-        # layers as FlyDSL launches (MI355X)
+        # supported draft steps run the draft layers as FlyDSL launches (MI355X,
+        # TP4, seven-token drafts); other deployments keep the stock layers
         self._mono_drafter = None
         if current_platform.is_rocm():
-            from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                DrafterDecode,
+            )
 
-            if mono_envs.MONO_DRAFTER:
-                from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
-                    DrafterDecode,
-                )
-
-                self._mono_drafter = DrafterDecode(self, vllm_config)
+            self._mono_drafter = DrafterDecode(self, vllm_config)
+        if current_platform.is_rocm() and self.use_aux_hidden_state:
+            # On ROCm, on every step and whether or not the drafter kernels run
+            # (fc is applied before them): fc (the aux hidden states -> hidden)
+            # is row-parallel. Each rank multiplies its 1/TP of fc's input
+            # columns and the partials are all-reduced, instead of every rank
+            # reading the whole replicated weight (MI355X, TP4: -32 us a decode
+            # step at c=1).
+            self.fc = RowParallelLinear(
+                self.fc.input_size,
+                self.fc.output_size,
+                bias=False,
+                input_is_parallel=False,
+                params_dtype=self.fc.params_dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
 
     def __call__(self, *args, **kwargs):
         # ahead of torch.compile's wrapper: the kernels launch outside the graph
@@ -416,6 +430,22 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
 
 class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     model_cls = MiniMaxM3DSparkModel
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # On gfx950 each Markov sampling step of the speculator is one launch
+        # (amd/ops/fused_markov.py). Batch-sharded sampling keeps its own loop: a
+        # model's sample_sequential turns it off.
+        if (
+            current_platform.is_rocm()
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                from vllm.models.minimax_m3.amd.ops import fused_markov
+
+                self.sample_sequential = fused_markov.sample_sequential
 
     @staticmethod
     def _rename_checkpoint_weights(

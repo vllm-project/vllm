@@ -149,6 +149,8 @@ steps:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_dspark_drafter.py
+  - tests/kernels/models/amd/test_minimax_m3_fused_markov.py
+  - tests/kernels/test_minimax_m3_dspark_draft.py
   commands:
   # Named one by one, not as a directory: a directory selection silently adopts
   # every new file into this blocking 4-GPU step, and check_test_tethering.py
@@ -159,6 +161,8 @@ steps:
     models/minimax_m3/amd_specialized_decode/test_model.py
     models/minimax_m3/amd_specialized_decode/test_runtime.py
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py
+  - pytest -v -s kernels/models/amd/test_minimax_m3_fused_markov.py
+  - pytest -v -s kernels/test_minimax_m3_dspark_draft.py
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
