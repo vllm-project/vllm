@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp GEMM selection on AMD CDNA3.
+"""Qwen4Exp GEMM selection on AMD CDNA3 with 304 CUs (MI300X / MI325X).
 
 Linear layers whose local `(N, K)` shape has rows in AITER's tuned A16W16
 table for this device use AITER `tgemm` at token counts with a tuned row.
@@ -24,8 +24,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.platforms import current_platform
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
+# CU counts whose AITER rows were measured end to end with this hook (MI300X /
+# MI325X). AITER also ships rows for other CDNA3 parts, e.g. 80-CU MI308X.
+_MEASURED_CU_COUNTS = (304,)
 # The standard path serves up to this many tokens with the wvSplitK and LLMM1
 # skinny kernels, except weights the LM-head guard sends to the generic GEMM.
 _SKINNY_MAX_TOKENS = 5
@@ -94,7 +98,7 @@ def enable_qwen4_exp_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    """On CDNA3, route linears with tuned AITER rows to `tgemm`."""
+    """On 304-CU CDNA3, route linears with tuned AITER rows to `tgemm`."""
     if (
         dtype != torch.bfloat16
         or not current_platform.is_rocm()
@@ -103,7 +107,7 @@ def enable_qwen4_exp_low_latency_gemm(
         return
     from vllm.platforms.rocm import get_cdna_version
 
-    if get_cdna_version() != 3:
+    if get_cdna_version() != 3 or num_compute_units() not in _MEASURED_CU_COUNTS:
         return
 
     for child in module.modules():
