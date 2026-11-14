@@ -417,6 +417,14 @@ class Worker(WorkerBase):
         zero_weights(self.model_runner.get_model())
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        # Fabric KV cache: on ROCm with MoRIIO fabric backend, KV cache must
+        # be allocated via fabric-exportable VMM memory so MORI can export
+        # fabric handles for UALink cross-node transfers.
+        if tag == "kv_cache" and self._needs_fabric_kv_cache():
+            from mori.io.fabric_allocator import fabric_mem_pool
+
+            return fabric_mem_pool()
+
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -433,6 +441,16 @@ class Worker(WorkerBase):
             return nullcontext()
 
         return get_mem_allocator_instance().use_memory_pool(tag=tag)
+
+    def _needs_fabric_kv_cache(self) -> bool:
+        """Check if the KV connector requires fabric-exportable memory."""
+        if not current_platform.is_rocm():
+            return False
+        kv_config = self.vllm_config.kv_transfer_config
+        if kv_config is None or kv_config.kv_connector != "MoRIIOConnector":
+            return False
+        extra = kv_config.kv_connector_extra_config or {}
+        return str(extra.get("backend", "")).lower() == "fabric"
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):

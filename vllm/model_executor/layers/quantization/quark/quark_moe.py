@@ -1848,6 +1848,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=w2_bias,
                 w13_input_scale=layer.w13_input_scale,
                 w2_input_scale=layer.w2_input_scale,
+                activation=self.moe.activation,
             )
         else:
             converted_weights = convert_weight_to_mxfp4_moe_kernel_format(

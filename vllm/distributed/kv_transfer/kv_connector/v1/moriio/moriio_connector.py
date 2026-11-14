@@ -1975,11 +1975,8 @@ class MoRIIOConnectorWorker:
             transfer_timeout=self.moriio_config.transfer_timeout,
         )
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
-        backend = (
-            BackendType.XGMI
-            if self.moriio_config.backend == "xgmi"
-            else BackendType.RDMA
-        )
+        _backend_map = {"xgmi": BackendType.XGMI, "fabric": BackendType.FABRIC}
+        backend = _backend_map.get(self.moriio_config.backend, BackendType.RDMA)
         self.moriio_wrapper.set_backend_type(
             backend,
             qp_per_transfer=self.moriio_config.qp_per_transfer,
