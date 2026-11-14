@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 from vllm.v1.worker.ubatching import (
-    dbo_enabled,
+    dbo_comm_handoff_enabled,
     dbo_switch_to_compute_sync,
     dbo_yield_and_switch_from_compute_to_comm,
 )
@@ -159,7 +159,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         capture keeps every collective on the capture stream, so overlap is
         limited to eager steps (prefill).
         """
-        if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
+        if not dbo_comm_handoff_enabled():
             yield
             return
         # Release the CPU to the peer ubatch so it can enqueue compute while

@@ -168,6 +168,32 @@ def dbo_current_ubatch_token_offset() -> int:
     return ctx.token_offset
 
 
+def dbo_comm_handoff_enabled() -> bool:
+    """Whether a collective should hand off from the compute to the comm stream.
+
+    Graph capture keeps every collective on the capture stream, so the
+    handoff only applies to eager steps.
+    """
+    return dbo_enabled() and not torch.cuda.is_current_stream_capturing()
+
+
+def dbo_record_stream(*tensors: torch.Tensor | None) -> None:
+    """Mark tensors allocated on the other DBO stream as used by this one.
+
+    Under DBO, all2all kernels allocate their outputs on the comm stream while
+    the experts read them on the compute stream, and the reverse holds for the
+    dispatch and combine inputs. Without this, the caching allocator can hand
+    a freed block to the other ubatch while kernels on this stream still read
+    it.
+    """
+    if not dbo_enabled():
+        return
+    stream = current_stream()
+    for t in tensors:
+        if t is not None:
+            t.record_stream(stream)
+
+
 def _register_ubatch_function(func):
     def wrapper(*args, **kwargs):
         if len(_THREAD_ID_TO_CONTEXT) > 0:
