@@ -361,3 +361,95 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         )
 
     _assert_embeddings_close(vllm_outputs, hf_embeddings)
+
+
+@pytest.mark.parametrize(
+    "dimension_field", [None, "colbert_dim", "dim", "projection_dim"]
+)
+@pytest.mark.parametrize("projection_name", ["linear.weight", "colbert_linear.weight"])
+def test_colbert_configured_projection(
+    tmp_path, vllm_runner, dimension_field, projection_name
+):
+    """Load configured and inferred projection widths through the public LLM API."""
+    from safetensors.torch import save_file
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from tokenizers.processors import TemplateProcessing
+    from transformers import BertConfig, BertModel, TokenizersBackend
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(19)
+        config = BertConfig(
+            vocab_size=16,
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=128,
+            max_position_embeddings=64,
+            pad_token_id=0,
+        )
+        reference = BertModel(config, add_pooling_layer=False).eval()
+        projection = torch.randn(8, 64) * 0.1
+
+    config.architectures = ["HF_ColBERT"]
+    if dimension_field is not None:
+        setattr(config, dimension_field, projection.shape[0])
+    config.save_pretrained(tmp_path)
+    state = {
+        "bert." + name: value.contiguous()
+        for name, value in reference.state_dict().items()
+    }
+    state[projection_name] = projection
+    save_file(state, tmp_path / "model.safetensors", metadata={"format": "pt"})
+
+    vocabulary = {
+        "[PAD]": 0,
+        "[UNK]": 1,
+        "[CLS]": 2,
+        "[SEP]": 3,
+        "alpha": 4,
+        "beta": 5,
+        "gamma": 6,
+    }
+    vocabulary.update({f"unused{i}": i for i in range(7, 16)})
+    backend = Tokenizer(WordLevel(vocabulary, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    backend.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[CLS]", 2), ("[SEP]", 3)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    texts = ["alpha beta", "gamma"]
+    expected = _compute_hf_colbert_embeddings(
+        reference, tokenizer, projection, texts, torch.device("cpu")
+    )
+    expected_score = (expected[0] @ expected[1].T).amax(-1).sum()
+
+    with vllm_runner(
+        str(tmp_path),
+        runner="pooling",
+        dtype="float32",
+        max_model_len=64,
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+    ) as model:
+        actual = model.token_embed(texts)
+        scores = model.score(texts[0], texts[1])
+
+    for result, target in zip(actual, expected):
+        torch.testing.assert_close(
+            torch.as_tensor(result), target, rtol=1e-5, atol=1e-5
+        )
+    assert scores == pytest.approx([expected_score.item()], rel=1e-5, abs=1e-5)
