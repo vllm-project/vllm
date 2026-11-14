@@ -36,7 +36,7 @@ class _RequestMetricsState:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _TierState:
     active_promotion_count: int = 0
     active_cascade_count: int = 0

@@ -283,7 +283,7 @@ def create_tcp_store(
         raise
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class StatelessProcessGroup:
     """A dataclass to hold a metadata store, and the rank, world_size of the
     group. Only use it to communicate metadata between processes.

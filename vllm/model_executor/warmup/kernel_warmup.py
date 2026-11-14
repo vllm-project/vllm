@@ -9,7 +9,7 @@ import gc
 import json
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -63,7 +63,7 @@ _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
 @contextmanager
-def _outside_kv_cache_transient_window(worker: "Worker") -> Iterator[None]:
+def _outside_kv_cache_transient_window(worker: "Worker") -> Generator[None]:
     """Keep a one-off tuning step out of the extensible KV cache's reserve.
 
     An extensible KV cache keeps free the allocator peak its warmup steps reach
@@ -73,16 +73,11 @@ def _outside_kv_cache_transient_window(worker: "Worker") -> Iterator[None]:
     before tuning, then restart peak tracking afterwards; the warmup steps that
     follow run with the tuned tactics and measure their own transients.
     """
-    cache_config = getattr(worker, "cache_config", None)
-    if not getattr(cache_config, "enable_extensible_kv_cache", False):
+    kv_cache = worker.model_runner.extensible_kv_cache
+    if kv_cache is None:
         yield
         return
-    stats = torch.accelerator.memory_stats(worker.device)
-    worker.kv_cache_transient_bytes_before_tuning = max(
-        getattr(worker, "kv_cache_transient_bytes_before_tuning", 0),
-        stats.get("allocated_bytes.all.peak", 0)
-        - stats.get("allocated_bytes.all.current", 0),
-    )
+    kv_cache.record_transient_peak()
     try:
         yield
     finally:
@@ -362,9 +357,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        # The drafter is outside the target's module tree and its o_proj can
+        # land on a different einsum kernel than the target's.
+        for model in (worker.get_model(), worker.get_draft_model()):
+            if model is not None:
+                deep_gemm_warmup(model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 

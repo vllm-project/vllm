@@ -27,7 +27,6 @@ from vllm.v1.hisparse.types import (
     SparseKVRowMirror,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparseResidentSpec,
     KVCacheConfig,
 )
 from vllm.v1.request import Request
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingPublication:
     request: Request
     num_computed_tokens: int
@@ -47,7 +46,7 @@ class _PendingPublication:
     num_cached_blocks: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _HiSparseRequestState:
     """Residency bookkeeping for one request.
 
@@ -73,7 +72,7 @@ class _HiSparseRequestState:
     stale_pages: set[int] = field(default_factory=set)
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingSpill:
     transfer_id: int
     page: tuple[str, int]
@@ -116,11 +115,7 @@ class HiSparseCoordinator:
         hot_managers: list[HiSparseHotManager] = []
         resident_group_ids: list[int] = []
         for group_id, (group, manager) in enumerate(zip(groups, managers)):
-            if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
-                if not isinstance(manager, HiSparseResidentManager):
-                    raise TypeError(
-                        "HiSparse resident specs require resident cache managers."
-                    )
+            if isinstance(manager, HiSparseResidentManager):
                 resident_managers.append(manager)
                 resident_group_ids.append(group_id)
                 assert not group.host_resident
