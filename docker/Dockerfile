@@ -1214,7 +1214,13 @@ COPY . /src
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
-RUN cd /src && mkdir src && mv vllm src/vllm
+#
+# The image carries no .git: it is several hundred MB that every host would
+# pull again with each commit. The one thing tests read from it, the merge
+# base with main, is recorded in .ci-merge-base instead.
+RUN cd /src && mkdir src && mv vllm src/vllm \
+    && { git merge-base HEAD origin/main > .ci-merge-base 2>/dev/null || rm -f .ci-merge-base; } \
+    && rm -rf .git
 
 # image to run unit testing suite
 # note that this uses vllm installed by `pip` (in the test-wheel stage)
