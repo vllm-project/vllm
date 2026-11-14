@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
-import pytest
+from functools import partial
 
+import pytest
+import torch
+
+from tests.lora.utils import create_peft_lora
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
@@ -22,6 +26,53 @@ def make_lora_request(lora_id: int):
     return LoRARequest(
         lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
     )
+
+
+def test_rejected_reload_preserves_execution_weights(vllm_runner, tmp_path):
+    """A failed reload must not change the weights used after reactivation."""
+    with vllm_runner(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        dtype="float16",
+        enforce_eager=True,
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        kv_cache_memory_bytes=32 * 1024**2,
+        enable_lora=True,
+        max_loras=1,
+        max_cpu_loras=2,
+        max_lora_rank=8,
+    ) as runner:
+        paths = [tmp_path / name for name in ("original", "replacement")]
+        for path in paths:
+            path.mkdir()
+            runner.apply_model(
+                partial(
+                    create_peft_lora,
+                    save_dir=str(path),
+                    target_modules=["model.layers.0.self_attn.o_proj"],
+                    lora_dtype=torch.float16,
+                )
+            )
+
+        def execution_weights(model):
+            layer = model.model.layers[0].self_attn.o_proj
+            return layer.lora_a_stacked[0].cpu().clone()
+
+        engine = runner.llm.llm_engine
+        original = LoRARequest("original", 1, str(paths[0]))
+        assert engine.add_lora(original)
+        before = runner.apply_model(execution_weights)
+        assert engine.add_lora(LoRARequest("blocker", 2, str(paths[0])))
+        assert engine.pin_lora(2)
+        with pytest.raises(RuntimeError, match="All items are pinned"):
+            engine.add_lora(
+                LoRARequest("original", 1, str(paths[1]), load_inplace=True)
+            )
+        assert engine.remove_lora(2)
+        assert engine.add_lora(original)
+        after = runner.apply_model(execution_weights)
+        torch.testing.assert_close(after, before, rtol=0, atol=0)
 
 
 def test_lora_functions_sync():
