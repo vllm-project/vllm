@@ -1815,6 +1815,10 @@ class Worker(WorkerBase):
             self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is not None and model_runner.eplb_state is not None:
+            model_runner.eplb_state.stop_async_loop()
+
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.

@@ -83,6 +83,8 @@ def transfer_run_periodically(
     while True:
         try:
             state.rearrange_event.wait(stream=stream)
+            if state.async_worker_stop.is_set():
+                return
             _transfer_cycle(state, stream, is_profile)
         except Exception:
             if not state.parallel_config.enable_fault_tolerance:

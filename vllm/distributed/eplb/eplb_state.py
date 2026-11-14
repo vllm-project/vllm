@@ -303,6 +303,7 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_stop = threading.Event()
         self.async_worker_error: Exception | None = None
         """
         Exception that stopped the async worker thread, if any.
@@ -1034,10 +1035,21 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_worker_stop.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
+
+    def stop_async_loop(self) -> None:
+        """Drain and stop the worker before releasing its resources."""
+        if self.async_worker is None:
+            return
+        self.drain_async()
+        self.async_worker_stop.set()
+        self.rearrange_event.record()
+        self.async_worker.join()
+        self.async_worker = None
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.
