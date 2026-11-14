@@ -295,6 +295,21 @@ class TestEnvWithChoices:
                 env_func()
 
 
+def test_float32_matmul_precision_env_is_lowercased(monkeypatch: pytest.MonkeyPatch):
+    # torch.set_float32_matmul_precision ignores anything but lowercase.
+    env_func = environment_variables["VLLM_FLOAT32_MATMUL_PRECISION"]
+    monkeypatch.delenv("VLLM_FLOAT32_MATMUL_PRECISION", raising=False)
+    assert env_func() == "highest"
+
+    for value, expected in (("high", "high"), ("HIGH", "high"), ("Medium", "medium")):
+        monkeypatch.setenv("VLLM_FLOAT32_MATMUL_PRECISION", value)
+        assert env_func() == expected
+
+    monkeypatch.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "tf32")
+    with pytest.raises(ValueError, match="VLLM_FLOAT32_MATMUL_PRECISION"):
+        env_func()
+
+
 def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
     env_func = environment_variables["VLLM_GDN_DECODE_KERNEL"]
     monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
