@@ -508,7 +508,9 @@ steps:
   - vllm/model_executor/models/qwen3_next.py
   - tests/models/qwen3_5/
   commands:
-  - pytest -v -s models/qwen3_5/
+  # amd_specialized_decode/ is gated on 8 gfx950 GPUs; :amd: (MI355)
+  # Qwen3.8-2.4T Specialized Decode runs it.
+  - pytest -v -s models/qwen3_5/ --ignore=models/qwen3_5/amd_specialized_decode
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
