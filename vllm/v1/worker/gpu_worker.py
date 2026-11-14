@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,12 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     resume_device_comms,
     suspend_device_comms,
+)
+from vllm.distributed.pp_transport import (
+    PPTransport,
+    RowSpec,
+    check_intermediate_tensors,
+    row_specs,
 )
 from vllm.distributed.utils import all_reduce_int
 from vllm.distributed.weight_transfer import (
@@ -177,7 +184,6 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
-    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.spec_decode.resources import SpecCapabilities, SpecResources
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -240,7 +246,6 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
-        self.kv_cache_transient_bytes_before_tuning = 0
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -276,6 +281,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
         # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
         self._pp_transport: PPTransport | None = None
+        # What a non-first PP rank receives into; checked on the NCCL path.
+        self._pp_recv_specs: dict[str, RowSpec] = {}
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -621,13 +628,15 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
+        persistent = self.model_runner.intermediate_tensors
+        if persistent is not None:
+            self._pp_recv_specs = row_specs(persistent.tensors)
+
         if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
-            self._pp_transport = create_pp_transport(
-                self.vllm_config, self.model_runner.intermediate_tensors
-            )
+            self._pp_transport = create_pp_transport(self.vllm_config, persistent)
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1107,22 +1116,18 @@ class Worker(WorkerBase):
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         if self.cache_config.enable_extensible_kv_cache:
+            kv_cache = self.model_runner.extensible_kv_cache
+            assert kv_cache is not None
+            # The blocks warmup_kernels committed hold garbage and can take
+            # nearly all the memory warmup may commit: release them, so the
+            # sizing steps run beside only the blocks they address.
+            kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
             # Measure before capture, whose persistent allocations would
             # hide part of the peak from a later peak - current.
-            kv_cache = self.model_runner.extensible_kv_cache
-            assert kv_cache is not None
-            stats = torch.accelerator.memory_stats(self.device)
-            kv_cache.reserved_headroom_bytes = max(
-                kv_cache.reserved_headroom_bytes,
-                # kernel_warmup keeps FlashInfer autotuning out of this
-                # peak window; include what the steps before it reached.
-                getattr(self, "kv_cache_transient_bytes_before_tuning", 0),
-                stats.get("allocated_bytes.all.peak", 0)
-                - stats.get("allocated_bytes.all.current", 0),
-            )
+            kv_cache.record_transient_peak()
             if not self.model_config.enforce_eager:
                 # Warmup's blocks hold garbage and capture addresses only the
                 # null block: release them so the graphs fit (encoder graphs
@@ -1506,6 +1511,10 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
+            # After the postprocessing that all-gathers and reshapes the tensors.
+            comm_postprocess.append(
+                partial(check_intermediate_tensors, tensor_dict, self._pp_recv_specs)
+            )
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,

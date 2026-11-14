@@ -38,6 +38,8 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
+      - pytest -v -s distributed/test_cpu_all_reduce.py
+      - pytest -v -s distributed/test_pipeline_partition.py
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py

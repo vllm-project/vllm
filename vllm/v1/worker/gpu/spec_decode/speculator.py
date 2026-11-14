@@ -452,14 +452,18 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Use the sizes the KV cache was allocated with: draft layers can share a
+        # group with target layers whose backends need smaller kernel blocks.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            kernel_block_sizes=kernel_block_sizes,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
