@@ -117,8 +117,10 @@ def test_enable_disable_flags(bool_parser, args, expected):
     assert (ns.enable_feature, ns.disable_logs, ns.plain) == expected
 
 
-def test_enable_disable_flags_help(bool_parser):
+def test_enable_disable_flags_help(bool_parser, monkeypatch):
     """Help advertises `--enable-x`/`--disable-x` but not `--no-enable-x`."""
+    # Python 3.14's argparse colors help when CI sets FORCE_COLOR.
+    monkeypatch.setenv("PYTHON_COLORS", "0")
     _, serve = bool_parser
     usage = serve.format_usage()
     assert "[--enable-feature | -ef | --disable-feature]" in usage
