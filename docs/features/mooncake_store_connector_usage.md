@@ -63,7 +63,9 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
 - `global_segment_size`: CPU memory contributed to the distributed pool (per
   GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
-  Must be greater than zero in the vLLM config. The default is 4 GiB.
+  Set to `0` to disable SDK staging when using preallocated registered
+  buffers. The default is 4 GiB. APIs that allocate SDK-local buffers need
+  a positive value.
 - `enable_offload`: When `true`, vLLM allocates a DirectIO staging buffer so
   large prefills do not exceed the owner's SSD-write budget. Set this together
   with the matching `--enable_offload=true` flag on `mooncake_master` and on
@@ -495,7 +497,7 @@ export MOONCAKE_CONFIG_PATH="${PWD}/mooncake_egm_requester.json"
 The requester uses the existing positional Store `setup()` API. Do not put
 `enable_egm_store_pool` or `egm_numa_nodes` in the vLLM JSON: only the external
 provider owns and configures EGM capacity. Keep the requester's ordinary
-positive `local_buffer_size`: vLLM requires it, and it is independent of the
+positive `local_buffer_size`, which is independent of the
 provider's EGM capacity and the GPU KV cache. The existing default is 4 GiB per
 rank. Retaining this SDK client buffer does not add CPU staging to the
 connector's registered GPU multi-buffer transfers to memory replicas.
@@ -596,3 +598,16 @@ To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance tha
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
+
+## Device integration hooks
+
+Hardware plugins can subclass `MooncakeStoreConnector` and override
+`_create_worker`. The worker exposes Store setup, layout planning, transfer
+context, save-event and shutdown hooks while retaining native queues, key
+rotation, capacity-pressure handling and block-reference lifetimes.
+
+`MambaStoreLayout.register_state_views` describes separately allocated or
+padded states with `(tensor, projection_sizes, shard_axis)` entries. Each
+projection is TP-sharded independently; descriptors address live state bytes
+and preserve native component order. The caller retains the views for the
+lifetime of their registered descriptors.
