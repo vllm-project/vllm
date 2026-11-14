@@ -20,6 +20,7 @@ use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
     TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
@@ -29,7 +30,7 @@ use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
-    prompt_logprobs_to_maps, text_end_offset, text_len,
+    prompt_logprobs_to_maps, text_end_offset, text_len, visible_logprob_positions,
 };
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
@@ -75,6 +76,7 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
+    let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,
@@ -143,6 +145,7 @@ pub async fn completions(
                     state.system_fingerprint.clone(),
                     api_server_options,
                     prepared.options.clone(),
+                    tokenizer.clone(),
                 )
             })
             .collect();
@@ -160,6 +163,7 @@ pub async fn completions(
                 state.system_fingerprint.clone(),
                 api_server_options,
                 prepared.options.clone(),
+                tokenizer.clone(),
             )
         }))
         .instrument(request_span.clone())
@@ -238,7 +242,9 @@ async fn collect_completion(
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
+        include_stop_str_in_output,
     }: ResponseOptions,
+    tokenizer: DynTokenizer,
 ) -> Result<CompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
@@ -267,6 +273,8 @@ async fn collect_completion(
             echo.is_some(),
             prompt_char_count,
             return_tokens_as_token_ids,
+            include_stop_str_in_output,
+            tokenizer.as_ref(),
         )?)
     } else {
         None
@@ -371,7 +379,9 @@ async fn completion_chunk_stream(
         return_token_ids,
         return_tokens_as_token_ids,
         return_weight_versions,
+        include_stop_str_in_output,
     }: ResponseOptions,
+    tokenizer: DynTokenizer,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
@@ -535,7 +545,12 @@ async fn completion_chunk_stream(
                         )
                     })?;
                     let logprobs = decoded_logprobs_to_openai(
-                        decoded_logprobs,
+                        visible_logprob_positions(
+                            decoded_logprobs,
+                            finished.as_ref().map(|value| &value.finish_reason),
+                            include_stop_str_in_output,
+                            tokenizer.as_ref(),
+                        ),
                         next_text_offset,
                         return_tokens_as_token_ids,
                     )?;
@@ -743,6 +758,8 @@ mod tests {
         DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
     };
 
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
     use super::{
         ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
         StreamResponseEnvelope, collect_completion, completion_chunk_stream, final_chunk,
@@ -855,6 +872,7 @@ mod tests {
                     ..Default::default()
                 },
                 ResponseOptions::default(),
+                Arc::new(TestTokenizer::new()),
             )
             .await
             .expect("completion response");
@@ -883,6 +901,7 @@ mod tests {
             None,
             ApiServerOptions::default(),
             ResponseOptions::default(),
+            Arc::new(TestTokenizer::new()),
         )
         .await
         .expect("completion response");
@@ -997,6 +1016,7 @@ mod tests {
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -1128,7 +1148,7 @@ mod tests {
                     Some(single_token_logprobs(token)),
                     (i == last).then(|| Finished {
                         usage: vllm_llm::TokenUsage::default(),
-                        finish_reason: FinishReason::Stop(None),
+                        finish_reason: FinishReason::Length,
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         spec_decode_metrics: None,
@@ -1151,6 +1171,7 @@ mod tests {
                     requested_logprobs: Some(0),
                     ..Default::default()
                 },
+                Arc::new(TestTokenizer::new()),
             )
             .collect::<Vec<_>>()
             .await;
@@ -1208,6 +1229,7 @@ mod tests {
                 include_usage: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -1273,6 +1295,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -1344,6 +1367,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .await
         .expect("collect completion");
@@ -1403,6 +1427,7 @@ mod tests {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .await
         .expect("collect completion");
@@ -1466,6 +1491,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -1547,6 +1573,7 @@ mod tests {
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -1627,6 +1654,7 @@ mod tests {
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await;

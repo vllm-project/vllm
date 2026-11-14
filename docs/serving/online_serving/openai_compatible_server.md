@@ -80,6 +80,14 @@ vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
 Or directly merge them into the JSON payload if you are using HTTP call directly.
 
+When sampling stops at an EOS or stop-token ID, `/v1/chat/completions` and
+`/v1/completions` omit its logprobs if the token is excluded from the response text
+(the default).
+To include that token in both text and logprobs, set
+`include_stop_str_in_output: true` and `skip_special_tokens: false` in `extra_body`.
+The `completion_tokens` usage count still includes the hidden terminal token.
+When token IDs are returned via `return_token_ids`, they also retain that token.
+
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
