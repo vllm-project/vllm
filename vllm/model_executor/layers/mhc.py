@@ -271,6 +271,8 @@ class MHCPreOp(CustomOp):
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_cpu(
@@ -971,6 +973,8 @@ class MHCFusedPostPreOp(CustomOp):
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_cpu(
