@@ -566,9 +566,15 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     # so past layer 0 a near-tie is a gap within 2e-2 there (1.1e-2 seen).
     # And 22% of the tokens flip an expert at some layer, at 8 and at 42 rows
     # alike, so up to a third may flip there instead of a quarter.
+    # TP8 on CDNA4 keeps CDNA4's bounds and ties, but the quarter was measured
+    # at TP2 / TP4. At TP8, in about 500 MI355X CI runs, 28 rows went over it
+    # 3 times, with 32 of 124 to 35 of 132 tokens (26-27%), and 8 rows 5
+    # times, with 6 of 21 to 9 of 26 (27-35%); every flip a near-tie the loop
+    # above accepted. TP8's rate is about a quarter, as gfx942's is 22%, so
+    # up to a third may flip there too.
     first_bound = 0.06 if arch == "gfx942" else 0.03
     later_tie = 2e-2 if arch == "gfx942" else 1e-2
-    flip_divisor = 3 if arch == "gfx942" else 4
+    flip_divisor = 3 if arch == "gfx942" or tp == 8 else 4
     for rank in range(tp):
         got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
         want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
