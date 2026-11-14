@@ -1009,7 +1009,7 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,

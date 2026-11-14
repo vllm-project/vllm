@@ -91,7 +91,7 @@ def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     assert spec.tokens_per_state == Fraction(1, 4)
     # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
     # +1 is an eviction margin (see whisper_causal.py get_kv_cache_config).
-    assert manager_config.sliding_window == cdiv(750, 4) + 1 == 189
+    assert manager_config.params.sliding_window == cdiv(750, 4) + 1 == 189
     assert (
         SlidingWindowManager.max_admission_blocks(
             manager_config,
