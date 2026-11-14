@@ -20,10 +20,14 @@ from collections.abc import Iterable, Iterator, Sequence
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+
+logger = init_logger(__name__)
 
 _EOM = "<|eom|>"
 _EOT = "<|eot|>"
@@ -138,7 +142,12 @@ def _trim_open_body(body: str) -> str:
             else:
                 continue
             break
-        header_tail = _OPEN_TAIL_HEADER_RE.search(trimmed)
+        try:
+            header_tail = _OPEN_TAIL_HEADER_RE.search(
+                trimmed, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            return body
         if header_tail is not None:
             trimmed = trimmed[: header_tail.start()]
         if trimmed == body:
@@ -230,8 +239,16 @@ class MuseReasoningParser(ReasoningParser):
     def _scoped_turn(cls, text: str) -> str:
         """Current assistant turn with reasoning spans removed."""
         scoped = _current_assistant_turn(text)
-        scoped = _STRIP_REASONING_RE.sub("", scoped)
-        return _STRIP_OPEN_REASONING_RE.sub("", scoped)
+        try:
+            scoped = _STRIP_REASONING_RE.sub(
+                "", scoped, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+            return _STRIP_OPEN_REASONING_RE.sub(
+                "", scoped, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching reasoning pattern.")
+            return scoped
 
     @classmethod
     def _tool_channel_remainder(cls, text: str) -> str:
@@ -253,9 +270,14 @@ class MuseReasoningParser(ReasoningParser):
                     return scoped[header.start() :]
             return ""
         scoped = cls._scoped_turn(text)
-        for match in _CHANNEL_HEADER_RE.finditer(scoped):
-            if match.group("recipient") not in ("self", "user"):
-                return scoped[match.start() :]
+        try:
+            for match in _CHANNEL_HEADER_RE.finditer(
+                scoped, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
+                if match.group("recipient") not in ("self", "user"):
+                    return scoped[match.start() :]
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching reasoning pattern.")
         return ""
 
     @classmethod
@@ -279,7 +301,15 @@ class MuseReasoningParser(ReasoningParser):
         pos = 0
         n = len(text)
         while pos < n:
-            match = _CHANNEL_HEADER_RE.search(text, pos)
+            try:
+                match = _CHANNEL_HEADER_RE.search(
+                    text, pos, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Regex timeout occurred when matching reasoning pattern."
+                )
+                break
             if not match:
                 break
             recipient = match.group("recipient")
@@ -287,7 +317,17 @@ class MuseReasoningParser(ReasoningParser):
             eom = text.find(_EOM, body_start)
             eot = text.find(_EOT, body_start)
             terminators = [p for p in (eom, eot) if p != -1]
-            next_header = _CHANNEL_HEADER_RE.search(text, body_start)
+            try:
+                next_header = _CHANNEL_HEADER_RE.search(
+                    text,
+                    body_start,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Regex timeout occurred when matching reasoning pattern."
+                )
+                break
             if next_header is not None:
                 terminators.append(next_header.start())
             body_end = min(terminators) if terminators else n
@@ -359,34 +399,60 @@ class MuseReasoningParser(ReasoningParser):
                     if recipient in ("user", "commentary")
                 )
             return reasoning, content or None
-        collapsed = _COLLAPSE_RE.sub("\n", model_output)
-        matches = _REASONING_RE.findall(collapsed)
-        reasoning = "\n".join(matches) if matches else None
-        # Truncation fallback: generation stopped inside a to=self block, so
-        # there is no closing <|eom|>. Bounded at the next channel header so a
-        # real tool call that follows a header-less channel switch is not
-        # absorbed into the reasoning field.
-        open_match = _OPEN_REASONING_RE.search(model_output)
-        if open_match and open_match.group(1):
-            partial = open_match.group(1)
-            reasoning = f"{reasoning}\n{partial}" if reasoning else partial
-        # Content is everything that is not a reasoning block. In a
-        # reasoning+tool-call turn there is no to=user answer, but the tool
-        # channels MUST be forwarded -- the unified parser runs the tool parser
-        # on this returned `content`, not on the original model_output.
-        remainder = _STRIP_REASONING_RE.sub("", model_output)
-        remainder = _STRIP_OPEN_REASONING_RE.sub("", remainder)
-        if "<atem:invoke" in remainder or _FUNCTION_CALLS_OPEN in remainder:
-            return reasoning, (remainder or None)
-        content_match = _CONTENT_RE.search(model_output)
-        if content_match:
-            content = content_match.group(1) or None
-        elif _REASONING_OPEN in model_output:
-            content = None
-        else:
-            content = model_output or None
-            reasoning = None
-        return reasoning, content
+        try:
+            collapsed = _COLLAPSE_RE.sub(
+                "\n",
+                model_output,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+            )
+            matches = _REASONING_RE.findall(
+                collapsed, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+            reasoning = "\n".join(matches) if matches else None
+            # Truncation fallback: generation stopped inside a to=self block, so
+            # there is no closing <|eom|>. Bounded at the next channel header so a
+            # real tool call that follows a header-less channel switch is not
+            # absorbed into the reasoning field.
+            open_match = _OPEN_REASONING_RE.search(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+            if open_match and open_match.group(1):
+                partial = open_match.group(1)
+                reasoning = f"{reasoning}\n{partial}" if reasoning else partial
+            # Content is everything that is not a reasoning block. In a
+            # reasoning+tool-call turn there is no to=user answer, but the tool
+            # channels MUST be forwarded -- the unified parser runs the tool parser
+            # on this returned `content`, not on the original model_output.
+            remainder = _STRIP_REASONING_RE.sub(
+                "",
+                model_output,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+            )
+            remainder = _STRIP_OPEN_REASONING_RE.sub(
+                "",
+                remainder,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+            )
+            if "<atem:invoke" in remainder or _FUNCTION_CALLS_OPEN in remainder:
+                return reasoning, (remainder or None)
+            content_match = _CONTENT_RE.search(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            )
+            if content_match:
+                content = content_match.group(1) or None
+            elif _REASONING_OPEN in model_output:
+                content = None
+            else:
+                content = model_output or None
+                reasoning = None
+            return reasoning, content
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching reasoning pattern.")
+            logger.debug(
+                "Regex timeout occurred when matching user input: %s",
+                model_output,
+            )
+            return None, model_output
 
     def extract_reasoning_streaming(
         self,
