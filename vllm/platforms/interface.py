@@ -989,7 +989,7 @@ class Platform:
             from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
             from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
 
-            attn_page_size_1_token = MLAAttentionSpec(
+            mla_spec = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -1004,7 +1004,11 @@ class Platform:
                     if cache_config.cache_dtype == "mxfp4_mla"
                     else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
                 ),
-            ).page_size_bytes
+            )
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    mla_spec
+                ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"

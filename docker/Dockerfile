@@ -973,6 +973,23 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 RUN --mount=type=cache,target=/opt/pip/cache \
     PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
+# FlashInfer's PyPI wheel leaves out the sources of its experimental kernels.
+# vLLM JIT-compiles one of them, the Cake NVFP4 MLA decode (`nvfp4` KV cache on
+# MLA), which needs CUDA 13.4+. Copy its sources from the same release's sdist
+# into the installed package, where FlashInfer looks for them. pip does not
+# track these files, so rerun this after changing FlashInfer in a derived image.
+RUN if [ "$(printf '%s\n' 13.4 "${CUDA_VERSION}" | sort -V | head -n1)" = "13.4" ]; then \
+        src=flashinfer/experimental/cake_mla_nvfp4_paged_decode/csrc \
+        && ver=$(python3 -c 'from importlib.metadata import version; print(version("flashinfer-python"))') \
+        && site=$(python3 -c 'from importlib.metadata import distribution; print(distribution("flashinfer-python").locate_file(""))') \
+        && curl -fsSL --retry 3 -o /tmp/flashinfer-sdist.tar.gz \
+            "https://files.pythonhosted.org/packages/source/f/flashinfer-python/flashinfer_python-${ver}.tar.gz" \
+        && rm -rf "${site:?}/${src}" \
+        && tar -xzf /tmp/flashinfer-sdist.tar.gz --no-same-owner -C "${site}" --strip-components=1 \
+            "flashinfer_python-${ver}/${src}" \
+        && rm /tmp/flashinfer-sdist.tar.gz; \
+    fi
+
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
 # Pre-install these to avoid reinstalling on every vLLM wheel rebuild
