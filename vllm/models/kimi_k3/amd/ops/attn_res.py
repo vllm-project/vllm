@@ -10,6 +10,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.triton_utils import tl, triton
 
@@ -182,7 +183,10 @@ def attn_res(
         return output if scale is None else (output, scale)
 
     # Source tiling helps decode, while one-source tiles scale better for prefill.
-    if num_tokens >= 256 or num_blocks <= 1:
+    # BLOCK_L and num_warps change the FP32 reduction order of each row, so under
+    # batch invariance the tiling must not depend on num_tokens: always use the
+    # one-source tiles (the prefill path, so prefill numerics are unchanged).
+    if envs.VLLM_BATCH_INVARIANT or num_tokens >= 256 or num_blocks <= 1:
         block_l, num_warps = 1, 4
     else:
         block_l, num_warps = 4, 8
