@@ -708,3 +708,53 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
     torch.testing.assert_close(inputs_embeds[:5], expected)
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
+
+
+class _StopAfterExecute(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "max_num_tokens,max_num_reqs,num_query_per_req,draft_slots",
+    [
+        (256, 256, 1, 1),  # draft_model, max_num_seqs == max_num_batched_tokens
+        (256, 200, 1, 1),  # more requests than tokens left after draft slots
+        (128, 64, 1, 1),  # exactly fits
+        (512, 256, 1, 1),
+        (512, 512, 4, 0),  # DFlash-style query rows, no draft slots
+    ],
+)
+def test_dummy_run_leaves_a_token_per_request_after_draft_slots(
+    monkeypatch, max_num_tokens, max_num_reqs, num_query_per_req, draft_slots
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_num_tokens = max_num_tokens
+    runner.max_num_reqs = max_num_reqs
+    runner.speculator = SimpleNamespace(num_query_per_req=num_query_per_req)
+    runner.speculative_config = SimpleNamespace(
+        max_num_new_slots_for_drafting=draft_slots
+    )
+    runner.kv_connector = SimpleNamespace(set_disabled=lambda disabled: None)
+    runner.is_first_pp_rank = True
+    runner.lora_config = None
+    runner.eplb = SimpleNamespace(step=lambda **kwargs: None)
+    monkeypatch.setattr(
+        runner, "maybe_dummy_run_with_lora", lambda *a, **k: contextlib.nullcontext()
+    )
+    seen = {}
+
+    def execute_model(scheduler_output, **kwargs):
+        seen["tokens"] = list(scheduler_output.num_scheduled_tokens.values())
+        raise _StopAfterExecute
+
+    monkeypatch.setattr(runner, "execute_model", execute_model)
+
+    with pytest.raises(_StopAfterExecute):
+        runner._dummy_run(max_num_tokens, is_profile=True)
+
+    tokens = seen["tokens"]
+    num_reqs = len(tokens)
+    # Every dummy request schedules at least its query tokens, and the batch
+    # plus each request's draft slots stays within the token budget.
+    assert min(tokens) >= num_query_per_req
+    assert sum(tokens) + num_reqs * draft_slots <= max_num_tokens
