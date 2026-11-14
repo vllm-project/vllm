@@ -40,6 +40,7 @@ from .matcher_utils import (
 )
 from .rms_quant_fusion import (
     FusedRMSQuantKey,
+    _rms_input_weight_dtype_match,
 )
 
 logger = init_logger(__name__)
@@ -116,6 +117,7 @@ class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             [self.empty(5, 16), self.empty(16)],
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -178,6 +180,7 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
