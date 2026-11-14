@@ -349,6 +349,36 @@ def test_load_base64_jpeg_enforces_num_frames_limit():
     assert metadata["frames_indices"] == list(range(num_frames_limit))
 
 
+def test_load_base64_jpeg_truncates_frames_indices_with_frames():
+    """frames_indices describe the frames sent, so they are validated against
+    that count and truncated together with the frames."""
+    num_frames_limit = 4
+    sent_frames = 6
+    data = ",".join(_make_jpeg_b64_frames(sent_frames))
+    sent_indices = [0, 10, 20, 30, 40, 50]
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(
+        imageio,
+        num_frames=num_frames_limit,
+        frames_indices=sent_indices,
+        total_num_frames=60,
+        fps=10.0,
+    )
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == num_frames_limit
+    assert metadata["frames_indices"] == sent_indices[:num_frames_limit]
+    assert metadata["total_num_frames"] == 60
+    assert metadata["duration"] == 6.0
+
+    videoio = VideoMediaIO(
+        imageio, num_frames=num_frames_limit, frames_indices=sent_indices[:4]
+    )
+    with pytest.raises(ValueError, match=r"\(4\) must match .* frames sent \(6\)"):
+        videoio.load_base64("video/jpeg", data)
+
+
 def test_load_base64_jpeg_no_limit_when_num_frames_negative():
     """When num_frames is -1, all frames should be loaded without truncation."""
     sent_frames = 10
