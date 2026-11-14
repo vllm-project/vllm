@@ -58,7 +58,6 @@ MINIMAL_PP_ARCH_LIST = [
 # test once the fix lands.
 KNOWN_PP_DEFECTS: dict[str, str] = {
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
-    "GPTBigCodeForCausalLM": "Later stages add position embeddings again; see #66290",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
 }
 # The reduced configs keep each model's leading dense layers, which can fill a
