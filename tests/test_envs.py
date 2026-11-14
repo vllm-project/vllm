@@ -625,3 +625,77 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+class TestEnvVarDefRegistry:
+    """Tests for the declarative environment variable registry."""
+
+    def test_every_registered_var_is_wired_and_documented(self):
+        for var_def in envs.list_env_vars():
+            assert var_def.doc.strip(), var_def.name
+            assert envs.environment_variables[var_def.name] == var_def.resolve
+
+    def test_unset_resolves_to_declared_default(self, monkeypatch: pytest.MonkeyPatch):
+        """Guards against a custom getter drifting from ``default``."""
+        for name in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "DO_NOT_TRACK"):
+            monkeypatch.delenv(name, raising=False)
+        for var_def in envs.list_env_vars():
+            monkeypatch.delenv(var_def.name, raising=False)
+            assert var_def.resolve() == var_def.resolve_default(), var_def.name
+
+    @pytest.mark.parametrize(
+        ("name", "value", "expected"),
+        [
+            ("VLLM_TARGET_DEVICE", "CPU", "cpu"),
+            ("VLLM_LOGGING_LEVEL", "debug", "DEBUG"),
+            ("VLLM_USE_FASTOKENS", "1", True),
+            ("VLLM_USE_FASTOKENS", "0", False),
+            ("VLLM_CONFIGURE_LOGGING", "0", False),
+            ("VLLM_USE_MODELSCOPE", " True ", True),
+            ("VLLM_NO_USAGE_STATS", "1", True),
+            ("VLLM_NO_USAGE_STATS", "true", False),
+            ("NO_COLOR", "0", False),
+            ("NO_COLOR", "anything", True),
+            ("VLLM_ENGINE_READY_TIMEOUT_S", "5", 5),
+            ("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "2.5", 2.5),
+            ("VLLM_LOG_STATS_INTERVAL", "0", 10.0),
+            ("VLLM_LOG_STATS_INTERVAL", "3", 3.0),
+            ("VLLM_PORT", "1234", 1234),
+        ],
+    )
+    def test_parsing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        value: str,
+        expected: object,
+    ):
+        monkeypatch.setenv(name, value)
+        assert envs.environment_variables[name]() == expected
+
+    def test_do_not_track_honors_standard_variable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("VLLM_DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        assert envs.environment_variables["VLLM_DO_NOT_TRACK"]() is True
+
+    def test_cache_root_expands_user(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "~/vllm-cache")
+        assert envs.environment_variables["VLLM_CACHE_ROOT"]() == os.path.expanduser(
+            "~/vllm-cache"
+        )
+
+    def test_get_env_var_def_and_is_set(self, monkeypatch: pytest.MonkeyPatch):
+        var_def = envs.get_env_var_def("VLLM_API_KEY")
+        assert var_def is not None and var_def.var_type is str
+        assert envs.get_env_var_def("NOT_A_VLLM_VAR") is None
+
+        monkeypatch.delenv("VLLM_API_KEY", raising=False)
+        assert not var_def.is_set() and not envs.is_set("VLLM_API_KEY")
+        monkeypatch.setenv("VLLM_API_KEY", "k")
+        assert var_def.is_set() and envs.is_set("VLLM_API_KEY")
+
+    def test_format_env_vars_table(self):
+        table = envs.format_env_vars_table()
+        assert "VLLM_CACHE_ROOT" in table and "VLLM_TARGET_DEVICE" in table
