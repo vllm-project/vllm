@@ -51,9 +51,9 @@ from vllm.v1.pool.late_interaction import (
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA-alike platforms.",
+        reason="V1 currently only supported on CUDA-alike and XPU platforms",
         allow_module_level=True,
     )
 
@@ -1512,7 +1512,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
     mock_executor_class.side_effect = create_mock_executor
 
     with monkeypatch.context() as m:
-        m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
+        m.setenv(current_platform.device_control_env_var, "")  # No CUDA devices
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 
