@@ -597,6 +597,20 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: CacheDType
     assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
+def test_triton_writer_backends_reject_fp8_e5m2():
+    """Their KV writer stores an e4m3 variant, which readers would decode as e5m2."""
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        _is_supported_kv_cache_dtype,
+    )
+
+    assert not _is_supported_kv_cache_dtype("fp8_e5m2")
+    for backend in (TritonAttentionBackend, RocmAttentionBackend):
+        assert not backend.supports_kv_cache_dtype("fp8_e5m2")
+        assert backend.supports_kv_cache_dtype("fp8_e4m3")
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
     kv_cache_dtype: CacheDType, monkeypatch: pytest.MonkeyPatch
