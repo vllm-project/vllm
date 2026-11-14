@@ -30,7 +30,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group,
     make_kv_cache_group_from_specs,
 )
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -43,8 +43,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
-from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    Glm5NextIndexerBackend,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
@@ -162,6 +166,7 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
+    indexer_layer=None,
     worker_cls=NixlPushConnectorWorker,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
@@ -174,6 +179,9 @@ def _make_packed_mla_view_worker(
             num_kv_heads=1,
             head_size=page_size // block_size,
             dtype=torch.uint8,
+            cache_role=SparseCacheRole.INDEXER
+            if name == indexer_layer
+            else SparseCacheRole.SPARSE,
         )
         tensor = KVCacheTensor(
             size=raw.nbytes,
@@ -192,6 +200,12 @@ def _make_packed_mla_view_worker(
     config.parallel_config.pipeline_parallel_size = pp_size
     config.kv_transfer_config.kv_role = "kv_producer"
     config.cache_config.kv_cache_layout = "BLHNC"
+    if indexer_layer in layouts:
+        # The cache layer registers itself in the config's forward context.
+        with set_current_vllm_config(config):
+            DeepseekV32IndexerCache(
+                128, torch.uint8, indexer_layer, config.cache_config
+            )
     backends = [
         b if isinstance(b, type) else make_attn_backend(b, block_size)
         for b in backend_names
@@ -298,22 +312,21 @@ def test_compatibility_hash_ignores_indexer_backends(worker_cls):
     on a layer without one lists the sparse MLA backend first, or holds no
     indexer at all, while its PP=1 peer starts with the indexer. All must
     hash alike."""
-    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
-
-    class Indexer(DeepseekV32IndexerBackend):
-        @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
-            return [16]
-
+    indexer = DeepseekV32IndexerBackend
+    cases = [
+        ({"IDX": (0, 64), "L0": (64, 128)}, (indexer, "FLASHMLA_SPARSE")),
+        ({"L0": (0, 128), "IDX": (128, 64)}, ("FLASHMLA_SPARSE", indexer)),
+        ({"L0": (0, 128)}, ("FLASHMLA_SPARSE",)),
+    ]
     hashes = {
         _make_packed_mla_view_worker(
-            {"L0": (0, 128)}, 128, backend_names=backends, worker_cls=worker_cls
+            layouts,
+            192,
+            backend_names=backends,
+            indexer_layer="IDX",
+            worker_cls=worker_cls,
         )[0].compat_hash
-        for backends in (
-            (Indexer, "FLASHMLA_SPARSE"),
-            ("FLASHMLA_SPARSE", Indexer),
-            ("FLASHMLA_SPARSE",),
-        )
+        for layouts, backends in cases
     }
     assert len(hashes) == 1
 
