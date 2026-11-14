@@ -5,15 +5,39 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
+from starlette.requests import Request
 
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 
 
 async def _never_finishes():
     await asyncio.Event().wait()
     yield
+
+
+async def _finished(text: str):
+    yield RequestOutput(
+        request_id="",
+        prompt=None,
+        prompt_token_ids=[1],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=[2],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+    )
 
 
 async def _records_start_then_never_finishes(started_request_ids, request_id):
@@ -207,3 +231,94 @@ async def test_language_detection_cancel_aborts_engine_request():
     sampling_params = engine_client.generate.call_args.args[1]
     assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_beam_search", [False, True])
+@pytest.mark.parametrize(
+    "header,expected_rank", [(None, None), ("invalid", None), ("0", 0), ("3", 3)]
+)
+async def test_speech_to_text_preserves_data_parallel_rank(
+    use_beam_search, header, expected_rank, monkeypatch
+):
+    """X-data-parallel-rank reaches language detection and every chunk request."""
+    ranks = []
+
+    def generate(prompt, params, request_id, *, data_parallel_rank=None, **kwargs):
+        ranks.append((request_id, data_parallel_rank))
+        return _finished("hello")
+
+    def beam_search(*, request_id, data_parallel_rank=None, **kwargs):
+        ranks.append((request_id, data_parallel_rank))
+        return _finished("hello")
+
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
+    server.engine_client = SimpleNamespace(
+        errored=False, check_admission=Mock(), generate=generate
+    )
+    server.task_type = "transcribe"  # type: ignore[misc]  # Final, set in __init__
+    server.models = SimpleNamespace(model_name=lambda: "audio")
+    server.model_config = SimpleNamespace(max_model_len=1024)
+    server.default_sampling_params = {}
+    server.asr_config = SimpleNamespace(max_audio_clip_s=30, sample_rate=16000)
+    server.tokenizer = Mock()
+    server.model_cls = SimpleNamespace(
+        validate_language=lambda language: language,
+        supports_explicit_language_detection=True,
+        get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
+        get_language_token_ids=Mock(return_value=[1]),
+        parse_language_detection_output=Mock(return_value="en"),
+        get_generation_prompt=Mock(return_value={"prompt": "transcribe"}),
+        post_process_output=lambda text, model_config: text,
+        no_space_languages=set(),
+    )
+    server.renderer = SimpleNamespace(
+        render_cmpl_async=AsyncMock(
+            return_value=[{"prompt": "chunk-0"}, {"prompt": "chunk-1"}]
+        )
+    )
+    server._decode_and_chunk_speech_async = AsyncMock(
+        return_value=([np.zeros(16000), np.zeros(16000)], 2.0)
+    )
+    monkeypatch.setattr(server, "_check_model", AsyncMock(return_value=None))
+    monkeypatch.setattr(server, "_maybe_get_adapters", Mock(return_value=None))
+    monkeypatch.setattr(server, "_log_inputs", Mock())
+    monkeypatch.setattr(server, "beam_search", beam_search)
+    monkeypatch.setattr(
+        "vllm.entrypoints.speech_to_text.base.serving.parse_model_prompt",
+        lambda model_config, prompt: prompt,
+    )
+
+    request = SimpleNamespace(
+        model="audio",
+        response_format="json",
+        stream=False,
+        use_beam_search=use_beam_search,
+        max_completion_tokens=None,
+        language=None,
+        to_language=None,
+        build_stt_params=Mock(),
+        to_sampling_params=Mock(return_value=SamplingParams()),
+        to_beam_search_params=Mock(
+            return_value=BeamSearchParams(beam_width=1, max_tokens=1)
+        ),
+    )
+    headers = [(b"x-request-id", b"outer-request")]
+    if header is not None:
+        headers.append((b"x-data-parallel-rank", header.encode()))
+
+    response = await server._create_speech_to_text(
+        audio_data=b"audio",
+        request=request,
+        raw_request=Request({"type": "http", "headers": headers}),
+        response_class=TranscriptionResponse,
+        stream_generator_method=Mock(),
+    )
+
+    assert isinstance(response, TranscriptionResponse)
+    assert response.text == "hello hello"
+    assert ranks == [
+        ("transcribe-outer-request-lang_detect", expected_rank),
+        ("transcribe-outer-request-0", expected_rank),
+        ("transcribe-outer-request-1", expected_rank),
+    ]
