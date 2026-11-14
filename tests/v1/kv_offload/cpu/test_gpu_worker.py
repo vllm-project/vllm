@@ -19,6 +19,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
+    CopyRun,
     DevicePointers,
     GPULoadStoreSpec,
     TransferResult,
@@ -27,6 +29,7 @@ from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import MIN_N
 from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 NUM_GPU_BLOCKS = [64]
@@ -67,6 +70,82 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     ) is (ops.swap_blocks_batch)
+
+
+@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
+@pytest.mark.parametrize("page_size_bytes", [4096, 64 * 1024])
+def test_triton_load_path_takes_the_kernel_for_loads_of_any_page_size(
+    monkeypatch: pytest.MonkeyPatch, page_size_bytes: int
+) -> None:
+    """`auto` keeps loads of large pages on the copy engine and `triton` does
+    not; stores keep the copy engine either way."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]]
+
+    def select(gpu_to_cpu: bool, load_path: str):
+        return gpu_worker._select_swap_blocks_fn(
+            refs, gpu_to_cpu=gpu_to_cpu, load_path=load_path
+        )
+
+    triton_load = select(gpu_to_cpu=False, load_path="triton")
+    assert triton_load.func is gpu_worker.swap_blocks_batch
+    assert triton_load.keywords == {"bytes_per_chunk": min(page_size_bytes, 8192)}
+    auto_load = select(gpu_to_cpu=False, load_path="auto")
+    assert (auto_load is ops.swap_blocks_batch) == (
+        page_size_bytes >= gpu_worker.THRESHOLD_BYTES
+    )
+    for load_path in ("auto", "triton"):
+        assert select(gpu_to_cpu=True, load_path=load_path) is ops.swap_blocks_batch
+
+
+@pytest.mark.parametrize("blocker", ["unpinned", "rocm", "unaligned", "canonical"])
+def test_triton_load_path_keeps_the_copy_engine_where_the_kernel_cannot_copy(
+    monkeypatch: pytest.MonkeyPatch, blocker: str
+) -> None:
+    """`triton` lifts only the size cutoff: pageable memory, ROCm and unaligned
+    pages still take the copy engine, and so do canonical-layout loads, whose
+    fragment sizes the selection does not check."""
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(
+        gpu_worker.current_platform, "is_rocm", lambda: blocker == "rocm"
+    )
+    page = 64 * 1024 + (4 if blocker == "unaligned" else 0)
+    mapping = CanonicalPageMapping(
+        page, page, (CopyRun(0, 0, page, 1, page, page),), 1, 0, True
+    )
+    handler = gpu_worker.SingleDirectionOffloadingHandler(
+        cpu_tensors=[torch.zeros((1, page), dtype=torch.int8)],
+        blocks_per_chunk=1,
+        layer_refs_per_group=[[CanonicalKVCacheRef(0, page, mapping)]],
+        gpu_to_cpu=False,
+        canonical_layout=blocker == "canonical",
+        host_memory_is_pinned=blocker != "unpinned",
+        load_path="triton",
+    )
+
+    assert handler._swap_blocks_batch is ops.swap_blocks_batch
+
+
+def test_worker_warns_once_when_the_triton_load_path_is_unavailable(
+    caplog_vllm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gpu_worker, "PIN_MEMORY", False)
+    page = 64 * 1024
+    tensor = CanonicalKVCacheTensor(torch.zeros((1, page), dtype=torch.int8), page)
+    kv_caches = CanonicalKVCaches([tensor], [[CanonicalKVCacheRef(0, page)]])
+
+    with caplog_vllm.at_level(logging.WARNING, logger=gpu_worker.__name__):
+        worker = CPUOffloadingWorker(
+            kv_caches, blocks_per_chunk=1, num_cpu_chunks=2, load_path="triton"
+        )
+
+    try:
+        assert worker._load_handler._swap_blocks_batch is ops.swap_blocks_batch
+        assert caplog_vllm.text.count("load_path 'triton'") == 1
+    finally:
+        worker.shutdown()
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
@@ -867,9 +946,15 @@ def test_transfer_multi_group(
     not current_platform.is_cuda_alike(),
     reason="stream ordering test requires a CUDA-like platform",
 )
+@pytest.mark.parametrize("load_path", ["auto", "triton"])
 @torch.inference_mode()
-def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> None:
-    """A CPU load must land after pending writes to its GPU destination."""
+def test_load_waits_for_pending_compute_stream_writes(
+    default_vllm_config, load_path: str
+) -> None:
+    """A CPU load must land after pending writes to its GPU destination, on
+    the copy engine and through the Triton kernel."""
+    if load_path == "triton" and not current_platform.is_cuda():
+        pytest.skip("Triton loads require CUDA")
     device = DEVICES[0]
     page_size_bytes = 128 * 1024
     num_blocks = 64
@@ -892,7 +977,15 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
         kv_caches=kv_caches,
         blocks_per_chunk=1,
         num_cpu_chunks=num_blocks,
+        load_path=load_path,
     )
+    # 128 KiB pages are above THRESHOLD_BYTES: only `triton` takes the kernel,
+    # for regular loads, and with enough copies that the wrapper runs it.
+    assert (worker._load_handler._swap_blocks_batch is ops.swap_blocks_batch) == (
+        load_path == "auto"
+    )
+    assert worker._expedited_load_handler._swap_blocks_batch is ops.swap_blocks_batch
+    assert len(loaded_blocks) >= MIN_N
     worker._load_handler.cpu_tensors[0].fill_(sentinel)
     expected = torch.full((page_size_bytes,), sentinel, dtype=torch.int8)
 

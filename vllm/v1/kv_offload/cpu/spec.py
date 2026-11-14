@@ -143,6 +143,13 @@ class CPUOffloadingSpec(OffloadingSpec):
             "cache_policy_module_path"
         )
 
+        # CPU->GPU copy path, see _select_swap_blocks_fn
+        self.load_path: str = self.extra_config.get("load_path", "auto")
+        if self.load_path not in ("auto", "triton"):
+            raise ValueError(
+                f"load_path must be 'auto' or 'triton', got {self.load_path!r}"
+            )
+
     @classmethod
     @override
     def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
@@ -207,6 +214,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                load_path=self.load_path,
             )
         except Exception:
             if mmap_region is not None:
