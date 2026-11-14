@@ -112,6 +112,10 @@ Legend:
 
 ### 🚀 Online Benchmark
 
+When benchmarking OpenAI-compatible completions, chat completions, or audio
+servers with the Python `vllm bench serve` client, SSE metadata and keepalive
+comments require no additional configuration.
+
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
