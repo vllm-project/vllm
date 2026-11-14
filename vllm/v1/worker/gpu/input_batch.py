@@ -464,7 +464,16 @@ def _combine_sampled_and_draft_tokens_kernel(
         draft_tokens = tl.load(
             draft_tokens_ptr + req_state_idx * draft_tokens_stride + block,
             mask=mask,
+            other=-1,
         )
+        # A draft row's -1 padding (written when a step schedules fewer
+        # draft tokens than the maximum) must never reach input_ids: the
+        # embedding gather asserts on negative indices. Substitute the
+        # request's last sampled token (always a valid id) for padding
+        # slots, which can only be read when the scheduled draft count
+        # exceeds the row's valid prefix.
+        last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
+        draft_tokens = tl.where(draft_tokens >= 0, draft_tokens, last_token_id)
         tl.store(
             input_ids_ptr + query_end - num_draft_tokens + block,
             draft_tokens,
