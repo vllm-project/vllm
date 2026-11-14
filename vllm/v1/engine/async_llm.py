@@ -293,7 +293,10 @@ class AsyncLLM(EngineClient):
         return cls(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_requests=engine_args.enable_log_requests,
+            log_requests=(
+                engine_args.enable_log_requests
+                or engine_args.enable_log_request_ids_only
+            ),
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,

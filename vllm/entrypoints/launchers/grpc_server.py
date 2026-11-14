@@ -182,7 +182,9 @@ async def serve_grpc(args: argparse.Namespace):
     async_llm = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=UsageContext.OPENAI_API_SERVER,
-        enable_log_requests=args.enable_log_requests,
+        enable_log_requests=(
+            args.enable_log_requests or args.enable_log_request_ids_only
+        ),
         disable_log_stats=args.disable_log_stats,
     )
 
