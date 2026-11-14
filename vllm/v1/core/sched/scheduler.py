@@ -1618,15 +1618,6 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
-                # Local experiment log: the work the engine will actually
-                # compute, before the first step runs.
-                if request.num_preemptions == 0:
-                    logger.info(
-                        "engine_admit request_id=%s prompt=%d cached=%d",
-                        request.request_id,
-                        request.num_prompt_tokens,
-                        num_computed_tokens,
-                    )
                 drafts_needed = drafts_needed or not self._drafts_unused(
                     request, num_computed_tokens, num_new_tokens
                 )
