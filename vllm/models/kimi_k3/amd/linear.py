@@ -260,6 +260,7 @@ def _apply_attn_res(
     output_norm: RMSNorm | None = None,
     block_write_idx: int = -1,
     quant_key: QuantKey | None = None,
+    block_rstd_cache: torch.Tensor | None = None,
 ) -> torch.Tensor | QuantizedActivation:
     fuse_quant = quant_key == kFp8DynamicTokenSym and not envs.VLLM_BATCH_INVARIANT
     result = attn_res(
@@ -276,6 +277,7 @@ def _apply_attn_res(
         quant_dtype=cast(torch.dtype, kFp8DynamicTokenSym.dtype)
         if fuse_quant
         else None,
+        block_rstd_cache=block_rstd_cache,
     )
     if fuse_quant:
         assert isinstance(result, tuple)
@@ -790,6 +792,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         prefix_delta: torch.Tensor | None = None,
+        block_rstd_cache: torch.Tensor | None = None,
         **kwargs,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
@@ -798,7 +801,7 @@ class KimiDecoderLayer(nn.Module):
         if self.use_attn_residuals:
             assert residual is not None
             return self.forward_attn_residual(
-                positions, hidden_states, residual, prefix_delta
+                positions, hidden_states, residual, prefix_delta, block_rstd_cache
             )
 
         assert prefix_delta is None
@@ -822,6 +825,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
         prefix_delta: torch.Tensor | None,
+        block_rstd_cache: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
         attention_quant_key = (
@@ -839,6 +843,7 @@ class KimiDecoderLayer(nn.Module):
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
             quant_key=attention_quant_key,
+            block_rstd_cache=block_rstd_cache,
         )
 
         if self.is_block_write_layer:
@@ -868,6 +873,7 @@ class KimiDecoderLayer(nn.Module):
                 if isinstance(self.mlp, KimiMLP)
                 else None
             ),
+            block_rstd_cache=block_rstd_cache,
         )
 
         hidden_states = self.mlp(hidden_states)
@@ -875,6 +881,8 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
+    cache_attn_res_norms: bool = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -965,6 +973,27 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
+        if envs.VLLM_ROCM_KIMI_ATTN_RES_NORM_CACHE:
+            from vllm.platforms.rocm import on_gfx950
+
+            parallel = vllm_config.parallel_config
+            self.cache_attn_res_norms = (
+                on_gfx950()
+                and config.num_hidden_layers == 93
+                and config.attn_res_block_size == 12
+                and config.hidden_size == 7168
+                and config.rms_norm_eps == 1e-5
+                and vllm_config.model_config.dtype == torch.bfloat16
+                and parallel.pipeline_parallel_size == 1
+                and parallel.tensor_parallel_size == 8
+                and parallel.decode_context_parallel_size == 8
+                and parallel.data_parallel_size == 1
+                and not parallel.use_ubatching
+                and not parallel.enable_dbo
+                and vllm_config.lora_config is None
+                and not envs.VLLM_BATCH_INVARIANT
+                and specialized_decode_config(vllm_config) is None
+            )
 
     def _new_block_residual(
         self, hidden_states: torch.Tensor, num_blocks: int
@@ -1076,15 +1105,37 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
         prefix_delta = None
+        block_rstd_cache = None
+        if (
+            self.cache_attn_res_norms
+            and step is None
+            and intermediate_tensors is None
+            and hidden_states.shape[0] in (280, 336)
+            and hidden_states.dtype == torch.bfloat16
+        ):
+            # Forward-local storage: graph capture owns its lifetime, and every
+            # historical slot is rewritten before use on each forward/replay.
+            block_rstd_cache = hidden_states.new_empty(
+                block_residual.shape[:2], dtype=torch.float32
+            )
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
             kernel = step.layer(layer_idx) if step is not None else None
-            hidden_states, residual, prefix_delta = (kernel or layer)(
-                positions, hidden_states, residual, prefix_delta
-            )
+            if block_rstd_cache is None:
+                hidden_states, residual, prefix_delta = (kernel or layer)(
+                    positions, hidden_states, residual, prefix_delta
+                )
+            else:
+                hidden_states, residual, prefix_delta = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    prefix_delta,
+                    block_rstd_cache=block_rstd_cache,
+                )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
@@ -1106,6 +1157,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_norm,
             attn_res_block_num,
             delta=prefix_delta,
+            block_rstd_cache=block_rstd_cache,
         )
         # NOTE: the final norm is applied in compute_logits instead of here.
         if aux_hidden_states:
