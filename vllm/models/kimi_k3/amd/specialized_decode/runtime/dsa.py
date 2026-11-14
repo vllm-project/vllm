@@ -393,8 +393,9 @@ def indexer_tail(w, iq, ik, iv, prep=None) -> None:
         ind.cp_interleave,
         ind.indexer_weight_scale * ind.index_softmax_scale,
         ind.dcp_scores,
-        # D1a already applied the key LayerNorm, so the fused store skips it.
-        ind.fused_prep,
+        # D1a already applied the key LayerNorm (no k_norm). fused_prep only with
+        # D1a's prep: without it, the op's unfused prep as before D1a ran it.
+        prep is not None,
         None,
         None,
         0.0,
