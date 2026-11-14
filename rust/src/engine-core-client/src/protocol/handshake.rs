@@ -27,6 +27,8 @@ pub struct ReadyMessage {
 /// KV-event publisher configuration reported by EngineCore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvEventsConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enable_source_attribution: bool,
     pub enable_kv_cache_events: bool,
     pub publisher: String,
     pub endpoint: String,
@@ -201,6 +203,23 @@ pub struct DataParallelRendezvous {
 mod tests {
     use super::*;
     use crate::protocol::{decode_value, encode_msgpack};
+
+    #[test]
+    fn kv_events_source_flag_defaults_and_round_trips() {
+        let legacy = serde_json::json!({
+            "enable_kv_cache_events": true, "publisher": "zmq",
+            "endpoint": "tcp://127.0.0.1:5557", "replay_endpoint": null,
+            "buffer_steps": 10, "hwm": 100, "max_queue_size": 100, "topic": "kv"
+        });
+        let config: KvEventsConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!config.enable_source_attribution);
+        assert_eq!(serde_json::to_value(config).unwrap(), legacy);
+        let mut attributed = legacy;
+        attributed["enable_source_attribution"] = serde_json::json!(true);
+        let config: KvEventsConfig = serde_json::from_value(attributed.clone()).unwrap();
+        assert!(config.enable_source_attribution);
+        assert_eq!(serde_json::to_value(config).unwrap(), attributed);
+    }
 
     #[test]
     fn handshake_parallel_config_encodes_rendezvous_fields_or_empty_map() {

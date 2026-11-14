@@ -358,6 +358,27 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":computer: (CPU) KV Event Sources"
+  key: kv-event-sources-cpu
+  depends_on:
+    - image-build-cpu
+  device: cpu-small
+  source_file_dependencies:
+    - vllm/config/kv_events.py
+    - vllm/distributed/kv_events.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/v1/core/sched/scheduler.py
+    - tests/distributed/test_kv_cache_events.py
+    - tests/distributed/test_events.py
+    - tests/v1/kv_connector/unit/test_kv_event_source.py
+  commands:
+    - >-
+      pytest -v -s
+      distributed/test_kv_cache_events.py
+      distributed/test_events.py
+      v1/kv_connector/unit/test_kv_event_source.py
+
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
   depends_on:
