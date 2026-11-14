@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -269,22 +269,6 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and request.prefix_cache_hit_limit != 0
 
-    def _session_blocks(
-        self, request: Request
-    ) -> Mapping[int, Sequence[KVCacheBlock]] | None:
-        if request.session_id is None:
-            return None
-        return self.sessions.get_blocks(request.session_id, request.block_hashes)
-
-    def _register_session(self, request: Request) -> None:
-        if request.session_id is None or not self.sessions.ttl:
-            return
-        self.sessions.register(
-            request.session_id,
-            request.block_hashes,
-            self.coordinator.get_blocks(request.request_id),
-        )
-
     def close_session(self, session_id: str) -> None:
         """Stop preferring a session's blocks for retention."""
         self.sessions.close(session_id)
@@ -309,7 +293,7 @@ class KVCacheManager:
         _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
             request.block_hashes,
             request.num_tokens - 1,
-            self._session_blocks(request),
+            self.sessions.get_blocks(request),
         )
         return num_computed_tokens
 
@@ -365,7 +349,7 @@ class KVCacheManager:
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes,
                 max_cache_hit_length,
-                self._session_blocks(request),
+                self.sessions.get_blocks(request),
             )
         )
 
@@ -428,7 +412,7 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes,
             max_cache_hit_length,
-            self._session_blocks(request),
+            self.sessions.get_blocks(request),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -699,7 +683,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
-        self._register_session(request)
+        self.sessions.register(request, self.coordinator.get_blocks(request.request_id))
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -734,7 +718,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        self._register_session(request)
+        self.sessions.register(request, self.coordinator.get_blocks(request.request_id))
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:

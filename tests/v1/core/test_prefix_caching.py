@@ -7105,9 +7105,7 @@ def test_session_lookup_matches_normal_lookup(make_config):
             for _ in managers
         ]
         sessions = managers[0].sessions
-        num_session_lookups += (
-            sessions.get_blocks("s", requests[0].block_hashes) is not None
-        )
+        num_session_lookups += sessions.get_blocks(requests[0]) is not None
         assert _lookup(managers[0], requests[0]) == _lookup(managers[1], requests[1])
         for manager in managers:
             _run_turn(manager, f"{turn}", token_ids, session_id="s")
@@ -7222,8 +7220,8 @@ def test_max_sessions_drops_oldest_session():
         )
         for i in range(2)
     ]
-    assert manager.sessions.get_blocks("s0", requests[0].block_hashes) is None
-    assert manager.sessions.get_blocks("s1", requests[1].block_hashes) is not None
+    assert manager.sessions.get_blocks(requests[0]) is None
+    assert manager.sessions.get_blocks(requests[1]) is not None
     assert len(_retained_blocks(manager)) == 2
 
 
@@ -7306,7 +7304,7 @@ def test_session_retention_random_ops_keep_invariants(
                 f"r{step}", token_ids, 16, sha256, session_id=session_id
             )
             if session_id is not None:
-                found = manager.sessions.get_blocks(session_id, request.block_hashes)
+                found = manager.sessions.get_blocks(request)
                 num_session_lookups += found is not None
             assert _lookup(manager, request) == _lookup(
                 manager, make_request("plain", token_ids, 16, sha256)

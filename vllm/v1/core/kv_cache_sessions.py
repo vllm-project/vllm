@@ -14,14 +14,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import islice
 from operator import is_
+from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
     BlockHashWithGroupId,
     KVCacheBlock,
     make_block_hash_with_group_id,
     resolve_block_hashes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
 
 
 @dataclass(slots=True)
@@ -80,13 +83,13 @@ class KVCacheSessions:
         self._sessions: OrderedDict[str, _Session] = OrderedDict()
 
     def register(
-        self,
-        session_id: str,
-        block_hashes: list[BlockHash],
-        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
+        self, request: "Request", blocks_by_group: Sequence[Sequence[KVCacheBlock]]
     ) -> None:
-        """Make a request's blocks the session's retained prefix. Must be
+        """Make a request's blocks its session's retained prefix. Must be
         called before the blocks are freed."""
+        session_id = request.session_id
+        if not session_id or not self.ttl:
+            return
         old = self._sessions.pop(session_id, None)
         session = _Session([], [], [], time.monotonic() + self.ttl)
         for group_id, blocks in enumerate(blocks_by_group):
@@ -117,7 +120,7 @@ class KVCacheSessions:
                 # count only blocks cached under the request's hash for
                 # their position.
                 hashes = resolve_block_hashes(
-                    block_hashes, self.hash_block_size, block_size
+                    request.block_hashes, self.hash_block_size, block_size
                 )
                 for key, block_hash in zip(
                     keys[num_lookup_blocks:], hashes[num_lookup_blocks:]
@@ -136,20 +139,18 @@ class KVCacheSessions:
         if len(self._sessions) > self.max_sessions:
             self._release(self._sessions.popitem(last=False)[1])
 
-    def get_blocks(
-        self, session_id: str, block_hashes: list[BlockHash]
-    ) -> dict[int, list[KVCacheBlock]] | None:
-        """Return, per KV cache group, the session's cached blocks that hold
-        the start of a request with `block_hashes`, or None if it does not
-        continue the session."""
-        session = self._sessions.get(session_id)
+    def get_blocks(self, request: "Request") -> dict[int, list[KVCacheBlock]] | None:
+        """Return, per KV cache group, the cached blocks of the request's
+        session that hold the start of the request, or None if it does not
+        continue a session."""
+        session = self._sessions.get(request.session_id or "")
         if session is None:
             return None
         found = {}
         for group_id, block_size in self.lookup_block_sizes.items():
             blocks, keys = session.blocks[group_id], session.keys[group_id]
             hashes = resolve_block_hashes(
-                block_hashes, self.hash_block_size, block_size
+                request.block_hashes, self.hash_block_size, block_size
             )
             num_blocks = min(session.num_lookup_blocks[group_id], len(hashes))
             if num_blocks == 0:
