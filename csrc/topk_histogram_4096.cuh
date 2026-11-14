@@ -39,6 +39,22 @@ struct alignas(8) Tie {
   float score;
 };
 
+// The threshold leaves at most top_k keys above it, so the slots a row claims
+// stay within top_k as long as the scatter assigns every key the bin the
+// histogram counted it in. Trap when they do not instead of writing past the
+// row silently. Where the CTA goes on to another row, read the counter before
+// the row's last barrier: the next row may reuse its shared memory.
+__device__ __forceinline__ void trap_on_output_overflow(uint32_t count,
+                                                        uint32_t top_k) {
+  if (count > top_k) {
+#ifdef USE_ROCM
+    __builtin_trap();
+#else
+    __trap();
+#endif
+  }
+}
+
 __device__ __forceinline__ void load_float4_predicated(const float* ptr,
                                                        int base, int seq_len,
                                                        float& v0, float& v1,
@@ -689,6 +705,7 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
       }
     }
   }
+  trap_on_output_overflow(smem->counter_gt, TopK);
 
   // Phase 4: Tie-breaking
   if (!need_tie) return;

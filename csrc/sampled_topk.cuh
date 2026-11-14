@@ -124,7 +124,7 @@ __device__ __forceinline__ int reserve(bool hit, int* counter) {
   return base + __popc(mask & ((1u << lane) - 1));
 }
 
-template <bool Buffered, typename InT>
+template <int K, bool Buffered, typename InT>
 __device__ void emit(Storage& s, const InT* row, int32_t* dst, int count,
                      uint32_t cutoff) {
   const int tid = threadIdx.x;
@@ -144,6 +144,7 @@ __device__ void emit(Storage& s, const InT* row, int32_t* dst, int count,
     const int offset = reserve(keep, &s.count);
     if (keep) dst[offset] = pair.x;
   }
+  hist4096::trap_on_output_overflow(s.count, K);
 }
 
 template <int K, typename InT>
@@ -173,7 +174,7 @@ __global__ void __launch_bounds__(kThreads)
     }
     if (!selected) {
       const uint32_t exact_cutoff = threshold<false>(s, row, length, K);
-      emit<false>(s, row, dst, length, exact_cutoff);
+      emit<K, false>(s, row, dst, length, exact_cutoff);
     }
     return;
   }
@@ -271,10 +272,10 @@ __global__ void __launch_bounds__(kThreads)
   const int count = s.count;
   if (count >= K && count <= kCapacity) {
     const uint32_t exact_cutoff = threshold<true>(s, row, count, K);
-    emit<true>(s, row, dst, count, exact_cutoff);
+    emit<K, true>(s, row, dst, count, exact_cutoff);
   } else {
     const uint32_t exact_cutoff = threshold<false>(s, row, length, K);
-    emit<false>(s, row, dst, length, exact_cutoff);
+    emit<K, false>(s, row, dst, length, exact_cutoff);
   }
 }
 
