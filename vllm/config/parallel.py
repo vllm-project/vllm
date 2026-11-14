@@ -1416,10 +1416,18 @@ def _mori_epv2_unsupported_reason(
         * parallel_config.data_parallel_size
         * parallel_config.prefill_context_parallel_size
     )
-    # A guess before startup; MoriEPv2All2AllManager checks the actual
-    # CCO-LSA team.
-    if not lsa_spans_hosts and _ep_spans_hosts(parallel_config, ep_size):
-        return f"ep_size={ep_size} across hosts (EPv2 needs one host)"
+    # The internode path is new: keep EPv1 across hosts unless asked for. A
+    # guess before startup; MoriEPv2All2AllManager checks the actual CCO-LSA
+    # team and enforces the opt-in there too.
+    if (
+        not envs.VLLM_MORI_EP_V2
+        and not lsa_spans_hosts
+        and _ep_spans_hosts(parallel_config, ep_size)
+    ):
+        return (
+            f"ep_size={ep_size} across hosts by default (its internode path "
+            "is opt-in: set VLLM_MORI_EP_V2=1)"
+        )
     sdma = os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true")
     if sdma and sdma_picks_epv1:
         return "MORI_ENABLE_SDMA=1 (SDMA is EPv1-only)"

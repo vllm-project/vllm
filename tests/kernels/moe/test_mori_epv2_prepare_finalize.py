@@ -144,8 +144,18 @@ def test_padding_tokens_are_routed_to_local_experts(monkeypatch):
     assert op.sent_ids.tolist() == [[0, 7], [2, 3]]
 
 
-@pytest.mark.parametrize("world_size,lsa_size", [(8, 8), (8, 4)])
-def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
+@pytest.mark.parametrize(
+    "world_size,lsa_size,opt_in,gpu_per_node",
+    [
+        (8, 8, False, None),
+        # EP over two hosts: internode, with equal LSA teams, when opted in.
+        (16, 8, True, 8),
+        # Not opted in: fails as on main, whatever the guess before startup.
+        (16, 8, False, "opt-in"),
+        (8, 3, True, "error"),
+    ],
+)
+def test_manager_lsa_teams(monkeypatch, world_size, lsa_size, opt_in, gpu_per_node):
     from vllm.distributed.device_communicators import all2all
     from vllm.distributed.device_communicators.base_device_communicator import (
         All2AllManagerBase,
@@ -161,6 +171,7 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
     monkeypatch.setattr(
         torch.distributed, "broadcast_object_list", lambda *a, **k: None
     )
+    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
     monkeypatch.setattr(all2all, "CudaRTLibrary", Mock)
     device_comm = Mock(lsa_size=lsa_size)
     calls = Mock()  # records the order of op.close and comm.destroy
@@ -177,8 +188,14 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             GDA_CONNECTION_NONE=0,
         ),
     )
-    if lsa_size != world_size:
-        with pytest.raises(ValueError, match="one LSA team"):
+    monkeypatch.delenv("VLLM_MORI_EP_V2", raising=False)
+    if opt_in:
+        monkeypatch.setenv("VLLM_MORI_EP_V2", "1")
+    if gpu_per_node == "opt-in":
+        with pytest.raises(ValueError, match="opt-in: set VLLM_MORI_EP_V2=1"):
+            all2all.MoriEPv2All2AllManager(object())
+    elif gpu_per_node == "error":
+        with pytest.raises(ValueError, match="equal LSA teams"):
             all2all.MoriEPv2All2AllManager(object())
     else:
         cfg = dict(
@@ -192,16 +209,34 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             combine_dtype=None,
             schedule=None,
         )
+        configs = []
+
+        def make_config(**kw):
+            config = SimpleNamespace(**(cfg | kw))
+            config.is_internode = config.__dict__.get("gpu_per_node") is not None
+            configs.append(config)
+            return config
+
         monkeypatch.setitem(
             sys.modules,
             "mori.ops.dispatch_combine_v2",
             SimpleNamespace(
-                EpDispatchCombineConfig=lambda **kw: SimpleNamespace(**(cfg | kw)),
+                EpDispatchCombineConfig=make_config,
                 EpDispatchCombineOp=lambda config, comm: calls.op,
             ),
         )
+        monkeypatch.setitem(
+            sys.modules,
+            "mori.ops.dispatch_combine_v2.internode_regions",
+            SimpleNamespace(internode_regions=lambda config: [("a", 1), ("b", 300)]),
+        )
         manager = all2all.MoriEPv2All2AllManager(object())
         assert manager.get_handle({}) is calls.op
+        (config,) = configs
+        assert config.__dict__.get("gpu_per_node") == gpu_per_node
+        assert config.__dict__.get("kernel_backend") == (
+            "hip" if gpu_per_node else None
+        )
         # The cache holds ops weakly; the manager keeps them alive itself.
         manager.handle_cache._cache.clear()
         manager.destroy()
@@ -210,6 +245,112 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
         assert order.index("op.close") < order.index("comm.destroy")
     device_comm.close.assert_called_once()
     comm.destroy.assert_called_once()
+
+
+def _internode_manager(monkeypatch, order, regions):
+    """A 16-rank MoriEPv2All2AllManager over two LSA teams of 8, MORI faked,
+    with the internode path opted in."""
+    from vllm.distributed.device_communicators import all2all
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        All2AllManagerBase,
+    )
+
+    monkeypatch.setattr(
+        All2AllManagerBase,
+        "__init__",
+        lambda self, group: self.__dict__.update(
+            rank=0, world_size=16, cpu_group=group
+        ),
+    )
+    monkeypatch.setattr(
+        torch.distributed,
+        "broadcast_object_list",
+        lambda *a, **k: order.append("broadcast"),
+    )
+    monkeypatch.setattr(
+        torch.distributed, "barrier", lambda *a, **k: order.append("barrier")
+    )
+    monkeypatch.setattr(all2all, "CudaRTLibrary", Mock)
+    communicator = Mock()
+
+    def init(world_size, rank, uid, per_rank_vmm):
+        order.append(("init", per_rank_vmm))
+        return Mock(create_dev_comm=Mock(return_value=Mock(lsa_size=8)))
+
+    communicator.init.side_effect = init
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cco",
+        SimpleNamespace(
+            Communicator=communicator,
+            CCODevCommRequirements=SimpleNamespace,
+            GDA_CONNECTION_NONE=0,
+        ),
+    )
+    configs = []
+
+    def make_config(**kw):
+        config = SimpleNamespace(
+            dispatch_dtype=None,
+            combine_dtype=None,
+            effective_max_recv=0,
+            schedule=None,
+            **kw,
+        )
+        config.is_internode = True
+        configs.append(config)
+        return config
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.ops.dispatch_combine_v2",
+        SimpleNamespace(
+            EpDispatchCombineConfig=make_config,
+            EpDispatchCombineOp=lambda config, comm: Mock(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules, "mori.ops.dispatch_combine_v2.internode_regions", regions
+    )
+    monkeypatch.setenv("VLLM_MORI_EP_V2", "1")
+    return all2all.MoriEPv2All2AllManager(object()), configs
+
+
+def test_ranks_line_up_before_each_cco_window(monkeypatch):
+    order: list = []
+    regions = SimpleNamespace(internode_regions=lambda cfg: [("a", 5 << 30)])
+    manager, _ = _internode_manager(monkeypatch, order, regions)
+    # The 5 GiB arena does not fit the first 4 GiB window: a second one opens,
+    # as it does after weight loading.
+    manager.get_handle({})
+    inits = [i for i, step in enumerate(order) if isinstance(step, tuple)]
+    assert len(inits) == 2
+    for i in inits:
+        assert order[i - 2 : i] == ["broadcast", "barrier"]
+
+
+def test_internode_op_may_set_its_own_kernel_backend(monkeypatch):
+    regions = SimpleNamespace(internode_regions=lambda cfg: [("a", 1)])
+    manager, configs = _internode_manager(monkeypatch, [], regions)
+    manager.get_handle({"kernel_backend": "hip"})
+    (config,) = configs
+    assert config.kernel_backend == "hip" and config.gpu_per_node == 8
+
+
+def test_internode_asyncll_arena_uses_the_asyncll_regions(monkeypatch):
+    order: list = []
+    regions = SimpleNamespace(
+        internode_regions=lambda cfg: [("a", 1)],
+        asyncll_regions=lambda cfg: [("a", 5 << 30)],
+    )
+    manager, _ = _internode_manager(monkeypatch, order, regions)
+    manager.get_handle({"async_ll": True})
+    # AsyncLL's per-rank send buffers outgrow the first window; the per-node
+    # internode table (1 byte here) would have fitted it and overrun.
+    assert [step for step in order if isinstance(step, tuple)][-1] == (
+        "init",
+        8 << 30,
+    )
 
 
 def _unique_id_worker(rank, init_method):
@@ -345,8 +486,10 @@ def _quark(qscheme):
     "parallel,model,moe_backend,env,ep_v2",
     [
         ({}, {}, "aiter", {}, True),
-        # EP across hosts: DP over two nodes, even with ep_size <= 8.
+        # EP across hosts: DP over two nodes, even with ep_size <= 8. MORI's
+        # internode path is opt-in.
         ({"data_parallel_size": 16}, {}, "aiter", {}, False),
+        ({"data_parallel_size": 16}, {}, "aiter", {"VLLM_MORI_EP_V2": "1"}, True),
         ({"data_parallel_size_local": 4}, {}, "aiter", {}, False),
         # A DP replica (TP/PP) spanning nodes.
         ({"nnodes_within_dp": 2}, {}, "aiter", {}, False),
