@@ -19,8 +19,6 @@ def _transform_context_kv_kernel(
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     EPS: tl.constexpr,
-    VALUE_SCALE: tl.constexpr,
-    NEOX: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64) * 4 + tl.arange(0, 4)
@@ -45,14 +43,9 @@ def _transform_context_kv_kernel(
     # Beam rounds K normalization before RoPE.
     key = key.to(KV.dtype.element_ty).to(tl.float32)
     half: tl.constexpr = DIM // 2
-    if NEOX:
-        partner = (col + half) % DIM
-        second = col >= half
-        rope_col = col % half
-    else:
-        partner = col ^ 1
-        second = col % 2 != 0
-        rope_col = col // 2
+    partner = (col + half) % DIM
+    second = col >= half
+    rope_col = col % half
     other = tl.gather(key, tl.broadcast_to(partner[None, :], (4, BLOCK)), 1)
     position = tl.load(POSITIONS + row, row < ROWS, 0).to(tl.int64)
     cosine = tl.load(ROPE + position[:, None] * DIM + rope_col[None, :], mask, 0)
@@ -67,7 +60,7 @@ def _transform_context_kv_kernel(
     )
     value = tl.load(KV + kv_offsets + HEADS * DIM, mask, 0).to(tl.float32)
     tl.store(KEY_OUT + out_offsets, key, mask)
-    tl.store(VALUE_OUT + out_offsets, value * VALUE_SCALE, mask)
+    tl.store(VALUE_OUT + out_offsets, value, mask)
 
 
 def transform_context_kv(
@@ -76,10 +69,8 @@ def transform_context_kv(
     positions: torch.Tensor,
     rope: torch.Tensor,
     eps: float,
-    value_scale: float,
-    is_neox: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Beam K normalization/RoPE and V scaling without touching caches."""
+    """Normalize and apply NeoX RoPE to K without touching the caches."""
     rows, layers, _, heads, dim = kv.shape
     keys = torch.empty((layers, rows, heads, dim), dtype=kv.dtype, device=kv.device)
     values = torch.empty_like(keys)
@@ -96,8 +87,6 @@ def transform_context_kv(
             heads,
             dim,
             eps,
-            value_scale,
-            is_neox,
             triton.next_power_of_2(dim),
             num_warps=4,
             enable_fp_fusion=False,

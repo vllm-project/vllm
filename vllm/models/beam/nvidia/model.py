@@ -49,6 +49,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.beam import BeamConfig
 
+from ..common.layernorm import RMSNorm, beam_norm_residual_norm, beam_rms_norm
 from .activation import beam_softcap_logits
 from .allreduce import (
     BeamAllReduceWorkspace,
@@ -56,7 +57,6 @@ from .allreduce import (
     beam_finalize_allreduce_norm_residual_norm,
 )
 from .attention import BeamAttention, use_merged_qkv_gate
-from .layernorm import RMSNorm, beam_norm_residual_norm, beam_rms_norm
 from .moe import BeamMLP, BeamSparseMoeBlock
 
 
