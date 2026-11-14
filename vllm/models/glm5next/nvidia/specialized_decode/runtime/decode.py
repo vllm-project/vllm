@@ -427,6 +427,17 @@ class SpecializedDecode(LayerStages):
         self.head: Any = None
         self.head_tokens: set[int] = set()
 
+    @classmethod
+    def for_target(cls, backbone, config) -> "SpecializedDecode":
+        """The executor of the target model's backbone, for this GPU."""
+        from . import is_hopper
+
+        if is_hopper():
+            from ..hopper.decode import HopperSpecializedDecode
+
+            return HopperSpecializedDecode(backbone, config)
+        return cls(backbone, config)
+
     def build_logits(self, logits_processor, lm_head) -> None:
         """The LM head GEMM and logits all-gather at the row counts the policy
         gives them."""

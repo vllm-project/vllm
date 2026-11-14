@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash specialized decode: a decode executor over the stock backbone for
-GB300 TP4, enabled by default; `decode_backend=stock` disables it.
+GB300 TP4, enabled by default (`decode_backend=stock` disables it), and H100/H200
+TP4 (`hopper/`), opt-in with `decode_backend=latency_specialized`.
 """
 
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     extra = extra if isinstance(extra, dict) else {}
     backend = extra.get("decode_backend", "auto")
     if backend == "stock":
+        return None
+    # On Hopper the specialized decode is opt-in: auto keeps the stock decode.
+    if backend == "auto" and is_hopper():
         return None
     if backend not in ("auto", "latency_specialized"):
         raise ValueError(
@@ -84,6 +88,30 @@ GEOMETRY = {
 }
 
 
+def is_hopper() -> bool:
+    """Whether this GPU runs the Hopper (SM90) executor (`hopper/`)."""
+    from vllm.platforms import current_platform
+
+    return current_platform.is_device_capability_family(90)
+
+
+# Speculative tokens the Hopper executor plans for: verify steps of up to 6
+# tokens per request (MTP5, the Hopper recipe).
+HOPPER_MAX_SPECULATIVE_TOKENS = 5
+
+
+def kv_cache_dtype(vllm_config) -> str:
+    """The KV cache dtype name, with "auto" resolved to the model dtype."""
+    import torch
+
+    dtype = str(vllm_config.cache_config.cache_dtype)
+    if dtype != "auto":
+        return dtype
+    return {torch.bfloat16: "bfloat16", torch.float16: "float16"}.get(
+        vllm_config.model_config.dtype, str(vllm_config.model_config.dtype)
+    )
+
+
 def unsupported(vllm_config) -> list[str]:
     """Every reason this deployment cannot run the specialized decode."""
     import torch
@@ -93,6 +121,11 @@ def unsupported(vllm_config) -> list[str]:
     from vllm.utils.import_utils import has_cutedsl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    # GB300 (SM100/103) keeps its requirements as they are; Hopper (SM90) differs
+    # in the KV cache (BF16, the SM90 sparse MLA recipe) and in the planned verify
+    # width.
+    hopper = is_hopper()
+    max_spec = HOPPER_MAX_SPECULATIVE_TOKENS if hopper else 7
     parallel, spec = vllm_config.parallel_config, vllm_config.speculative_config
     model, cache = vllm_config.model_config, vllm_config.cache_config
     quant = vllm_config.quant_config
@@ -106,8 +139,16 @@ def unsupported(vllm_config) -> list[str]:
     ]
     compilation = vllm_config.compilation_config
     graphs = compilation.cudagraph_mode
+    sparse_mla = (
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
+        if hopper
+        else AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+    )
     checks = (
-        (not current_platform.is_device_capability_family(100), "this GPU (SM100/103)"),
+        (
+            not (hopper or current_platform.is_device_capability_family(100)),
+            "this GPU (SM100/103, or SM90)",
+        ),
         (not has_cutedsl(), "missing CuTe DSL"),
         (model.dtype != torch.bfloat16, "activation dtypes other than BF16"),
         (
@@ -137,19 +178,24 @@ def unsupported(vllm_config) -> list[str]:
             "deployments without FULL decode CUDA graphs (e.g. enforce-eager)",
         ),
         (
-            cache.cache_dtype not in ("fp8", "fp8_e4m3"),
+            not hopper and cache.cache_dtype not in ("fp8", "fp8_e4m3"),
             "KV cache dtypes other than FP8 E4M3",
+        ),
+        # Hopper runs the BF16 KV cache of its recipe (the SM90 sparse MLA decode).
+        (
+            hopper and kv_cache_dtype(vllm_config) != "bfloat16",
+            "on SM90, KV cache dtypes other than BF16",
         ),
         (bool(cache.kv_cache_dtype_skip_layers), "mixed KV cache dtypes"),
         (
-            backend not in (None, AttentionBackendEnum.FLASHINFER_MLA_SPARSE),
-            "attention backends other than FLASHINFER_MLA_SPARSE",
+            backend not in (None, sparse_mla),
+            f"attention backends other than {sparse_mla.name}",
         ),
         (attention.hisparse_config is not None, "HiSparse"),
         (spec is not None and spec.method != "mtp", "speculative methods but MTP"),
         (
-            spec is not None and spec.num_speculative_tokens > 7,
-            "more than 7 speculative tokens",
+            spec is not None and spec.num_speculative_tokens > max_spec,
+            f"more than {max_spec} speculative tokens",
         ),
         # The KDA decode keeps a BF16 conv state and an FP32 recurrent state in place;
         # it maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.

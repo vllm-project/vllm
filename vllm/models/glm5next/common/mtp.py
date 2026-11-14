@@ -161,7 +161,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         ):
             from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
 
-            self.specialized_decode = SpecializedDraft(
+            self.specialized_decode = SpecializedDraft.for_target(
                 self, self.specialized_decode_config
             )
         return self.specialized_decode
