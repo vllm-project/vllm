@@ -24,6 +24,7 @@ use crate::RequestTimestamps;
 use crate::aux_output::AuxOutputRows;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
+use crate::observer::ObserverContext;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 use crate::weight_versions::{WeightVersionSpan, WeightVersions};
 
@@ -320,6 +321,8 @@ pub struct GenerateOutputStream {
     remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// Taken on finish so observers are notified at most once.
+    observer_context: Option<ObserverContext>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -333,6 +336,7 @@ impl GenerateOutputStream {
         remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
+        observer_context: Option<ObserverContext>,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
@@ -344,7 +348,15 @@ impl GenerateOutputStream {
             })),
             raw_stream,
             request_metrics,
+            observer_context,
             _request_guard: request_guard,
+        }
+    }
+
+    fn finish(&mut self, received_at: f64, finish_reason: FinishReason) {
+        let stats = self.request_metrics.record_finished(received_at, &finish_reason);
+        if let Some(context) = self.observer_context.take() {
+            context.notify(finish_reason, stats);
         }
     }
 
@@ -423,7 +435,7 @@ impl GenerateOutputStream {
         if let Some(finish_reason) = finish_reason.as_ref()
             && !rejected
         {
-            self.request_metrics.record_finished(received_at, finish_reason.clone());
+            self.finish(received_at, finish_reason.clone());
         }
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -481,8 +493,7 @@ impl Drop for GenerateOutputStream {
             AbortCause::StopStringMatched => FinishReason::Stop(None),
         };
 
-        self.request_metrics
-            .record_finished(current_unix_timestamp_secs(), finish_reason);
+        self.finish(current_unix_timestamp_secs(), finish_reason);
     }
 }
 
