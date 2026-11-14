@@ -74,6 +74,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/hy_v4/
+      - vllm/models/glm5next/amd/sparse_indexer.py
+      - vllm/models/glm5next/common/sparse_indexer.py
       - vllm/config/
       - vllm/v1/worker/
       - vllm/v1/attention/ops/
@@ -96,6 +98,7 @@ steps:
       - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
       - pytest models/language -v -s -m 'distributed(num_gpus=2)'
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
+      - pytest -v -s models/glm5next/test_amd_indexer_shardq.py -m 'distributed(num_gpus=2)'
       - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
       - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
