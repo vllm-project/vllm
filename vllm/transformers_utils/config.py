@@ -187,6 +187,14 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashNgramForCausalLM": "longcat_flash",
 }
 
+# Architectures whose remote code was upstreamed to Transformers. Their checkpoints
+# still carry an `auto_map`, which would take precedence over Transformers'
+# implementation under `trust_remote_code`
+_UPSTREAMED_ARCHITECTURES: set[str] = {
+    "InternLM3ForCausalLM",
+    "IQuestCoderForCausalLM",
+}
+
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
 # Model types whose checkpoints carry shared RoPE parameters alongside the
@@ -399,6 +407,7 @@ class HFConfigParser(ConfigParserBase):
                 "qwen2_5_vl_visual", Qwen2_5_VLVisionConfig, exist_ok=True
             )
 
+        architecture = (config_dict.get("architectures") or [None])[0]
         rope_parameters = config_dict.get("rope_parameters") or {}
         if model_type == "gemma4_text" and "full_attention" in rope_parameters:
             from transformers import Gemma4TextConfig
@@ -445,6 +454,14 @@ class HFConfigParser(ConfigParserBase):
 
             kwargs.setdefault("name_or_path", str(model))
             config = CONFIG_MAPPING[model_type].from_dict(config_dict, **kwargs)
+        elif (
+            architecture in _UPSTREAMED_ARCHITECTURES
+            and model_type in transformers.CONFIG_MAPPING
+        ):
+            config_dict.pop("auto_map", None)
+            kwargs.setdefault("name_or_path", str(model))
+            config_class = transformers.CONFIG_MAPPING[model_type]
+            config = config_class.from_dict(config_dict, **kwargs)
         elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(

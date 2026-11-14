@@ -431,8 +431,6 @@ th {
 | `HYV4ForCausalLM` | [HY4](hy4.md) | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
-| `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
-| `IQuestCoderForCausalLM` | IQuestCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | | |
 | `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
 | `JambaForCausalLM` | Jamba | `ai21labs/AI21-Jamba-1.5-Large`, `ai21labs/AI21-Jamba-1.5-Mini`, `ai21labs/Jamba-v0.1`, etc. | ✅︎ | ✅︎ |
 | `K2HorizonForCausalLM` | K2-Horizon | `IFM/K2-Horizon-7B`, `IFM/K2-Horizon-375B` | | ✅︎ |
@@ -493,6 +491,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `GPTNeoXForCausalLM` | GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM | `EleutherAI/gpt-neox-20b`, `EleutherAI/pythia-12b`, `OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc. | | ✅︎ |
 | `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
 | `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
+| `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
+| `IQuestCoderForCausalLM` | IQuest-Coder-V1 | `IQuestLab/IQuest-Coder-V1-7B-Instruct`, `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Jais2ForCausalLM` | Jais2 | `inceptionai/Jais-2-8B-Chat`, `inceptionai/Jais-2-70B-Chat`, etc. | ✅︎ | ✅︎ |
 | `Kolibri1ForCausalLM` | Kolibri 1 | `Aleph-Alpha/Kolibri-1`, `Aleph-Alpha/Kolibri-1-BF16`, etc. | ✅︎ | ✅︎ |
 | `MellumForCausalLM` | Mellum 2 | `JetBrains/Mellum2-12B-A2.5B-Base`, etc. | ✅︎ | ✅︎ |
