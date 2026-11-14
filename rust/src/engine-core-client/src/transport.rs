@@ -27,7 +27,7 @@ use crate::protocol::handshake::{
     DataParallelRendezvous, EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage,
     HandshakeParallelConfig, ReadyMessage,
 };
-use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
+use crate::protocol::output::EngineCoreOutputs;
 use crate::protocol::{decode_msgpack, encode_msgpack};
 
 mod dp_rendezvous;
@@ -744,7 +744,7 @@ pub async fn run_output_loop(
             let _ = tx.send(Err(Error::EngineCoreDead)).await;
             return;
         }
-        let decoded = match decode_engine_core_outputs(&frames) {
+        let decoded = match EngineCoreOutputs::from_frames(&frames) {
             Ok(decoded) => {
                 trace!(frame_len, outputs = ?decoded, "decoded output message");
                 Ok(decoded)
