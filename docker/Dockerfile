@@ -280,12 +280,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
-        # Keep the CUDA-specific PyTorch index first. Using it as an extra
-        # index with unsafe-best-match can select a higher, incompatible
-        # torch build from the base image (for example cu130 in a cu129 image).
+        # Take PyTorch and its CUDA libraries from the CUDA-specific index.
+        # uv gives --extra-index-url priority over --index-url, so that index
+        # goes in --extra-index-url; with unsafe-first-match PyPI's default
+        # build (made for another CUDA version) can then not replace it.
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
-        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        --extra-index-url https://pypi.org/simple \
+        --index-url https://pypi.org/simple \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         --index-strategy unsafe-first-match; \
     fi
 
@@ -967,10 +968,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     else \
+        # The CUDA-specific index goes in --extra-index-url, which uv ranks
+        # above --index-url: see the same install in the base stage.
         uv pip install --system \
             -r /tmp/pins/torch.txt \
-            --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            --extra-index-url https://pypi.org/simple \
+            --index-url https://pypi.org/simple \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             --index-strategy unsafe-first-match; \
     fi
 
