@@ -12,6 +12,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -977,6 +978,18 @@ def _is_escaped(text: str, index: int) -> bool:
         backslashes += 1
         j -= 1
     return backslashes % 2 == 1
+
+
+_CALL_LIST_PREFIX_RE = re.compile(r"\[(?:[a-zA-Z]\w*(?:\(.*)?)?", re.DOTALL)
+
+
+def may_be_pythonic_call_list(text: str) -> bool:
+    """Whether `text` can still become a `[name(...)]` pythonic call list.
+
+    Streaming parsers use this to hold back a leading `[` only while the text
+    could still turn into a call, and to release it as content once it cannot.
+    """
+    return _CALL_LIST_PREFIX_RE.fullmatch(text) is not None
 
 
 def make_valid_python(text: str) -> tuple[str, str] | None:

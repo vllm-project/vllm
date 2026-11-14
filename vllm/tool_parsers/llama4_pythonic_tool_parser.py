@@ -25,6 +25,7 @@ from vllm.tool_parsers.utils import (
     compute_tool_delta,
     handle_single_tool,
     make_valid_python,
+    may_be_pythonic_call_list,
 )
 
 logger = init_logger(__name__)
@@ -128,6 +129,11 @@ class Llama4PythonicToolParser(ToolParser):
         if not current_text.startswith("[") and not current_text.startswith(
             "<|python_start|>"
         ):
+            return DeltaMessage(content=delta_text)
+        if current_text.startswith("[") and not may_be_pythonic_call_list(current_text):
+            # Release the text withheld while it could still have been a call.
+            if may_be_pythonic_call_list(previous_text):
+                return DeltaMessage(content=current_text)
             return DeltaMessage(content=delta_text)
 
         try:
