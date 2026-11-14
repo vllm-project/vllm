@@ -3,8 +3,8 @@
 """CPU-only unit tests for the sleep-mode backend abstraction (RFC #34303).
 
 These cover the registry/factory contract and capability flags. They do not
-touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/memory/``.
+touch CUDA - the `cumem` suspend/resume path is exercised end-to-end on GPU
+in `tests/basic_correctness/memory/`.
 """
 
 import pytest
@@ -48,18 +48,15 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     calls: list[tuple[str, object]] = []
 
     class Backend:
-        def suspend(self, level: int = 1) -> None:
-            calls.append(("backend.suspend", level))
+        def suspend(self, discardable=()) -> None:
+            calls.append(("backend.suspend", set(discardable)))
 
         def resume(self, tags: list[str] | None = None) -> None:
             calls.append(("backend.resume", tuple(tags) if tags else None))
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
-    worker._sleep_saved_parameters = {}
     worker.model_runner = SimpleNamespace(extensible_kv_cache=None)
-    worker._sleep_saved_buffers = {}
-    worker._sleep_saved_draft_buffers = {}
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=enable_nccl_comm_suspend)
     )
@@ -78,8 +75,8 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     worker.sleep(level=1)
     worker.wake_up(tags=["weights"])
 
-    expected = [
-        ("backend.suspend", 1),
+    expected: list[tuple[str, object]] = [
+        ("backend.suspend", set()),
         ("comms.suspend", None),
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
@@ -123,7 +120,7 @@ def test_suspend_resume_state_transitions():
     """Lifecycle state advances RUNNING -> SUSPENDED -> RUNNING without GPU."""
     backend = DummyBackend()
     assert backend.state() == "RUNNING"
-    backend.suspend(level=1)
+    backend.suspend()
     assert backend.state() == "SUSPENDED"
     backend.resume()
     assert backend.state() == "RUNNING"
@@ -132,7 +129,7 @@ def test_suspend_resume_state_transitions():
 class DummyBackend(SleepModeBackend):
     """A no-GPU backend used to exercise lifecycle + registration in CPU tests."""
 
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, discardable=()) -> None:
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:

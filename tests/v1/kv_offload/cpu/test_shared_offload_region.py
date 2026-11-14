@@ -938,7 +938,7 @@ def host_register(monkeypatch):
     """Mock the cross-platform host_register/host_unregister helpers with
     registrations capped at seven pages. The same unregister mock backs both
     pin_mmap_region's rollback path and the region's cleanup() on exit from
-    ``_region``.
+    `_region`.
     """
     register = MagicMock(return_value=True)
     unregister = MagicMock()

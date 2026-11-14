@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton unified attention with different K/V head dimensions (DiffKV).
 
-This is a slimmed fork of ``triton_unified_attention.py`` for models like
+This is a slimmed fork of `triton_unified_attention.py` for models like
 MiMo-V2.5 where the V tensor's head dimension differs from K's.  The KV cache
-is the same packed layout used by ``FlashAttentionDiffKVBackend``:
+is the same packed layout used by `FlashAttentionDiffKVBackend`:
 
     kv_cache: [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]
 
-We slice ``key_cache = kv_cache[..., :head_size_qk]`` and
-``value_cache = kv_cache[..., head_size_qk:]`` on the host, so the kernel
+We slice `key_cache = kv_cache[..., :head_size_qk]` and
+`value_cache = kv_cache[..., head_size_qk:]` on the host, so the kernel
 takes two cache pointers but with two distinct head sizes.
 
 Both 2D and 3D launches are supported:
@@ -18,7 +18,7 @@ Both 2D and 3D launches are supported:
     decode batches.
   - 3D: one program per (q-block, kv-head, segm); each program covers a
     KV slice and writes per-segment partials (max/expsum/output).  A
-    follow-up ``kernel_reduce_segments_diffkv`` combines them.  Selected
+    follow-up `kernel_reduce_segments_diffkv` combines them.  Selected
     for decode-only batches whose 2D grid would under-fill the GPU.
 """
 
@@ -348,8 +348,8 @@ def kernel_reduce_segments_diffkv(
 ):
     """Combine per-segment partials into the final softmax output.
 
-    Mirrors ``reduce_segments`` from triton_unified_attention.py but
-    indexes V's head size (``HEAD_SIZE_V``) instead of the shared one.
+    Mirrors `reduce_segments` from triton_unified_attention.py but
+    indexes V's head size (`HEAD_SIZE_V`) instead of the shared one.
     """
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)

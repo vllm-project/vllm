@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
@@ -51,7 +51,7 @@ class _WorkerRequestState:
     finished: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
@@ -282,11 +282,14 @@ class AuxOutputWorkerConnector:
                 local_start = emit_start % block_size
                 rows = stored[local_start : local_start + stored_end - emit_start]
                 if stored_end < token_end:
-                    rows = np.concatenate(
-                        (rows, buffer.read(request_id, stored_end, token_end))
+                    suffix = buffer.read(
+                        request_id, stored_end, token_end, state.pending_blocks
                     )
+                    rows = np.concatenate((rows, suffix))
             else:
-                rows = buffer.read(request_id, emit_start, token_end)
+                rows = buffer.read(
+                    request_id, emit_start, token_end, state.pending_blocks
+                )
             outputs[request_id] = AuxRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
         return outputs

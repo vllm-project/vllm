@@ -29,7 +29,7 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SkinnyConfig:
     block_size: int = 224
     outputs_per_block: int = 2
