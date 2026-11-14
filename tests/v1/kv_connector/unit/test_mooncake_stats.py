@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -219,6 +220,8 @@ def _bare_worker() -> MooncakeConnectorWorker:
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = OrderedDict()
     return worker
 
 
@@ -271,11 +274,6 @@ def test_get_kv_connector_stats_returns_and_resets():
     assert worker.get_kv_connector_stats() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="The worker stub lacks the KV lease setup from #64193 "
-    "(no _kv_lease_duration); no fix yet",
-)
 def test_expired_request_bumps_counter():
     import asyncio
 
