@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Cutlass W4A16 (Machete) kernel on Hopper.
 
-Verifies that W4A16 quantized models loaded through vllm select the
-MacheteLinearKernel on sm_90 GPUs, that weights are correctly repacked,
-and that inference produces valid output.
+Verifies that W4A16 quantized models loaded through vllm can select the
+MacheteLinearKernel on sm_90 GPUs (Humming, when installed, is preferred for
+4-bit weights), that weights are correctly repacked, and that inference
+produces valid output.
 
 Run `pytest tests/quantization/test_cutlass_w4a16.py`.
 """
@@ -25,6 +26,7 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
+    HummingLinearKernel,
     MacheteLinearKernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -32,6 +34,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16,
 )
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -55,8 +58,12 @@ def enable_pickle(monkeypatch):
         "fp16-channelwise",
     ],
 )
-def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points):
-    """Verify choose_mp_linear_kernel picks MacheteLinearKernel."""
+def test_machete_kernel_selected(
+    monkeypatch, act_type, weight_type, group_size, zero_points
+):
+    """Verify choose_mp_linear_kernel picks MacheteLinearKernel once Humming,
+    which is preferred for 4-bit weights, is out of the way."""
+    monkeypatch.setattr("vllm.envs.VLLM_DISABLED_KERNELS", ["HummingLinearKernel"])
     config = MPLinearLayerConfig(
         full_weight_shape=(4096, 4096),
         partition_weight_shape=(4096, 4096),
@@ -69,6 +76,29 @@ def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points)
     assert kernel is MacheteLinearKernel, (
         f"Expected MacheteLinearKernel, got {kernel.__name__}"
     )
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming-kernels is not installed")
+@pytest.mark.parametrize(
+    "weight_type,zero_points,expected",
+    [
+        (scalar_types.uint4b8, False, HummingLinearKernel),
+        (scalar_types.uint4, True, HummingLinearKernel),
+        (scalar_types.uint8b128, False, MacheteLinearKernel),
+    ],
+    ids=["w4-gptq", "w4-awq", "w8"],
+)
+def test_humming_preferred_for_4bit_weights(weight_type, zero_points, expected):
+    """On Hopper, Humming outranks Machete for 4-bit weights only."""
+    config = MPLinearLayerConfig(
+        full_weight_shape=(4096, 4096),
+        partition_weight_shape=(4096, 4096),
+        act_type=torch.bfloat16,
+        weight_type=weight_type,
+        group_size=128,
+        zero_points=zero_points,
+    )
+    assert choose_mp_linear_kernel(config) is expected
 
 
 @pytest.mark.parametrize(
@@ -127,7 +157,12 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
 )
 def test_w4a16_machete_e2e(vllm_runner, model_name):
     """Load a W4A16 model, verify Machete kernel is used, and generate."""
-    with vllm_runner(model_name, enforce_eager=True, gpu_memory_utilization=0.5) as llm:
+    with vllm_runner(
+        model_name,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        linear_backend="machete",
+    ) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -161,6 +196,7 @@ def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
         enforce_eager=True,
         dtype="bfloat16",
         gpu_memory_utilization=0.5,
+        linear_backend="machete",
     ) as llm:
 
         def check_kernel_type(model):
