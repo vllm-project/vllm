@@ -132,6 +132,6 @@ class SpeculatorsConfig(PreTrainedConfig):
         }
         if result["method"] == "peagle":
             raise ValueError("P-EAGLE (parallel drafting EAGLE-3) is not supported.")
-        if result["method"] == "dflash2":
+        if result["method"] in ("dflash2", "dspine"):
             result["method"] = "dflash"
         return result

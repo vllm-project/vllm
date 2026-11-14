@@ -1529,6 +1529,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DSpineDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.8-27B",
+        speculative_model="tencent/Qwen3.8-27B-DSpine-b16",
+        use_original_num_layers=True,
+    ),
     # LiLiCorr checkpoints are not published yet.
     "LiLiCorrDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",

@@ -10,6 +10,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
+- [DSpine](#dspine)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
@@ -34,11 +35,33 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; matches against prior responses too. |
 | Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
-| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from drafter confidence; currently DSpark only. |
+| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from estimated acceptance. |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
+
+## DSpine
+
+DSpine drafts tokens in parallel with adjacent causal injection and
+predecessor-conditioned refinement. DSpine checkpoints use the DFlash serving
+path. Checkpoint metadata selects the DSpine model.
+
+```bash
+vllm serve Qwen/Qwen3.8-27B \
+  --language-model-only \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "tencent/Qwen3.8-27B-DSpine-b16",
+    "num_speculative_tokens": 15
+  }'
+```
+
+Set `num_speculative_tokens` to the checkpoint's block size minus one.
+Draft sampling defaults to `greedy`; set `draft_sample_method` to
+`probabilistic` for probabilistic proposals.
+Set `enable_adaptive_verification` to `true` in the speculative config to
+enable [adaptive verification](adaptive_verification.md).
 
 ## Custom Speculators (Experimental)
 
@@ -137,7 +160,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
-| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
+| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Draft tensor parallel size. For DSpine, this must match the target. |
 | `draft_decode_context_parallel_size` | `integer >= 1` | `None` | Decode context parallel size for the draft model: `1` or the target's `decode_context_parallel_size`. Defaults to the target's, except `dflash`/`dspark` drafts, which default to `1` unless they are full-attention MLA. |
 | `draft_enable_eplb` | `boolean` | `true` | Enable EPLB for the draft when target EPLB is enabled. Set to `false` to disable EPLB for the draft. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
