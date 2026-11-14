@@ -23,7 +23,30 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for NIXL KV transfer performance metrics.
+
+    Records per-transfer telemetry (duration, bytes, descriptors) from each
+    TP rank independently. Stats are aggregated across all ranks via
+    :meth:`aggregate`, which concatenates observation lists rather than
+    merging summaries. :meth:`reduce` then computes statistics over the
+    combined pool of observations from all ranks.
+
+    Important aggregation semantics:
+        - "Num successful transfers" is the **total count across all TP
+          ranks**, not a per-rank count.
+        - "Avg MB per transfer" averages over individual rank-level
+          transfers, not total bytes moved per logical KV transfer.
+        - "Throughput (MB/s)" is ``total_MB_all_ranks / total_time_all_ranks``,
+          which approximates an average per-rank throughput rather than
+          aggregate system throughput.
+        - Percentiles (P90) are computed over the combined distribution of
+          all ranks' transfer times.
+
+    This design is intentional: workers report telemetry in a
+    fire-and-forget manner and the logger process pools observations before
+    computing summary statistics. Users should interpret the logged metrics
+    accordingly.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -31,7 +54,9 @@ class NixlKVConnectorStats(KVConnectorStats):
             self.reset()
 
     def reset(self):
-        # Must be serializable
+        """Clear all recorded telemetry. Data is stored as flat lists so it
+        remains JSON-serializable for transfer from worker to logger process.
+        """
         self.data: dict[str, list[float | int]] = {
             "transfer_duration": [],
             "post_duration": [],
@@ -44,7 +69,17 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_notifications_after_expiry": [],
         }
 
+<<<<<<< HEAD
     def record_transfer(self, res: "nixlXferTelemetry | None"):
+=======
+    def record_transfer(self, res: "nixlXferTelemetry"):
+        """Record telemetry for one successful NIXL KV cache transfer.
+
+        Called once per transfer by each TP rank independently. Units are
+        normalised here (microseconds → seconds) to stay consistent with the
+        rest of the codebase.
+        """
+>>>>>>> 6cd297b965 (docs: document NIXL KV connector metrics aggregation semantics)
         # Keep metrics units consistent with rest of the code: time us->s
         if res is None:
             return
@@ -74,11 +109,21 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["num_notifications_after_expiry"].append(1)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
+        """Return a copy of current stats and clear the accumulator.
+
+        Used by the worker to hand off telemetry to the logger process
+        without dropping observations recorded in the meantime.
+        """
         old = copy.copy(self)
         self.reset()
         return old
 
     def is_empty(self) -> bool:
+        """Return True when no meaningful observations were recorded.
+
+        Failure-only updates are *not* treated as empty so they are still
+        reported in the log interval.
+        """
         # Do not discard metrics update that are entirely failures related.
         return (
             self.num_successful_transfers == 0
@@ -90,6 +135,13 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """Merge another stats object into this one by extending lists.
+
+        This concatenates raw observations from *other* (typically one TP
+        rank's telemetry) into the current lists. After aggregation the
+        combined pool contains observations from **all** ranks, which is the
+        input to :meth:`reduce`.
+        """
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -98,6 +150,32 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
+        """Compute summary statistics over the combined observation pool.
+
+        The input lists contain observations from **all TP ranks**
+        (see :meth:`aggregate`). The returned metrics therefore describe the
+        pooled distribution across ranks, not any single rank or the system
+        aggregate:
+
+        - **Num successful transfers**: total transfer count across all ranks.
+        - **Avg / P90 xfer time (ms)**: mean and 90th-percentile transfer
+          duration over all rank-level transfers.
+        - **Avg / P90 post time (ms)**: mean and 90th-percentile post-
+          processing duration over all rank-level transfers.
+        - **Avg MB per transfer**: average payload size of individual
+          rank-level transfers (not total bytes per logical KV move).
+        - **Throughput (MB/s)**: ``total_MB_all_ranks / total_time_all_ranks``,
+          i.e. an average per-rank throughput, not aggregate system
+          throughput.
+        - **Avg number of descriptors**: mean descriptor count per transfer.
+
+        Failure counts are reported every interval regardless of whether any
+        transfers succeeded. Transfer, handshake and notification failures
+        are grouped as sporadic transport-layer events; KV expiry is separate
+        because it signals autoscaler behaviour. Notifications after expiry
+        are surfaced because the reader may have consumed already-reused KV
+        blocks.
+        """
         # Compute compact representative stats suitable for CLI logging.
         # Failure counts are reported on every interval: transfer, handshake
         # and notification failures are grouped as sporadic
