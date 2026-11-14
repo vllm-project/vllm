@@ -11,6 +11,10 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     get_layerwise_info,
 )
 from vllm.model_executor.model_loader.reload.meta import materialize_layer
+from vllm.model_executor.model_loader.reload.online import (
+    fill_online_layer,
+    has_online_buffers,
+)
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
@@ -34,6 +38,14 @@ class DummyModelLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         for layer in model.modules():
+            if has_online_buffers(layer):
+                # Online quantization: dummy checkpoint weights, then quantize.
+                def fill(layer: nn.Module = layer) -> None:
+                    for name, tensor in get_layer_tensors(layer).items():
+                        initialize_single_dummy_weight(tensor, name=name)
+
+                fill_online_layer(layer, fill)
+                continue
             info = get_layerwise_info(layer)
             if info.can_load():
                 self._process_online_quant_layer(layer, info)

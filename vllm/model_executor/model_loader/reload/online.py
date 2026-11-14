@@ -39,6 +39,7 @@ logger = init_logger(__name__)
 __all__ = [
     "begin_online_reload",
     "drop_online_buffers",
+    "fill_online_layer",
     "finalize_online",
     "has_online_buffers",
     "install_online_buffers",
@@ -253,6 +254,20 @@ def begin_online_reload(model: torch.nn.Module, defer: bool = False) -> None:
         state.loaded.clear()
         state.unknown_key = False
         state.defer = defer
+
+
+def fill_online_layer(layer: torch.nn.Module, fill: Callable[[], None]) -> None:
+    """Load `layer` without a checkpoint (dummy weights): materialize every
+    checkpoint-format parameter, let `fill` write the layer's tensors, then
+    process it."""
+    state = _state(layer)
+    assert state is not None
+    for name, meta in state.ckpt.items():
+        if name not in state.loaded:
+            layer.register_parameter(name, _materialize(meta, state.device))  # type: ignore[arg-type]
+            state.loaded.add(name)
+    fill()
+    _process(layer, state)
 
 
 def finalize_online(model: torch.nn.Module, strict: bool) -> None:

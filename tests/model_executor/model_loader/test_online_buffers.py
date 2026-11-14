@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.reload.online import (
     begin_online_reload,
+    fill_online_layer,
     finalize_online,
     install_online_buffers,
 )
@@ -214,6 +215,14 @@ def test_moe_full_expert_tensor_covers_every_expert():
     param.weight_loader(param, full[:, 2:], "w", "w3", 1)
     assert layer.quant_method.runs == 1
     _assert_equal(layer, _reference(full, "w13_weight"))
+
+
+def test_fill_online_layer_processes_dummy_weights():
+    # `load_format=dummy`: no loader runs; the layer is filled and processed.
+    layer, full = _QKV(), _rand(8, 4)
+    fill_online_layer(layer, lambda: layer.weight.data.copy_(full))
+    assert layer.quant_method.runs == 1
+    _assert_equal(layer, _reference(full))
 
 
 def test_load_without_shard_key_defers_to_finalize():
