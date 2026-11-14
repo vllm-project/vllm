@@ -710,7 +710,8 @@
         "refresh": 1,
         "regex": "",
         "sort": 1,
-        "type": "query"
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
       },
       {
         "current": { "text": "All hours", "value": "All hours" },
@@ -745,7 +746,8 @@
         "query": "",
         "refresh": 1,
         "regex": "",
-        "type": "query"
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
       }
     ]
   },
@@ -757,4 +759,3 @@
   "version": 2,
   "weekStart": ""
 }
-
