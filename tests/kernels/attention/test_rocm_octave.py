@@ -25,6 +25,15 @@ def _arch() -> str | None:
     return "cdna3" if get_cdna_version() == 3 else None
 
 
+def _wmma_chip() -> bool:
+    """The chips with the WMMA decode and prefill (octave_arch.cuh)."""
+    if _arch() != "rdna3":
+        return False
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1151
+
+    return on_gfx1100() or on_gfx1151()
+
+
 pytestmark = pytest.mark.skipif(
     _arch() is None or not hasattr(torch.ops._C, "octave_decode"),
     reason="Octave kernels need RDNA3 or CDNA3",
@@ -303,6 +312,41 @@ def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt):
         fmt.kernel_code,
     )
     return out
+
+
+@pytest.mark.skipif(not _wmma_chip(), reason="WMMA tier: gfx1100 and gfx1151")
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+def test_decode_runs_wmma_tier(cache_dtype):
+    """use_wmma=True runs the WMMA decode on the chips that have it, instead of
+    falling back to the portable kernel, which test_decode_matches_reference
+    would also accept. The tiers round the query differently (fp16 against
+    int8), so both match the reference but not each other."""
+    torch.manual_seed(5)
+    dev, fmt = "cuda", _format(cache_dtype)
+    signs = sq.sign_bits(HEAD).to(dev)
+    hkv, group, lens = 1, 6, [700, 1500]
+    max_blocks = max(math.ceil(n / BLOCK) for n in lens)
+    nblk = len(lens) * max_blocks
+    cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    block_table = torch.randperm(nblk, device=dev).view(len(lens), max_blocks).int()
+    for i, n in enumerate(lens):
+        k = torch.randn(n, hkv, HEAD, device=dev).half()
+        v = torch.randn(n, hkv, HEAD, device=dev).half()
+        _fill(cache, block_table[i], k, v, signs, signs, fmt)
+
+    q_to_req = torch.arange(len(lens), dtype=torch.int32, device=dev)
+    q_to_klen = torch.tensor(lens, dtype=torch.int32, device=dev)
+    q = (torch.randn(len(lens), hkv * group, HEAD, device=dev) * 2).half()
+    wmma, portable = (
+        _decode(cache, q, block_table, q_to_req, q_to_klen, signs, fmt, use_wmma)
+        for use_wmma in (True, False)
+    )
+    ref = sq.reference_attention(
+        q.float(), cache, block_table, q_to_req, q_to_klen, fmt, 1 / 16
+    )
+    assert _rel(wmma, ref) < 2e-2
+    assert _rel(portable, ref) < 2e-2
+    assert not torch.equal(wmma, portable)
 
 
 @pytest.mark.parametrize(

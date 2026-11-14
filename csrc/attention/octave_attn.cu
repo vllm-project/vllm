@@ -1073,8 +1073,8 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
       win ? wtags->data_ptr<int>() : nullptr, wmask,
       win ? stags->data_ptr<int>() : nullptr, smask, 4);
   TORCH_CHECK(ns > 0,
-              "octave_decode_sparse: needs the WMMA tier (gfx1100, head size "
-              "256, GQA group <= 8)");
+              "octave_decode_sparse: needs the WMMA tier (gfx1100 or gfx1151, "
+              "head size 256, GQA group <= 8)");
   if (!win) {
     launch_reduce(out, mid_o, v_signs, ns, stream);
     return;
