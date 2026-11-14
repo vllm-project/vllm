@@ -291,7 +291,7 @@ class Case:
         ]
     ],
 )
-@pytest.mark.parametrize("num_token", [2])
+@pytest.mark.parametrize("num_token", [2, 160])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
     if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
