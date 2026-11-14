@@ -116,8 +116,12 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
         )
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_w4a16_moe import (  # noqa: E501
+            FlashInferCuteDSLW4A16Experts,
+        )
 
-        return [FlashInferCuteDSLExperts]
+        # W4A4 first; the W4A16 class only accepts activation_key=None.
+        return [FlashInferCuteDSLExperts, FlashInferCuteDSLW4A16Experts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
@@ -289,7 +293,14 @@ def select_nvfp4_moe_backend(
                 f"'flashinfer_moe_ep_cutedsl', 'cutlass', 'b12x', 'marlin', "
                 f"or 'humming' instead."
             )
-        return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
+        kernel_cls, rejected = oracle.try_backend(requested_backend)
+        if kernel_cls is None:
+            # Name every candidate: FLASHINFER_CUTEDSL has two experts, and the
+            # last reason alone would not explain why W4A4 was rejected.
+            reason = "; ".join(r for _, r in rejected if r)
+            raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
+        logger.info_once(oracle.make_log_backend(requested_backend, AVAILABLE_BACKENDS))
+        return requested_backend, kernel_cls
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
@@ -328,6 +339,26 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
 ]:
     use_a16 = _use_a16(nvfp4_backend, use_a16)
+    if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL and use_a16:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_w4a16_moe import (  # noqa: E501
+            prepare_w4a16_scales,
+        )
+
+        if is_act_and_mul:
+            raise ValueError("Experimental FlashInfer W4A16 requires non-gated ReLU2")
+        for weight, scale in ((w13, w13_scale), (w2, w2_scale)):
+            if tuple(scale.shape) != (*weight.shape[:2], weight.shape[2] // 8):
+                raise ValueError("W4A16 conversion requires fresh unswizzled scales")
+        return (
+            w13,
+            prepare_w4a16_scales(w13_scale),
+            w13_scale_2,
+            None,
+            w2,
+            prepare_w4a16_scales(w2_scale),
+            w2_scale_2,
+            None,
+        )
     if nvfp4_backend == NvFp4MoeBackend.B12X:
         if a13_scale is None or a2_scale is None:
             if not use_a16:
@@ -533,8 +564,10 @@ def make_nvfp4_moe_quant_config(
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif backend == NvFp4MoeBackend.MARLIN or (
-        backend == NvFp4MoeBackend.B12X and use_a16
+    elif (
+        (backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL and use_a16)
+        or backend == NvFp4MoeBackend.MARLIN
+        or (backend == NvFp4MoeBackend.B12X and use_a16)
     ):
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
