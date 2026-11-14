@@ -315,7 +315,9 @@ def test_tied_head_keeps_the_embedding(online_head_config):
     head.tie_weights(embed)
     # The model loader's process_weights_after_loading pass.
     head.quant_method.process_weights_after_loading(head)
-    assert head.weight is embed.weight
+    # The head holds only the int4 copy; the embeddings keep their weight.
+    assert head.weight is not embed.weight
+    assert embed.weight.dtype == torch.bfloat16
     torch.testing.assert_close(embed.weight.data, original, rtol=0, atol=0)
     tokens = torch.arange(16, device="cuda")
     torch.testing.assert_close(embed(tokens), original[tokens], rtol=0, atol=0)

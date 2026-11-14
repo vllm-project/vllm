@@ -161,12 +161,13 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
         set_weight_attrs(packed, {"packed_dim": 1})
         set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0})
         if tied:
-            # `weight` is the input embeddings' parameter: keep it, and add
-            # the quantized copy under its own name.
-            w_q_name = "weight_packed"
+            # `weight` is the input embeddings' parameter, which they keep: the
+            # head drops it, since kernels may re-register their packed weight
+            # under that name.
+            del layer.weight
             w_q = Parameter(packed, requires_grad=False)
             set_weight_attrs(w_q, {"input_dim": 1, "output_dim": 0, "packed_dim": 1})
-            layer.register_parameter(w_q_name, w_q)
+            layer.register_parameter("weight", w_q)
             added = packed.nbytes + scales.nbytes
             if zero_points is not None:
                 added += zero_points.nbytes
@@ -180,8 +181,8 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
             )
         else:
             # The loaded parameter already reports input_dim=1, output_dim=0.
-            w_q_name = "weight"
-            replace_parameter(layer, w_q_name, packed)
+            replace_parameter(layer, "weight", packed)
+        w_q_name = "weight"
         replace_parameter(layer, "weight_scale", scales)
         w_zp_name = None
         if zero_points is not None:
