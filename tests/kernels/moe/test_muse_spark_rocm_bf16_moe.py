@@ -39,7 +39,9 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW8A8Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
@@ -47,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
     MuseSparkAiterExperts,
+    MuseSparkAiterFp8Experts,
     MuseSparkOnlineMXFP4FusedMoE,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
@@ -289,7 +292,7 @@ def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
         MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
 
 
-def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
+def test_muse_fp8_method_selects_route_preserving_experts(monkeypatch) -> None:
     state = {"backend": Fp8MoeBackend.TRITON}
 
     def _fake_quark_init(self, moe, weight_quant_key, activation_quant_key) -> None:
@@ -309,8 +312,12 @@ def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
     assert method.experts_cls is MuseSparkTritonExperts
 
     state["backend"] = Fp8MoeBackend.AITER
-    with pytest.raises(NotImplementedError, match="Triton FP8"):
-        MuseSparkQuarkW8A8Fp8FusedMoE(config, kFp8StaticChannelSym, kFp8DynamicTokenSym)
+    method = MuseSparkQuarkW8A8Fp8FusedMoE(
+        config, kFp8StaticChannelSym, kFp8DynamicTokenSym
+    )
+    assert method.experts_cls is MuseSparkAiterFp8Experts
+    with pytest.raises(NotImplementedError, match="per-token"):
+        MuseSparkQuarkW8A8Fp8FusedMoE(config, kFp8Static128BlockSym, kFp8Dynamic128Sym)
 
 
 def test_muse_unquantized_method_is_pinned_to_triton(
@@ -436,7 +443,7 @@ _FAIL_CLOSED_EVERYWHERE = [
     + [
         (validate_bf16_deployment, _moe_config(moe_backend="aiter"), "Triton"),
         (validate_fp8_deployment, _moe_config(moe_backend="auto"), "Triton"),
-        (validate_fp8_deployment, _moe_config(moe_backend="aiter"), "Triton"),
+        (validate_fp8_deployment, _moe_config(moe_backend="flydsl"), "Triton"),
     ],
 )
 def test_unsupported_deployments_fail_closed(

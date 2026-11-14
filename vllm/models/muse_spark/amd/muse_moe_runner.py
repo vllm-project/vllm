@@ -24,6 +24,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterExperts,
+    AiterFp8ChannelExperts,
     AiterMxfp4Experts,
     rocm_aiter_fused_experts,
 )
@@ -116,9 +118,9 @@ def validate_mxfp4_deployment(moe_config: FusedMoEConfig) -> None:
 def validate_fp8_deployment(moe_config: FusedMoEConfig) -> None:
     """Reject deployments whose FP8 finalization is not implemented."""
     _validate_tp_post_norm_deployment(moe_config, "FP8")
-    if moe_config.moe_backend != "triton":
+    if moe_config.moe_backend not in ("triton", "aiter"):
         raise NotImplementedError(
-            "Muse Spark FP8 on ROCm requires the Triton MoE backend; got "
+            "Muse Spark FP8 on ROCm requires the Triton or AITER MoE backend; got "
             f"{moe_config.moe_backend!r}."
         )
 
@@ -411,8 +413,12 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         )
 
 
-class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
+class MuseSparkAiterRouteExperts(_RouteOutputHandoff, AiterExperts):
     """AITER experts that return one unweighted output per selected route."""
+
+    _MUSE_QUANT_CONFIG: (
+        type[MuseSparkQuarkOCPMXMoEQuantConfig] | type[MuseSparkQuarkFp8MoEQuantConfig]
+    )
 
     def __init__(
         self,
@@ -420,9 +426,9 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         quant_config: FusedMoEQuantConfig,
     ) -> None:
         super().__init__(moe_config, quant_config)
-        if not isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig):
+        if not isinstance(quant_config, self._MUSE_QUANT_CONFIG):
             raise TypeError(
-                "MuseSparkAiterExperts requires MuseSparkQuarkOCPMXMoEQuantConfig."
+                f"{type(self).__name__} requires {self._MUSE_QUANT_CONFIG.__name__}."
             )
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("Muse Spark post-expert norm is not configured.")
@@ -544,7 +550,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         quant_config = self.quant_config
-        assert isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig)
+        assert isinstance(quant_config, self._MUSE_QUANT_CONFIG)
         assert quant_config.post_expert_norm_fn is not None
         return MuseSparkTopKWeightAndReduce(
             quant_config.post_expert_norm_fn,
@@ -553,8 +559,20 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         )
 
 
+class MuseSparkAiterExperts(MuseSparkAiterRouteExperts, AiterMxfp4Experts):
+    """AITER MXFP4 experts that return one unweighted output per route."""
+
+    _MUSE_QUANT_CONFIG = MuseSparkQuarkOCPMXMoEQuantConfig
+
+
+class MuseSparkAiterFp8Experts(MuseSparkAiterRouteExperts, AiterFp8ChannelExperts):
+    """AITER per-token FP8 experts that return one unweighted output per route."""
+
+    _MUSE_QUANT_CONFIG = MuseSparkQuarkFp8MoEQuantConfig
+
+
 class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
-    """Quark W8A8 FP8 method using route-preserving Triton experts."""
+    """Quark W8A8 FP8 method using route-preserving Triton or AITER experts."""
 
     def __init__(
         self,
@@ -564,12 +582,21 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
     ) -> None:
         validate_fp8_deployment(moe)
         super().__init__(moe, weight_quant_key, activation_quant_key)
-        if self.fp8_backend is not Fp8MoeBackend.TRITON:
-            raise NotImplementedError(
-                "Muse Spark FP8 on ROCm requires the Triton FP8 MoE backend; "
-                f"got {self.fp8_backend.value}."
+        if self.fp8_backend is Fp8MoeBackend.TRITON:
+            self.experts_cls = MuseSparkTritonExperts
+        elif (
+            self.fp8_backend is Fp8MoeBackend.AITER
+            and AiterFp8ChannelExperts._supports_quant_scheme(
+                weight_quant_key, activation_quant_key
             )
-        self.experts_cls = MuseSparkTritonExperts
+        ):
+            self.experts_cls = MuseSparkAiterFp8Experts
+        else:
+            raise NotImplementedError(
+                "Muse Spark FP8 on ROCm requires the Triton FP8 MoE backend, or "
+                "the AITER backend with per-channel weight and per-token "
+                f"activation scales; got {self.fp8_backend.value}."
+            )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
