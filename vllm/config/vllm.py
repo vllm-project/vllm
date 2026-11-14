@@ -232,14 +232,13 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if rotary embedding custom op is active and
-    use_inductor_graph_partition is enabled.
-    """
+    """Enable if the KV cache update stays inside the compiled graph and the
+    rotary embedding custom op is not disabled."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_enabled()
-        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and "-rotary_embedding" not in cfg.compilation_config.custom_ops
         and (
             cfg.compilation_config.use_inductor_graph_partition
             or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -273,11 +272,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not rocm_aiter_ops.is_enabled():
-        return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    return enable_rope_kvcache_fusion(cfg)
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -2028,10 +2023,6 @@ class VllmConfig:
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
-        # Re-compute compile ranges after platform-specific config updates
-        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
-        self._set_compile_ranges()
-
         if self.parallel_config.all2all_backend == "moonep":
             if (
                 self.model_config is not None
@@ -2091,6 +2082,22 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
+
+        # __post_init__ ran before these flags resolved; re-append the custom op.
+        # TODO(Rohan138): support rope native forward match and remove this.
+        # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+        rope_pass_config = self.compilation_config.pass_config
+        if (
+            rope_pass_config.fuse_rope_kvcache
+            or rope_pass_config.fuse_qk_norm_rope_kvcache
+            or rope_pass_config.enable_qk_norm_rope_fusion
+        ) and "+rotary_embedding" not in self.compilation_config.custom_ops:
+            self.compilation_config.custom_ops.append("+rotary_embedding")
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        # and after set_splitting_ops_for_v1.
+        self._set_compile_ranges()
 
         # final check of cudagraph mode after all possible updates
         if (

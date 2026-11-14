@@ -4937,3 +4937,79 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         for rank in range(8)
     ]
     assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
+
+
+@pytest.fixture
+def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
+    """Resolve the ROCm fusion defaults as if AITER were on, on any platform."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", classmethod(lambda cls: True))
+
+
+def _resolved(compilation_config: CompilationConfig) -> VllmConfig:
+    return VllmConfig(
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=compilation_config,
+    )
+
+
+@pytest.mark.parametrize(
+    "compilation_kwargs",
+    [
+        {"use_inductor_graph_partition": True},
+        {"splitting_ops": []},
+    ],
+    ids=["graph_partition", "empty_splitting_ops"],
+)
+def test_rope_kvcache_fusion_resolves_for_the_documented_opt_ins(
+    aiter_enabled, compilation_kwargs
+):
+    """Graph partition or empty `splitting_ops` enables the RoPE + KV-cache
+    fusion through the optimization level alone."""
+    config = _resolved(CompilationConfig(**compilation_kwargs))
+
+    pass_config = config.compilation_config.pass_config
+    assert pass_config.fuse_rope_kvcache
+    assert pass_config.fuse_qk_norm_rope_kvcache
+    assert "+rotary_embedding" in config.compilation_config.custom_ops
+
+
+def test_rope_kvcache_fusion_stays_off_by_default(aiter_enabled):
+    """Without either opt-in the fusion stays off and the custom op is not
+    requested."""
+    config = _resolved(CompilationConfig())
+
+    pass_config = config.compilation_config.pass_config
+    assert not pass_config.fuse_rope_kvcache
+    assert not pass_config.fuse_qk_norm_rope_kvcache
+    assert "+rotary_embedding" not in config.compilation_config.custom_ops
+    assert (
+        pass_config.rope_kvcache_fusion_max_token_num
+        not in config.compilation_config.compile_ranges_endpoints
+    )
+
+
+def test_rope_kvcache_fusion_honours_the_custom_op_opt_out(aiter_enabled):
+    config = _resolved(
+        CompilationConfig(
+            use_inductor_graph_partition=True,
+            custom_ops=["none", "-rotary_embedding"],
+        )
+    )
+
+    pass_config = config.compilation_config.pass_config
+    assert not pass_config.fuse_rope_kvcache
+    assert not pass_config.fuse_qk_norm_rope_kvcache
+
+
+def test_rope_kvcache_fusion_needs_aiter(monkeypatch: pytest.MonkeyPatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", classmethod(lambda cls: False))
+    config = _resolved(CompilationConfig(use_inductor_graph_partition=True))
+
+    pass_config = config.compilation_config.pass_config
+    assert not pass_config.fuse_rope_kvcache
+    assert not pass_config.fuse_qk_norm_rope_kvcache
+    assert "+rotary_embedding" not in config.compilation_config.custom_ops
