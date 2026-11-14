@@ -17,6 +17,7 @@ from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.multimodal.audio import AudioResampler
 
 MISTRAL_FORMAT_ARGS = [
@@ -90,6 +91,31 @@ def test_request_extensions_reach_prompt_and_sampling_params(tmp_path, encoding)
     expected = None if encoding == "absent" else extensions
     assert params.extra_args == expected
     assert (request.to_sampling_params(16).extra_args or {}) == (expected or {})
+
+
+@pytest.mark.parametrize(
+    ("request_cls", "task_type"),
+    [(TranscriptionRequest, "transcribe"), (TranslationRequest, "translate")],
+)
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"use_beam_search": True, "max_completion_tokens": 7}],
+)
+def test_decoding_options_reach_prompt_params(
+    tmp_path, request_cls, task_type, options
+):
+    """Models see the decoding options so they can reject unsupported ones."""
+    WhisperConfig().save_pretrained(tmp_path)
+    request = request_cls(file=UploadFile(BytesIO()), **options)
+    params = request.build_stt_params(
+        audio=np.zeros(160, dtype=np.float32),
+        stt_config=SpeechToTextConfig(),
+        model_config=ModelConfig(model=str(tmp_path)),
+        task_type=task_type,
+    )
+
+    assert params.use_beam_search is options.get("use_beam_search", False)
+    assert params.max_completion_tokens == options.get("max_completion_tokens")
 
 
 async def transcribe_and_check(

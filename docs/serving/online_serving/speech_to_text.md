@@ -28,6 +28,27 @@ changes that size, but not the audio the API accepts.
 
 The Transformers modeling backend needs Transformers 5.23 or later for transcription.
 
+### Failed Generations
+
+These rules apply to both the Transcriptions and Translations APIs. When generation
+ends with an error, a non-streaming request returns HTTP 500 instead of a partial
+transcript. When the server aborts the request, for example during shutdown, it
+returns HTTP 503, which is safe to retry. A streaming request has already returned
+HTTP 200, so on an error it sends an error event with code 500 followed by
+`data: [DONE]`. In an aborted streaming request, the last transcription chunk
+has `finish_reason` `abort` (a usage chunk may follow); when long audio is split into chunks, the remaining
+chunks are not transcribed.
+
+A request that sets `max_completion_tokens` may end with `finish_reason` `length`
+and a truncated transcript; it still returns HTTP 200. When a server limit ends
+generation first, such as `--max-model-len` or the model's default output length,
+a non-streaming request returns HTTP 422 instead of a truncated transcript, and a
+streaming request sends an error event with code 422 followed by `data: [DONE]`.
+The limit applies to each chunk of long audio. Shorter audio avoids the error.
+
+A model may reject a request option it cannot honor, such as `use_beam_search`;
+the request then returns HTTP 400 before generation starts.
+
 ### Uploading Audio Files
 
 The Transcriptions API supports uploading audio files in various formats including FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, and WEBM.
@@ -167,6 +188,7 @@ Whisper models can translate audio from one of the 55 non-English supported lang
 Please mind that the popular `openai/whisper-large-v3-turbo` model does not support translating.
 `nvidia/canary-1b-v2` translates to or from English only and needs both `language` and `to_language`.
 Models that cannot translate, such as Voxtral and GLM-ASR, return a 400 error.
+Failed generations are reported as described in [Failed Generations](#failed-generations).
 
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
