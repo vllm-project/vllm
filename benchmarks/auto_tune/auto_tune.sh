@@ -18,6 +18,8 @@ MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
 MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
 NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
 NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
+# Optional. Unset on GPU: vLLM sizes the KV cache from measured memory there.
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-""}
 HOSTNAME=$(hostname)
 if [[ -z "$HOSTNAME" ]]; then
     echo "Error: Failed to determine hostname." >&2
@@ -38,6 +40,7 @@ echo "DOWNLOAD_DIR=$DOWNLOAD_DIR"
 echo "INPUT_LEN=$INPUT_LEN"
 echo "OUTPUT_LEN=$OUTPUT_LEN"
 echo "MAX_MODEL_LEN=$MAX_MODEL_LEN"
+echo "GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION"
 echo "MIN_CACHE_HIT_PCT=$MIN_CACHE_HIT_PCT"
 echo "MAX_LATENCY_ALLOWED_MS=$MAX_LATENCY_ALLOWED_MS"
 echo "NUM_SEQS_LIST=$NUM_SEQS_LIST"
@@ -87,7 +90,6 @@ start_server() {
         "$MODEL"
         "--port" "8004"
         "--host" "$HOSTNAME"
-        "--gpu-memory-utilization" "$gpu_memory_utilization"
         "--max-num-seqs" "$max_num_seqs"
         "--max-num-batched-tokens" "$max_num_batched_tokens"
         "--tensor-parallel-size" "$TP"
@@ -96,6 +98,9 @@ start_server() {
         "--download-dir" "$DOWNLOAD_DIR"
         "--max-model-len" "$MAX_MODEL_LEN"
     )
+    if [[ -n "$gpu_memory_utilization" ]]; then
+        common_args_array+=("--gpu-memory-utilization" "$gpu_memory_utilization")
+    fi
 
     # Use the array expansion "${common_args_array[@]}"
     # This correctly passes each element as a separate argument.
@@ -249,6 +254,12 @@ run_benchmark() {
 read -r -a num_seqs_list <<< "$NUM_SEQS_LIST"
 read -r -a num_batched_tokens_list <<< "$NUM_BATCHED_TOKENS_LIST"
 
+if [[ -n "$GPU_MEMORY_UTILIZATION" || "$SYSTEM" == "GPU" ]]; then
+    # On GPU, vLLM sizes the KV cache from the memory free after warmup and
+    # defaults gpu_memory_utilization to 1.0, so there is nothing to search.
+    gpu_memory_utilization=$GPU_MEMORY_UTILIZATION
+    echo "Using gpu_memory_utilization=${gpu_memory_utilization:-default} to serve model."
+else
 # first find out the max gpu-memory-utilization without HBM OOM.
 gpu_memory_utilization=0.98
 find_gpu_memory_utilization=0
@@ -269,6 +280,7 @@ if [[ "$find_gpu_memory_utilization" -eq 1 ]]; then
 else
     echo "Cannot find a proper gpu_memory_utilization over 0.9 to serve the model, please check logs in $LOG_FOLDER."
     exit 1
+fi
 fi
 
 for num_seqs in "${num_seqs_list[@]}"; do

@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -229,6 +230,18 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def test_store_marks_a_cached_miss_present(fs_tier):
+    tier, _ = fs_tier
+    block_key = key(1)
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.MISS]
+
+    tier.submit_store(make_job(1, [block_key], [0]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.HIT]
 
 
 def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
@@ -981,8 +994,13 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
-        assert manager.prepare_store(keys, _CTX) is not None
-        manager.complete_store(keys, _CTX)  # cascades to the fs tier
+        assert (
+            manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())

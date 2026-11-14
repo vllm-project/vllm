@@ -21,7 +21,7 @@ def eplb_map_and_record(
 ):
     """Map logical expert ids to physical replicas and record expert load.
 
-    ``token_idx`` broadcasts against ``logical_ids``; masked-off or
+    `token_idx` broadcasts against `logical_ids`; masked-off or
     out-of-range ids map to -1.
     """
     valid = mask & (logical_ids >= 0) & (logical_ids < num_logical)

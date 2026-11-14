@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``).
+"""Native CDNA4 MXFP8 linear (`RocmDotScaledMxfp8LinearKernel`).
 
 DeepSeek V4.1 routes every attention linear through this kernel. It used to
-carry two BF16-dequantize workarounds on ROCm (one for all ``.attn.`` linears,
-one for the row-parallel ``wo_b``, whose comment blamed NaNs at small token
+carry two BF16-dequantize workarounds on ROCm (one for all `.attn.` linears,
+one for the row-parallel `wo_b`, whose comment blamed NaNs at small token
 counts). These tests pin the two properties those workarounds stood in for --
 finite output and MXFP8-level accuracy -- across the V4.1 attention shapes at
 TP=4 and the small token counts decode actually runs.
 
 They also cover the tiny-M fused quant+GEMM fastpath of
-``rocm_mxfp8_block32_gemm_quant`` (at M <= 8 the activation quant runs inside
+`rocm_mxfp8_block32_gemm_quant` (at M <= 8 the activation quant runs inside
 the packed GEMM's K loop): bit-exactness with the stock two-launch
-``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` path at the serving
+`mxfp8_e4m3_quantize` + `rocm_mxfp8_block32_gemm` path at the serving
 shapes and under CUDA-graph capture/replay, agreement with a high-precision
 QDQ fp32 reference, and bit-identical fallbacks for ineligible inputs.
 """
@@ -60,6 +60,10 @@ M31_TP4_SHAPES = [
     ("shared_gate_up", 1536, 6144),
     ("shared_down", 6144, 768),
 ]
+M31_TP2_SHAPES = [
+    ("tp2_fused_qkv", 4992, 6144),
+    ("tp2_dense_gate_up", 12288, 6144),
+]
 
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
@@ -72,23 +76,117 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
 
 
 @pytest.mark.parametrize(
-    "n,k,selected,fallback",
+    "n,k,tiles",
     [
-        (2560, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (6144, 768, (16, 16, 256, 2, 3), (16, 32, 256, 4, 3)),
+        (
+            2560,
+            6144,
+            {
+                16: (16, 16, 1024, 2, 3),
+                32: (32, 16, 1024, 2, 3),
+                48: (16, 16, 1024, 2, 2),
+                96: (32, 32, 512, 2, 3),
+                192: (64, 32, 512, 2, 3),
+                256: (64, 64, 512, 4, 2),
+            },
+        ),
+        (
+            6144,
+            2048,
+            {
+                16: (16, 32, 512, 2, 3),
+                32: (32, 32, 512, 2, 3),
+                64: (64, 32, 512, 2, 3),
+                128: (64, 64, 512, 4, 2),
+                256: (128, 64, 256, 8, 3),
+            },
+        ),
+        (
+            1536,
+            6144,
+            {
+                32: (16, 16, 1024, 2, 3),
+                64: (32, 16, 1024, 2, 3),
+                80: (16, 16, 1024, 2, 2),
+                160: (32, 32, 512, 2, 3),
+                256: (64, 32, 512, 2, 3),
+            },
+        ),
+        (
+            6144,
+            768,
+            {
+                16: (16, 16, 256, 2, 3),
+                32: (32, 16, 256, 2, 3),
+                64: (64, 32, 256, 4, 3),
+                128: (64, 64, 256, 4, 3),
+                256: (128, 64, 256, 8, 3),
+            },
+        ),
+        (
+            4992,
+            6144,
+            {
+                16: None,
+                32: (32, 32, 512, 2, 3),
+                64: (64, 32, 512, 2, 3),
+                128: (64, 64, 512, 4, 2),
+                192: None,
+                256: (64, 64, 256, 4, 2),
+            },
+        ),
+        (
+            12288,
+            6144,
+            {
+                16: None,
+                32: (32, 16, 512, 2, 2),
+                64: (64, 64, 512, 4, 2),
+                192: (64, 64, 256, 4, 2),
+                256: (64, 64, 512, 4, 2),
+            },
+        ),
     ],
 )
-def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
-    """The gfx950 small-M tuning is shape-scoped and ends after M=16."""
+def test_rocm_mxfp8_linear_selects_m31_tiles(n, k, tiles):
+    """The gfx950 tuning is shape-scoped: each tile covers M up to its key
+    (and past the previous key); None, and M beyond 256, use the generic selection."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
-        pytest.skip("MiniMax-M3.1 small-M tuning requires gfx950")
-    for num_tokens in (1, 8, 16):
-        assert rocm_native._select_cfg(num_tokens, n, k) == selected
-    assert rocm_native._select_cfg(17, n, k) == fallback
+        pytest.skip("MiniMax-M3.1 tuning requires gfx950")
+    lo = 1
+    for max_m, tile in tiles.items():
+        for num_tokens in (lo, max_m):
+            if tile is None:
+                assert rocm_native._select_m31_cfg(num_tokens, n, k) is None
+            else:
+                assert rocm_native._select_cfg(num_tokens, n, k) == tile
+        lo = max_m + 1
+    assert rocm_native._select_m31_cfg(257, n, k) is None
+
+
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (2560, 6144),
+        (2304, 6144),
+        (6144, 2048),
+        (1536, 6144),
+        (6144, 768),
+        (6144, 6144),
+        (6144, 3072),
+        (4992, 6144),
+        (12288, 6144),
+    ],
+)
+def test_rocm_mxfp8_linear_m31_tiles_are_valid(n, k):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    for _, tile in rocm_native._M31_TILES[(n, k)]:
+        if tile is not None:
+            assert k % tile[2] == 0, "the K loop is unmasked"
 
 
 @pytest.mark.parametrize(
@@ -99,18 +197,111 @@ def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
         (6144, 768, (16, 32, 256, 4, 3)),
     ],
 )
-def test_rocm_mxfp8_linear_preserves_non_gfx950_tiles(monkeypatch, n, k, fallback):
+def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback):
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
-    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    monkeypatch.setattr(rocm_native, "_ON_CDNA4", False)
     for num_tokens in (1, 8, 16, 17):
         assert rocm_native._select_cfg(num_tokens, n, k) == fallback
 
 
+M31_TP1_SHAPES = [
+    ("fused_qkv", 9856, 6144),
+    ("o_proj", 6144, 8192),
+    ("dense_gate_up", 24576, 6144),
+    ("dense_down", 6144, 12288),
+    ("shared_gate_up", 6144, 6144),
+    ("shared_down", 6144, 3072),
+]
+
+_WIDE_PREFILL_TILE = (256, 256, 128, 4, 2)
+
+
 @pytest.mark.parametrize(
-    "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
+    "num_tokens,n,k,num_cus,wide",
+    [
+        (16384, 9856, 6144, 256, True),
+        (8192, 6144, 8192, 256, True),
+        (2048, 24576, 6144, 256, True),
+        (8192, 6144, 3072, 256, True),
+        (4096, 9856, 6144, 256, True),
+        (16384, 2560, 6144, 256, True),
+        (9349, 1536, 6144, 256, True),
+        (6144, 6144, 6144, 256, False),
+        (2048, 9856, 6144, 256, False),
+        (5041, 9856, 6144, 256, False),
+        (16384, 1536, 6144, 256, False),
+        # N <= 1024 and short K keep their own tiles.
+        (16384, 1024, 6144, 256, False),
+        (16384, 6144, 768, 256, False),
+        # M <= 1024 is untouched.
+        (1024, 24576, 6144, 256, False),
+        (64, 24576, 6144, 256, False),
+        # The waves follow the device's CU count.
+        (6144, 6144, 6144, 128, True),
+        (8192, 4992, 6144, 256, True),
+        (8192, 4992, 6144, 304, False),
+    ],
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
+def test_rocm_mxfp8_linear_wide_prefill_tile_follows_cu_waves(
+    monkeypatch, num_tokens, n, k, num_cus, wide
+):
+    """The 256x256x128 tile is taken exactly when the 128x128 grid needs at
+    least 10/3 as many CU waves as the 256x256 one."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", True)
+    monkeypatch.setattr(rocm_native, "num_compute_units", lambda: num_cus)
+    cfg = rocm_native._select_cfg(num_tokens, n, k)
+    assert (cfg == _WIDE_PREFILL_TILE) is wide, cfg
+    assert k % cfg[2] == 0, "the K loop is unmasked"
+
+
+def test_rocm_mxfp8_linear_wide_prefill_tile_is_gfx950_only(monkeypatch):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    for _, n, k in M31_TP1_SHAPES:
+        for num_tokens in (2048, 8192, 16384):
+            assert rocm_native._select_cfg(num_tokens, n, k) != _WIDE_PREFILL_TILE
+
+
+@pytest.mark.parametrize("name,n,k", M31_TP1_SHAPES, ids=lambda v: str(v))
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_wide_prefill_tile_matches_dequant_reference(name, n, k):
+    """A full 16384-token prefill chunk on the 256x256x128 tile matches an
+    exact MXFP8 GEMM of the same inputs."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("the wide prefill tile is gfx950-only")
+    num_tokens = 16384
+    assert rocm_native._select_cfg(num_tokens, n, k) == _WIDE_PREFILL_TILE
+    torch.manual_seed(0)
+    layer = _make_layer(n, k, "cuda")
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+
+    assert out.shape == (num_tokens, n)
+    assert torch.isfinite(out).all(), f"{name}: non-finite output"
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+    )
+    rel = (out.float() - expected).norm() / expected.norm()
+    assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+
+@pytest.mark.parametrize(
+    "name,n,k",
+    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
+    ids=lambda v: str(v),
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024])
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
@@ -153,7 +344,7 @@ def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
 
     A degenerate block makes the dynamic activation quantizer pick an extreme
     E8M0 scale; a zero row makes it pick the tiny-clamped one. Both feed
-    ``tl.dot_scaled`` directly.
+    `tl.dot_scaled` directly.
     """
     from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
         Mxfp8LinearLayerConfig,
@@ -330,7 +521,7 @@ FUSED_QUANT_CASES = [
 
 
 def _spy_launch(monkeypatch) -> list[bool]:
-    """Record, per ``_launch``, whether the activation quant ran in-kernel."""
+    """Record, per `_launch`, whether the activation quant ran in-kernel."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
     fused: list[bool] = []
@@ -353,7 +544,7 @@ def _mxfp8_weight(n: int, k: int):
 @torch.inference_mode()
 def test_rocm_mxfp8_fused_act_quant_bitwise_eq_unfused(monkeypatch, n, k, num_tokens):
     """Small-M bf16 GEMMs quantize the activation in-kernel, bit-exact with
-    the unfused path: ``mxfp8_e4m3_quantize`` and the ``_select_cfg`` tile."""
+    the unfused path: `mxfp8_e4m3_quantize` and the `_select_cfg` tile."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
     torch.manual_seed(num_tokens)
@@ -606,3 +797,108 @@ def test_rocm_mxfp8_fused_quant_cuda_graph_capture(warm_counters):
         graph.replay()
         torch.accelerator.synchronize()
         assert torch.equal(out, expected), "replay differs from stock"
+
+
+@pytest.fixture
+def aiter_flydsl_mxfp8_kernel(monkeypatch):
+    """`AiterFlyDSLMxfp8LinearKernel` with AITER linear on and every shape treated
+    as tuned (an untuned one runs AITER's heuristic kernel)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
+    )
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    yield AiterFlyDSLMxfp8LinearKernel
+    torch.set_default_dtype(prev_dtype)
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize("name,n,k", M31_TP4_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 128, 1024])
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_linear_matches_dequant_reference(
+    aiter_flydsl_mxfp8_kernel, name, n, k, num_tokens
+):
+    """Output matches an exact MXFP8 GEMM of the same inputs, and a
+    pre-quantized activation gives the same bits as quantizing in the kernel."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    torch.manual_seed(num_tokens)
+    layer = _make_layer(n, k, "cuda")
+    w_q, w_scale = layer.weight.data.clone(), layer.weight_scale.data.clone()
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+    assert out.shape == (num_tokens, n) and out.dtype == torch.bfloat16
+    assert torch.isfinite(out).all(), f"{name}: non-finite output"
+
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(w_q, w_scale).float().T
+    )
+    rel = (out.float() - expected).norm() / expected.norm()
+    assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    assert torch.equal(kernel.apply_weights(layer, qa), out)
+
+
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_linear_cuda_graph_replay(aiter_flydsl_mxfp8_kernel):
+    n, k, m = 2560, 6144, 16
+    layer = _make_layer(n, k, "cuda")
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    eager = kernel.apply_weights(layer, x)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = kernel.apply_weights(layer, x)
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    assert torch.equal(captured, kernel.apply_weights(layer, x))
+    assert not torch.equal(captured, eager)
+
+
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_row_major_weight(aiter_flydsl_mxfp8_kernel):
+    """`row_major_weight` undoes the kernel's (16, 16) preshuffle, and returns
+    the weight as is for a layer the Triton kernel runs."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        row_major_weight,
+    )
+
+    n, k = 2560, 6144
+    layer = _make_layer(n, k, "cuda")
+    w = layer.weight.data.clone()
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    layer.quant_method = SimpleNamespace(kernel=kernel)
+    kernel.process_weights_after_loading(layer)
+    assert not torch.equal(layer.weight.view(torch.uint8), w.view(torch.uint8))
+    assert torch.equal(row_major_weight(layer).view(torch.uint8), w.view(torch.uint8))
+
+    triton_layer = _make_layer(n, k, "cuda")
+    triton = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    triton_layer.quant_method = SimpleNamespace(kernel=triton)
+    triton.process_weights_after_loading(triton_layer)
+    assert row_major_weight(triton_layer).data_ptr() == triton_layer.weight.data_ptr()

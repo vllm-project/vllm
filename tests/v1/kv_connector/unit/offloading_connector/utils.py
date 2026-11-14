@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.core.utils import uniform_spec
 from tests.v1.kv_connector.unit.utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
@@ -36,15 +37,26 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
+    ManagerConfig,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    DevicePointers,
     GPULoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
@@ -61,6 +73,68 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+
+
+def make_kv_cache_group_from_specs(
+    specs: dict[str, KVCacheSpec],
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """Group of the given per-layer specs under one manager, defaulting to
+    full attention (or Mamba, for `MambaSpec` layers)."""
+    if manager_cls is None:
+        first = next(iter(specs.values()))
+        manager_cls = (
+            MambaManager if isinstance(first, MambaSpec) else FullAttentionManager
+        )
+    config = manager_config or manager_cls.config()
+    return KVCacheGroup.from_layers(
+        {name: KVCacheLayerConfig(config, spec) for name, spec in specs.items()},
+        **kwargs,
+    )
+
+
+def make_kv_cache_group(
+    layer_names: list[str],
+    layer: KVCacheSpec | KVCacheLayerConfig,
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """Group of layers sharing one spec (or layer config)."""
+    if isinstance(layer, KVCacheLayerConfig):
+        assert manager_cls is None and manager_config is None
+        return KVCacheGroup.from_layers(dict.fromkeys(layer_names, layer), **kwargs)
+    return make_kv_cache_group_from_specs(
+        dict.fromkeys(layer_names, layer), manager_cls, manager_config, **kwargs
+    )
+
+
+def sliding_window_layer(
+    *, sliding_window: int, extra_retained_tokens: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    """Sliding-window attention layer with a `AttentionSpec` layout."""
+    return SlidingWindowManager.layer_config(
+        AttentionSpec(**spec_kwargs),
+        sliding_window=sliding_window,
+        extra_retained_tokens=extra_retained_tokens,
+    )
+
+
+def mamba_layer(
+    *, mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return MambaManager.layer_config(
+        MambaSpec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def circular_buffer_layer(**spec_kwargs) -> KVCacheLayerConfig:
+    """Per-request ring (scratch) layer with a `AttentionSpec` layout."""
+    return CircularBufferManager.layer_config(AttentionSpec(**spec_kwargs))
 
 
 def to_key(int_hash: int) -> OffloadKey:
@@ -80,7 +154,8 @@ class MockLoadStoreSpec(LoadStoreSpec):
 
 
 class MockOffloadingWorker(OffloadingWorker):
-    def __init__(self):
+    def __init__(self, gpu_spec_map: dict[int, "GPULoadStoreSpec"]):
+        self._gpu_spec_map = gpu_spec_map
         self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
@@ -96,9 +171,10 @@ class MockOffloadingWorker(OffloadingWorker):
         return finished
 
     def submit_store(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (gpu_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -106,10 +182,11 @@ class MockOffloadingWorker(OffloadingWorker):
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (src_spec, gpu_spec)
         self.waiting_jobs.add(job_id)
         if self.fail_loads:
             self._failing_jobs.add(job_id)
@@ -144,7 +221,21 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.get_stats.return_value = None
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
-        self.handler = MockOffloadingWorker()
+
+        self._gpu_spec_map: dict[int, GPULoadStoreSpec] = {}
+        self.handler = MockOffloadingWorker(self._gpu_spec_map)
+
+        import vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker as _cm
+        from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers as _orig
+
+        def _tracking_resolve(
+            device_spec: GPULoadStoreSpec, kv_caches: CanonicalKVCaches
+        ) -> DevicePointers:
+            result = _orig(device_spec, kv_caches)
+            self._gpu_spec_map[id(result)] = device_spec
+            return result
+
+        _cm.resolve_device_pointers = _tracking_resolve
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
@@ -190,15 +281,14 @@ class RequestRunner:
         num_gpu_blocks: int,
         blocks_per_chunk: int = 1,
         async_scheduling: bool = True,
-        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        kv_cache_groups: list[KVCacheGroup] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
     ):
         assert blocks_per_chunk == 1 or all(
-            group.kv_cache_spec.block_size == block_size
-            for group in kv_cache_groups or ()
+            group.block_size == block_size for group in kv_cache_groups or ()
         ), "blocks_per_chunk > 1 requires every group to use block_size"
 
         self.blocks_per_chunk: int = blocks_per_chunk
@@ -238,6 +328,9 @@ class RequestRunner:
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
         )
+        vllm_config.num_hash_lookahead_tokens = (
+            vllm_config._resolve_num_hash_lookahead_tokens()
+        )
         vllm_config.kv_events_config = KVEventsConfig(
             # Enable so the offloading events tracker is active, but use the
             # null publisher: these tests drain take_events directly and a
@@ -248,9 +341,9 @@ class RequestRunner:
 
         if kv_cache_groups is None:
             kv_cache_groups = [
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -260,16 +353,13 @@ class RequestRunner:
             ]
 
         # Groups overlay one allocation, sized by the largest group.
-        block_stride = max(
-            group.kv_cache_spec.page_size_bytes * len(group.layer_names)
-            for group in kv_cache_groups
-        )
+        block_stride = max(group.page_size_bytes for group in kv_cache_groups)
         kv_cache_tensors = [
             KVCacheTensor(
                 size=block_stride * num_gpu_blocks,
                 layers=list(group.layer_names),
-                layer_stride=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
-                block_stride=group.kv_cache_spec.page_size_bytes,
+                layer_stride=uniform_spec(group).page_size_bytes * num_gpu_blocks,
+                block_stride=uniform_spec(group).page_size_bytes,
             )
             for group in kv_cache_groups
         ]
@@ -303,7 +393,7 @@ class RequestRunner:
         # register worker kv_caches to enable OffloadingWorker creations
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
-            spec = group.kv_cache_spec
+            spec = uniform_spec(group)
             assert isinstance(spec, AttentionSpec)
             for layer_name in group.layer_names:
                 # Shape follows FlashAttention layout:
@@ -340,7 +430,7 @@ class RequestRunner:
             self.connector_scheduler.config.kv_group_configs,
             kv_cache_config.kv_cache_groups,
         ):
-            tokens_per_block = kv_cache_group.kv_cache_spec.block_size
+            tokens_per_block = kv_cache_group.block_size
             assert group_config.tokens_per_block == tokens_per_block
             assert group_config.tokens_per_chunk == tokens_per_block * blocks_per_chunk
 
@@ -363,7 +453,10 @@ class RequestRunner:
         self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(block_size, sha256)
+        # Mirror EngineCore's choice of hash protocol.
+        self._block_hasher = get_request_block_hasher(
+            block_size, sha256, self.scheduler.num_hash_lookahead_tokens
+        )
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
@@ -519,7 +612,7 @@ class RequestRunner:
             # and no pending finished_req_ids awaiting build_connector_meta.
             if (
                 not self.scheduler.requests
-                and not self.connector_scheduler._jobs
+                and not self.connector_scheduler._job_statuses
                 and not self.scheduler.finished_req_ids
             ):
                 break
@@ -587,7 +680,7 @@ class RequestRunner:
                 and prev_token_id != token_id
                 and (
                     self.scheduler.requests
-                    or self.connector_scheduler._jobs
+                    or self.connector_scheduler._job_statuses
                     or self.scheduler.finished_req_ids
                 )
             ):
@@ -608,7 +701,7 @@ class RequestRunner:
                     # Request still running, just exhausted decoded_tokens.
                     break
                 if not self.scheduler.finished_req_ids and (
-                    not complete_transfers or not self.connector_scheduler._jobs
+                    not complete_transfers or not self.connector_scheduler._job_statuses
                 ):
                     break
 

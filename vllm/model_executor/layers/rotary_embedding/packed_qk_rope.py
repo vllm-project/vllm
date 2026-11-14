@@ -46,7 +46,7 @@ def packed_qk_rope_(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
         freqs_cis: contiguous (seqlen, headdim // 2) complex64 rotary freqs,
             read through its interleaved re/im fp32 view.
 
-    Matches ``ApplyRotaryEmb(enable_fp32_compute=True)`` applied to Q and K
+    Matches `ApplyRotaryEmb(enable_fp32_compute=True)` applied to Q and K
     separately to within one ULP, but in one kernel with ~5x less memory
     traffic. Both compute in fp32; the gap is which product the compiler
     keeps exact inside the fused multiply-add, which differs per backend.

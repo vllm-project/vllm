@@ -98,6 +98,29 @@ def test_backend_guidance_rollback_terminated():
     assert grammar.is_terminated()
 
 
+@pytest.mark.parametrize("invalid_prefix", [False, True])
+def test_backend_guidance_eos_in_token_batch(invalid_prefix):
+    """Forced-length speculative batches must validate only through EOS."""
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    backend = GuidanceBackend(
+        VllmConfig(), tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    grammar = backend.compile_grammar(StructuredOutputOptions.REGEX, "a+")
+    valid = tokenizer.encode("a")
+    invalid = tokenizer.encode("1")
+    eos = [tokenizer.eos_token_id]
+    tokens = valid + (invalid if invalid_prefix else []) + eos + invalid
+    original_tokens = tokens.copy()
+
+    assert grammar.accept_tokens("", tokens) is not invalid_prefix
+    assert tokens == original_tokens
+    if invalid_prefix:
+        assert not grammar.is_terminated()
+        assert grammar.accept_tokens("", valid + eos + invalid)
+    assert grammar.is_terminated()
+    assert grammar.accept_tokens("", invalid + eos + invalid)
+
+
 def test_grammar_bitmask_with_specdec():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode('{"a": "b"}')

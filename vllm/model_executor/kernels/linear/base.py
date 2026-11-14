@@ -10,6 +10,30 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
+# TODO: extend similarly to oracle/base.py on MOE side, to remove code duplication in
+# the different linear oracles (#65978)
+class LinearKernelOracle:
+    """Shared behaviour of linear kernel selection (dispatch).
+
+    Linear kernels have no oracle abstraction yet; this only hosts the logic
+    shared by the `init_*_linear_kernel` selectors, to be extended as they are
+    migrated.
+    """
+
+    @staticmethod
+    def maybe_skip_for_requantization_source() -> bool:
+        """Whether to return a placeholder instead of selecting a compute kernel.
+
+        A checkpoint method created as an online requantization source only
+        dequantizes its weights, so it needs no linear kernel.
+        """
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        return is_requantization_source()
+
+
 @dataclass
 class MMLinearLayerConfig: ...
 
@@ -188,6 +212,16 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
         """
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

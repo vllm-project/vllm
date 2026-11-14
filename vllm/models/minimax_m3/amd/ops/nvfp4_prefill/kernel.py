@@ -65,7 +65,7 @@ def kv_lane_loader(arg_cache, page_bytes, kvh, hkv, w, n, g):
     v_scale_load = (v_scl + (n // 2) * BLK + w * KPW + 8 * g) // 4
 
     def load(page):
-        """This lane's RAW NVFP4 dwords of ``page``."""
+        """This lane's RAW NVFP4 dwords of `page`."""
         pr = buffer_ops.create_buffer_resource_from_addr(
             arg_cache + fx.Int64(page) * fx.Int64(page_bytes),
             num_records_bytes=page_bytes,
@@ -245,7 +245,7 @@ def compile_nvfp4_prefill_fp16(rounds: int = 2):
         )
 
         def page_at(mask):
-            """Page of the lowest lane left in ``mask``, the first page when empty."""
+            """Page of the lowest lane left in `mask`, the first page when empty."""
             idx = (mask != fx.Int64(0)).select(
                 fx.Int32(fx.math.cttz(mask).to(fx.Int32)), first
             )
@@ -318,7 +318,7 @@ def compile_nvfp4_prefill_fp16(rounds: int = 2):
         init += raw0
         n_st = 1 + 2 * TOK_PER_WG + TOK_PER_WG * NDT
         results = init
-        for u, st_ in range(  # type: ignore[call-overload]
+        for _, st_ in range(  # type: ignore[call-overload]
             fx.Index(0),
             fx.Index(n_u),
             fx.Index(1),
