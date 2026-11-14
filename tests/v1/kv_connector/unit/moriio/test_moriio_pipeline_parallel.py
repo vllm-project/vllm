@@ -113,6 +113,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler._global_dp_rank = 0
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
