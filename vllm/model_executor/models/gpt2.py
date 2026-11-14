@@ -53,10 +53,12 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -201,19 +203,33 @@ class GPT2Model(nn.Module):
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            self.embed_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wte",
-        )
-        self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+        pp_group = get_pp_group()
+        if (
+            pp_group.is_first_rank
+            or (pp_group.is_last_rank and config.tie_word_embeddings)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.wte = VocabParallelEmbedding(
+                config.vocab_size,
+                self.embed_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.wte",
+            )
+        else:
+            self.wte = PPMissingLayer()
+        if pp_group.is_first_rank:
+            self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+        else:
+            self.wpe = PPMissingLayer()
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: GPT2Block(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
-        self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        if pp_group.is_last_rank:
+            self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        else:
+            self.ln_f = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
@@ -276,14 +292,17 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         self.transformer = GPT2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.lm_head",
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.lm_head",
+            )
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
+        else:
+            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
