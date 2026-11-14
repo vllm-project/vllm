@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTokenSym,
     kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
@@ -38,6 +39,9 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
+
+if hasattr(torch.ops._C, "dynamic_scaled_int8_quant"):
+    QUANT_OPS[kInt8DynamicTokenSym] = torch.ops._C.dynamic_scaled_int8_quant.default
 
 if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501

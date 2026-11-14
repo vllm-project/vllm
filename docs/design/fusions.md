@@ -26,6 +26,7 @@ or just on the low or high end.
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
+| [RMSNorm + INT8 Quant](#rmsnorm--quantization-fuse_norm_quant)                 | `fuse_norm_quant`            | Native RMSNorm (+residual) → INT8 quant        | Opt-in (native RMSNorm)        | Workload-dependent | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
@@ -43,7 +44,8 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
-| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_norm_quant` (FP8)      | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_norm_quant` (INT8)     | INT8 symmetric per-token                 | INT8 symmetric per-token                 | INT8 symmetric per-token                 | INT8          | —                                        |
 | `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                     |
@@ -51,6 +53,8 @@ The table below lists the quantization schemes supported by each fusion on each 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
 for per-backend details.
+
+INT8 support above refers to dynamic symmetric per-token quantization.
 
 ## Enabling / Disabling Fusions
 
@@ -208,9 +212,12 @@ Supported hardware: CUDA (sm80+) only, tested only on sm90 and sm100.
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
 
-!!! warning
-    On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
-    Hence, this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
+!!! note
+    The default policy enables this pass when either `rms_norm` or `quant_fp8`
+    uses a custom kernel, or the first configured RMSNorm provider is non-native. Otherwise
+    Inductor handles decomposable operations. For native RMSNorm followed by
+    the opaque INT8 quantization op, explicitly set `fuse_norm_quant=True`.
+    The INT8 pattern does not change this default policy.
 
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
 operations with subsequent quantization into a single fused kernel,
@@ -227,6 +234,10 @@ Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
+- INT8 dynamic symmetric per-token: CUDA, with native FP16/BF16 RMSNorm.
+  See [INT8 W8A8 fusion](../features/quantization/llm_compressor/int8_w8a8.md#rmsnorm-and-activation-quantization-fusion)
+  for layout and precision constraints. Operator support does not imply that
+  every INT8 Linear backend supports the same GPU, or guarantee a speedup.
 
 **Code locations.**
 
@@ -237,7 +248,7 @@ Supported quantization scheme/hardware combinations:
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
 
 !!! warning
-    Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
+    On NVIDIA, Inductor generates a faster fused kernel than our custom ops for this activation fusion.
     This fusion is only enabled when either `silu_and_mul` or `quant_fp8` are using a custom kernel,
     or for NVFP4-quantized models (where FP4 quant is always a custom op).
 
