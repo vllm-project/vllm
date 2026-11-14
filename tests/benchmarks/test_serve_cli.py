@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import subprocess
 import tempfile
 import time
@@ -12,6 +13,7 @@ import urllib3
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+API_KEY = "test-api-key"
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
@@ -71,8 +73,9 @@ class RemoteOpenAIServerSSL(RemoteOpenAIServer):
 
 
 @pytest.fixture(scope="function")
-def server():
+def server(request):
     args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
+    args.extend(getattr(request, "param", []))
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -122,6 +125,40 @@ def test_bench_serve(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("server", [["--api-key", API_KEY]], indirect=True)
+def test_bench_serve_model_discovery_with_api_key(server, monkeypatch, tmp_path):
+    """Environment credentials must authenticate discovery and generation."""
+    monkeypatch.setenv("OPENAI_API_KEY", API_KEY)
+    command = [
+        "vllm",
+        "bench",
+        "serve",
+        "--base-url",
+        server.url_root,
+        "--input-len",
+        "8",
+        "--output-len",
+        "1",
+        "--num-prompts",
+        "1",
+        "--num-warmups",
+        "0",
+        "--temperature",
+        "0",
+        "--save-result",
+        "--result-dir",
+        str(tmp_path),
+        "--result-filename",
+        "authenticated.json",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    metrics = json.loads((tmp_path / "authenticated.json").read_text())
+    assert metrics["completed"] == 1
+    assert metrics["failed"] == 0
 
 
 @pytest.mark.benchmark
