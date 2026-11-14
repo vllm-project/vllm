@@ -11,6 +11,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import num_compute_units
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -409,9 +410,24 @@ def _prefill_logits(
         TILE_R, STAGES, num_warps = 64, 2, 4
     BLOCK_N = 64
     K_TILES = 16
+    query_rows = min(num_queries, max_query_len)
+    if k_cache.dtype == torch.bfloat16 and current_platform.is_device_capability(80):
+        # A100: 16 K tiles per CTA leave most of the 108 SMs idle. Two K tiles
+        # per CTA were faster at every measured chunk; BLOCK_N 128 when that
+        # grid still gives at least two CTAs per SM, else BLOCK_N 32.
+        TILE_R, K_TILES = 32, 2
+        wide_ctas = (
+            page_table.shape[0]
+            * triton.cdiv(query_rows, TILE_R)
+            * triton.cdiv(logits_width, 128 * K_TILES)
+        )
+        if wide_ctas >= 2 * num_compute_units():
+            BLOCK_N = 128
+        else:
+            BLOCK_N, STAGES = 32, 1
     grid = (
         page_table.shape[0],
-        triton.cdiv(min(num_queries, max_query_len), TILE_R),
+        triton.cdiv(query_rows, TILE_R),
         triton.cdiv(logits_width, BLOCK_N * K_TILES),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
