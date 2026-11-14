@@ -83,6 +83,17 @@ def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | N
     ):
         # Measured on GB200.
         return 36864, 4096
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(
+        120, device.index or 0
+    ):
+        # Measured on RTX 6000D with a 64 GB small-page host table. Sorting is a
+        # loss below ~16K rows (2.1x at 8K), breaks even near 16K, and wins from
+        # 32K on (1.20x), reaching 2.58x at 1M rows.
+        # Inline stays disabled: once rows are sorted the lookup is bound by host
+        # page walks rather than occupancy, and the half-width prefetch grid is
+        # consistently faster than full width (1M rows: 21.2 vs 21.5 ms; 512K:
+        # 13.5 vs 14.3; 64K: 1.66 vs 1.80).
+        return 32768, None
     # TODO: Add hand-tuned thresholds for other GPU families.
     return None, None
 
