@@ -47,8 +47,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
 
-from .qwen2 import Qwen2MLP as Qwen3MLP
-from .qwen3 import Qwen3ForCausalLM
+from .qwen3 import Qwen3ForCausalLM, Qwen3MLP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -102,6 +101,16 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     (config mirror of the model's `get_draft_attn_causal`, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
+def dflash_has_any_sliding(config: Qwen3Config) -> bool:
+    """Whether any draft layer uses sliding-window attention, resolved from config
+    (config mirror of `_resolve_layer_attention`, usable pre-build)."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None) or ()
+    return bool(dflash_config.get("use_swa", False)) or (
+        _SLIDING_ATTENTION in layer_types
     )
 
 
@@ -655,6 +664,20 @@ class DFlashQwen3Model(nn.Module):
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """The modules whose weights the context K/V path (`combine_hidden_states`
+        and `precompute_and_store_context_kv`) reads once loaded. A subclass that
+        changes that path must override this."""
+        modules: list[nn.Module] = [self.hidden_norm, *self._attn_layers]
+        if self.use_aux_hidden_state:
+            modules.append(self.fc)
+        if self._fused_kv_weight is None:  # e.g. quantized: no fused K/V copy
+            if self._context_kv_proj is not None:
+                modules.append(self._context_kv_proj)
+            else:
+                modules.extend(self._context_qkv_projs)
+        return modules
+
     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
@@ -944,6 +967,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.model.precompute_and_store_context_kv(
             context_states, context_positions, context_slot_mapping
         )
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        """The modules whose weights `combine_hidden_states` and
+        `precompute_and_store_context_kv` read once loaded. With
+        `SpeculativeConfig.prefill_context_kv_only`, the other draft weights
+        are freed (see `DFlashSpeculator.free_unused_weights`)."""
+        return self.model.context_kv_modules()
 
     def combine_hidden_states(
         self,

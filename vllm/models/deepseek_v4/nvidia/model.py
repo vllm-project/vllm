@@ -125,6 +125,14 @@ def prepare_mega_gate_routing_metadata(
     )
 
 
+def _use_mega_gate(vllm_config: VllmConfig) -> bool:
+    """Whether MegaMoE layers route with `bf16_mega_gate`, which is SM100-only."""
+    return (
+        vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        and current_platform.is_device_capability_family(100)
+    )
+
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -227,6 +235,7 @@ class DeepseekV4MoE(nn.Module):
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -467,7 +476,7 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
+        if not self.use_mega_gate or hidden_states.shape[0] <= gate_threshold:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -674,18 +683,37 @@ class DeepseekV4DecoderLayer(nn.Module):
                 _MHC_POST_TILELANG_KERNEL,
                 _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
             )
+            from vllm.model_executor.kernels.mhc.warmup import (
+                HC_PRENORM_GEMM_KERNEL,
+                compute_mhc_num_splits,
+            )
             from vllm.utils.deep_gemm import is_deep_gemm_supported
 
             include_pre_gemm_splits = is_deep_gemm_supported()
+            include_broadcast_splits = (
+                get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
+            )
+            if include_pre_gemm_splits:
+                max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+                if self.use_sequence_parallel:
+                    # mHC runs on this rank's sp_shard of the step.
+                    tp_size = vllm_config.parallel_config.tensor_parallel_size
+                    max_tokens = cdiv(max_tokens, tp_size)
+                hc_dim = self.hc_mult * self.hidden_size
+                for k in (hc_dim, self.hidden_size)[: 1 + include_broadcast_splits]:
+                    HC_PRENORM_GEMM_KERNEL.register_warmup(
+                        max_tokens=max_tokens,
+                        n=self.hc_mult * (2 + self.hc_mult),
+                        k=k,
+                        num_splits=compute_mhc_num_splits,
+                    )
             _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
                 use_norm_weight=True,
                 include_pre_gemm_splits=include_pre_gemm_splits,
-                include_broadcast_splits=(
-                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
-                ),
+                include_broadcast_splits=include_broadcast_splits,
                 rms_eps=self.rms_norm_eps,
                 hc_pre_eps=self.hc_eps,
                 hc_sinkhorn_eps=self.hc_eps,
@@ -835,6 +863,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -987,7 +1016,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=self.has_local_hash_moe,

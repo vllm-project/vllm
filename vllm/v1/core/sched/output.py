@@ -191,15 +191,36 @@ class CachedRequestData:
         )
 
 
-@dataclass
-class ScheduledEncoderInputStats:
-    """Stats for encoder inputs scheduled in one iteration."""
+@dataclass(slots=True)
+class IterationDetails:
+    """Scheduled prefill/decode request and input counts."""
 
-    num_inputs: int = 0
-    output_tokens: int = 0
+    num_prefill_requests: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_requests: int = 0
+    num_decode_tokens: int = 0
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
+
+    # Temporary aliases for existing EngineCore and worker profiler consumers.
+    @property
+    def num_ctx_requests(self) -> int:
+        return self.num_prefill_requests
+
+    @property
+    def num_ctx_tokens(self) -> int:
+        return self.num_prefill_tokens
+
+    @property
+    def num_generation_requests(self) -> int:
+        return self.num_decode_requests
+
+    @property
+    def num_generation_tokens(self) -> int:
+        return self.num_decode_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
@@ -257,7 +278,8 @@ class SchedulerOutput:
         default_factory=dict
     )
 
-    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    # Optional scheduling-time snapshot, before worker-side token adjustments.
+    iteration_details: IterationDetails | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
@@ -274,9 +296,6 @@ class SchedulerOutput:
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
-
-    # Used for adjusting acceptance rate calculation.
-    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
@@ -324,7 +343,7 @@ class SchedulerOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

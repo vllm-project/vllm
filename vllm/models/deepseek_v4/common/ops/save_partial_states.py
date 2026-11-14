@@ -19,7 +19,7 @@ from vllm.utils.math_utils import next_power_of_2
 class SavePartialStatesKernel(
     VllmTritonJitKernel["SavePartialStatesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         head_size: int
         triton_block_size: int
@@ -88,7 +88,7 @@ class SavePartialStatesKernel(
             mask=mask,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         head_size: int,

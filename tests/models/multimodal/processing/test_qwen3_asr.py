@@ -45,8 +45,10 @@ def test_audio_processing_matches_hf(asr_processor, samples, num_audios):
         rng.randn(samples + index * 160).astype(np.float32)
         for index in range(num_audios)
     ]
+    # TODO: Remove `truncation=False` once Transformers restores it as the default
     expected = [
-        native(text=_AUDIO_PROMPT, audio=audio, return_tensors="pt") for audio in audios
+        native(text=_AUDIO_PROMPT, audio=audio, truncation=False, return_tensors="pt")
+        for audio in audios
     ]
     actual = processor(
         _AUDIO_PROMPT * num_audios,

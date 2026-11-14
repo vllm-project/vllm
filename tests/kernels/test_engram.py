@@ -17,11 +17,13 @@ from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
+    EngramLayout,
     NgramHashState,
     ParallelEngramEmbedding,
 )
 from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 
@@ -690,9 +692,20 @@ def _reference_lookup(weight, scale_inv, ids, start, end, block=32):
     return values.masked_fill(mask.unsqueeze(-1), 0)
 
 
-def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _decode_e2m1(packed):
+    """[rows, dim // 2] uint8 -> [rows, dim] fp32; even column in the low nibble."""
+    lut = torch.tensor(_E2M1_VALUES, device=packed.device)
+    nibbles = torch.stack([packed & 0xF, packed >> 4], dim=-1).flatten(-2).long()
+    return torch.where(nibbles & 0x8 != 0, -1.0, 1.0) * lut[nibbles & 0x7]
+
+
+def _make_embedding(cpu_offload, rows=4096, dim=256, block=32, packed_fp4=False):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
+    layer.packed_fp4 = packed_fp4
     layer.dim, layer.block_size, layer.tp_size = dim, block, 1
     layer.dp_size = 1
     layer.n_hash_cols = layer.part_n_hash_cols = 24
@@ -711,12 +724,19 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
         {"device": "cpu", "pin_memory": True} if cpu_offload else {"device": "cuda"}
     )
     owned = layer.vocab_end_idx - layer.vocab_start_idx
-    layer.weight = torch.empty(owned, dim, dtype=torch.float8_e4m3fn, **kwargs)
+    if packed_fp4:
+        layer.weight = torch.empty(owned, dim // 2, dtype=torch.uint8, **kwargs)
+    else:
+        layer.weight = torch.empty(owned, dim, dtype=torch.float8_e4m3fn, **kwargs)
     layer.weight_scale_inv = torch.empty(
         owned, dim // block, dtype=torch.uint8, **kwargs
     )
     torch.manual_seed(0)
-    layer.weight.copy_((torch.randn(owned, dim) * 4).to(torch.float8_e4m3fn))
+    if packed_fp4:
+        # Every byte value, so all 16 nibbles appear in both halves.
+        layer.weight.copy_(torch.randint(0, 256, (owned, dim // 2), dtype=torch.uint8))
+    else:
+        layer.weight.copy_((torch.randn(owned, dim) * 4).to(torch.float8_e4m3fn))
     layer.weight_scale_inv.copy_(
         torch.randint(120, 134, (owned, dim // block), dtype=torch.uint8)
     )
@@ -726,19 +746,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
 @pytest.mark.parametrize(
     "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
 )
+@pytest.mark.parametrize("packed_fp4", [False, True])
 def test_engram_meta_initialization_does_not_allocate_host_tables(
-    dist_init, cpu_offload, use_thp
+    dist_init, cpu_offload, use_thp, packed_fp4
 ):
     """Encoder-only language-model placeholders must not allocate host storage."""
     with torch.device("meta"):
         layer = ParallelEngramEmbedding(
-            36, 64, (17, 19), cpu_offload=cpu_offload, use_thp=use_thp
+            36,
+            64,
+            (17, 19),
+            cpu_offload=cpu_offload,
+            use_thp=use_thp,
+            packed_fp4=packed_fp4,
         )
 
     assert layer.weight.is_meta and layer.weight_scale_inv.is_meta
-    assert layer.weight.shape == (36, 64)
+    assert layer.weight.shape == (36, 32 if packed_fp4 else 64)
     assert layer.weight_scale_inv.shape == (36, 2)
-    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight.dtype == (torch.uint8 if packed_fp4 else torch.float8_e4m3fn)
     assert layer.weight_scale_inv.dtype == torch.uint8
 
 
@@ -849,7 +875,8 @@ def test_engram_head_shards_reconstruct_checkpoint(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 def test_engram_lookup_reuses_jit_across_token_shapes():
-    """Runtime token counts and launch grids must share one JIT variant."""
+    """Runtime token counts and launch grids share one JIT variant per tile
+    size, on either side of the 128-row tile threshold on any SM count."""
     layer = _make_embedding(cpu_offload=False)
     kernel = engram_ops._engram_lookup_kernel
     kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
@@ -857,7 +884,10 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 
     cache_sizes = []
     for background in (False, True):
-        for num_tokens in (1, 7, 256):
+        grid = layer._num_sms // 2 if background else layer._num_sms
+        # The fewest tokens whose rows fill the grid with 128-row tiles.
+        large = -(-128 * grid // 24)
+        for num_tokens in (1, 7, large - 1, large, 2 * large):
             ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
             out = torch.empty(
                 num_tokens,
@@ -869,7 +899,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
             layer.lookup(ids, out, background=background)
             cache_sizes.append(len(kernel_cache))
 
-    assert cache_sizes == [1] * len(cache_sizes)
+    # 16-row tiles, then 128-row tiles; the background grid adds neither.
+    assert cache_sizes == [1, 1, 1, 2, 2] + [2] * 5
 
 
 @pytest.mark.skipif(
@@ -878,7 +909,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [1, 7, 256, 1024])
 def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
@@ -989,6 +1021,113 @@ def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+def test_engram_mxfp4_lookup_matches_torch(cpu_offload, background, num_tokens):
+    """Packed E2M1 rows with UE8M0 scales must dequantize bit-exactly like the
+    torch reference, from HBM and from pinned host memory, with zeros for rows
+    another TP rank owns."""
+    layer = _make_embedding(cpu_offload, packed_fp4=True)
+    cols, rows = 24, layer.part_num_embeddings
+    ids = torch.randint(0, rows, (num_tokens, cols), dtype=torch.int32, device="cuda")
+    expected = _reference_lookup(
+        _decode_e2m1(layer.weight.cuda()),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    out = torch.empty(num_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda")
+    layer.lookup(ids, out, background=background)
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+def test_engram_packed_weight_is_half_width_uint8(dist_init, cpu_offload, use_thp):
+    dim, head_sizes = 256, (31,) * 24
+    with torch.device("cuda"):
+        layer = ParallelEngramEmbedding(
+            sum(head_sizes),
+            dim,
+            head_sizes,
+            cpu_offload=cpu_offload,
+            use_thp=use_thp,
+            packed_fp4=True,
+        )
+    assert layer.weight.shape == (layer.part_num_embeddings, dim // 2)
+    assert layer.weight.dtype == torch.uint8
+    indices = torch.zeros(1, len(head_sizes), dtype=torch.int32, device="cuda")
+    out = torch.full(
+        (1, len(head_sizes) * (dim + dim // 32)), 42, dtype=torch.uint8, device="cuda"
+    )
+    with pytest.raises(ValueError, match="packed FP8 output"):
+        layer.lookup(indices, out)
+    assert torch.all(out == 42)
+
+
+@pytest.mark.parametrize(
+    "quant_config,expected",
+    [
+        (None, False),
+        ({"engram_embed_quant": "fp8"}, False),
+        ({"engram_embed_quant": "mxfp4"}, True),
+        (
+            {
+                "engram_embed_quant": "mxfp4",
+                "engram_embed_block_size": 32,
+                "engram_embed_scale_dtype": "ue8m0",
+                "engram_embed_layers": [1, 14],
+            },
+            True,
+        ),
+        ({"engram_embed_quant": "nvfp4"}, "engram_embed_quant"),
+        (
+            {"engram_embed_quant": "mxfp4", "engram_embed_block_size": 16},
+            "engram_embed_block_size",
+        ),
+        (
+            {"engram_embed_quant": "mxfp4", "engram_embed_scale_dtype": "float32"},
+            "engram_embed_scale_dtype",
+        ),
+        (
+            {"engram_embed_quant": "mxfp4", "engram_embed_layers": [1]},
+            "engram_embed_layers",
+        ),
+    ],
+)
+def test_engram_embedding_format_follows_checkpoint_config(quant_config, expected):
+    """Resolve storage before allocation and reject unsupported checkpoint layouts."""
+    config = DeepseekV41Config(
+        text_config={
+            "engram_layer_ids": [1, 14],
+            "engram_num_embeddings": [72, 72],
+            "engram_max_ngram_size": 2,
+            "engram_n_heads": 4,
+            "engram_head_dim": 32,
+            "engram_compressed_vocab_size": 32,
+            "engram_pad_token_id": 0,
+            "engram_vocab_size": 3,
+        },
+        quantization_config=quant_config,
+    )
+    if isinstance(expected, str):
+        with pytest.raises(ValueError, match=expected):
+            EngramLayout(config)
+    else:
+        layout = EngramLayout(config)
+        assert layout.packed_fp4 is expected
+        assert layout.row_bytes == (16 if expected else 32)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [None, False])
 def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     """Default offload uses pinned storage and the given stream; False uses HBM."""
@@ -1001,6 +1140,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         max_ngram_size=2,
         n_heads=24,
         primes=(((3,) * 24,),),
+        packed_fp4=False,
     )
     vllm_config = SimpleNamespace(
         engram_config=EngramConfig()

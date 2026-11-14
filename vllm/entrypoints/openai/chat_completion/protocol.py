@@ -20,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     AnyResponseFormat,
     DeltaMessage,
     FunctionCall,
@@ -402,8 +404,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -704,7 +706,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     # Default sampling parameters for chat completion requests
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,

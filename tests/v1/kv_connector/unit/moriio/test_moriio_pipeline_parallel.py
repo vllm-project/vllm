@@ -105,6 +105,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
+    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     scheduler.tp_size = 4
     scheduler._has_mamba = False
     scheduler._is_hma_required = False
@@ -199,7 +200,10 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
 
     scheduler.update_state_after_alloc(
         SimpleNamespace(request_id="req", kv_transfer_params=params),
-        SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],)),
+        SimpleNamespace(
+            get_block_ids=lambda: ([5, 6, 7],),
+            get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
+        ),
         num_external_tokens=40,
     )
     scheduler._release_write_prefill_blocks("req", {**params, "remote_dp_rank": 0})
@@ -255,7 +259,10 @@ def test_every_stage_gets_the_allocation_and_release(shape, monkeypatch):
 
     scheduler.update_state_after_alloc(
         SimpleNamespace(request_id="req", kv_transfer_params=params),
-        SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],)),
+        SimpleNamespace(
+            get_block_ids=lambda: ([5, 6, 7],),
+            get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
+        ),
         num_external_tokens=40,
     )
     assert _wait_for(

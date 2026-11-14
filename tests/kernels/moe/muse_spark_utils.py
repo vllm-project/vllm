@@ -16,6 +16,7 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
@@ -42,14 +43,17 @@ def nvfp4_quant_config() -> ModelOptNvFp4Config:
 def make_runner(
     norm: torch.nn.Module,
     expert_bias: torch.Tensor,
-    ckpt: dict[str, torch.Tensor],
+    ckpt: dict[str, torch.Tensor] | None,
     quant_config=None,
     *,
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
 ):
-    """Build a MuseSpark runner, load `ckpt` and finalize its weights."""
+    """Build a MuseSpark runner, load `ckpt` and finalize its weights.
+
+    With `ckpt=None` the runner is only built, on the current device.
+    """
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
@@ -81,7 +85,15 @@ def make_runner(
             runner_cls=MuseMoERunner,
             runner_args={"post_expert_norm": norm},
         )
-    runner.cuda()
+        # Record the BF16 layout before loading quantizes it, same as the model
+        # loader does: layerwise reload (RL weight sync) restores the layer from it.
+        record_metadata_for_reloading(runner)
+    if ckpt is None:
+        return router, runner, vllm_config
+    # Online-quantized experts start on the meta device, which .cuda() cannot
+    # move; those callers build under torch.device("cuda") instead.
+    if all(not p.is_meta for p in runner.parameters()):
+        runner.cuda()
     routed = runner.routed_experts
     loaded = list(routed.load_weights(list(ckpt.items())))
     assert len(loaded) == len(ckpt)
