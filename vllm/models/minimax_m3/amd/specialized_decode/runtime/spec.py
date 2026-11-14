@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from vllm.config import CompilationMode, VllmConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256

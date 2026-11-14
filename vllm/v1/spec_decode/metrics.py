@@ -15,7 +15,7 @@ from vllm.v1.metrics.utils import create_metric_per_engine
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class SpecDecodingStats:
     """Per-step iteration decoding stats from scheduler.
 

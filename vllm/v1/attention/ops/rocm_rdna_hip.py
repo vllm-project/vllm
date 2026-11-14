@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KernelVariant:
     """One decode build: its shape and launch knobs."""
 
@@ -303,7 +303,7 @@ PREFILL_CONFIG_FIELDS = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PrefillVariant:
     """One prefill build: its shape, smallest M and launch knobs."""
 

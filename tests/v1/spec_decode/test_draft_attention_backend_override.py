@@ -16,23 +16,23 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
-@dataclass
+@dataclass(slots=True)
 class _AttentionConfig:
     backend: str | None = None
     use_non_causal: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class _KernelConfig:
     moe_backend: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _CacheConfig:
     cache_dtype: str = "auto"
 
 
-@dataclass
+@dataclass(slots=True)
 class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
@@ -46,7 +46,7 @@ class _SpeculativeConfig:
     apply_draft_eplb_overrides = SpeculativeConfig.apply_draft_eplb_overrides
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmConfig:
     attention_config: _AttentionConfig
     kernel_config: _KernelConfig
