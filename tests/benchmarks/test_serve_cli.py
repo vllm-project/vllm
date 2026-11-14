@@ -9,9 +9,35 @@ import pytest
 import requests
 import urllib3
 
+from vllm.benchmarks.serve import add_cli_args, compute_result_filename
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_dataset_stats_plot_without_saving_results(tmp_path: Path) -> None:
+    """A standalone dataset plot must resolve its configured output path."""
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    result_dir = tmp_path / "plots"
+    args = parser.parse_args(
+        [
+            "--plot-dataset-stats",
+            "--result-dir",
+            str(result_dir),
+            "--result-filename",
+            "stats.json",
+        ]
+    )
+
+    filename = compute_result_filename(args, MODEL_NAME, "", "20261018")
+
+    assert filename == str(result_dir / "stats.json")
+    assert result_dir.is_dir()
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
