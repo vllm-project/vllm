@@ -98,9 +98,18 @@ def _linears():
     return module
 
 
-@pytest.mark.parametrize(("cdna_version", "expect_swap"), [(3, True), (4, False)])
+@pytest.mark.parametrize(
+    ("cdna_version", "cu_count", "expect_swap"),
+    [(3, 304, True), (3, 80, False), (4, 256, False)],
+)
 def test_enable_swaps_only_tuned_linears_on_cdna3(
-    default_vllm_config, dist_init, monkeypatch, llg, cdna_version, expect_swap
+    default_vllm_config,
+    dist_init,
+    monkeypatch,
+    llg,
+    cdna_version,
+    cu_count,
+    expect_swap,
 ):
     import vllm.platforms.rocm as rocm_platform
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -110,6 +119,7 @@ def test_enable_swaps_only_tuned_linears_on_cdna3(
         lambda M, N, K: {"libtype": "opus"} if (N, K) == TUNED_SHAPE else None,
     )
     monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna_version)
+    monkeypatch.setattr(llg, "num_compute_units", lambda: cu_count)
     monkeypatch.setattr(llg.rocm_aiter_ops, "is_linear_enabled", lambda: True)
     module = _linears()
 
