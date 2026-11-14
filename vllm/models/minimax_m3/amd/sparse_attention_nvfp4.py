@@ -28,6 +28,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 class MiniMaxM3SparseRocmNvfp4MetadataBuilder(MiniMaxM3SparseMetadataBuilder):
     """Adds each prefill token's request and absolute position."""
 
+    @classmethod
+    def supports_varlen_decode(cls) -> bool:
+        # The NVFP4 decode kernel scores uniform per-request query rows.
+        return False
+
     def build(
         self,
         common_prefix_len: int,

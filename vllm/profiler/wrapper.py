@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
 from uuid import uuid4
@@ -577,7 +577,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     @contextmanager
-    def capture_cuda_graphs(self) -> Iterator[None]:
+    def capture_cuda_graphs(self) -> Generator[None]:
         """Keep a Proton session active while vLLM captures CUDA graphs."""
         if not self._graph_attribution:
             yield

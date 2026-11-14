@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -167,6 +168,56 @@ def test_reshape_and_cache(
     else:
         torch.testing.assert_close(key_cache, cloned_key_cache)
         torch.testing.assert_close(value_cache, cloned_value_cache)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@torch.inference_mode()
+def test_rocm_attn_kv_cache_update_writes_all_heads() -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/62697.
+
+    32 KV heads x 256 in fp16 needs more than the 512 chunks of x elements per
+    token that the native reshape_and_cache kernel writes.
+    """
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    set_random_seed(0)
+    num_tokens, num_kv_heads, head_size, block_size, num_blocks = 42, 32, 256, 16, 8
+    device, dtype = CUDA_DEVICES[0], torch.float16
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.randn_like(key)
+    slot_mapping = torch.randperm(num_blocks * block_size, device=device)[:num_tokens]
+    kv_cache = torch.zeros(
+        2, num_blocks, block_size, num_kv_heads * head_size, dtype=dtype, device=device
+    )
+    scale = torch.tensor(1.0, device=device)
+    impl = RocmAttentionImpl(
+        num_heads=num_kv_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    impl.do_kv_cache_update(
+        SimpleNamespace(_k_scale=scale, _v_scale=scale),
+        key,
+        value,
+        kv_cache.transpose(0, 1),
+        slot_mapping,
+    )
+
+    key_cache, value_cache = PagedAttention.split_kv_cache(
+        kv_cache, num_kv_heads, head_size
+    )
+    block_idx, block_offset = slot_mapping // block_size, slot_mapping % block_size
+    torch.testing.assert_close(
+        key_cache[block_idx, :, :, block_offset].flatten(2), key, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        value_cache[block_idx, :, :, block_offset], value, atol=0, rtol=0
+    )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
