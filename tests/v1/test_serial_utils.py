@@ -3,6 +3,7 @@
 from collections import UserDict
 from dataclasses import dataclass
 
+import cloudpickle
 import msgspec
 import numpy as np
 import pytest
@@ -17,7 +18,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, run_method
 
 pytestmark = pytest.mark.cpu_test
 
@@ -302,6 +303,42 @@ def test_custom_class_serialization_disallowed_without_pickle():
     with pytest.raises(TypeError):
         # Attempt to encode the custom class
         encoder.encode(obj)
+
+
+def test_run_method_rejects_pickled_bytes_without_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A bytes method is cloudpickle-deserialized; reject it unless
+    VLLM_ALLOW_INSECURE_SERIALIZATION is set (the default is off)."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
+    payload = cloudpickle.dumps(lambda self, x: x + 1)
+    with pytest.raises(TypeError):
+        run_method(object(), payload, (41,), {})
+
+
+def test_run_method_allows_pickled_bytes_with_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With the flag set, a bytes method deserializes and runs."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    payload = cloudpickle.dumps(lambda self, x: x + 1)
+    assert run_method(object(), payload, (41,), {}) == 42
+
+
+def test_run_method_str_and_callable_need_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """String and callable methods never use cloudpickle, so the flag
+    does not affect them."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
+
+    class Obj:
+        def add(self, x):
+            return x + 1
+
+    obj = Obj()
+    assert run_method(obj, "add", (41,), {}) == 42
+    assert run_method(obj, lambda self, x: x + 1, (41,), {}) == 42
 
 
 @dataclass
