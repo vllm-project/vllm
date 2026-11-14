@@ -15,11 +15,13 @@ from vllm.utils.import_utils import PlaceholderModule
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .serve import (
     SweepServeArgs,
+    _comb_is_valid,
     _get_comb_base_path,
     run_comb,
     server_ctx,
 )
 from .server import ServerProcess
+from .utils import validate_result_paths
 
 try:
     import pandas as pd
@@ -231,6 +233,12 @@ def explore_combs_workloads(
             "since it is supposed to be explored automatically."
         )
 
+    validate_result_paths(
+        _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
+        for serve_comb in serve_params
+        for bench_comb in bench_params
+        if _comb_is_valid(serve_comb, bench_comb, link_vars)
+    )
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
         with server_ctx(
