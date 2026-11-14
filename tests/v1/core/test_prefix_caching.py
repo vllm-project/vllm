@@ -154,13 +154,23 @@ def make_request(
 
 
 def make_kv_cache_manager(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig | None = None,
+    mark_eagle_group: bool = True,
+    **kwargs,
 ) -> KVCacheManager:
     """Build a `KVCacheManager`, deriving `scheduler_block_size` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     `resolve_kv_cache_block_sizes` for the non-context-parallel case used by
     these tests, so callers don't have to pass it at every site. With
     `vllm_config`, a HiSparseConnector builds the HiSparse coordinator."""
+    if (
+        kwargs.get("use_eagle", False)
+        and mark_eagle_group
+        and not any(g.is_eagle_group for g in kv_cache_config.kv_cache_groups)
+    ):
+        for g in kv_cache_config.kv_cache_groups:
+            g.is_eagle_group = True
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -6668,6 +6678,42 @@ def test_swa_reachable_block_mask_final_partial_segment():
     assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
 
 
+def test_swa_reachable_block_mask_eagle_sibling_divergence():
+    """A sibling that diverges right after a segment boundary hits one alignment
+    unit lower, because the EAGLE peek block past the boundary is dropped when
+    the hit is taken. When a segment spans several alignment units, that run ends
+    a full unit below the boundary, so it must be retained as well; keeping only
+    the peek block would still lose the sibling's hit.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=3 * block_size,  # need = 3, 4 with the EAGLE peek
+    )
+
+    def retained(use_eagle: bool) -> set[int]:
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=24,
+            alignment_tokens=2 * block_size,  # two blocks per alignment unit
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            retention_interval=8 * block_size,  # four alignment units per segment
+        )
+        assert mask is not None
+        return {i for i, v in enumerate(mask) if v}
+
+    # Per segment the tail is ``need`` blocks ending on the boundary; under
+    # EAGLE it also reaches one alignment unit (two blocks) below it.
+    assert retained(True) == {*range(3, 9), *range(11, 17), *range(19, 24)}
+    assert retained(False) == {5, 6, 7, 13, 14, 15, 21, 22, 23}
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     `need`-block sliding-window tail ending on that boundary (not a single
@@ -7008,3 +7054,57 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def test_eagle_no_fallback_when_no_draft_group(caplog):
+    block_size = 16
+    kv_cache_config = make_kv_cache_config(block_size, num_blocks=100)
+    assert not any(g.is_eagle_group for g in kv_cache_config.kv_cache_groups)
+    with caplog.at_level("WARNING"):
+        manager = make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=True,
+            mark_eagle_group=False,
+        )
+    assert manager.coordinator.eagle_group_ids == set()
+    assert manager.coordinator.drop_eagle_group_ids == set()
+    assert "no KV cache group was identified as a draft group" in caplog.text
+
+
+def test_eagle_no_fallback_with_multi_group_hybrid(caplog):
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(
+        block_size, num_blocks=100, sliding_window_blocks=2
+    )
+    assert len(kv_cache_config.kv_cache_groups) == 3
+    assert not any(g.is_eagle_group for g in kv_cache_config.kv_cache_groups)
+    with caplog.at_level("WARNING"):
+        manager = make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=True,
+            mark_eagle_group=False,
+        )
+    assert manager.coordinator.eagle_group_ids == set()
+    assert manager.coordinator.drop_eagle_group_ids == set()
+    assert "no KV cache group was identified as a draft group" in caplog.text
+
+
+def test_eagle_drop_when_draft_group_present():
+    block_size = 16
+    kv_cache_config = make_kv_cache_config(block_size, num_blocks=100)
+    kv_cache_config.kv_cache_groups[0].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    assert manager.coordinator.eagle_group_ids == {0}
+    assert manager.coordinator.drop_eagle_group_ids == {0}
