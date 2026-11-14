@@ -65,7 +65,7 @@ def run_comb_workload(
     warmup_num_prompts: int,
     continue_on_error: bool,
     workload_var: WorkloadVariable,
-    workload_value: int,
+    workload_value: int | float,
 ) -> list[dict[str, object]] | None:
     bench_comb_workload = bench_comb | {workload_var: workload_value}
 
@@ -165,22 +165,24 @@ def explore_comb_workloads(
         print("[WL END]")
         return []
 
-    serial_workload_value = math.ceil(
-        _estimate_workload_avg(serial_workload_data, workload_var)
-    )
+    serial_workload_value = _estimate_workload_avg(serial_workload_data, workload_var)
+    if workload_var == "max_concurrency":
+        serial_workload_value = max(1, math.ceil(serial_workload_value))
     print(f"Serial inference: {workload_var}={serial_workload_value}")
 
-    batch_workload_value = math.floor(
-        _estimate_workload_avg(batch_workload_data, workload_var)
-    )
+    batch_workload_value = _estimate_workload_avg(batch_workload_data, workload_var)
+    if workload_var == "max_concurrency":
+        batch_workload_value = max(1, math.floor(batch_workload_value))
     print(f"Batch inference: {workload_var}={batch_workload_value}")
 
     # Avoid duplicated runs for intermediate values if the range between
     # `serial_workload_value` and `batch_workload_value` is small
     inter_workload_values = np.linspace(
         serial_workload_value, batch_workload_value, workload_iters
-    )[1:-1]
-    inter_workload_values = sorted(set(map(round, inter_workload_values)))
+    )[1:-1].tolist()
+    if workload_var == "max_concurrency":
+        inter_workload_values = list(map(round, inter_workload_values))
+    inter_workload_values = sorted(set(inter_workload_values))
 
     inter_workloads_data: list[dict[str, object]] = []
     for inter_workload_value in inter_workload_values:

@@ -143,6 +143,8 @@ The algorithm for exploring different workload levels can be summarized as follo
 
 You can override the number of iterations in the algorithm by setting `--workload-iters`.
 
+With `--workload-var request_rate`, measured bounds and intermediate rates retain fractional precision, including rates below 1 request per second. With `--workload-var max_concurrency`, workload levels are integers of at least 1; rounding can reduce the number of distinct intermediate levels.
+
 !!! tip
     This is our equivalent of [GuideLLM's `--profile sweep`](https://github.com/vllm-project/guidellm/blob/v0.5.3/src/guidellm/benchmark/profiles.py#L575).
 
