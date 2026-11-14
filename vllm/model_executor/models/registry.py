@@ -450,10 +450,6 @@ _MULTIMODAL_MODELS = {
         "granite4_vision",
         "Granite4VisionForConditionalGeneration",
     ),
-    "GraniteDoclingForConditionalGeneration": (
-        "granite_docling",
-        "GraniteDoclingForConditionalGeneration",
-    ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": (
@@ -810,6 +806,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "TransformersMultiModalMoEForCausalLM",
     ),
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "GraniteDoclingForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
