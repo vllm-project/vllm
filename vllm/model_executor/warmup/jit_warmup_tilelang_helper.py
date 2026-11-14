@@ -41,7 +41,7 @@ def _quiet_tilelang_warmup_logs() -> Generator[None]:
             logger.setLevel(level)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TileLangWarmupTensor:
     """Minimal tensor-like object accepted by TileLang compile().
 
