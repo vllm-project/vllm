@@ -8,7 +8,11 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -34,6 +38,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
+from vllm.v1.attention.ops import rocm_gqa_verify
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -43,6 +48,24 @@ from vllm.v1.kv_cache_interface import (
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
+
+
+def _uses_fast_verify(vllm_config: VllmConfig | None, kv_cache_dtype: str) -> bool:
+    """Whether a layer can use the decode kernels in
+    `vllm.v1.attention.ops.rocm_gqa_verify`: gfx950 and an FP8 e4m3 KV cache in the
+    default (unshuffled) layout. The layer still has to pass `supports_layer`."""
+    if vllm_config is None or not current_platform.is_rocm():
+        return False
+    if (
+        kv_cache_dtype not in ("fp8", "fp8_e4m3")
+        or rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    ):
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -334,6 +357,8 @@ class AiterFlashAttentionDecodeMetadata:
     swa_block_table: torch.Tensor | None = None
     swa_seq_lens: torch.Tensor | None = None
     swa_max_seq_len: int = 0
+    # Speculative-decode verify: the full-attention layers' work map for this step.
+    verify_map: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -485,6 +510,8 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
+        self._verify_kv_heads: int | None = None
+        swa_tables_needed = False
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -494,6 +521,10 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            if layer.impl._fast_verify and layer.impl.sliding_window[0] == -1:
+                self._verify_kv_heads = layer.impl.num_kv_heads
+            if layer.impl.sliding_window[0] != -1 and not layer.impl._fast_verify:
+                swa_tables_needed = True
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
@@ -508,11 +539,12 @@ class AiterFlashAttentionMetadataBuilder(
                 )
                 self.aot_sliding_window = sliding_window_config
 
-        # Persistent so full CUDA graphs keep reading the same storage.
+        # Persistent so full CUDA graphs keep reading the same storage. Layers on
+        # the `rocm_gqa_verify` kernels apply the window themselves.
         self._swa_block_table: torch.Tensor | None = None
         self._swa_seq_lens: torch.Tensor | None = None
         self._swa_block_offsets: torch.Tensor | None = None
-        if self.aot_sliding_window is not None:
+        if self.aot_sliding_window is not None and swa_tables_needed:
             window = self.aot_sliding_window[0] + 1
             num_window_blocks = cdiv(window, self.block_size) + 1
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -525,6 +557,14 @@ class AiterFlashAttentionMetadataBuilder(
             self._swa_block_offsets = torch.arange(
                 num_window_blocks, dtype=torch.int64, device=device
             )
+
+        self._verify_map_buffers = (
+            None
+            if self._verify_kv_heads is None
+            else rocm_gqa_verify.map_buffers(
+                vllm_config.scheduler_config.max_num_seqs, device
+            )
+        )
 
         self.extend_workspace = torch.empty(
             [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
@@ -683,11 +723,25 @@ class AiterFlashAttentionMetadataBuilder(
                         common_attn_metadata.max_seq_len,
                     )
                 )
+            verify_map = None
+            if (
+                self._verify_map_buffers is not None
+                and self._verify_kv_heads is not None
+                and rocm_gqa_verify.uniform_query_len(
+                    num_decodes, num_decode_tokens, decode_max_query_len
+                )
+            ):
+                verify_map = rocm_gqa_verify.verify_map(
+                    common_attn_metadata.seq_lens[:num_decodes],
+                    self._verify_kv_heads,
+                    self._verify_map_buffers,
+                )
             decode_metadata = AiterFlashAttentionDecodeMetadata(
                 max_query_len=decode_max_query_len,
                 swa_block_table=swa_block_table,
                 swa_seq_lens=swa_seq_lens,
                 swa_max_seq_len=swa_max_seq_len,
+                verify_map=verify_map,
             )
 
         prefill_metadata = None
@@ -994,6 +1048,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+        self._fast_verify = _uses_fast_verify(
+            get_current_vllm_config_or_none(), kv_cache_dtype
+        ) and rocm_gqa_verify.supports_layer(
+            num_heads,
+            num_kv_heads,
+            head_size,
+            self.alibi_slopes,
+            sinks,
+            self.logits_soft_cap,
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1369,6 +1434,26 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if num_decodes > 0:
             assert attn_metadata.decode_metadata is not None
             decode_max_query_len = attn_metadata.decode_metadata.max_query_len
+
+            if (
+                self._fast_verify
+                and attn_metadata.causal
+                and rocm_gqa_verify.fast_verify(
+                    query,
+                    key_cache,
+                    value_cache,
+                    output,
+                    attn_metadata,
+                    num_decodes,
+                    num_decode_tokens,
+                    decode_max_query_len,
+                    self.scale,
+                    self.sliding_window[0] + 1,
+                    layer,
+                    attn_metadata.decode_metadata.verify_map,
+                )
+            ):
+                return output
 
             # Use unified_attention for the decodes the paged kernels can't
             # take: sliding window, sinks, or a multi-token batch

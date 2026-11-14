@@ -253,9 +253,10 @@ def test_aiter_kv_workspace_only_for_cache_readers(
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
     layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
-    layer.impl.sliding_window = None
+    layer.impl.sliding_window = (-1, -1)
     layer.impl.num_kv_heads = 1
     layer.impl.head_size = 64
+    layer.impl._fast_verify = False
     layer.kv_sharing_target_layer_name = "source" if sharing else None
     layer.kv_cache_update_bypass = bypass
     monkeypatch.setattr(
