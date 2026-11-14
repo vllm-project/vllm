@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PlotSpec:
     var_x: str
     var_y: str

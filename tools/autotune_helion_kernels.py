@@ -48,7 +48,7 @@ except ImportError as e:
 logger = init_logger("vllm.scripts.autotune_helion_kernels")
 
 
-@dataclass
+@dataclass(slots=True)
 class AutotuneResult:
     status: str  # "success" | "partial" | "error" | "skipped"
     successful: int
