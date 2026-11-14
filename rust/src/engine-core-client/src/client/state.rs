@@ -21,6 +21,12 @@ use crate::transport::ConnectedEngine;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
+pub enum OutputDispatch {
+    Sent,
+    Unrouted(EngineCoreStreamOutput),
+    Overflow(EngineId, String),
+}
+
 #[derive(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
@@ -238,29 +244,34 @@ impl RequestRegistry {
     }
 
     /// Send one output to its request stream. If it indicates the request is
-    /// finished, the request will be removed from the registry. Returns the
-    /// output back if its request is no longer tracked.
+    /// finished, the request will be removed from the registry. An unread
+    /// queue overflow also removes the request so the engine can be aborted.
     ///
     /// The send happens under the registry lock: the sender is stateful (see
     /// [`OutputSender::send`]) and owned by the registry entry, and sending on
-    /// its unbounded channel never blocks.
-    pub fn send_output(
-        &mut self,
-        output: EngineCoreStreamOutput,
-    ) -> Option<EngineCoreStreamOutput> {
+    /// its channel never blocks.
+    pub fn send_output(&mut self, output: EngineCoreStreamOutput) -> OutputDispatch {
         self.apply_lora_events(&output.output);
         if output.finished() {
             match self.remove(output.request_id.as_str()) {
-                Some((mut sender, _)) => sender.send(output),
-                None => return Some(output),
+                Some((mut sender, _)) => {
+                    sender.send(output);
+                }
+                None => return OutputDispatch::Unrouted(output),
             }
         } else {
             match self.requests.get_mut(output.request_id.as_str()) {
-                Some(tracked) => tracked.sender.send(output),
-                None => return Some(output),
+                Some(tracked) => {
+                    let request_id = output.request_id.clone();
+                    if !tracked.sender.send(output) {
+                        let (_, engine_id) = self.remove(&request_id).expect("tracked request");
+                        return OutputDispatch::Overflow(engine_id, request_id);
+                    }
+                }
+                None => return OutputDispatch::Unrouted(output),
             }
         }
-        None
+        OutputDispatch::Sent
     }
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
@@ -506,7 +517,8 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, OutputDispatch, OutputReceiver, RequestRegistry,
+        UtilityRegistry,
     };
     use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
@@ -579,8 +591,42 @@ mod tests {
             ..Default::default()
         }));
 
-        assert!(unrouted.is_none());
+        assert!(matches!(unrouted, OutputDispatch::Sent));
         assert!(!registry.contains("req-1"));
+    }
+
+    #[test]
+    fn unread_output_overflow_removes_request_for_engine_abort() {
+        use crate::client::output_channel::MAX_QUEUED_OUTPUTS_PER_REQUEST;
+
+        let engine_id = EngineId::from(b"engine-0");
+        let mut registry = RequestRegistry::new(&[connected_engine(engine_id.clone())]);
+        let (_, _receiver) = registry
+            .register(
+                "req-slow".to_string(),
+                None,
+                None,
+                NonZeroU32::new(512).unwrap(),
+            )
+            .unwrap();
+        for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
+            assert!(matches!(
+                registry.send_output(stream_output(EngineCoreOutput {
+                    request_id: "req-slow".to_string(),
+                    ..Default::default()
+                })),
+                OutputDispatch::Sent
+            ));
+        }
+        assert!(matches!(
+            registry.send_output(stream_output(EngineCoreOutput {
+                request_id: "req-slow".to_string(),
+                ..Default::default()
+            })),
+            OutputDispatch::Overflow(actual_engine, request_id)
+                if actual_engine == engine_id && request_id == "req-slow"
+        ));
+        assert!(!registry.contains("req-slow"));
     }
 
     /// Drain the outputs that are ready on `receiver` without waiting,
@@ -610,7 +656,7 @@ mod tests {
                 new_token_ids: vec![token_id],
                 ..Default::default()
             }));
-            assert!(unrouted.is_none());
+            assert!(matches!(unrouted, OutputDispatch::Sent));
         }
         // Only the first output is delivered; the next two are held back
         // below the stream interval.
