@@ -45,12 +45,15 @@ def benchmark_activation(
         layer = op_registry[func_name]()
 
     x = torch.randn(num_tokens, dim, dtype=dtype, device=device)
-    compiled_layer = torch.compile(layer.forward_native)
-
-    if provider == "custom":
-        fn = lambda: layer(x)
+    if provider == "native":
+        fn = lambda: layer.forward_native(x)
+    elif provider == "custom":
+        fn = lambda: layer.forward_cuda(x)
     elif provider == "compiled":
+        compiled_layer = torch.compile(layer.forward_native)
         fn = lambda: compiled_layer(x)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
 
     ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
         fn, quantiles=[0.5, 0.2, 0.8]
@@ -90,9 +93,9 @@ if __name__ == "__main__":
             x_names=["batch_size", "seq_len", "intermediate_size"],
             x_vals=configs,
             line_arg="provider",
-            line_vals=["custom", "compiled"],
-            line_names=["Custom OP", "Compiled"],
-            styles=[("blue", "-"), ("green", "-")],
+            line_vals=["native", "custom", "compiled"],
+            line_names=["PyTorch (eager)", "Custom OP", "Compiled"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
             ylabel="ms",
             plot_name=f"{func_name}-op-performance",
             args={},
