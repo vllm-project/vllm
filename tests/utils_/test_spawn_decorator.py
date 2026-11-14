@@ -39,6 +39,31 @@ def test_spawn_decorator_reports_skip(pytester):
     result.stdout.fnmatch_lines(["SKIPPED *intentional skip"])
 
 
+def test_spawn_decorator_imports_octave_dispatch(pytester, monkeypatch):
+    """The collected Octave test must reach its device check in a fresh process."""
+    for variable in (
+        "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+    ):
+        monkeypatch.setenv(variable, "")
+
+    test_file = (
+        Path(__file__).resolve().parents[1] / "kernels/attention/test_rocm_octave.py"
+    )
+    items, recorder = pytester.inline_genitems(
+        f"{test_file}::test_prefill_query_device_dispatch"
+    )
+    assert recorder.ret == pytest.ExitCode.OK
+    (item,) = items
+    # Call directly so module-level GPU marks cannot hide child import failures.
+    with pytest.raises(
+        pytest.skip.Exception,
+        match="Requires an Octave-supported GPU and an unsupported GPU",
+    ):
+        item.obj()
+
+
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize("x,y,expected", [(1, 2, 3), (0, 0, 0)])
 def test_spawn_decorator_parametrized(x, y, expected):
