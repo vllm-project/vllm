@@ -1275,6 +1275,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
     --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
+    --mount=type=bind,source=requirements/test/kv_connectors_cuda.overrides,target=/tmp/vllm-requirements/kv_connectors.overrides,ro \
     set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -1292,11 +1293,17 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         uv pip freeze --system > /tmp/kv-installed.txt; \
         grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
             /tmp/kv-installed.txt > /tmp/kv-constraints.txt; \
-        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build || ( \
+        # Keep vLLM's OpenTelemetry versions over lmcache's caps, as the CI image does. \
+        # --override replaces UV_OVERRIDE, so pass the NCCL override file again. \
+        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" \
+            --override /tmp/vllm-requirements/kv_connectors.overrides \
+            ${UV_OVERRIDE:+--override "${UV_OVERRIDE}"} --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build-isolation && \
+            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" \
+                --override /tmp/vllm-requirements/kv_connectors.overrides \
+                ${UV_OVERRIDE:+--override "${UV_OVERRIDE}"} --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
