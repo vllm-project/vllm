@@ -4,20 +4,13 @@ import logging
 import multiprocessing
 import os
 import threading
-from functools import wraps
+from functools import cache, wraps
 from pathlib import Path
+from types import ModuleType
 
 import torch
-import torch.utils.cpp_extension
-from torch.utils.cpp_extension import load
 
-root = Path(__file__).parent.resolve()
-cuda_include_path = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")
-hf3fs_utils = load(
-    name="hf3fs_utils",
-    sources=[f"{root}/utils/hf3fs_utils.cpp"],
-    extra_include_paths=[cuda_include_path],
-)
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +25,24 @@ try:
     )
 except ImportError:
     HF3FS_AVAILABLE = False
+
+
+@cache
+def _load_cuda_shm_ops() -> ModuleType:
+    """JIT-build the CUDA shm copy extension (utils/hf3fs_utils.cpp).
+
+    CUDA only. Built on first use rather than at import time so that importing
+    this module works on every platform.
+    """
+    from torch.utils.cpp_extension import CUDA_HOME, load
+
+    assert CUDA_HOME is not None, "CUDA_HOME is required to build hf3fs_utils"
+    root = Path(__file__).parent.resolve()
+    return load(
+        name="hf3fs_utils",
+        sources=[str(root / "utils" / "hf3fs_utils.cpp")],
+        extra_include_paths=[os.path.join(CUDA_HOME, "include")],
+    )
 
 
 def rsynchronized():
@@ -143,8 +154,14 @@ class Hf3fsClient:
             self.rlock = threading.RLock()
             self.wlock = threading.RLock()
 
-            self.stream = torch.cuda.Stream()
-            self.stream_ptr_int = self.stream.cuda_stream
+            # shm <-> device copies: native extension on CUDA, generic torch
+            # copies on every other accelerator.
+            self._cuda_ops: ModuleType | None = None
+            if current_platform.is_cuda():
+                self._cuda_ops = _load_cuda_shm_ops()
+                self.stream = torch.cuda.Stream()
+            else:
+                self.stream = torch.Stream()
 
         except Exception:
             self._release_resources()
@@ -213,24 +230,21 @@ class Hf3fsClient:
         resv = self.ior_r.submit().wait(min_results=ionum)
 
         # results
-        with torch.cuda.stream(self.stream):
-            hf3fs_utils.read_shm(
-                self.shm_r_tensor, self.r_pinned, tensors, self.stream_ptr_int
-            )
+        self._read_shm(tensors)
         results = [res.result for res in resv]
 
         return results
 
     @wsynchronized()
     def batch_write(
-        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.cuda.Event
+        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.Event
     ) -> list[int]:
         """Write data from tensors to the file at specified offsets.
 
         Args:
             offsets: List of byte offsets to write to
             tensors: List of tensors containing data to write
-            event: CUDA event to synchronize on before reading the tensors
+            event: Accelerator event to wait on before reading the tensors
 
         Returns:
             List of operation results (0 for success, non-zero for error)
@@ -241,11 +255,7 @@ class Hf3fsClient:
         assert self.iov_w is not None
 
         # prepare
-        with torch.cuda.stream(self.stream):
-            self.stream.wait_event(event)
-            hf3fs_utils.write_shm(
-                tensors, self.shm_w_tensor, self.w_pinned, self.stream_ptr_int
-            )
+        self._write_shm(tensors, event)
 
         current = 0
         for offset, tensor in zip(offsets, tensors):
@@ -263,6 +273,69 @@ class Hf3fsClient:
         results = [res.result for res in resv]
 
         return results
+
+    @staticmethod
+    def _byte_view(t: torch.Tensor) -> torch.Tensor:
+        """Flat uint8 view over a contiguous tensor's storage."""
+        assert t.is_contiguous(), "HF3FS I/O buffers must be contiguous"
+        return t.view(-1).view(torch.uint8)
+
+    def _read_shm(self, tensors: list[torch.Tensor]) -> None:
+        """Copy packed pages from the read shm into ``tensors``.
+
+        shm -> pinned host buffer -> device (async on ``self.stream``).
+        ``self.stream`` does not wait on other streams: the caller must ensure
+        no pending device work still touches ``tensors``.
+        """
+        if self._cuda_ops is not None:
+            with torch.cuda.stream(self.stream):
+                self._cuda_ops.read_shm(
+                    self.shm_r_tensor,
+                    self.r_pinned,
+                    tensors,
+                    self.stream.cuda_stream,
+                )
+            return
+
+        nbytes = sum(t.numel() * t.element_size() for t in tensors)
+        self.r_pinned[:nbytes].copy_(self.shm_r_tensor[:nbytes])
+        cur = 0
+        with self.stream:
+            for t in tensors:
+                n = t.numel() * t.element_size()
+                self._byte_view(t).copy_(
+                    self.r_pinned[cur : cur + n], non_blocking=True
+                )
+                cur += n
+        self.stream.synchronize()
+
+    def _write_shm(self, tensors: list[torch.Tensor], event: torch.Event) -> None:
+        """Pack ``tensors`` into the write shm once ``event`` has completed.
+
+        device -> pinned host buffer (async on ``self.stream``) -> shm.
+        """
+        if self._cuda_ops is not None:
+            with torch.cuda.stream(self.stream):
+                self.stream.wait_event(event)
+                self._cuda_ops.write_shm(
+                    tensors,
+                    self.shm_w_tensor,
+                    self.w_pinned,
+                    self.stream.cuda_stream,
+                )
+            return
+
+        cur = 0
+        with self.stream:
+            self.stream.wait_event(event)
+            for t in tensors:
+                n = t.numel() * t.element_size()
+                self.w_pinned[cur : cur + n].copy_(
+                    self._byte_view(t), non_blocking=True
+                )
+                cur += n
+        self.stream.synchronize()
+        self.shm_w_tensor[:cur].copy_(self.w_pinned[:cur])
 
     def check(self, offsets: list[int], tensors: list[torch.Tensor]) -> None:
         sizes = [t.numel() * t.itemsize for t in tensors]
