@@ -2,6 +2,8 @@
 #include "dispatch_utils.h"
 #include "torch_utils.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #ifndef USE_ROCM
@@ -340,10 +342,11 @@ __device__ bool processHistogramStep(
 }
 
 // Follows half - 11 - 11 - 10 bit iterations
-// Keep the adaptive kernel's device instantiation separate from legacy calls.
+// Keep the adaptive kernels' device instantiations separate from legacy calls
+// and from each other: a non-zero deviceLengthAware tags one adaptive kernel.
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false,
-          bool deviceLengthAware = false, bool useTopK512Optimization = false>
+          int deviceLengthAware = 0, bool useTopK512Optimization = false>
 static __device__ void topKPerRowJob(const int* indices, const float* logits,
                                      int rowStart, int rowEnd, int* outIndices,
                                      float* outLogits, int stride1, int topK) {
@@ -643,6 +646,131 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
 }
 
 #ifdef USE_ROCM
+// Split-work decode policy, measured on MI300X/MI325X with Gaussian,
+// FP8-rounded and tightly clustered logits. A row of L logits uses about
+// 1.25 * (512 / k)^(1/4) * sqrt(L / k) blocks: sqrt(L / k) balances the
+// per-block scan of L / n logits against the merge of n * k candidates, and the
+// measured optimum falls faster with k because the merge costs more per
+// candidate. Rows shorter than kSplitWorkMinRowLength run in a single block
+// because the merge would cost more than splitting saves. Every block still
+// gets at least k logits.
+constexpr int kSplitWorkMinRowLength = 16 * 1024;
+// The grid has between kSplitWorkMinGridBlocks (the fixed split CUDA uses)
+// and kSplitWorkMaxBlocks blocks per row, and no more than a row as wide as
+// the logits would use.
+constexpr int kSplitWorkMinGridBlocks = 10;
+constexpr int kSplitWorkMaxBlocks = 32;
+constexpr int kSplitWorkMergeThreads = 1024;
+// When the preferred splits of a batch's rows would not fit on the GPU, each
+// row gets an equal share of one block per SM, but enough blocks for chunks of
+// at most kSplitWorkMaxChunk logits so that the longest rows of a batch with
+// mixed lengths do not hold up the others.
+constexpr int kSplitWorkMaxChunk = 32 * 1024;
+constexpr int kSplitWorkDeviceLengthAwareTag = 2;
+
+// The policy's parameters that depend only on k, the logits shape and the GPU.
+// The host computes them so that each block only does a few operations before
+// it starts on its logits.
+struct SplitWorkPolicy {
+  // 1.25^2 * (512 / k)^(1/2) / k: a row of L logits prefers
+  // floor(sqrt(blocksSquaredPerLogit * L)) blocks.
+  float blocksSquaredPerLogit;
+  // The number of blocks per row in the grid.
+  int maxBlocks;
+  // Each row's share of one block per SM.
+  int shareBlocks;
+  // A power of two: each merge pass loads about blocksPerLoad blocks'
+  // candidates as float4 across the merge block.
+  int blocksPerLoad;
+};
+
+// The split a row would use if it had the GPU to itself. The host also calls
+// it with the logits width to bound the grid.
+__host__ __device__ __forceinline__ int splitWorkPreferredBlocks(
+    const SplitWorkPolicy& policy, int rowLength) {
+  if (rowLength < kSplitWorkMinRowLength) return 1;
+  // Exact at power-of-two lengths for k = 512 and 2048, where the blocks
+  // squared are whole numbers.
+  return max(1,
+             static_cast<int>(sqrtf(policy.blocksSquaredPerLogit * rowLength)));
+}
+
+// The grid and workspace depend only on the number of rows and the logits
+// width, so a captured graph stays valid for any device-side lengths. Each row
+// picks how many of its gridDim.y blocks to use and records that number in
+// auxNumBlocks for topKPerRowDecodeSplitWorkMerge. A row that runs in a single
+// block writes its result directly.
+template <int kNumThreadsPerBlock>
+static __global__
+__launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeSplitWork(
+    const float* logits, const int* seqLens, int* outIndices, int* auxIndices,
+    float* auxLogits, int* auxNumBlocks, int stride0, int stride1,
+    const int topK, int next_n, int seqLensIs2D, const SplitWorkPolicy policy) {
+  static constexpr int kNumBins = 2048;
+  const int rowIdx = blockIdx.x;
+  const int rowEntry = seqLensIs2D ? rowIdx : rowIdx / next_n;
+  const int seqLen = seqLens[rowEntry];
+  const int rowEnd =
+      seqLensIs2D ? max(0, seqLen)
+                  : max(0, seqLen - next_n + rowIdx - rowEntry * next_n + 1);
+  int numBlocks = 1;
+  if (policy.maxBlocks > 1) {
+    numBlocks =
+        min(min(splitWorkPreferredBlocks(policy, rowEnd), policy.maxBlocks),
+            max(policy.shareBlocks,
+                (rowEnd + kSplitWorkMaxChunk - 1) / kSplitWorkMaxChunk));
+    // A partial last merge load costs as much as a full one. Round down to
+    // whole loads once there are at least two.
+    if (numBlocks >= 2 * policy.blocksPerLoad) {
+      numBlocks &= -policy.blocksPerLoad;
+    }
+  }
+  // numBlocks is the same in every lane. Saying so keeps the block's range in
+  // scalar registers, as with a split fixed by gridDim.y.
+  numBlocks = __builtin_amdgcn_readfirstlane(numBlocks);
+  if (blockIdx.y == 0 && threadIdx.x == 0) {
+    auxNumBlocks[rowIdx] = numBlocks;
+  }
+  if (blockIdx.y >= numBlocks) return;
+
+  logits += static_cast<int64_t>(rowIdx) * stride0;
+  const int64_t auxOffset =
+      (static_cast<int64_t>(rowIdx) * policy.maxBlocks + blockIdx.y) * topK;
+  // A single-block row writes its result directly; the auxiliary logits it
+  // also writes are never read.
+  int rowStart = 0;
+  int blockRowEnd = rowEnd;
+  int* blockIndices = outIndices + static_cast<int64_t>(rowIdx) * topK;
+  if (numBlocks > 1) {
+    const int blockSize = rowEnd / numBlocks;
+    rowStart = blockSize * blockIdx.y;
+    blockRowEnd = blockIdx.y + 1 == numBlocks ? rowEnd : rowStart + blockSize;
+    blockIndices = auxIndices + auxOffset;
+  }
+  topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, true, false,
+                kSplitWorkDeviceLengthAwareTag>(
+      nullptr, logits, rowStart, blockRowEnd, blockIndices,
+      auxLogits + auxOffset, stride1, topK);
+}
+
+// Merges the numBlocks * k candidates of each row that
+// topKPerRowDecodeSplitWork split.
+template <int kNumThreadsPerBlock>
+static __global__
+__launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeSplitWorkMerge(
+    const int* auxIndices, const float* auxLogits, const int* auxNumBlocks,
+    int* outIndices, const int topK, int maxBlocks) {
+  static constexpr int kNumBins = 2048;
+  const int rowIdx = blockIdx.x;
+  const int numBlocks = auxNumBlocks[rowIdx];
+  if (numBlocks == 1) return;
+  const int64_t auxOffset = static_cast<int64_t>(rowIdx) * maxBlocks * topK;
+  topKPerRowJob<kNumThreadsPerBlock, kNumBins, true, false, true,
+                kSplitWorkDeviceLengthAwareTag>(
+      auxIndices + auxOffset, auxLogits + auxOffset, 0, numBlocks * topK,
+      outIndices + static_cast<int64_t>(rowIdx) * topK, nullptr, 1, topK);
+}
+
 // Measured native-kernel policy for gfx950, FP32, and k=1024. This
 // active-column split crossover is independent of the Python AITER/native
 // backend crossover; the two policies can be retuned separately. At exactly
@@ -881,8 +1009,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
             static_cast<int>(next_n), seqLensIs2D);
-  } else if (numColumns < kSplitWorkThreshold) {
-    // From this threshold, use radix sort instead
+  } else if (numColumns < kSplitWorkThreshold || stride1 != 1) {
+    // From this threshold, use radix sort instead. Strided logits are not
+    // split because the split kernels assume stride1 == 1.
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
         <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
             logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
@@ -934,6 +1063,71 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
     const bool useGfx950TopK1024 =
         topK == 1024 && numRows <= 64 &&
         std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
+    if (!useGfx950TopK1024) {
+      // The host sizes the grid from the number of rows and the logits width
+      // only; each row picks its own split on the device. The grid spreads
+      // numResidentBlocks blocks per SM over the rows, but has no more blocks
+      // per row than a row as wide as the logits would use. CUDA keeps the
+      // fixed split below because the policy was only measured on ROCm.
+      const int splitSmem = 2 * topK * sizeof(int32_t);
+      vllm::SplitWorkPolicy policy{};
+      policy.blocksSquaredPerLogit =
+          1.5625f * std::sqrt(512.0f / static_cast<float>(topK)) /
+          static_cast<float>(topK);
+      int numResidentBlocks = 1;
+      const cudaError_t occErr = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &numResidentBlocks,
+          vllm::topKPerRowDecodeSplitWork<kNumThreadsPerBlock>,
+          kNumThreadsPerBlock, splitSmem);
+      STD_TORCH_CHECK(occErr == cudaSuccess,
+                      "top_k_per_row_decode occupancy query failed: ",
+                      cudaGetErrorString(occErr));
+      numResidentBlocks = std::clamp(numResidentBlocks, 1, 2);
+      const int numSMs = get_device_prop()->multiProcessorCount;
+      const int rows = std::max(1, static_cast<int>(numRows));
+      policy.maxBlocks = std::min(
+          std::clamp(numSMs * numResidentBlocks / rows,
+                     vllm::kSplitWorkMinGridBlocks, vllm::kSplitWorkMaxBlocks),
+          vllm::splitWorkPreferredBlocks(policy, static_cast<int>(numColumns)));
+      policy.shareBlocks = std::max(1, numSMs / rows);
+      const int blocksPerLoad =
+          vllm::kSplitWorkMergeThreads * 4 / static_cast<int>(topK);
+      policy.blocksPerLoad = 1;
+      while (2 * policy.blocksPerLoad <= blocksPerLoad) {
+        policy.blocksPerLoad *= 2;
+      }
+      const int maxBlocks = policy.maxBlocks;
+      const auto outIndicesAux = torch::stable::empty(
+          {numRows, maxBlocks, topK}, torch::headeronly::ScalarType::Int,
+          std::nullopt, logits.device());
+      const auto outLogitsAux = torch::stable::empty(
+          {numRows, maxBlocks, topK}, torch::headeronly::ScalarType::Float,
+          std::nullopt, logits.device());
+      const auto numBlocksAux =
+          torch::stable::empty({numRows}, torch::headeronly::ScalarType::Int,
+                               std::nullopt, logits.device());
+
+      vllm::topKPerRowDecodeSplitWork<kNumThreadsPerBlock>
+          <<<dim3(numRows, maxBlocks), kNumThreadsPerBlock, splitSmem,
+             stream>>>(
+              logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+              indices.mutable_data_ptr<int>(),
+              outIndicesAux.mutable_data_ptr<int>(),
+              outLogitsAux.mutable_data_ptr<float>(),
+              numBlocksAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
+              static_cast<int>(stride1), static_cast<int>(topK),
+              static_cast<int>(next_n), seqLensIs2D, policy);
+      if (maxBlocks == 1) return;
+
+      vllm::topKPerRowDecodeSplitWorkMerge<vllm::kSplitWorkMergeThreads>
+          <<<numRows, vllm::kSplitWorkMergeThreads, topK * sizeof(int32_t),
+             stream>>>(outIndicesAux.const_data_ptr<int>(),
+                       outLogitsAux.const_data_ptr<float>(),
+                       numBlocksAux.const_data_ptr<int>(),
+                       indices.mutable_data_ptr<int>(), static_cast<int>(topK),
+                       maxBlocks);
+      return;
+    }
 #else
     constexpr bool useGfx950TopK1024 = false;
 #endif
