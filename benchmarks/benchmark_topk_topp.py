@@ -20,16 +20,19 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
-from flashinfer.testing import bench_gpu_time_with_cupti
 
+from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
     reset_buffer_cache,
 )
+
+if current_platform.is_cuda():
+    import flashinfer.sampling as fi_sampling
+    from flashinfer.testing import bench_gpu_time_with_cupti
 
 
 @dataclass(slots=True)
@@ -120,6 +123,33 @@ IMPLEMENTATIONS = {
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
 }
+
+
+def bench_gpu_time_with_events(
+    fn,
+    dry_run_iters: int,
+    repeat_iters: int,
+    use_cuda_graph: bool = False,
+    cold_l2_cache: bool = True,
+) -> list[float]:
+    """Milliseconds per call from events, with the signature of FlashInfer's
+    `bench_gpu_time_with_cupti` for the arguments used here."""
+    assert not use_cuda_graph and cold_l2_cache
+    # Larger than the L2 plus the 256 MiB Infinity Cache of MI300X/MI355X.
+    flush = torch.empty(1 << 30, dtype=torch.int8, device="cuda")
+    for _ in range(dry_run_iters):
+        fn()
+    events = [
+        (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        for _ in range(repeat_iters)
+    ]
+    for start, end in events:
+        flush.zero_()
+        start.record()
+        fn()
+        end.record()
+    torch.accelerator.synchronize()
+    return [start.elapsed_time(end) for start, end in events]
 
 
 def measure_memory() -> tuple[int, int]:
@@ -280,8 +310,12 @@ def run_benchmark(
     output: Path | None = None,
 ):
     """Run selected implementations with identical inputs and masked-logit outputs."""
-    results = []
+    if current_platform.is_cuda():
+        bench_fn = bench_gpu_time_with_cupti
+    else:
+        bench_fn = bench_gpu_time_with_events
 
+    results = []
     for index, config in enumerate(configs):
         logits = create_logits(
             config.batch_size,
@@ -296,7 +330,7 @@ def run_benchmark(
         for name in implementations:
             func = IMPLEMENTATIONS[name]
             reset_memory_stats()
-            times = bench_gpu_time_with_cupti(
+            times = bench_fn(
                 # note: measured runtime includes logits.clone()
                 lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
                 dry_run_iters=warmup_iters,
@@ -411,7 +445,7 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
+        default=["triton"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 
