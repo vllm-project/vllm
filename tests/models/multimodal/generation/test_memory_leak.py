@@ -30,7 +30,13 @@ MAX_MODEL_LEN = 8192
 REQUESTS_PER_ROUND = 4
 WARMUP_ROUNDS = 2
 MEASURED_ROUNDS = 16
-GPU_GROWTH_THRESHOLD_MIB = 0
+# GPU usage is read device-wide (total - free), so it also sees memory the
+# HIP runtime allocates outside the torch caching allocator. On ROCm that
+# runtime sometimes maps one extra 2 MiB VRAM granule at a random round after
+# warmup (and sometimes releases it again), which is not a leak. Allow exactly
+# one granule there: any steady leak above 2 MiB / MEASURED_ROUNDS (128 KiB)
+# per round still exceeds it. CUDA stays at zero tolerance.
+GPU_GROWTH_THRESHOLD_MIB = 2 if current_platform.is_rocm() else 0
 CPU_PEAK_GROWTH_THRESHOLD_MIB = 0
 
 SAMPLING_PARAMS = SamplingParams(
