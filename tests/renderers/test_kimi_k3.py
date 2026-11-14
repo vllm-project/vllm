@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,15 +9,159 @@ import httpx
 import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import LlamaConfig, TokenizersBackend
+from transformers import AutoTokenizer, LlamaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
-from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
 from vllm.renderers.registry import RENDERER_REGISTRY, renderer_from_config
 from vllm.tokenizers.registry import TokenizerRegistry
+
+KIMI_K31_MODEL = "moonshotai/Kimi-K3.1-Pro"
+KIMI_K31_REVISION = "d9e99b0792a5e93b78ea9bea62a68167e36ddd9e"
+
+
+@pytest.fixture(scope="module")
+def kimi_k31_tokenizer():
+    return AutoTokenizer.from_pretrained(
+        KIMI_K31_MODEL,
+        revision=KIMI_K31_REVISION,
+        trust_remote_code=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def kimi_k31_config():
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=KIMI_K31_MODEL,
+            revision=KIMI_K31_REVISION,
+            tokenizer_revision=KIMI_K31_REVISION,
+            trust_remote_code=True,
+            language_model_only=True,
+            max_model_len=4096,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+
+@pytest.fixture
+def kimi_k31_renderer(kimi_k31_config, kimi_k31_tokenizer):
+    renderer = KimiK3Renderer(kimi_k31_config, kimi_k31_tokenizer)
+    yield renderer
+    renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["developer", "system"])
+@pytest.mark.parametrize("content", ["Keep this instruction.", "", None])
+@pytest.mark.parametrize("tool_state", ["missing", "empty", "declared"])
+async def test_kimi_k31_instruction_content_reaches_prompt(
+    kimi_k31_renderer, kimi_k31_tokenizer, role, content, tool_state
+):
+    """Keep in-place instructions and dynamic tool schemas in the actual tokens."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"role": {"const": "developer"}},
+                },
+            },
+        }
+    ]
+    prefix = [
+        {"role": "system", "content": "Initial policy."},
+        {"role": "user", "content": "First turn."},
+        {"role": "assistant", "content": "First answer."},
+    ]
+    suffix = [{"role": "user", "content": "Next turn."}]
+    instruction: dict[str, Any] = {"role": role, "content": content, "name": "policy"}
+    expected: list[dict[str, Any]] = list(prefix)
+    if tool_state != "missing":
+        instruction["tools"] = tools if tool_state == "declared" else []
+    if tool_state == "declared":
+        expected.append({"role": "system", "tools": tools})
+    if content or tool_state != "declared":
+        expected.append({"role": "system", "content": content or "", "name": "policy"})
+    expected.extend(suffix)
+    messages = [*prefix, instruction, *suffix]
+    original = deepcopy(messages)
+    request_tools = [{"type": "function", "function": {"name": "global_lookup"}}]
+    params = ChatParams(
+        chat_template_kwargs={"thinking": False, "tools": request_tools}
+    )
+    expected_ids = kimi_k31_tokenizer.apply_chat_template(
+        expected, tools=request_tools, thinking=False, tokenize=True
+    )
+
+    _, sync_prompt = kimi_k31_renderer.render_messages(messages, params)
+    _, async_prompt = await kimi_k31_renderer.render_messages_async(messages, params)
+
+    assert sync_prompt["prompt_token_ids"] == expected_ids
+    assert async_prompt["prompt_token_ids"] == expected_ids
+    assert messages == original
+
+
+@pytest.fixture(scope="module")
+def kimi_k31_render_server():
+    args = [
+        "--revision",
+        KIMI_K31_REVISION,
+        "--tokenizer-revision",
+        KIMI_K31_REVISION,
+        "--trust-remote-code",
+        "--language-model-only",
+        "--max-model-len",
+        "4096",
+    ]
+    with RemoteLaunchRenderServer(KIMI_K31_MODEL, args) as server:
+        yield server
+
+
+@pytest.mark.parametrize("api", ["responses", "chat/completions"])
+@pytest.mark.parametrize("role", ["developer", "system"])
+@pytest.mark.parametrize("has_tools", [False, True])
+def test_kimi_k31_instruction_input_through_render_api(
+    kimi_k31_tokenizer, kimi_k31_render_server, api, role, has_tools
+):
+    messages: list[dict[str, Any]] = [
+        {"role": role, "content": [{"type": "text", "text": "用中文回答。"}]},
+        {"role": "user", "content": "Hello."},
+    ]
+    expected: list[dict[str, Any]] = []
+    if has_tools:
+        tools = [{"type": "function", "function": {"name": "lookup"}}]
+        messages[0]["tools"] = tools
+        expected.append({"role": "system", "tools": tools})
+    expected.extend(
+        [
+            {"role": "system", "content": "用中文回答。"},
+            {"role": "user", "content": "Hello."},
+        ]
+    )
+    expected_ids = kimi_k31_tokenizer.apply_chat_template(
+        expected,
+        thinking=False,
+        tokenize=True,
+    )
+    body: dict[str, Any] = {"model": KIMI_K31_MODEL}
+    if api == "responses":
+        messages[0]["content"][0]["type"] = "input_text"
+        body.update(input=messages, reasoning={"effort": "none"})
+    else:
+        body.update(messages=messages, reasoning_effort="none")
+    response = httpx.post(
+        kimi_k31_render_server.url_for(f"v1/{api}/render"), json=body, timeout=30
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["token_ids"] == expected_ids
 
 
 class StubTokenizer:

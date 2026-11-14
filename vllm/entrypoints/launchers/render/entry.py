@@ -7,7 +7,7 @@ import socket
 from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import configure_logging_from_args, init_logger
 
 from ..app import build_app
@@ -93,6 +93,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # by `verify_and_update_config` during VllmConfig construction.
     vllm_config = VllmConfig(
         model_config=model_config,
+        cache_config=CacheConfig(enable_prefix_caching=False),
         logging_config=engine_args.create_logging_config(),
         structured_outputs_config=engine_args.create_structured_outputs_config(),
     )

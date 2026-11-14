@@ -7,7 +7,9 @@ Our renderer API is designed to disaggregate the render phase(preprocessing) and
 - Tokens-in / tokens-out engine: Make the engine a pure token-in / token-out service, decoupled from request preprocessing.
 
 The dedicated `vllm launch render` server always exposes the `/render` and
-`/derender` endpoints.
+`/derender` endpoints. It does not allocate an inference KV cache and disables
+inference prefix caching in its own configuration, including for hybrid models
+such as Kimi-K3.1-Pro. Generation workers configure their caches independently.
 
 Scale-out endpoints, including `/render`, `/derender`, and
 `/inference/v1/generate`, are disabled by default on a standard inference

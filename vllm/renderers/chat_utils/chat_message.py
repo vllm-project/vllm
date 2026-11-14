@@ -691,7 +691,7 @@ def parse_chat_message_content(
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
 
-        if role == "developer":
+        if role == "developer" or (role == "system" and "tools" in message):
             result_msg["tools"] = message.get("tools", None)
     return result
 
