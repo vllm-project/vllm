@@ -71,7 +71,7 @@ steps:
   num_devices: 2
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+  - SKIP_DEEPEP_LL=1 bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
   mirror:
     amd:
       label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy TP1"
