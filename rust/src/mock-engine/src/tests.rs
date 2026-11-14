@@ -172,6 +172,50 @@ async fn long_prompt_sent_in_aux_frame_is_served() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requested_logprobs_are_returned() {
+    let ipc = IpcNamespace::new().expect("ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 4).await;
+    // Four tokens of 21 candidates take more than the default zero-copy
+    // threshold, so the sample logprobs come in auxiliary frames.
+    let request = EngineCoreRequest {
+        prompt_token_ids: Some(vec![11, 12, 13, 14].into()),
+        sampling_params: Some(EngineCoreSamplingParams {
+            max_tokens: 4,
+            logprobs: Some(20),
+            prompt_logprobs: Some(2),
+            ..EngineCoreSamplingParams::for_test()
+        }),
+        ..sample_request("req-logprobs", 4)
+    };
+    let mut stream = client.call(request).await.expect("call").into_outputs();
+
+    let output = stream.next().await.expect("output").expect("output ok");
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
+    let logprobs = output.new_logprobs.as_ref().expect("sample logprobs");
+    assert_eq!(logprobs.positions.len(), 4);
+    for (position, &token_id) in logprobs.positions.iter().zip(&output.new_token_ids) {
+        assert_eq!(position.entries.len(), 21);
+        assert_eq!(
+            (position.entries[0].token_id, position.entries[0].rank),
+            (token_id, 1)
+        );
+        assert_eq!(position.entries[1].token_id, token_id);
+    }
+    // Prompt logprobs score each prompt token after the first.
+    let prompt_logprobs = output.new_prompt_logprobs_tensors.as_ref().expect("prompt logprobs");
+    let scored: Vec<_> = prompt_logprobs
+        .positions
+        .iter()
+        .map(|position| (position.entries.len(), position.entries[0].token_id))
+        .collect();
+    assert_eq!(scored, [(3, 12), (3, 13), (3, 14)]);
+    assert!(stream.next().await.is_none());
+
+    shutdown_mock(client, shutdown, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chunk_size_clips_final_output_to_max_tokens() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
