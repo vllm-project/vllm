@@ -87,6 +87,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_linear_weight,
     dequantize_nvfp4_moe_weights,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
@@ -3179,10 +3180,20 @@ class ModelOptLinearMethod(LinearMethodBase):
             return dequant_mxfp8_to_bf16(
                 layer.weight.contiguous(), layer.weight_scale.contiguous()
             )
-        else:
-            raise NotImplementedError(
-                "ModelOpt weight dequantization is only supported for MXFP8."
+        if self.wkey.key is kNvfp4Static:
+            assert self.ctx.group_size is not None, "NVFP4 requires a group_size"
+            return dequantize_nvfp4_linear_weight(
+                layer.weight,
+                layer.weight_scale,
+                layer.weight_scale_2,
+                layer.logical_widths,
+                self.out_dtype,
+                self.ctx.group_size,
+                invert_global_scales=False,
             )
+        raise NotImplementedError(
+            "ModelOpt weight dequantization is only supported for MXFP8 and NVFP4."
+        )
 
     def apply(self, layer, x, bias=None):
         return self.fmt.apply(

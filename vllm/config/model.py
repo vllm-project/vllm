@@ -1427,6 +1427,17 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
+        from vllm.config.quantization import (
+            _DEFERRED_ONLINE_SHORTHANDS,
+            _ONLINE_SHORTHANDS,
+            merge_quantization_config,
+            resolve_quantization_config,
+        )
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        requested_quantization = self.quantization
         supported_quantization = me_quant.QUANTIZATION_METHODS
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
@@ -1508,13 +1519,56 @@ class ModelConfig:
                     f"({self.quantization})."
                 )
 
+        # Keep the NVFP4 loader selected above, but preserve the requested
+        # MXFP4 conversion as an online overlay.
+        if (
+            quant_cfg is not None
+            and requested_quantization == "mxfp4"
+            and self.quantization == "modelopt_fp4"
+        ):
+            online_args = resolve_quantization_config(
+                requested_quantization, self.quantization_config
+            )
+            # Explicit targets (even {}) replace the shorthand's global defaults.
+            if online_args is None or online_args.targets is None:
+                online_args = merge_quantization_config(
+                    _ONLINE_SHORTHANDS[requested_quantization], online_args
+                )
+            self.quantization_config = online_args
+
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            current_platform.verify_quantization(self.quantization)
+            online_args = resolve_quantization_config(
+                self.quantization, self.quantization_config
+            )
+            # Activation-only overrides do not replace checkpoint weights.
+            has_online_weights = online_args is not None and (
+                any(
+                    spec is not None and spec.weight is not None
+                    for spec in (online_args.linear, online_args.moe)
+                )
+                or any(
+                    isinstance(target, str) or target.weight is not None
+                    for target in (online_args.targets or {}).values()
+                )
+            )
+            quant_cls = me_quant.get_quantization_config(self.quantization)
+            # Without checkpoint metadata, mxfp4/mxfp8 may still be online
+            # shorthands; keep their existing model-level validation.
+            is_checkpoint_quantization = not issubclass(
+                quant_cls, OnlineQuantizationConfig
+            ) and (
+                quant_cfg is not None
+                or self.quantization not in _DEFERRED_ONLINE_SHORTHANDS
+            )
+            # Layer selection determines which checkpoint methods still execute.
+            defer_platform_check = has_online_weights and is_checkpoint_quantization
+            if not defer_platform_check:
+                current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
             if self.allow_deprecated_quantization:

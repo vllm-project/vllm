@@ -194,6 +194,8 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
@@ -813,7 +815,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
 ):
     """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
-    quant_config = _fully_quantized_quark_config()
+    quant_config = _fully_quantized_modelopt_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         quant_config_args(linear="mxfp8", ignore=[prefix])
@@ -834,7 +836,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
         disable_tp=True,
     )
 
-    assert isinstance(layer.quant_method, QuarkLinearMethod)
+    assert isinstance(layer.quant_method, ModelOptLinearMethod)
 
 
 def test_online_quantization_configures_prequantized_moe(
@@ -996,8 +998,8 @@ def _nvfp4_moe_checkpoint_tensors(
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("projection", ["column", "row", "merged"])
-@pytest.mark.parametrize("source_format", ["modelopt_mxfp8"])
+@pytest.mark.parametrize("projection", ["column", "row", "merged", "merged_unequal"])
+@pytest.mark.parametrize("source_format", ["modelopt_mxfp8", "modelopt_nvfp4"])
 def test_weight_loading_requantization(
     source_format: str,
     projection: str,
@@ -1019,7 +1021,8 @@ def test_weight_loading_requantization(
             lambda **kwargs: Mock(),
         )
         config = _fully_quantized_modelopt_mxfp8_config()
-        expected_source_cls = ModelOptLinearMethod
+    elif source_format == "modelopt_nvfp4":
+        config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     config.online_quantization_config = OnlineQuantizationConfig(
@@ -1032,8 +1035,10 @@ def test_weight_loading_requantization(
         quant_config=config,
         prefix="model.layers.0.self_attn.o_proj",
     )
-    if projection == "merged":
-        layer = MergedColumnParallelLinear(output_sizes=[64, 64], **kwargs)
+    output_sizes = [64, 32, 32] if projection == "merged_unequal" else [64, 64]
+    is_merged = projection.startswith("merged")
+    if is_merged:
+        layer = MergedColumnParallelLinear(output_sizes=output_sizes, **kwargs)
     elif projection == "row":
         layer = RowParallelLinear(output_size=64, **kwargs)
     else:
@@ -1043,13 +1048,13 @@ def test_weight_loading_requantization(
     assert isinstance(target, Fp8PtpcOnlineLinearMethod)
     source = target.requantization_source
     # Checkpoint parameters must belong to the selected source method.
-    assert isinstance(source, expected_source_cls)
+    assert isinstance(source, ModelOptLinearMethod)
     for name in ("weight", "weight_scale"):
         # Source registration must choose V2 rather than the online target's loader.
         assert getattr(layer, name).weight_loader == layer.weight_loader_v2
 
     torch.manual_seed(11)
-    rows = 128 if projection == "merged" else 64
+    rows = sum(output_sizes) if is_merged else 64
     if source_format == "modelopt_mxfp8":
         checkpoint = {
             "weight": torch.randn(rows, 128, dtype=torch.bfloat16).to(
@@ -1057,16 +1062,32 @@ def test_weight_loading_requantization(
             ),
             "weight_scale": torch.randint(124, 131, (rows, 4), dtype=MXFP8_SCALE_DTYPE),
         }
+    elif source_format == "modelopt_nvfp4":
+        checkpoint = {
+            "weight": torch.full((rows, 64), 0x22, dtype=torch.uint8),
+            "weight_scale": torch.ones(rows, 8, dtype=torch.float8_e4m3fn),
+            "weight_scale_2": torch.tensor(
+                [2.0, 3.0, 5.0][: len(output_sizes)] if is_merged else [2.0]
+            ),
+        }
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     expected = {}
     for name, tensor in checkpoint.items():
         param = getattr(layer, name)
-        if projection == "merged":
-            for shard, part in enumerate(tensor.chunk(2, dim=0)):
+        if name == "weight_scale_2":
+            if is_merged:
+                for shard, scale in enumerate(tensor):
+                    param.weight_loader(param, scale, shard)
+            else:
+                param.weight_loader(param, tensor)
+            expected[name] = tensor
+        elif is_merged:
+            parts = tensor.split(output_sizes, dim=0)
+            for shard, part in enumerate(parts):
                 param.weight_loader(param, part, shard)
             expected[name] = torch.cat(
-                [part.chunk(2, dim=0)[tp_rank] for part in tensor.chunk(2, dim=0)]
+                [part.chunk(2, dim=0)[tp_rank] for part in parts]
             )
         else:
             param.weight_loader(param, tensor)
@@ -1074,11 +1095,26 @@ def test_weight_loading_requantization(
                 tp_rank
             ]
         # TP loading must preserve each source weight/scale shard exactly.
-        torch.testing.assert_close(param.cpu(), expected[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            param.cpu().float(), expected[name].float(), rtol=0, atol=0
+        )
     actual_weight = source.dequantize_weight(layer)
-    reference = source.dequantize_weight(SimpleNamespace(**expected))
+    reference = source.dequantize_weight(
+        SimpleNamespace(**expected, logical_widths=layer.logical_widths)
+    )
     # Loaded source shards must dequantize identically to their checkpoint slices.
     torch.testing.assert_close(actual_weight.cpu(), reference.cpu(), rtol=0, atol=0)
+    if source_format == "modelopt_nvfp4":
+        widths = layer.logical_widths if is_merged else [actual_weight.shape[0]]
+        expected_values = torch.repeat_interleave(
+            checkpoint["weight_scale_2"], torch.tensor(widths)
+        )
+        torch.testing.assert_close(
+            actual_weight.cpu().float(),
+            expected_values[:, None].expand_as(actual_weight),
+            rtol=0,
+            atol=0,
+        )
     # Source loading must leave the online processing method attached.
     assert layer.quant_method is target
 
@@ -1691,6 +1727,12 @@ def test_online_overlay_loads_checkpoint_config_file(tmp_path) -> None:
         pytest.param("mxfp4", None, False, id="mxfp4-online"),
         pytest.param("mxfp8", None, False, id="mxfp8-online"),
         pytest.param(
+            "mxfp4",
+            {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+            False,
+            id="modelopt-nvfp4-to-online-mxfp4",
+        ),
+        pytest.param(
             "mxfp8",
             {"quant_method": "mxfp8", "ignored_layers": []},
             False,
@@ -1721,12 +1763,85 @@ def test_online_shorthand_selects_checkpoint_or_online_config(
 
     result = weight_utils.get_quant_config(model_config, LoadConfig())
 
-    if checkpoint_quantization_config is not None:
+    if (
+        checkpoint_quantization_config is not None
+        and checkpoint_quantization_config.get("quant_algo") == "NVFP4"
+    ):
+        assert isinstance(result, ModelOptNvFp4Config)
+        assert model_config.quantization == "modelopt_fp4"
+        assert result.online_quantization_config is not None
+        assert result.online_quantization_config.args == quant_config_args(
+            linear="mxfp4", moe="mxfp4"
+        )
+    elif checkpoint_quantization_config is not None:
         assert isinstance(result, ModelOptMxFp8Config)
         assert result.online_quantization_config is None
     else:
         assert isinstance(result, OnlineQuantizationConfig)
         assert result.online_quantization_config is None
+
+
+@pytest.mark.parametrize("quantization", [None, "mxfp4"])
+@pytest.mark.parametrize("target", ["mxfp4", {"weight": "mxfp4"}])
+def test_modelopt_nvfp4_targets_preserve_checkpoint_and_selection(
+    tmp_path, quantization, target
+) -> None:
+    """Targets keep the NVFP4 loader without quantizing untargeted linears."""
+    _write_minimal_llama_config(
+        tmp_path, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization=quantization,
+        quantization_config=QuantizationConfigArgs(targets={"*mlp*": target}),
+    )
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, ModelOptNvFp4Config)
+    online_config = result.online_quantization_config
+    assert online_config is not None
+    assert online_config.args.linear is None
+    assert online_config.args.moe is None
+    selected = online_config.resolve_quant_method_cls(
+        ColumnParallelLinear, "model.layers.0.mlp.gate_proj"
+    )
+    assert selected is not None
+    assert selected[3].weight == kMxfp4Static
+    assert (
+        online_config.resolve_quant_method_cls(
+            ColumnParallelLinear, "model.layers.0.self_attn.q_proj"
+        )
+        is None
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_checkpoint_platform_validation_applies_to_untargeted_layers(
+    tmp_path, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """A converted layer cannot make an unsupported native layer valid."""
+    monkeypatch.setattr(type(current_platform), "supported_quantization", ["online"])
+    _write_minimal_llama_config(
+        tmp_path, {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    )
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization_config=quant_config_args(targets={"*mlp*": "fp8_per_channel"}),
+    )
+    default_vllm_config.model_config = model_config
+    config = weight_utils.get_quant_config(model_config, LoadConfig())
+    kwargs = dict(
+        input_size=128,
+        output_size=64,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        disable_tp=True,
+    )
+    targeted = ColumnParallelLinear(prefix="model.layers.0.mlp.proj", **kwargs)
+    assert isinstance(targeted.quant_method, Fp8PtpcOnlineLinearMethod)
+    with pytest.raises(ValueError, match="modelopt_fp4.*not supported"):
+        ColumnParallelLinear(prefix="model.layers.0.self_attn.proj", **kwargs)
 
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
