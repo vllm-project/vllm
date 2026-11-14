@@ -455,6 +455,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+        if self.pp_handler is not None:
+            self.pp_handler.relay_positions = (
+                self.model_state.positions_depend_on_encoder
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -577,6 +581,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_size=self.max_num_tokens,
                 dtype=self.model_config.dtype,
                 device=self.device,
+            )
+            assert self.pp_handler is not None
+            self.pp_handler.add_positions_buffer(
+                self.intermediate_tensors,
+                self.max_num_tokens,
+                self.model_config.mrope_num_dims,
             )
 
         get_offloader().post_init()
@@ -2110,6 +2120,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Some PP transports receive into the persistent tensors.
                     if received[k].data_ptr() != v.data_ptr():
                         v[:num_tokens].copy_(received[k][:num_tokens])
+                assert self.pp_handler is not None
+                self.pp_handler.receive_positions(
+                    intermediate_tensors, model_inputs["positions"], num_tokens
+                )
             n = input_batch.num_tokens_after_padding
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
@@ -2223,8 +2237,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # the unpadded tokens; the next stage pads for its own CUDA graphs.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
+            return self.pp_handler.send_positions(
+                output_intermediate_tensors, model_inputs["positions"]
             )[: input_batch.num_tokens]
         return None
 
