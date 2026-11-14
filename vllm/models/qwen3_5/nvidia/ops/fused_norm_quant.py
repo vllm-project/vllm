@@ -66,8 +66,10 @@ def _gemma_add_rms_norm_quant_kernel(
     sf_ptr,
     y_ptr,
     eps,
+    x_unscale,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
+    FP16_PARTIAL: tl.constexpr,
     QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "nvfp4"
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
@@ -96,6 +98,10 @@ def _gemma_add_rms_norm_quant_kernel(
     w = tl.load(w_ptr + cols, mask=mask, other=0.0)
     if QUANT != "none":
         scale = tl.load(scale_ptr)
+    if FP16_PARTIAL:
+        # x is an all-reduced FP16 partial sum: unscale and round to the
+        # residual dtype, as the unfused path does.
+        x = (x.to(tl.float32) * x_unscale).to(res_ptr.dtype.element_ty)
 
     h = x.to(tl.float32)
     if HAS_RESIDUAL:
@@ -105,7 +111,7 @@ def _gemma_add_rms_norm_quant_kernel(
     var = tl.sum(h * h) / H
     rstd = tl.rsqrt(var + eps)
     # Round to the activation dtype, like the unfused norm output.
-    y = (h * rstd * (1.0 + w.to(tl.float32))).to(x_ptr.dtype.element_ty)
+    y = (h * rstd * (1.0 + w.to(tl.float32))).to(x.dtype)
     if QUANT == "none" or WRITE_Y:
         tl.store(y_ptr + row * H + cols, y, mask=mask)
     if QUANT == "nvfp4":
@@ -151,6 +157,7 @@ def gemma_add_rms_norm_quant(
     scale: torch.Tensor,
     nvfp4: bool,
     write_y: bool = False,
+    x_unscale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Gemma RMSNorm of `x (+ residual)` quantized for the next linear.
 
@@ -164,6 +171,9 @@ def gemma_add_rms_norm_quant(
         nvfp4: quantize to NVFP4 with swizzled 128x4 block scales instead of
             static FP8.
         write_y: also return the bf16 normed activation.
+        x_unscale: x holds all-reduced FP16 partial sums (prescaled by
+            `1 / x_unscale`) of a BF16 model; they are unscaled and rounded
+            to the residual's dtype before the add, and y has that dtype.
 
     Returns:
         `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
@@ -177,6 +187,13 @@ def gemma_add_rms_norm_quant(
     assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
     assert weight.shape == (x.shape[1],) and weight.is_contiguous()
     assert scale.numel() == 1 and scale.dtype == torch.float32
+    fp16_partial = x_unscale is not None
+    if fp16_partial:
+        assert (
+            x.dtype == torch.float16
+            and residual is not None
+            and residual.dtype == torch.bfloat16
+        )
     M, H = x.shape
     if nvfp4:
         # Whole 4-column scale tiles: padded scale columns are not written.
@@ -190,7 +207,8 @@ def gemma_add_rms_norm_quant(
     else:
         q = torch.empty((M, H), dtype=FP8_DTYPE, device=x.device)
         block_scale = scale
-    y = torch.empty_like(x) if write_y else None
+    y_like = residual if fp16_partial else x
+    y = torch.empty_like(y_like) if write_y else None
     if M == 0:
         return q, block_scale, y
 
@@ -206,8 +224,10 @@ def gemma_add_rms_norm_quant(
         block_scale,
         y if y is not None else x,
         eps,
+        x_unscale if fp16_partial else 1.0,
         H=H,
         HAS_RESIDUAL=residual is not None,
+        FP16_PARTIAL=fp16_partial,
         QUANT="nvfp4" if nvfp4 else "fp8",
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
@@ -250,8 +270,10 @@ def gemma_add_rms_norm(
         x,
         y,
         eps,
+        1.0,  # x_unscale: unread without FP16_PARTIAL
         H=H,
         HAS_RESIDUAL=residual is not None,
+        FP16_PARTIAL=False,
         QUANT="none",
         WRITE_Y=True,
         num_warps=16 if M <= 384 else 4,

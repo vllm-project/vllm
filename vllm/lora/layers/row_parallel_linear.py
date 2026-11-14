@@ -22,6 +22,9 @@ from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
+        # forward() below all-reduces the base layer output itself, without the
+        # FP16 -> BF16 step of RowParallelLinear.forward.
+        base_layer.disable_fp16_partial_sums("LoRA")
 
         # reset input_size
         self.input_size = self.base_layer.input_size_per_partition
