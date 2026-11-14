@@ -45,7 +45,7 @@ steps:
 # persistent-state sources.
 - label: ":nvidia: (L4) Persistent State"
   key: persistent-state-tests-2-gpus
-  timeout_in_minutes: 35
+  timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
@@ -53,6 +53,7 @@ steps:
   - tests/conftest.py
   - tests/plugins/vllm_add_dummy_model/
   - tests/plugins_tests/test_persistent_state_stub_model.py
+  - tests/utils.py
   - tests/v1/core/utils.py
   - vllm/config/cache.py
   - vllm/config/compilation.py
@@ -86,6 +87,8 @@ steps:
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/model_states/interface.py
   - vllm/v1/worker/gpu/state_slots.py
+  - vllm/v1/worker/gpu/warmup.py
+  - vllm/v1/worker/gpu_worker.py
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s plugins_tests/test_persistent_state_stub_model.py
