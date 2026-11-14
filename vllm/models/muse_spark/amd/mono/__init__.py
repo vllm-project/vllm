@@ -89,6 +89,14 @@ def maybe_attach_mono(lm: nn.Module) -> None:
     """
     if not lm.vllm_config.kernel_config.monokernel:
         return
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import get_cdna_version
+
+        if get_cdna_version() == 3:
+            from ..specialized_decode import attach
+
+            attach(lm)
+            return
     model = lm.model
     if model.mono is not None:
         model.mono.refresh_weights(model)
