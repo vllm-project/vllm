@@ -227,3 +227,51 @@ def test_prefill_token_ids_shares_prompt_until_outputs():
     request.append_output_token_ids(4)
     assert request.prefill_token_ids is request._all_token_ids
     assert request.prefill_token_ids == [1, 2, 3, 4]
+
+
+def _engine_request_with_salt(cache_salt: str | None) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id="request-1",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=cache_salt,
+        data_parallel_rank=None,
+    )
+
+
+def test_request_accepts_omitted_and_valid_cache_salt():
+    omitted = Request.from_engine_core_request(
+        _engine_request_with_salt(None), block_hasher=None
+    )
+    assert omitted.cache_salt is None
+
+    valid = Request.from_engine_core_request(
+        _engine_request_with_salt("a" * 128), block_hasher=None
+    )
+    assert valid.cache_salt == "a" * 128
+
+
+def test_request_rejects_empty_cache_salt():
+    with pytest.raises(ValueError, match="non-empty string"):
+        Request.from_engine_core_request(
+            _engine_request_with_salt(""), block_hasher=None
+        )
+
+
+def test_request_rejects_oversized_cache_salt():
+    with pytest.raises(ValueError, match="at most 128 characters"):
+        Request.from_engine_core_request(
+            _engine_request_with_salt("B" * 129), block_hasher=None
+        )
+
+
+@pytest.mark.parametrize("cache_salt", ["tenant@victim", "../../x", r"..\x", "a\0b"])
+def test_request_rejects_forbidden_cache_salt_characters(cache_salt: str):
+    with pytest.raises(ValueError, match="must not contain"):
+        Request.from_engine_core_request(
+            _engine_request_with_salt(cache_salt), block_hasher=None
+        )
