@@ -17,11 +17,13 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -316,7 +318,12 @@ class KimiK25ForConditionalGeneration(
             # mm projector
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
-        }
+        },
+        orig_to_new_suffix={
+            ".self_attn.attn.q_scale": ".self_attn.mla_attn.mla_attn.q_scale",
+            ".self_attn.attn.k_scale": ".self_attn.mla_attn.mla_attn.k_scale",
+            ".self_attn.attn.v_scale": ".self_attn.mla_attn.mla_attn.v_scale",
+        },
     )
 
     @classmethod
@@ -481,13 +488,10 @@ class KimiK25ForConditionalGeneration(
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding (same as Qwen): tail slots repeat the last
-            # real offset, so FlashAttn schedules no work for padding rows.
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            if n < dst.shape[0]:
-                dst[n:] = src[-1] if n else 0
+        attn_backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],
@@ -500,7 +504,7 @@ class KimiK25ForConditionalGeneration(
                 "merge_gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
+            padding_logics=padding_logics,
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -644,8 +648,8 @@ class KimiK25ForConditionalGeneration(
         grid_thw_list = self._get_grid_thw_list(mm_kwargs)
         pixel_values = mm_kwargs["pixel_values"]
 
-        # Unpadded: pad_cu_seqlens pads the tail with zero-length sequences
-        # whose entries repeat the real total.
+        # Unpadded: the manager pads the cu_seqlens tail with zero-length
+        # sequences whose entries repeat the real total.
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thw_list,
             max_batch_size=None,
@@ -697,5 +701,31 @@ class KimiK25ForConditionalGeneration(
         return torch.cat(embeddings, dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        scale_mapper = self.hf_to_vllm_mapper
+        if self.quant_config is not None:
+            scale_mapper |= self.quant_config.get_cache_scale_mapper()
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        def non_scale_weights():
+            for name, weight in weights:
+                if ".self_attn." in name and name.endswith(
+                    (".q_scale", ".k_scale", ".v_scale")
+                ):
+                    mapped_name = scale_mapper.map_name(name)
+                    if mapped_name is not None and mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, weight)
+                        loaded_params.add(mapped_name)
+                        continue
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params |= loader.load_weights(
+            non_scale_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        return loaded_params

@@ -48,7 +48,7 @@ class MulticastNotAvailableError(RuntimeError):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestConfig:
     topk: int
     m: int
@@ -59,7 +59,7 @@ class TestConfig:
     apply_router_weight_on_input: bool = False
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TestTensors:
     rank_tokens: torch.Tensor
     topk: torch.Tensor
