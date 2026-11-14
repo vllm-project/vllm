@@ -133,6 +133,10 @@ def _topk_topp_kernel(
         num_duplicate_logit = tl.zeros((), dtype=tl.uint32)
         num_keep = tl.zeros((), dtype=tl.uint32)
         num_kept = tl.zeros((), dtype=tl.uint32)
+        standalone_topp = False
+        sum_exp_logits = 0.0
+        min_larger_prob = 1.0
+        max_sample = 0.0
 
         max_logit = -float("inf")
         min_logit = float("inf")
@@ -620,6 +624,7 @@ def _topk_topp_kernel(
                 run_standalone = tl.load(K + row_id) < VOCAB_SIZE
             p = tl.load(P + row_id)
             if run_standalone and p < 1.0:
+                standalone_topp = True
                 # Zeroth pass: Compute avg and std from a sample block
                 offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
@@ -642,6 +647,8 @@ def _topk_topp_kernel(
                 std_logit = tl.sqrt(
                     tl.maximum(sq_avg_logit - avg_logit * avg_logit, 0.0)
                 )
+                # Retain the sampled reference unless a later logit exceeds it,
+                # preserving the existing search rounding on ordinary rows.
                 max_sample = avg_logit + std_logit * 10.0
                 sum_exp_logits = 0.0
 
@@ -652,7 +659,10 @@ def _topk_topp_kernel(
                     logits_blk = tl.load(
                         LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                     )
-                    max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                    block_max = tl.max(logits_blk)
+                    new_max_sample = tl.maximum(max_sample, block_max)
+                    rescale = tl.exp(max_sample - new_max_sample)
+                    max_logit = tl.maximum(max_logit, block_max)
                     # Exclude -inf from min to keep binary search bounds
                     # finite (avoids NaN pivots).
                     finite_blk = tl.where(
@@ -660,9 +670,13 @@ def _topk_topp_kernel(
                     )
                     min_logit = tl.minimum(min_logit, tl.min(finite_blk))
 
-                    probs_blk = tl.exp(logits_blk - max_sample)
-                    probs_blk = tl.where(mask_n, probs_blk, 0.0)
-                    sum_exp_logits += tl.sum(probs_blk)
+                    probs_blk = tl.where(
+                        logits_blk != -float("inf"),
+                        tl.exp(logits_blk - new_max_sample),
+                        0.0,
+                    )
+                    sum_exp_logits = sum_exp_logits * rescale + tl.sum(probs_blk)
+                    max_sample = new_max_sample
 
                 # If no finite logits exist (all -inf), clamp min to
                 # max so the search converges to -inf (no masking).
@@ -865,9 +879,16 @@ def _topk_topp_kernel(
 
                 # Duplicate logit handling
                 if num_keep < num_duplicate_logit:
-                    duplicate_mask = (
-                        tl.abs(logits_blk - duplicate_logit) < 1e-9
-                    ) & mask_n
+                    if standalone_topp:
+                        # Match the search probabilities without a log/exp round-trip.
+                        duplicate_mask = (
+                            tl.exp(logits_blk - max_sample) / sum_exp_logits
+                            == min_larger_prob
+                        ) & mask_n
+                    else:
+                        duplicate_mask = (
+                            tl.abs(logits_blk - duplicate_logit) < 1e-9
+                        ) & mask_n
                     duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                     duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
                     duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
