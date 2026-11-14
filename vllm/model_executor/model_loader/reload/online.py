@@ -237,6 +237,10 @@ def begin_online_reload(model: torch.nn.Module, defer: bool = False) -> None:
             {n: (b, b) for n, b in layer._buffers.items() if b is not None},
             set(layer._non_persistent_buffers_set),
         )
+        # until processed, the layer shows its checkpoint format, as other
+        # layers do during an update
+        for name, meta in state.ckpt.items():
+            layer.register_parameter(name, meta)
         state.seen.clear()
         state.loaded.clear()
         state.unknown_key = False
@@ -254,8 +258,9 @@ def finalize_online(model: torch.nn.Module, strict: bool) -> None:
         if state.kernel is None:  # cold start
             if getattr(layer, _GUARD, False):
                 continue
-        elif not state.loaded:
-            state.kernel = None  # not part of this update
+        elif not state.loaded:  # not part of this update
+            _restore(layer, state.kernel)
+            state.kernel = None
             continue
         missing = sorted(map(str, (state.expected or set()) - state.seen))
         if missing and not state.unknown_key:
@@ -302,9 +307,10 @@ def _process(layer: torch.nn.Module, state: _State) -> None:
         layer.update_param_tp_status()
     if state.kernel is not None:
         _copy_back(layer, state.kernel)
-    for name, wrapper in state.wrappers.items():
+    for name, wrapper in state.wrappers.items():  # undo an override (EPLB)
+        state.ckpt[name].weight_loader = wrapper
         param = layer._parameters.get(name)
-        if param is not None:  # undo a loader override (EPLB placement)
+        if param is not None:
             param.weight_loader = wrapper
     state.kernel = None
     state.seen.clear()
@@ -319,7 +325,7 @@ def _layout(t: torch.Tensor) -> tuple:
 
 
 def _copy_back(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> None:
-    params, buffers, non_persistent = kernel
+    params, buffers, _ = kernel
     for held, live in ((params, layer._parameters), (buffers, layer._buffers)):
         for name, (_, data) in held.items():
             new = live.get(name)
@@ -332,6 +338,11 @@ def _copy_back(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> N
                     f"{tuple(data.shape)} {data.dtype}"
                 )
             data.copy_(new.data)
+    _restore(layer, kernel)
+
+
+def _restore(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> None:
+    params, buffers, non_persistent = kernel
     for live in (layer._parameters, layer._buffers):
         for name in [n for n, t in live.items() if t is not None]:
             delattr(layer, name)

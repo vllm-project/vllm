@@ -230,6 +230,7 @@ def test_update_equals_cold_start_at_startup_tensors():
     new = _rand(8, 4, seed=1)
 
     begin_online_reload(layer)
+    assert layer.weight.is_meta and layer.weight.dtype == BF16  # checkpoint format
     # an override installed for one update (EPLB placement) is undone after it
     layer.weight.weight_loader = lambda *a, wrapped=layer.weight.weight_loader: wrapped(
         *a
@@ -286,9 +287,10 @@ def test_partial_update_raises_when_strict():
 def test_layer_left_out_of_an_update_keeps_its_weights():
     layer, full = _QKV(), _rand(8, 4)
     _load_qkv(layer, full)
+    weight = layer.weight
     begin_online_reload(layer)
     finalize_online(layer, strict=True)
-    assert layer.quant_method.runs == 1
+    assert layer.quant_method.runs == 1 and layer.weight is weight
     _assert_equal(layer, _reference(full))
 
 
