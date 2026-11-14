@@ -7,7 +7,7 @@ import contextlib
 import ctypes
 import importlib.util
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 
 import torch
 
@@ -158,7 +158,7 @@ def pin_nccl_env(pins: dict[str, str]) -> None:
 
 
 @contextlib.contextmanager
-def unpinned_nccl_env() -> Iterator[None]:
+def unpinned_nccl_env() -> Generator[None]:
     """Create communicators shared with other processes without the pins."""
     if _unpinned_env == {}:
         logger.warning_once(

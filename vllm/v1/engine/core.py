@@ -74,7 +74,10 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    get_kv_cache_kind,
+)
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     CheckpointState,
@@ -107,8 +110,6 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_kind,
-    is_full_attention_spec,
 )
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -167,13 +168,21 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self._eep_scale_up_before_kv_init()
+        try:
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_scale_up_before_kv_init()
 
-        measure_encoder_output_widths(vllm_config, self.collective_rpc)
+            measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
-        # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_config = self._initialize_kv_caches(vllm_config)
+            # Setup KV Caches and update CacheConfig after profiling.
+            kv_cache_config = self._initialize_kv_caches(vllm_config)
+        except BaseException:
+            # Otherwise module-level state keeps an in-process model alive.
+            try:
+                self.model_executor.shutdown()
+            except Exception:
+                logger.exception("Executor shutdown after failed startup failed")
+            raise
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -276,33 +285,8 @@ class EngineCore:
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
-        # register all kvcache specs in enginecore process.
-        register_all_kvcache_specs(vllm_config)
-
         # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
-
-        # Some layers (e.g. Prefix LM attention) run non-causally and tag their
-        # KV cache spec with ``non_causal=True``. The specs are collected here in
-        # the engine-core process (the same process that builds the scheduler),
-        # so this is the multiproc-safe place to translate that layer-level
-        # signal into a scheduling policy: chunked prefill and prefix caching
-        # both assume causal attention and would corrupt non-causal prefill.
-        if any(
-            getattr(spec, "non_causal", False)
-            for worker_specs in kv_cache_specs
-            for spec in worker_specs.values()
-        ):
-            if vllm_config.scheduler_config.enable_chunked_prefill:
-                logger.info(
-                    "Disabling chunked prefill: model has non-causal attention layers."
-                )
-                vllm_config.scheduler_config.enable_chunked_prefill = False
-            if vllm_config.cache_config.enable_prefix_caching:
-                logger.info(
-                    "Disabling prefix caching: model has non-causal attention layers."
-                )
-                vllm_config.cache_config.enable_prefix_caching = False
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -311,29 +295,29 @@ class EngineCore:
         if vllm_config.cache_config.enable_extensible_kv_cache:
             # Disable it, everywhere, where it cannot be used.
             executor = self.model_executor
-            reason = executor.extensible_kv_cache_unsupported_reason(kv_cache_specs)
+            reason = executor.extensible_kv_cache_unsupported_reason(layer_configs)
             if reason is not None:
                 executor.disable_extensible_kv_cache(reason)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
-            [s for specs in kv_cache_specs for s in specs.values()],
+            [lc for layers in layer_configs for lc in layers.values()],
         )
 
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
 
-        has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
+        has_kv_cache = any(layer_configs)
         if has_kv_cache:
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 # NOTE(yongji): should already be set
                 # during _eep_scale_up_before_kv_init
                 assert self.available_gpu_memory_for_kv_cache > 0
                 available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
-                    kv_cache_specs
+                    layer_configs
                 )
             else:
                 # Profiles the peak memory usage of the model to determine how
@@ -342,15 +326,15 @@ class EngineCore:
                 self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
         else:
             # Attention free models don't need memory for kv cache
-            available_gpu_memory = [0] * len(kv_cache_specs)
+            available_gpu_memory = [0] * len(layer_configs)
 
-        assert len(kv_cache_specs) == len(available_gpu_memory)
+        assert len(layer_configs) == len(available_gpu_memory)
 
         # Track max_model_len before KV cache config to detect auto-fit changes
         max_model_len_before = vllm_config.model_config.max_model_len
 
         kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory, global_kv_cache_groups
+            vllm_config, layer_configs, available_gpu_memory, global_kv_cache_groups
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
@@ -371,14 +355,12 @@ class EngineCore:
             # their small block_size would otherwise drag the global block_size
             # below the real allocator block size and desync it from mamba.
             participating = [
-                g.kv_cache_spec.block_size
-                for g in kv_cache_groups
-                if g.kv_cache_spec.prefix_cacheable
+                g.block_size for g in kv_cache_groups if g.prefix_cacheable
             ]
             vllm_config.cache_config.block_size = min(
                 participating
                 if participating
-                else [g.kv_cache_spec.block_size for g in kv_cache_groups]
+                else [g.block_size for g in kv_cache_groups]
             )
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
@@ -473,7 +455,7 @@ class EngineCore:
         block_sizes = {
             manager.block_size
             for manager in cache_manager.coordinator.single_type_managers
-            if is_full_attention_spec(manager.kv_cache_spec)
+            if isinstance(manager, FullAttentionManager)
         }
         cache_config.effective_attention_block_size = (
             block_sizes.pop() if len(block_sizes) == 1 else None
@@ -553,13 +535,16 @@ class EngineCore:
         for group_idx, (group, manager) in enumerate(
             zip(kv_cache_config.kv_cache_groups, managers, strict=True)
         ):
-            spec = group.kv_cache_spec
             metadata.append(
                 {
                     "group_idx": group_idx,
-                    "kind": get_kv_cache_spec_kind(spec).value,
+                    "kind": get_kv_cache_kind(
+                        group.manager_config, group.distinct_specs
+                    ).value,
                     "block_size": manager.block_size,
-                    "sliding_window": getattr(spec, "sliding_window", None),
+                    "sliding_window": getattr(
+                        group.manager_config.params, "sliding_window", None
+                    ),
                 }
             )
         return metadata
@@ -2687,7 +2672,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 "flight. Wait for the pause future to resolve before "
                 "resuming."
             )
-        if self.engines_running:
+        # Set at pause consensus, so all ranks take the same branch.
+        if not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
 

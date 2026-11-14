@@ -23,7 +23,11 @@ from vllm.distributed import (
 )
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
-from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    TensorMetadata,
+    single_pp_stage,
+)
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -204,6 +208,29 @@ def send_recv_tensor_dict_test_worker(
         assert recv_dict["d"] == test_dict["d"]
         assert recv_dict["e"] == test_dict["e"]
         torch.testing.assert_close(recv_dict["f"], test_dict["f"])
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def single_pp_stage_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    """A model built in `single_pp_stage()`, such as a draft model, sees this
+    rank alone as the PP group, and its PP communication stays on this rank."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    with single_pp_stage():
+        stage = get_pp_group()
+        assert stage.is_first_rank and stage.is_last_rank
+        for group in (stage.cpu_group, stage.device_group):
+            assert torch.distributed.get_process_group_ranks(group) == [rank]
+    assert get_pp_group().world_size == pp_size
 
 
 class _DummyWork:
@@ -467,30 +494,22 @@ def test_flashinfer_standalone_workspace_size(
 
 
 @pytest.mark.parametrize(
-    ("node_count", "is_blackwell", "hisparse", "expected"),
+    ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, False, ("mnnvl", True)),
-        (1, True, False, ("mnnvl", True)),
-        (2, False, False, (None, False)),
-        (2, True, False, ("mnnvl", False)),
-        (1, True, True, ("trtllm", False)),
-        (2, True, True, (None, False)),
+        (1, False, ("mnnvl", True)),
+        (1, True, ("mnnvl", True)),
+        (2, False, (None, False)),
+        (2, True, ("mnnvl", False)),
     ],
 )
 def test_flashinfer_auto_backend_uses_group_topology(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     is_blackwell: bool,
-    hisparse: bool,
     expected: tuple[str | None, bool],
 ) -> None:
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
-    )
-    config = Mock()
-    config.attention_config.hisparse_config = Mock() if hisparse else None
-    monkeypatch.setattr(
-        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
     monkeypatch.setattr(
@@ -823,7 +842,12 @@ def test_multi_process_tensor_parallel(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("pp_size", [2])
 @pytest.mark.parametrize(
-    "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker]
+    "test_target",
+    [
+        send_recv_test_worker,
+        send_recv_tensor_dict_test_worker,
+        single_pp_stage_test_worker,
+    ],
 )
 def test_multi_process_pipeline_parallel(
     monkeypatch: pytest.MonkeyPatch,

@@ -181,6 +181,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
             dtype_names=["float32", "bfloat16"],
             shapes=[[10, 10], [10]],
             num_updates_list=[4, 2],
+            wire_batch_bytes=1024,
         )
         assert info.num_updates_list == [4, 2]
 
@@ -191,6 +192,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[4, 2],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_empty_num_updates_list(self):
@@ -200,6 +202,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=[],
                 shapes=[],
                 num_updates_list=[],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_mismatched_num_updates(self):
@@ -209,6 +212,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32", "float32"],
                 shapes=[[10, 10], [10]],
                 num_updates_list=[3],
+                wire_batch_bytes=1024,
             )
 
     def test_rejects_negative_num_updates(self):
@@ -218,6 +222,7 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
                 dtype_names=["float32"],
                 shapes=[[10, 10]],
                 num_updates_list=[-1],
+                wire_batch_bytes=1024,
             )
 
 
@@ -659,6 +664,7 @@ def test_sparse_nccl_receive_weights_without_init_raises():
         dtype_names=["float32"],
         shapes=[[10]],
         num_updates_list=[2],
+        wire_batch_bytes=1024,
     )
 
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -1192,6 +1198,116 @@ def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
         receiver.shutdown()
 
     sender.shutdown()
+
+
+def _sparse_test_patch(name, indices, values, dtype, full_shape=(4,)):
+    return SparseWeightPatch(
+        name=name,
+        indices=torch.tensor(indices, dtype=torch.int32),
+        values=torch.tensor(values, dtype=dtype),
+        full_shape=full_shape,
+    )
+
+
+def _replay_sparse_patches(monkeypatch, patches, batch_bytes):
+    """Send patches over a fake wire. Returns the receiving toy model, the wire, the
+    tensors received, the number received at each load, and the receive call."""
+    monkeypatch.setattr(
+        "vllm.distributed.weight_transfer.sparse_nccl_engine._WIRE_BATCH_BYTES",
+        batch_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_, **__: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.accelerator, "device_index", lambda *_: nullcontext())
+
+    client = RecordingClient()
+    sender = SparseNCCLTrainerWeightTransferEngine(client=client)
+    sender.model_update_group = MagicMock()
+    sender.model_update_group.device = torch.device("cpu")
+    wire = []
+    sender.model_update_group.broadcast.side_effect = lambda tensor, **_: wire.append(
+        tensor.clone()
+    )
+    sender.send_weights(patches)
+
+    model = torch.nn.Module()
+    model.a = torch.nn.Parameter(
+        torch.full((4,), -1.0, dtype=torch.bfloat16), requires_grad=False
+    )
+    model.b = torch.nn.Parameter(torch.full((2, 2), -1.0), requires_grad=False)
+
+    received: list[torch.Tensor] = []
+    loads: list[int] = []
+
+    def load_weights(weights):
+        loads.append(len(received))
+        for name, weight in weights:
+            getattr(model, name).data.copy_(weight)
+        return {name for name, _ in weights}
+
+    def receive_broadcast(tensor, **_):
+        tensor.copy_(wire[len(received)])
+        received.append(tensor)
+
+    model.load_weights = load_weights
+    receiver = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    receiver.model_update_group = MagicMock()
+    receiver.model_update_group.device = torch.device("cpu")
+    receiver.model_update_group.broadcast.side_effect = receive_broadcast
+    info = SparseNCCLWeightTransferUpdateInfo(**client.last_update_info)
+    return model, wire, received, loads, lambda: receiver.receive_weights(info)
+
+
+@pytest.mark.parametrize(
+    ("batch_bytes", "received_at_each_load"),
+    [(1, [2, 4, 6]), (18, [2, 4]), (1 << 20, [3, 3])],
+)
+def test_sparse_nccl_wire_batches_land_every_patch_cpu(
+    monkeypatch, batch_bytes, received_at_each_load
+):
+    """Each batch is applied before the next is received, and every patch lands in
+    input order, including one name sent in two dtypes."""
+    model, _, _, loads, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0, 1, 2], [1.0, 2.0, 3.0], torch.bfloat16),
+            _sparse_test_patch("b", [3], [4.0], torch.float32, (2, 2)),
+            _sparse_test_patch("a", [0], [5.0], torch.float32),
+        ],
+        batch_bytes,
+    )
+
+    receive()
+
+    assert loads == received_at_each_load
+    assert model.a.tolist() == [5.0, 2.0, 3.0, -1.0]
+    assert model.b.tolist() == [[-1.0, -1.0], [-1.0, 4.0]]
+
+
+def test_sparse_nccl_failed_batch_still_drains_the_wire_cpu(monkeypatch):
+    """A failed batch skips the rest of the update but raises only once every
+    broadcast has its receive, since an unmatched one would hang the trainer."""
+    model, wire, received, _, receive = _replay_sparse_patches(
+        monkeypatch,
+        [
+            _sparse_test_patch("a", [0], [float("nan")], torch.bfloat16),
+            _sparse_test_patch("b", [2], [6.0], torch.float32, (2, 2)),
+            _sparse_test_patch("b", [3], [7.0], torch.float32, (2, 2)),
+        ],
+        1,
+    )
+
+    with pytest.raises(ValueError, match="NaN"):
+        receive()
+
+    assert len(received) == len(wire)
+    assert model.b.eq(-1).all()
 
 
 # --- Unit Tests: IPCWeightTransferUpdateInfo Validation ---
@@ -2710,7 +2826,7 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     assert client.last_update_info["names"] == ["w"]
     assert client.last_update_info["shapes"] == [[4, 4]]
     assert client.last_update_info["num_updates_list"] == [2]
-    # One broadcast for indices + one for values per patch.
+    # One broadcast for indices + one for values per wire batch.
     assert engine.model_update_group.broadcast.call_count == 2
     engine.shutdown()
 

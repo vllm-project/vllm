@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
-from vllm.distributed.pp_transport import PPTransport
+from vllm.distributed.pp_transport import PPTransport, check_intermediate_tensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -301,6 +301,9 @@ class CopyEngineTransport(PPTransport):
             assert send_ptr is not None and self.copier is not None
             self.dst = rank + 1
             self.send_layout = ranks[rank + 1][2]
+            self.send_specs = {
+                k: (r.dtype, r.row_shape) for k, r in self.send_layout.items()
+            }
             self.send_buf = _device_bytes(send_ptr, _nbytes(self.send_layout))
             self.empty = ptr + 8
             self.stream = torch.cuda.Stream()
@@ -331,14 +334,8 @@ class CopyEngineTransport(PPTransport):
         return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
+        check_intermediate_tensors(tensors, self.send_specs)
         rows = {k: t.shape[0] for k, t in tensors.items()}
-        for key, t in tensors.items():
-            r = self.send_layout.get(key)
-            if r is None or (t.dtype, tuple(t.shape[1:])) != (r.dtype, r.row_shape):
-                raise RuntimeError(
-                    f"PP send {key!r} {t.dtype} {tuple(t.shape)} does not match "
-                    "the next stage's intermediate tensors"
-                )
         self.seq += 1
         meta_work = pp_group.isend_object(dict(seq=self.seq, rows=rows), dst=self.dst)
 

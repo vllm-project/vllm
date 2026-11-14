@@ -71,7 +71,7 @@ def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PagedCacheView:
     cache: torch.Tensor
     attention_cache: torch.Tensor
@@ -100,14 +100,16 @@ class PagedCacheView:
         )
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
-            return cls(cache, cache, block_size, block_size)
+            # Blocks whole rows apart: kernels read the strided cache as flat rows.
+            assert block_stride % row_bytes == 0
+            return cls(cache, cache, block_size, block_stride // row_bytes)
         attention_cache = (
             raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
@@ -432,7 +434,7 @@ def hisparse_prefill_staging_remap(
     return new_bt, row_ids
 
 
-@dataclass
+@dataclass(slots=True)
 class HiSparsePrefillStagingPlan:
     block_table: torch.Tensor
     row_ids: torch.Tensor
@@ -723,8 +725,19 @@ class HiSparseRuntime:
         num_blocks: int,
         block_size: int,
         block_table: torch.Tensor,
+        owner: HiSparseRuntime | None = None,
     ) -> None:
-        """Bind this runtime's strided view into the shared GPU HMA slab."""
+        """Bind this runtime's strided view into the shared GPU HMA slab.
+
+        A cross-layer KV-sharing layer binds its target's hot rows and passes
+        the target as `owner`: both then track the rows in the owner's slot map.
+        """
+        if owner is not None:
+            assert self.is_group_leader and not self.index_group.followers
+            group, owner_group = self.index_group, owner.index_group
+            group.device_global_indices = owner_group.device_global_indices
+            group.lru_slots = owner_group.lru_slots
+            group.swap_stats = owner_group.swap_stats
         self.hot = PagedCacheView.bind(
             raw_tensor,
             dtype=self.kv_dtype,

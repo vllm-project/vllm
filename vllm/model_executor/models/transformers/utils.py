@@ -16,15 +16,26 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+import inspect
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import torch
 from torch import nn
+from transformers import AutoModel
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -39,7 +50,9 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.compilation.decorators import DynamicArgDims
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.pooler import SequencePoolingType
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -383,6 +396,34 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     return "dynamic" not in rope_types or dynamic_rope_update_is_noop(vllm_config)
 
 
+def _is_tensor_type(annotation: object) -> bool:
+    """Match `torch.Tensor` and legacy types like `torch.BoolTensor`."""
+    return (
+        isinstance(annotation, type)
+        and annotation.__module__ == "torch"
+        and annotation.__name__.endswith("Tensor")
+    )
+
+
+def infer_dynamic_arg_dims(cls: type[nn.Module]) -> "DynamicArgDims":
+    """Infer `dynamic_arg_dims` from the signature of `cls.forward`.
+
+    The 0-th dimension is dynamic for every argument which is either unannotated
+    or annotated with a tensor type, optionally in a union with other types.
+    String annotations are not resolved.
+    """
+    dims: DynamicArgDims = {}
+    for name, param in inspect.signature(cls.forward).parameters.items():
+        if name == "self" or param.kind in {param.VAR_POSITIONAL, param.VAR_KEYWORD}:
+            continue
+        annotation = param.annotation
+        is_union = get_origin(annotation) in {Union, UnionType}
+        members = get_args(annotation) if is_union else (annotation,)
+        if annotation is param.empty or any(map(_is_tensor_type, members)):
+            dims[name] = 0
+    return dims
+
+
 def maybe_disable_dynamic_rope_update(
     model: nn.Module, vllm_config: "VllmConfig"
 ) -> None:
@@ -423,3 +464,17 @@ def maybe_disable_dynamic_rope_update(
                     getattr(module, f"{prefix}inv_freq").copy_(inv_freq)
                 rope_types[layer_type] = "default"
         module.rope_type = rope_types if per_layer else rope_types[None]
+
+
+def has_bidirectional_attention(model: nn.Module) -> bool:
+    """Whether any of the attention layers in `model` has `is_causal=False`."""
+    return any(not getattr(module, "is_causal", True) for module in model.modules())
+
+
+def get_default_seq_pooling_type(model_config: "ModelConfig") -> "SequencePoolingType":
+    """`CLS` for encoders and `LAST` for decoders, like vLLM's own pooling models."""
+    with torch.device("meta"):
+        model = AutoModel.from_config(
+            model_config.hf_config, trust_remote_code=model_config.trust_remote_code
+        )
+    return "CLS" if has_bidirectional_attention(model) else "LAST"

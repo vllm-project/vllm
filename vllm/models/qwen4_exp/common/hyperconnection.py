@@ -49,7 +49,7 @@ def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-@dataclass
+@dataclass(slots=True)
 class HyperConnectionConfig:
     """Configuration shared by all HyperConnection variants."""
 

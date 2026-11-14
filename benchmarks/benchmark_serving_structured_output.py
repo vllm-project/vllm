@@ -62,7 +62,7 @@ from vllm.v1.structured_output.backend_xgrammar import (
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkMetrics:
     completed: int
     total_input: int
@@ -92,7 +92,7 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SampleRequest:
     """A class representing a single inference request for benchmarking.
 

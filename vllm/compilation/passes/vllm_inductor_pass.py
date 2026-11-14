@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 DEVICE_TYPE = current_platform.device_type
 
 
-@dataclass
+@dataclass(slots=True)
 class InductorCompilationConfig:
     splitting_ops: list[str] | None = None
     use_inductor_graph_partition: bool = False

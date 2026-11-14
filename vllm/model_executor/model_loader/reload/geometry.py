@@ -15,7 +15,7 @@ class Fallback(Exception):
     """A name cannot be written directly; the message is the reported reason."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Region:
     """`as_strided` arguments relative to the target's storage offset, in
     checkpoint-dtype elements. `shape` is the shape of the write's box, or
@@ -26,7 +26,7 @@ class Region:
     stride: tuple[int, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write:
     src: Box  # part of one of the entry's boxes
     module: str  # target tensor, by name

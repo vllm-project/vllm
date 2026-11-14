@@ -314,7 +314,7 @@ pub(crate) async fn structured_chat_event_stream(
                     message: state.message.clone(),
                     usage,
                     timestamps,
-                    spec_decode_metrics,
+                    spec_decode_metrics: spec_decode_metrics.map(Box::new),
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,

@@ -249,7 +249,7 @@ def boundary_fragments(
     return out
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CtaRowSum:
     """`RowSum` of a CTA that holds the row: `sums` 2 * WARPS FP32 of
     shared memory (one round each)."""
@@ -267,7 +267,7 @@ class _CtaRowSum:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StreamStore:
     """Stores fragment k of the new stream (FP32 rows) of row offset `row`."""
 

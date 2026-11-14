@@ -18,7 +18,7 @@ from ...utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
-@dataclass
+@dataclass(slots=True)
 class VitCudagraphTestConfig:
     model: str
     modalities: list[str] = field(default_factory=lambda: ["image", "video"])

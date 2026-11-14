@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotFilterBase(ABC):
     var: str
     target: str
@@ -66,7 +66,7 @@ def _parse_filter_target(series, target: str) -> float | bool | str:
         return target
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -74,7 +74,7 @@ class PlotEqualTo(PlotFilterBase):
         return df[df[self.var] == target]
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -82,28 +82,28 @@ class PlotNotEqualTo(PlotFilterBase):
         return df[df[self.var] != target]
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotLessThan(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] < float(self.target)]
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotLessThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] <= float(self.target)]
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotGreaterThan(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         return df[df[self.var] > float(self.target)]
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotGreaterThanOrEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -136,7 +136,7 @@ class PlotFilters(list[PlotFilterBase]):
         return df
 
 
-@dataclass
+@dataclass(slots=True)
 class PlotBinner:
     var: str
     bin_size: float
@@ -488,7 +488,7 @@ def plot(
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SweepPlotArgs:
     output_dir: Path
     fig_dir: Path

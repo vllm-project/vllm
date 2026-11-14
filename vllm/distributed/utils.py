@@ -224,6 +224,10 @@ def get_pp_indices(
     because they contain the input and output embeddings respectively and we
     are attempting to reduce maximum memory consumption across partitions.
     """
+    if pp_size == 1:
+        # VLLM_PP_LAYER_PARTITION partitions the pipeline; a single-stage
+        # model, such as a draft model under PP, holds every layer.
+        return 0, num_hidden_layers
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
         try:
@@ -279,7 +283,7 @@ def create_tcp_store(
         raise
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class StatelessProcessGroup:
     """A dataclass to hold a metadata store, and the rank, world_size of the
     group. Only use it to communicate metadata between processes.

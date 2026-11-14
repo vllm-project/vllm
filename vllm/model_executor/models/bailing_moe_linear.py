@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
     BailingMoELinearAttention,
-    _build_rope_parameters,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
@@ -174,11 +174,12 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config) or {}
         # MLA rotates the full qk_rope_head_dim,
         # partial_rotary_factor is for the linear-attn head only.
         rope_parameters = {
-            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+            k: v
+            for k, v in (getattr(config, "rope_parameters", None) or {}).items()
+            if k != "partial_rotary_factor"
         }
         rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)
@@ -325,7 +326,7 @@ class BailingMoeV25(nn.Module):
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

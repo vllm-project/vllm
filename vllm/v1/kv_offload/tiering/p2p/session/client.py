@@ -42,7 +42,7 @@ _ABORT_ACK_TIMEOUT_S = 5.0
 _LOOKUP_TIMEOUT_S = 8.0
 
 
-@dataclass
+@dataclass(slots=True)
 class _InboundLoadState:
     """Client-role state for a single in-flight load request.
 
@@ -65,7 +65,7 @@ class _InboundLoadState:
     pending_fetch: dict | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _ClientRequestState:
     """Per-kv_request_id client-side state.
 

@@ -28,7 +28,7 @@ import gc
 import pickle
 import weakref
 from collections import deque, namedtuple
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
-@dataclass
+@dataclass(slots=True)
 class GraphCaptureContext:
     stream: torch.cuda.Stream
 
@@ -1643,11 +1643,42 @@ def get_dcp_world_size_and_rank(enabled: bool = True) -> tuple[int, int]:
 
 
 _PP: GroupCoordinator | None = None
+# This rank alone as a PP group, created when PP > 1 for `single_pp_stage()`.
+_PP_SINGLE_STAGE: GroupCoordinator | None = None
 
 
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
+
+
+@contextmanager
+def single_pp_stage() -> Iterator[None]:
+    """Run models on this rank as the only pipeline stage.
+
+    Within the context, `get_pp_group()` returns a PP group that contains only
+    this rank. Speculative decoding runs the draft model whole on the last PP
+    rank: built and run in this context, model code that reads its stage from
+    the PP group, or communicates over it, behaves as at PP=1. Code in the
+    context that needs the target model's pipeline topology must not read it
+    from `get_pp_group()`. Without a PP group of more than one rank (PP=1, unit
+    tests), the context does nothing.
+    """
+    global _PP
+    if _PP_SINGLE_STAGE is None or _PP is _PP_SINGLE_STAGE:
+        yield
+        return
+    pp_group, _PP = _PP, _PP_SINGLE_STAGE
+    try:
+        yield
+    finally:
+        _PP = pp_group
+
+
+def in_single_pp_stage() -> bool:
+    """Whether `single_pp_stage()` is active on a PP group of more than one
+    rank, i.e. the other pipeline stages do not run the current model."""
+    return _PP_SINGLE_STAGE is not None and _PP is _PP_SINGLE_STAGE
 
 
 _DP: GroupCoordinator | None = None
@@ -2270,7 +2301,10 @@ def initialize_model_parallel(
         # DCP spans PCP first, then TP for full TP x PCP groups.
         dcp_ranks = dcp_ranks.transpose(-1, -2)
     group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
+    # torch.distributed orders group members by sorted global rank, so a
+    # full TP x PCP group's members must be listed in that order too, or
+    # rank_in_group disagrees with the collectives' output order.
+    group_ranks = [sorted(x.tolist()) for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -2315,6 +2349,17 @@ def initialize_model_parallel(
     _PP = init_model_parallel_group(
         group_ranks, get_world_group().local_rank, backend, group_name="pp"
     )
+
+    # Build one PP group per rank for `single_pp_stage()`.
+    global _PP_SINGLE_STAGE
+    assert _PP_SINGLE_STAGE is None, "single-stage PP group is already initialized"
+    if pipeline_model_parallel_size > 1:
+        _PP_SINGLE_STAGE = init_model_parallel_group(
+            [[rank] for ranks in group_ranks for rank in ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="pp_single_stage",
+        )
 
     global _DP
     assert _DP is None, "data parallel group is already initialized"
@@ -2528,10 +2573,13 @@ def destroy_model_parallel():
         _PCP.destroy()
     _PCP = None
 
-    global _PP
+    global _PP, _PP_SINGLE_STAGE
     if _PP:
         _PP.destroy()
     _PP = None
+    if _PP_SINGLE_STAGE:
+        _PP_SINGLE_STAGE.destroy()
+    _PP_SINGLE_STAGE = None
 
     global _DP, _ENGRAM_DP
     if _ENGRAM_DP and _ENGRAM_DP is not _DP:

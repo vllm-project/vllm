@@ -75,11 +75,11 @@ def _patch_key_deriver(
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     kernel = _FakeTritonKernel()
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]  # narrows base **kwargs
+    def dispatch(self, *, value: int) -> CompileKey:
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:

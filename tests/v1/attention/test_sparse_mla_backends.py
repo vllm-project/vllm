@@ -1073,6 +1073,15 @@ def test_sparse_backend_decode_correctness(
             (128, 128, 64, 128),
             id="FlashInferTRTLLM",
         ),
+        # Blocks only whole rows apart.
+        pytest.param(
+            FlashInferMLASparseTRTLLMBackend,
+            "auto",
+            128,
+            1155,
+            (128, 128, 64, 128),
+            id="FlashInferTRTLLM-unaligned",
+        ),
         # GLM-5.3 on SM90: the fp8 kernel's 64-token pages in larger blocks.
         pytest.param(
             FlashMLASparseBackend,
@@ -1110,6 +1119,51 @@ def test_sparse_mla_packed_stride(
         monkeypatch,
         block_stride_rows=block_stride_rows,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="trtllm-gen sparse MLA needs SM100",
+)
+def test_flashinfer_sparse_mla_reads_rows_past_the_last_whole_page():
+    """Top-k indices address flat rows, so the kernel must read rows that lie
+    after the last whole page of the cache it is given (blocks only whole rows
+    apart leave such a tail)."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    torch.manual_seed(0)
+    device = torch.device(DEVICE_TYPE)
+    rows, tail, width, heads, tokens, topk = 192, 40, 576, 64, 4, 128
+    kv = torch.zeros(rows + 64, width, dtype=torch.bfloat16, device=device)
+    kv[: rows + tail].normal_()
+    q = torch.randn(tokens, 1, heads, width, dtype=torch.bfloat16, device=device)
+    indices = torch.full((tokens, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[:, 0, :tail] = torch.arange(rows, rows + tail, device=device)
+    seq_lens = torch.full((tokens,), tail, dtype=torch.int32, device=device)
+    workspace = torch.zeros(256 << 20, dtype=torch.uint8, device=device)
+
+    def decode(kv_cache: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(tokens, 1, heads, 512, dtype=torch.bfloat16, device=device)
+        trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv_cache.view(-1, 64, width).unsqueeze(1),
+            workspace_buffer=workspace,
+            qk_nope_head_dim=512,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            block_tables=indices,
+            seq_lens=seq_lens,
+            max_seq_len=topk,
+            out=out,
+            bmm1_scale=0.04,
+            bmm2_scale=1.0,
+            sparse_mla_top_k=topk,
+        )
+        return out
+
+    out = decode(kv[:rows])
+    assert out.any()
+    torch.testing.assert_close(out, decode(kv), rtol=0, atol=0)
 
 
 def _triton_convert_reference_impl(
@@ -3520,7 +3574,10 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
 
 
 @requires_hisparse_ops
-def test_hisparse_remaps_strided_hma_rows_for_attention():
+@pytest.mark.parametrize("stride_rows", [12, 13])
+def test_hisparse_remaps_strided_hma_rows_for_attention(stride_rows):
+    """Hot rows are addressed by the row stride between blocks, which need
+    only be whole rows apart."""
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 4, 8
     runtime = _make_hisparse_runtime(
@@ -3529,7 +3586,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         row_width=row_width,
     )
     page_elements = block_size * row_width
-    stride_elements = 3 * page_elements
+    stride_elements = stride_rows * row_width
     byte_offset = page_elements * torch.float32.itemsize
     raw = torch.zeros(2 * stride_elements, dtype=torch.float32, device=device).view(
         torch.int8
@@ -3563,7 +3620,9 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     )
 
     assert runtime.hot.attention_cache is not None
-    assert runtime.hot.attention_cache.is_contiguous()
+    assert runtime.hot.attention_cache.is_contiguous() == (
+        stride_rows % block_size == 0
+    )
     physical_indices = runtime.index_group.shared_topk.device_topk_rows[0]
     expected = (
         physical_indices // block_size * (stride_elements // row_width)
@@ -4213,7 +4272,8 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
 
 
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
-    """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
+    """Verification rows resolve in one swap_in; FP8 attention sees them batched
+    over the hot cache as the kernel's 64-token pages."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -4225,18 +4285,20 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         .expand(-1, 4)
     )
     kernel_shapes: list[torch.Size] = []
+    kv_shapes: list[torch.Size] = []
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
         return logical_topk_indices + 10
 
-    def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
+    def run_kernel(self, *, q, kv_c_and_k_pe_cache, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
+        kv_shapes.append(kv_c_and_k_pe_cache.shape)
         return q[..., :1], None
 
     swap_in_mock = MagicMock(side_effect=swap_in)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
+            hot=SimpleNamespace(attention_cache=torch.empty(2, 128, 4, device=device)),
             max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
@@ -4280,6 +4342,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         swap_in_mock.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
+    assert kv_shapes == [(4, 64, 4)]
     assert output.shape == (num_tokens, 2, 1)
 
 
@@ -5318,6 +5381,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=True,
         _fp8_flash_mla_kernel=run_kernel,
     )
 
@@ -5334,6 +5398,77 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+
+@pytest.mark.parametrize("supports_topk_length", [True, False])
+@pytest.mark.parametrize("num_tokens", [31, 32])
+def test_fp8_mixed_batch_dcp_compacts_topk_from_32_tokens(
+    monkeypatch, num_tokens, supports_topk_length
+):
+    """From 32 tokens on, the rank-local top-k is compacted to the row front
+    and the kernel is bounded by the largest valid count, unless the kernel
+    rejects `topk_length` (SM90): then the -1 holes stay and it masks them."""
+    num_heads, topk = 2, 8
+    counts = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE_TYPE) % 5
+    compacted = torch.where(
+        torch.arange(topk, device=DEVICE_TYPE) < counts.view(-1, 1), 7, -1
+    ).to(torch.int32)
+    converter_kwargs = {}
+
+    def convert(*args, **kwargs):
+        converter_kwargs.update(kwargs)
+        return (compacted, counts) if kwargs["return_valid_counts"] else compacted
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        convert,
+    )
+    kernel_kwargs = {}
+
+    def run_kernel(**kwargs):
+        kernel_kwargs.update(kwargs)
+        out = torch.ones((1, num_tokens, num_heads, 1), device=DEVICE_TYPE)
+        lse = torch.ones((1, num_heads, num_tokens), device=DEVICE_TYPE)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        index_group=None,
+        index_group_index=0,
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=supports_topk_length,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    q = torch.empty(num_tokens, num_heads, 1, device=DEVICE_TYPE)
+    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=DEVICE_TYPE)
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), topk_indices, metadata
+    )
+
+    assert lse is not None
+    compact = supports_topk_length and num_tokens >= 32
+    assert converter_kwargs["compact_valid_to_front"] is compact
+    if compact:
+        assert kernel_kwargs["topk_length"].tolist() == [4]
+    else:
+        assert kernel_kwargs["topk_length"] is None
+    empty = counts == 0
+    assert torch.isneginf(lse[empty]).all() and (out[empty] == 0).all()
+    assert (lse[~empty] == 1).all() and (out[~empty] == 1).all()
 
 
 @pytest.mark.skipif(
@@ -5625,16 +5760,16 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "rms_norm_eps": 1e-06,
-        "rope_scaling": {
+        "rope_parameters": {
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 40,
             "mscale": 1.0,
             "mscale_all_dim": 1.0,
             "original_max_position_embeddings": 4096,
-            "type": "yarn",
+            "rope_theta": 10000,
+            "rope_type": "yarn",
         },
-        "rope_theta": 10000,
         "routed_scaling_factor": 2.5,
         "scoring_func": "sigmoid",
         "tie_word_embeddings": False,

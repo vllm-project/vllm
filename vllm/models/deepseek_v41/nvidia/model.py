@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import (
     get_forward_context,
     in_piecewise_cudagraph,
@@ -78,6 +79,7 @@ from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MixtureOfExperts,
     MegaGateRoutingMetadata,
+    _use_mega_gate,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
 )
@@ -119,6 +121,7 @@ from .ops.mhc import (
     supports_mhc_all_reduce,
     supports_mhc_overlap,
 )
+from .pipeline import PipelineBoundary, PipelineRelay, get_pipeline_boundaries
 from .specialized_decode import specialized_decode_config
 
 if typing.TYPE_CHECKING:
@@ -394,12 +397,29 @@ class DeepseekV4DecoderLayer(nn.Module):
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 mhc_fused_post_pre_splits,
             )
-            from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
+            from vllm.model_executor.kernels.mhc.warmup import (
+                HC_PRENORM_GEMM_KERNEL,
+                MHC_PRE_NORM_KERNEL,
+                compute_mhc_pre_num_splits,
+            )
+            from vllm.utils.deep_gemm import is_deep_gemm_supported
 
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             if self.use_sequence_parallel:
                 tp_size = vllm_config.parallel_config.tensor_parallel_size
                 max_tokens = (max_tokens + tp_size - 1) // tp_size
+            if is_deep_gemm_supported():
+                hc_dim = self.hc_mult * self.hidden_size
+                is_broadcast_layer = (
+                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
+                )
+                for k in (hc_dim, self.hidden_size)[: 1 + is_broadcast_layer]:
+                    HC_PRENORM_GEMM_KERNEL.register_warmup(
+                        max_tokens=max_tokens,
+                        n=self.hc_mult * (2 + self.hc_mult),
+                        k=k,
+                        num_splits=compute_mhc_pre_num_splits,
+                    )
             # The epilogue compiles per projection width and per pre-mix mode.
             # The first layer projects the broadcast embedding, so it reads one
             # hidden_size-wide row and selects stream zero; every later sublayer
@@ -742,6 +762,44 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        pp_size = self.parallel_config.pipeline_parallel_size
+        boundaries = (
+            get_pipeline_boundaries(
+                config,
+                [
+                    get_pp_indices(config.num_hidden_layers, rank, pp_size)
+                    for rank in range(pp_size)
+                ],
+            )
+            if pp_size > 1
+            else ()
+        )
+        needs_relay = any(boundary.needs_relay for boundary in boundaries)
+        if needs_relay and (
+            self.parallel_config.prefill_context_parallel_size != 1
+            or self.parallel_config.decode_context_parallel_size != 1
+            or self.parallel_config.use_ubatching
+            or vllm_config.speculative_config is not None
+            or vllm_config.kv_transfer_config is not None
+            or _select_dsv4_attn_cls(vllm_config)
+            not in (DeepseekV4FlashMLAAttention, DeepseekV4MegaAttnAttention)
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 cross-stage cache relay requires packed FlashMLA "
+                "caches and PCP=DCP=1, without microbatching, "
+                "speculative decoding or KV transfer."
+            )
+        pp_rank = get_pp_group().rank_in_group if needs_relay else 0
+        self.pipeline_relay = (
+            PipelineRelay(
+                vllm_config,
+                prefix,
+                boundaries[pp_rank - 1] if pp_rank > 0 else PipelineBoundary(),
+                boundaries[pp_rank] if pp_rank < pp_size - 1 else PipelineBoundary(),
+            )
+            if needs_relay
+            else None
+        )
         if self.parallel_config.prefill_context_parallel_size > 1 and (
             self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
@@ -769,6 +827,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -876,6 +935,26 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        if self.pipeline_relay is not None:
+            self.pipeline_relay.configure(
+                self.layers[self.start_layer].attn, vllm_config
+            )
+            replica = self.pipeline_relay.incoming.kv_source
+            if replica is not None:
+                # The replica is updated each step, so its first reader always gathers.
+                replica_prefix = f"{prefix}.layers.{replica}.attn"
+                first_reader = next(
+                    (
+                        layer.attn
+                        for layer in islice(
+                            self.layers, self.start_layer, self.end_layer
+                        )
+                        if layer.attn.compressed_cache_prefix == replica_prefix
+                    ),
+                    None,
+                )
+                if first_reader is not None:
+                    first_reader.always_gathers_compressed_kv = True
         self.engram_batch = EngramBatch.create(
             [
                 layer.engram
@@ -998,20 +1077,25 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer and keeps that shape until the final hc collapse — plus the
         # (num_tokens, hc_mult) pre-mix the next rank's first layer needs
         # for its attention collapse.
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.hc_mult, self.config.hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
-                "pre_mix": torch.zeros(
-                    (batch_size, self.hc_mult),
-                    dtype=torch.float32,
-                    device=device,
-                ),
-            }
-        )
+        tensors = {
+            "hidden_states": torch.zeros(
+                (batch_size, self.hc_mult, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            ),
+            "pre_mix": torch.zeros(
+                (batch_size, self.hc_mult),
+                dtype=torch.float32,
+                device=device,
+            ),
+        }
+        if self.pipeline_relay is not None:
+            tensors.update(
+                self.pipeline_relay.empty_tensors(
+                    self.pipeline_relay.incoming, batch_size, device
+                )
+            )
+        return IntermediateTensors(tensors)
 
     def forward(
         self,
@@ -1040,6 +1124,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            if self.pipeline_relay is not None:
+                self.pipeline_relay.transfer(
+                    positions,
+                    self.topk_indices_buffer,
+                    self.candidate_block_buffer,
+                    intermediate_tensors,
+                )
 
         if self.use_native_mega_moe:
             input_ids = input_ids.to(torch.int64)
@@ -1185,7 +1276,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
                 pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "pre_mix": pre_mix}
+                {
+                    "hidden_states": hidden_states,
+                    "pre_mix": pre_mix,
+                    **(
+                        self.pipeline_relay.transfer(
+                            positions,
+                            self.topk_indices_buffer,
+                            self.candidate_block_buffer,
+                        )
+                        if self.pipeline_relay is not None
+                        else {}
+                    ),
+                }
             )
 
         # MTP needs full HC states; otherwise collapse and normalize locally
@@ -1213,7 +1316,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def _mega_gate_metadata(
         self, input_ids: torch.Tensor | None
     ) -> MegaGateRoutingMetadata | None:
-        if not self.use_native_mega_moe:
+        if not self.use_mega_gate:
             return None
         assert input_ids is not None
         return prepare_mega_gate_routing_metadata(

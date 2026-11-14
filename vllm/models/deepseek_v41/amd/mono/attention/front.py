@@ -105,7 +105,7 @@ XQ_ITEMS = XH // 8  # an xq unit's 16 B items (one a thread)
 FRONT_POINTS = 6  # start, kt done, wqkv done, qkv done, wq_b done, (spare)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontBuild:
     tokens: int
     tp: int

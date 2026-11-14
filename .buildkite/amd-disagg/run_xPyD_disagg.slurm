@@ -36,9 +36,14 @@ PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"   # must equal vllm-router --vllm-di
 PROXY_PORT="${PROXY_PORT:-10001}"
 # Intra-node data-parallel size the router uses to route the MoRIIO KV-notify to
 # the right DP rank. Required for wideEP DP (else decode hangs: "remote blocks
-# never arrived"). EP -> GPUS_PER_NODE (matches --data-parallel-size-local); TP -> 1.
+# never arrived"). EP -> DP_SIZE (matches --data-parallel-size-local); TP -> 1.
+# The EP sizes are resolved here as vllm_disagg.sh does and passed into the
+# containers, so the router and the servers see the same value.
 if [[ "${WIDE_EP_MODE}" == "1" ]]; then
-    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-${GPUS_PER_NODE}}"
+    TP_SIZE="${TP_SIZE:-1}"
+    DP_SIZE="${DP_SIZE:-$(( ${EP_SIZE:-${GPUS_PER_NODE}} / TP_SIZE ))}"
+    export TP_SIZE DP_SIZE
+    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-${DP_SIZE}}"
 else
     ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-1}"
 fi
@@ -536,6 +541,7 @@ run_node_container() {
         -e WIDE_EP_MODE="$WIDE_EP_MODE" \
         -e xP="$xP" -e yD="$yD" \
         -e GPUS_PER_NODE="$GPUS_PER_NODE" \
+        -e ACCURACY_NUM_CONCURRENT -e TP_SIZE -e DP_SIZE -e EP_SIZE \
         -e CLUSTER_ENV="$CLUSTER_ENV" \
         -e MODEL_NAME="${MODEL_NAME:-}" \
         -e MODEL_DIR="${MODEL_DIR:-}" \

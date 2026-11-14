@@ -1047,14 +1047,10 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
+        max_total_frames = self._get_max_video_frames(seq_len)
+        max_frames_per_video = max_total_frames // max(num_videos, 1)
 
         return max(max_frames_per_video, 2)
 
@@ -1069,7 +1065,9 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
             image_processor=image_processor,
             mm_kwargs={},
         )
@@ -1152,17 +1150,19 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if "images" not in hf_data and "videos" not in hf_data:
+        if "images" not in mm_data and "videos" not in mm_data:
             return processed_data
 
         # Divide the processor_output into two modalities: image and video.
         pixel_values = processed_data["images"]
         if pixel_values is not None:
-            processed_data["images"] = self._pixel_values_norm(pixel_values, hf_kwargs)
+            processed_data["images"] = self._pixel_values_norm(
+                pixel_values, hf_processor_mm_kwargs
+            )
         for key in list(processed_data.keys()):
             if processed_data[key] is None:
                 del processed_data[key]
@@ -1280,7 +1280,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {

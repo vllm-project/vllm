@@ -28,7 +28,7 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplayBatch:
     """One forward's replay batch; `run_graph` is set when it runs in a graph."""
 

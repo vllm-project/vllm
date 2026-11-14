@@ -72,15 +72,17 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -119,7 +121,7 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 _SHARED_REGION_GROUP_ID = -1
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TransferRegion:
     layer_name: str
     layer_index: int
@@ -696,7 +698,7 @@ class MooncakeLeaseHeartbeat(
     lease_transfer_ids: list[TransferId] = msgspec.field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class LeaseHeartbeat:
     """Transfers that one P engine holds for this D engine under a lease."""
 
@@ -715,7 +717,7 @@ def _get_kv_lease_duration(kv_transfer_config: KVTransferConfig) -> float | None
     return duration
 
 
-@dataclass
+@dataclass(slots=True)
 class PullReqMeta:
     d_req_id: ReqId
     transfer_id: TransferId
@@ -731,7 +733,7 @@ class PullReqMeta:
     failed: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class SendBlockMeta:
     p_req_id: ReqId
     transfer_id: TransferId
@@ -782,12 +784,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         # Registers the device KV cache with an RDMA engine.
         return KVCacheAccess.REGISTERS
 
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
-
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # A decode pulls the unhashed blocks of every transfer group, so the
@@ -810,7 +806,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self._pulls_mamba_state = (
             vllm_config.kv_transfer_config.kv_role == "kv_consumer"
             and any(
-                isinstance(group.kv_cache_spec, MambaSpec)
+                issubclass(group.manager_cls, MambaManager)
                 for group in kv_cache_config.transfer_groups
             )
         )
@@ -1030,7 +1026,7 @@ class MooncakeConnectorScheduler:
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
@@ -1038,8 +1034,7 @@ class MooncakeConnectorScheduler:
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         # Requests that need to start recv/send.
@@ -1060,8 +1055,8 @@ class MooncakeConnectorScheduler:
 
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -1551,14 +1546,11 @@ class MooncakeConnectorWorker:
         )
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in kv_cache_config.transfer_groups:
-            group_spec = group.kv_cache_spec
-            specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
-            for layer_name in group.layer_names:
-                self._layer_specs[layer_name] = specs_by_layer.get(
-                    layer_name, group_spec
-                )
+        self._layer_specs: dict[str, KVCacheSpec] = {
+            name: spec
+            for group in kv_cache_config.transfer_groups
+            for name, spec in group.kv_cache_specs.items()
+        }
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1582,10 +1574,12 @@ class MooncakeConnectorWorker:
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
         backends = get_current_attn_backends(self.vllm_config)
-        backends, specs = get_current_attn_backends_and_specs(
+        backends, specs, layer_names = get_current_attn_backends_and_specs(
             self.vllm_config, self.kv_cache_config, backends
         )
-        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        kernel_block_size = select_common_block_size(
+            self.block_size, backends, specs, layer_names
+        )
         check_compressed_kernel_split(
             self.vllm_config, self.kv_cache_config, kernel_block_size
         )
@@ -2042,7 +2036,7 @@ class MooncakeConnectorWorker:
             )
             .reshape(-1)
             .tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            if not issubclass(group_specs[i].manager_cls, MambaManager)
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -2092,9 +2086,8 @@ class MooncakeConnectorWorker:
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
-                is_mamba_group = isinstance(
-                    group_specs[group_index].kv_cache_spec,
-                    MambaSpec,
+                is_mamba_group = issubclass(
+                    group_specs[group_index].manager_cls, MambaManager
                 )
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
@@ -2340,9 +2333,7 @@ class MooncakeConnectorWorker:
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
 
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
+            is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
             tensor_blocks = cache.shape[0] if cache.ndim > 1 else num_blocks
             if cache.ndim == 1:
                 # A flat buffer is block-major only when it is an integral run
@@ -2379,7 +2370,11 @@ class MooncakeConnectorWorker:
             # hetero PP can align by name (#56033). A non-contiguous row cannot
             # name a sub-span, so it is one region anchored at the allocation.
             use_packed_row = (
-                not isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
+                not isinstance(layer_spec, MambaSpec)
+                and not issubclass(
+                    self.kv_cache_config.transfer_groups[group_index].manager_cls,
+                    CircularBufferManager,
+                )
                 and storage_is_block_major
                 and block_stride > 0
                 and (is_mla_region or not hnc_contiguous)

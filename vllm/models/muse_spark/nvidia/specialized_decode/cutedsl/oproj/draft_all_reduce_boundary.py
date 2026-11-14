@@ -164,7 +164,7 @@ def _row_sum(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ClusterRowSum:
     """`RowSum` of a cluster that holds the row, one fragment per thread:
     each round its own `pairs` (2 * THREADS FP32), `sums` (CLUSTER_N FP32)
@@ -197,7 +197,7 @@ class _ClusterRowSum:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StreamStore:
     """Stores the thread's fragment of the new stream at `row_element`."""
 

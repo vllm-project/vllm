@@ -29,7 +29,7 @@ the three projections, and skip the tuner.
 """
 
 import importlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from functools import cache
 from typing import TYPE_CHECKING
@@ -222,7 +222,7 @@ def pinned_mm(
     else:
         data, scale = mxfp8_e4m3_quantize(a, is_sf_swizzled_layout=True)
     out = torch.empty(rows, n, dtype=out_dtype, device=a.device)
-    workspace = gemm_base._get_cache_buf(
+    workspace = gemm_base._get_stream_cache_buf(
         "mm_mxfp8_workspace", gemm_base.DEFAULT_WORKSPACE_SIZE, a.device
     )
     inputs = [data, layer.weight, scale, layer.weight_scale, out_dtype, out, workspace]
@@ -434,7 +434,7 @@ def compile_pinned(linear: nn.Module) -> None:
 
 
 @contextmanager
-def pinned_tactics() -> Iterator[None]:
+def pinned_tactics() -> Generator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
     tuner's tactic list is a FlashInfer internal: when it has no
     `autotune_tactics` or does not list a pinned tactic, every tactic is
