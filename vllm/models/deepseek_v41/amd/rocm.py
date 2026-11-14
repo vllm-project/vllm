@@ -789,9 +789,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 compressor.fused_wkv_wgate.weight.T,
                 out_dtype=torch.float32,
             )
-            latent = compressor(kv_score, positions)
-            compressor.insert_cache(latent, positions, self.rotary_emb)
-            return latent
+            return compressor(kv_score, positions, self.rotary_emb)
 
         def indexer_weights_chain():
             # ReplicatedLinear returns (output, bias); bias is None.
