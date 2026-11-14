@@ -95,6 +95,18 @@ class _CorruptAudioError(ValueError):
     """
 
 
+def _normalize_decode_limits(
+    max_duration_s: float | None,
+    max_decode_bytes: int | None,
+) -> tuple[float | None, int | None]:
+    """Treat documented zero-valued audio decode limits as disabled."""
+    if max_duration_s == 0:
+        max_duration_s = None
+    if max_decode_bytes == 0:
+        max_decode_bytes = None
+    return max_duration_s, max_decode_bytes
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -126,6 +138,10 @@ def load_audio_pyav(
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     try:
         container = av.open(path)
     except av.error.FFmpegError as e:
@@ -235,6 +251,10 @@ def load_audio_soundfile(
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
     """Load audio via soundfile."""
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:
@@ -301,6 +321,10 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
+    max_duration_s, max_decode_bytes = _normalize_decode_limits(
+        max_duration_s, max_decode_bytes
+    )
+
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
         # ImportError so `load_audio(backend="auto")` falls back cleanly.
@@ -600,7 +624,27 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                 backend=self.audio_backend,
             )
 
-        max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        max_audio_decode_bytes: int | None = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+        if max_audio_decode_bytes == 0:
+            max_audio_decode_bytes = None
+
+        max_decode_bytes = max_audio_decode_bytes
+        if max_decode_bytes is None:
+            request_decode_limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+            if request_decode_limit > 0:
+                # With the per-audio cap disabled, keep the request-level
+                # budget as the decoder's bound.
+                max_decode_bytes = request_decode_limit
+
+        if max_decode_bytes is None:
+            return load_audio(
+                source,
+                sr=None,
+                max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                max_decode_bytes=None,
+                backend=self.audio_backend,
+            )
+
         reserved = budget.reserve(max_decode_bytes)
         decoded_bytes = 0
         try:
@@ -613,9 +657,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
                     backend=self.audio_backend,
                 )
             except ValueError as exc:
-                if reserved < max_decode_bytes and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(
-                    exc
-                ):
+                if (
+                    max_audio_decode_bytes is None or reserved < max_audio_decode_bytes
+                ) and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(exc):
                     raise ValueError(
                         "Request decoded media exceeds "
                         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
