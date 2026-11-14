@@ -1302,6 +1302,32 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         _cleanup_file(region.mmap_path)
 
 
+def test_private_region_unlinked_once_mapped(iid):
+    """A private region has no joiners, so its name is dropped without a
+    barrier while the mapping stays valid."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        private=True,
+    )
+    try:
+        assert not os.path.exists(path)
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert region.mmap_obj is not None
+        assert memoryview(region.mmap_obj)[0] == 7
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
 def test_backing_file_unlinked_after_barrier(iid):
     """The file must exist until the barrier releases (late joiners need the
     name) and be gone right after, so no exit path can leak it."""
