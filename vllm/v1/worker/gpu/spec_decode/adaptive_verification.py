@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adaptive verification for DSpark speculative decoding."""
+"""Adaptive verification for model-based drafters and suffix decoding."""
 
 from collections import defaultdict
 from collections.abc import Iterable, Iterator

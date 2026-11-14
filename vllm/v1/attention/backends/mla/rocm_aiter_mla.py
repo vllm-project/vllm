@@ -796,6 +796,7 @@ class AiterMLABackend(MLACommonBackend):
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
         use_rswa: bool = False,
+        use_varlen_decode_cudagraphs: bool = False,
         use_hisparse: bool = False,
     ) -> list[str]:
         invalid_reasons = super().validate_configuration(
@@ -818,6 +819,7 @@ class AiterMLABackend(MLACommonBackend):
             use_adaptive_verification=use_adaptive_verification,
             use_dcp=use_dcp,
             use_rswa=use_rswa,
+            use_varlen_decode_cudagraphs=use_varlen_decode_cudagraphs,
             use_hisparse=use_hisparse,
         )
         # Arch/signature cannot express this: the backend still advertises

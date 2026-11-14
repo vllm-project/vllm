@@ -677,7 +677,8 @@ class SpeculativeConfig:
 
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    confidence. Supported for model-based drafters (EAGLE, MTP, DFlash, DSpark)
+    and suffix decoding."""
 
     prefill_context_kv_only: bool = False
     """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
