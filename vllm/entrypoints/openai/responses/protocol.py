@@ -70,6 +70,7 @@ from vllm.entrypoints.generate.base.protocol import (
     TopLogprobsParam,
     resolve_return_mm_kwargs_alias,
     validate_cache_salt,
+    validate_kv_transfer_params,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
@@ -901,6 +902,13 @@ class ResponsesRequest(OpenAIBaseModel):
             if resolved != tool_name:
                 data["tool_choice"] = {**tool_choice, "name": resolved}
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_kv_transfer_params_fields(cls, data):
+        if isinstance(data, dict) and data.get("kv_transfer_params") is not None:
+            validate_kv_transfer_params(data["kv_transfer_params"])
         return data
 
 
