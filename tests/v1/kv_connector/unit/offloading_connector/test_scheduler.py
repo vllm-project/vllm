@@ -905,7 +905,7 @@ def test_partial_lookup_and_load_address_each_group_block_size_under_dcp():
     assert req_status.partial_tail_boundary is None
 
 
-def test_normal_store_excludes_align_mode_mamba_sources():
+def test_normal_store_excludes_prefix_caching_mamba_sources():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.num_computed_tokens = 0

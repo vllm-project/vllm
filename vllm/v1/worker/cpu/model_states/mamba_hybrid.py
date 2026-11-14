@@ -39,8 +39,8 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
         self.cache_config = vllm_config.cache_config
-        self._align_mode = self.cache_config.enable_prefix_caching
-        if self._align_mode:
+        self.prefix_caching = self.cache_config.enable_prefix_caching
+        if self.prefix_caching:
             self._mamba_state_idx = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
@@ -48,7 +48,7 @@ class MambaHybridModelState(DefaultModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
-        if self._align_mode:
+        if self.prefix_caching:
             mamba_block_size = self.cache_config.mamba_block_size
             assert mamba_block_size is not None
             self._mamba_state_idx[req_index] = (
@@ -58,7 +58,7 @@ class MambaHybridModelState(DefaultModelState):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: CPUBlockTables
     ) -> None:
-        if not self._align_mode:
+        if not self.prefix_caching:
             return
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
@@ -74,7 +74,7 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        if not self._align_mode or input_batch.num_reqs == 0:
+        if not self.prefix_caching or input_batch.num_reqs == 0:
             return
 
         mamba_group_ids = get_mamba_group_ids(get_mamba_groups(kv_cache_config))

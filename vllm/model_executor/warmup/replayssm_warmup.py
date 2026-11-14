@@ -133,7 +133,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
             continue
         spec = group.kv_cache_specs[group.layer_names[0]]
         assert isinstance(spec, MambaSpec)
-        align = is_mamba_prefix_caching_group(group)
+        prefix_caching = is_mamba_prefix_caching_group(group)
         table = runner.block_tables.input_block_tables[group_id]
         # Match the runtime stride without changing its block-table contents.
         scratch_table = torch.empty_strided(
@@ -160,14 +160,16 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 mixer._replayssm_prev_num_accepted.zero_()
 
         context = ReplaySSMModelContext.create(
-            grouped, runner.max_num_reqs, materialize_prefixes=align
+            grouped, runner.max_num_reqs, materialize_prefixes=prefix_caching
         )
         device = grouped[0][2].device
         block_size = grouped[0][1].block_size
         query_len = runner.decode_query_len
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=device)
-        live_cols = torch.ones(1, dtype=torch.int32, device=device) if align else None
-        if align:
+        live_cols = (
+            torch.ones(1, dtype=torch.int32, device=device) if prefix_caching else None
+        )
+        if prefix_caching:
             context.reset_new_slots(
                 idx_mapping=idx_mapping,
                 src_cols=torch.full((1,), -1, dtype=torch.int32, device=device),

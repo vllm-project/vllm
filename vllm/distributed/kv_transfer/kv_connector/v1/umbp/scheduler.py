@@ -246,11 +246,6 @@ class UMBPStoreConnectorScheduler:
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if is_mamba_prefix_caching_group(group)
         )
-        if (
-            self._boundary_handoff_groups
-            and not vllm_config.cache_config.enable_prefix_caching
-        ):
-            raise ValueError("UMBP requires prefix caching for Mamba layers")
         self.runtime = runtime
         self.enable_kv_cache_events = bool(
             vllm_config.kv_events_config

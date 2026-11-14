@@ -1676,7 +1676,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def has_positionally_stable_blocks(self) -> bool:
         # With prefix caching, Mamba can null interior states and relocate
         # speculative blocks in place. Without it, blocks keep their positions.
-        return not self.enable_caching
+        return not self.prefix_caching
 
     @dataclass(frozen=True)
     class Params(SingleTypeKVCacheManager.Params):
@@ -1747,15 +1747,16 @@ class MambaManager(SingleTypeKVCacheManager):
         assert params.enable_prefix_caching or not self.enable_caching, (
             "Mamba prefix caching requires a group built with prefix caching"
         )
+        self.prefix_caching = params.enable_prefix_caching
         self.num_speculative_blocks: int = params.num_speculative_blocks
         self.prefill_checkpoint_alignment = params.prefill_checkpoint_alignment
         self.has_prefill_checkpoint_blocks = (
-            self.enable_caching and params.num_prefill_checkpoint_blocks > 0
+            self.prefix_caching and params.num_prefill_checkpoint_blocks > 0
         )
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-        if self.enable_caching:
+        if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
@@ -1908,7 +1909,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def _remove_blocks_in_range(
         self, request_id: str, first_block: int, last_block: int
     ) -> None:
-        if not self.enable_caching:
+        if not self.prefix_caching:
             return super()._remove_blocks_in_range(request_id, first_block, last_block)
         blocks = self.req_to_blocks.get(request_id, [])
         first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
@@ -1935,7 +1936,7 @@ class MambaManager(SingleTypeKVCacheManager):
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
         )
-        if self.enable_caching:
+        if self.prefix_caching:
             # `last_state_block_idx` refers to the block index allocated two steps ago.
             # The block allocated in the previous step is used to copy Mamba states
             # into the block allocated in the current step; the earlier block is
@@ -2006,7 +2007,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # that kv_cache_manager will think there is no enough blocks to allocate now
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
-        if not self.enable_caching:
+        if not self.prefix_caching:
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -2091,7 +2092,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
-        if not self.enable_caching:
+        if not self.prefix_caching:
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -2232,7 +2233,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_computed_tokens: int,
         num_in_flight_tokens: int,
     ) -> tuple[int, KVCacheBlock, int] | None:
-        if not self.enable_caching:
+        if not self.prefix_caching:
             return None
         producer_tail = self._producer_partial_tail_reqs.pop(request_id, None)
         if producer_tail is None:
@@ -2243,7 +2244,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        if self.enable_caching:
+        if self.prefix_caching:
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
@@ -2284,7 +2285,7 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if self.enable_caching:
+        if self.prefix_caching:
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
@@ -2301,7 +2302,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
-                if self.enable_caching:
+                if self.prefix_caching:
                     assert block.block_hash_num_tokens is not None
                     # Offer every retained boundary with its exact block.
                     # The connector filters against its save window, which may

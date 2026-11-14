@@ -260,10 +260,8 @@ class OffloadingConnectorScheduler:
         self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
-        self._mamba_align_size: int | None = (
-            resolve_mamba_align_size(spec, kv_cache_config)
-            if vllm_config.cache_config.enable_prefix_caching
-            else None
+        self._mamba_align_size: int | None = resolve_mamba_align_size(
+            spec, kv_cache_config
         )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}

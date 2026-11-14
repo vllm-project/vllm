@@ -268,6 +268,7 @@ def test_replayssm_uses_built_mamba_decode_split(
     state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
     state_config.speculative_config = config.speculative_config
     state_config.cache_config.use_replayssm = True
+    state_config.cache_config.enable_prefix_caching = False
     state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
     state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
     # The groups use these backend types without instantiating them.
