@@ -450,6 +450,9 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "merge_indices",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                tower.attn_backend, "cu_seqlens"
+            ),
         )
 
     def get_encoder_cudagraph_budget_range(
