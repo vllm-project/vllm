@@ -426,20 +426,25 @@ def test_decode_rank_waits_for_every_distinct_stage():
 
 
 @pytest.mark.usefixtures("consumer_role")
-def test_first_stage_failure_fails_the_transfer_once():
+def test_stage_failure_fails_the_transfer_once_every_stage_reported():
     wrapper = MoRIIOWrapper()
 
     wrapper._handle_structured_message(_write_done("t", 0))
-    wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
-    assert wrapper.pop_failed_write_req_ids() == {"t"}
-
-    # The other stages report later; none of it reaches the scheduler again.
+    wrapper._handle_structured_message({**_write_done("t", 1), "type": "write_failed"})
     wrapper._handle_structured_message(_write_done("t", 2))
+    assert wrapper.pop_failed_write_req_ids() == set()
+    assert wrapper.pop_finished_write_req_ids() == set()
+
+    wrapper._handle_structured_message(_write_done("t", 3))
+    assert wrapper.pop_failed_write_req_ids() == {"t"}
+    assert wrapper.pop_finished_write_req_ids() == set()
+    assert wrapper._write_done_senders == {}
+
+    # Late duplicates do not reach the scheduler again.
     wrapper._handle_structured_message(_write_done("t", 3))
     wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
     assert wrapper.pop_failed_write_req_ids() == set()
     assert wrapper.pop_finished_write_req_ids() == set()
-    assert wrapper._write_done_senders == {}
 
 
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:

@@ -297,7 +297,7 @@ def test_execute_write_task_writes_every_fanout_target():
     def _prepare_transfer_plan(
         task, request_info, remote_moriio_meta, remote_engine_id=None, target=None
     ):
-        return "plan"
+        return SimpleNamespace(transfer_sizes=[])
 
     def _do_layer_write(plan, sessions):
         write_sessions.append(sessions)
@@ -464,6 +464,8 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker._write_blocks_for_req = (  # type: ignore[method-assign]
         lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
     )
+    worker.moriio_wrapper = _real_wrapper()
+    worker._writer = make_moriio_writer(worker)
     return worker
 
 
@@ -544,10 +546,12 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ran
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
-        (ip, port, message_type)
+    wrapper.send_notify = lambda tid, ip, port, message_type, message_fields=None: (
+        sent.append((ip, port, message_type))
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, pp_rank=0, pp_size=1)
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
@@ -580,10 +584,12 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
 def test_deferred_write_timeout_notifies_every_fanout_target():
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
-        (ip, port, message_type)
+    wrapper.send_notify = lambda tid, ip, port, message_type, message_fields=None: (
+        sent.append((ip, port, message_type))
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, pp_rank=0, pp_size=1)
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
