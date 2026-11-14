@@ -183,3 +183,26 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+def test_parse_spec_decode_metrics_per_position_drafts():
+    """The per-position draft counter is parsed per position and kept out of
+    the draft-token total it shares a prefix with."""
+    from vllm.benchmarks.serve import parse_spec_decode_metrics
+
+    text = """
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{engine="0"} 10.0
+vllm:spec_decode_num_draft_tokens_total{engine="0"} 25.0
+vllm:spec_decode_num_accepted_tokens_total{engine="0"} 12.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="0",position="0"} 8.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{engine="0",position="1"} 4.0
+vllm:spec_decode_num_draft_tokens_per_pos_total{engine="0",position="0"} 10.0
+vllm:spec_decode_num_draft_tokens_per_pos_total{engine="0",position="1"} 10.0
+vllm:spec_decode_num_draft_tokens_per_pos_total{engine="0",position="2"} 5.0
+"""
+    metrics = parse_spec_decode_metrics(text)
+    assert metrics is not None
+    assert metrics.num_draft_tokens == 25
+    assert metrics.draft_per_pos == {0: 10, 1: 10, 2: 5}
+    assert metrics.accepted_per_pos == {0: 8, 1: 4}

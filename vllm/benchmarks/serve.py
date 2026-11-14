@@ -206,6 +206,66 @@ class SpecDecodeMetrics:
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
     num_verified_tokens: int
+    # Empty when the server predates vllm:spec_decode_num_draft_tokens_per_pos.
+    draft_per_pos: dict[int, int]
+
+
+def parse_spec_decode_metrics(text: str) -> SpecDecodeMetrics | None:
+    """Parse speculative decoding counters from Prometheus text.
+
+    Returns None if the text has no speculative decoding counters.
+    """
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
+    accepted_per_pos: dict[int, int] = {}
+    draft_per_pos: dict[int, int] = {}
+    num_verified_tokens = 0
+    found_spec_decode = False
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line.startswith("vllm:spec_decode"):
+            continue
+        # Extract metric name (before labels) to avoid matching
+        # substrings inside label values.
+        parts = line.split(None, 1)
+        metric_name = parts[0].split("{")[0]
+        if not metric_name.endswith("_total"):
+            continue
+        found_spec_decode = True
+        with contextlib.suppress(ValueError):
+            val = int(float(parts[-1]))
+            per_pos = None
+            if "num_accepted_tokens_per_pos" in metric_name:
+                per_pos = accepted_per_pos
+            elif "num_draft_tokens_per_pos" in metric_name:
+                per_pos = draft_per_pos
+            if per_pos is not None:
+                pos_label = 'position="'
+                if pos_label in line:
+                    start = line.index(pos_label) + len(pos_label)
+                    pos = int(line[start : line.index('"', start)])
+                    per_pos[pos] = per_pos.get(pos, 0) + val
+            elif "num_drafts" in metric_name:
+                num_drafts += val
+            elif "num_draft_tokens" in metric_name:
+                num_draft_tokens += val
+            elif "num_accepted_tokens" in metric_name:
+                num_accepted_tokens += val
+            elif "num_verified_tokens_total" in metric_name:
+                num_verified_tokens += val
+
+    if not found_spec_decode:
+        return None
+    return SpecDecodeMetrics(
+        num_drafts=num_drafts,
+        num_draft_tokens=num_draft_tokens,
+        num_accepted_tokens=num_accepted_tokens,
+        accepted_per_pos=accepted_per_pos,
+        num_verified_tokens=num_verified_tokens,
+        draft_per_pos=draft_per_pos,
+    )
 
 
 async def fetch_spec_decode_metrics(
@@ -220,58 +280,7 @@ async def fetch_spec_decode_metrics(
         async with session.get(metrics_url) as response:
             if response.status != 200:
                 return None
-            text = await response.text()
-
-            num_drafts = 0
-            num_draft_tokens = 0
-            num_accepted_tokens = 0
-            accepted_per_pos: dict[int, int] = {}
-            num_verified_tokens = 0
-            found_spec_decode = False
-
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.startswith("vllm:spec_decode"):
-                    # Extract metric name (before labels) to avoid matching
-                    # substrings inside label values.
-                    parts = line.split(None, 1)
-                    metric_name = parts[0].split("{")[0]
-                    if not metric_name.endswith("_total"):
-                        continue
-                    found_spec_decode = True
-                    with contextlib.suppress(ValueError):
-                        if "num_drafts" in metric_name:
-                            num_drafts += int(float(parts[-1]))
-                        elif "num_draft_tokens" in metric_name:
-                            num_draft_tokens += int(float(parts[-1]))
-                        elif "num_accepted_tokens_per_pos" in metric_name:
-                            pos_label = 'position="'
-                            if pos_label in line:
-                                start = line.index(pos_label) + len(pos_label)
-                                end = line.index('"', start)
-                                pos = int(line[start:end])
-                                val = int(float(parts[-1]))
-                                accepted_per_pos[pos] = (
-                                    accepted_per_pos.get(pos, 0) + val
-                                )
-                        elif "num_accepted_tokens" in metric_name:
-                            num_accepted_tokens += int(float(parts[-1]))
-                        elif "num_verified_tokens_total" in metric_name:
-                            num_verified_tokens += int(float(parts[-1]))
-
-            if not found_spec_decode:
-                return None
-
-            return SpecDecodeMetrics(
-                num_drafts=num_drafts,
-                num_draft_tokens=num_draft_tokens,
-                num_accepted_tokens=num_accepted_tokens,
-                accepted_per_pos=accepted_per_pos,
-                num_verified_tokens=num_verified_tokens,
-            )
+            return parse_spec_decode_metrics(await response.text())
     except (TimeoutError, aiohttp.ClientError):
         return None
 
@@ -1157,13 +1166,21 @@ async def benchmark(
                 set(spec_decode_metrics_before.accepted_per_pos.keys())
                 | set(spec_decode_metrics_after.accepted_per_pos.keys())
             )
+            before_m, after_m = spec_decode_metrics_before, spec_decode_metrics_after
             for pos in positions:
-                before_val = spec_decode_metrics_before.accepted_per_pos.get(pos, 0)
-                after_val = spec_decode_metrics_after.accepted_per_pos.get(
-                    pos, before_val
+                before_val = before_m.accepted_per_pos.get(pos, 0)
+                after_val = after_m.accepted_per_pos.get(pos, before_val)
+                # Over the drafts that reached this position; servers without
+                # the per-position draft counter only report num_drafts.
+                if after_m.draft_per_pos:
+                    drafted = after_m.draft_per_pos.get(
+                        pos, 0
+                    ) - before_m.draft_per_pos.get(pos, 0)
+                else:
+                    drafted = delta_drafts
+                per_pos_rates.append(
+                    (after_val - before_val) / drafted if drafted > 0 else math.nan
                 )
-                delta_pos = after_val - before_val
-                per_pos_rates.append(delta_pos / delta_drafts)
 
         if delta_draft_tokens > 0:
             acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
