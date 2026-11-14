@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -31,7 +32,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.mm.lora import activate_mm_loras
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -291,7 +292,40 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
         XPUPlatform.update_block_size_for_backend(vllm_config)
 
 
-def test_set_active_mm_loras_builds_tower_and_connector_mappings():
+def _run_mm_lora_batches(
+    model,
+    lora_manager,
+    encoder_cache,
+    *,
+    req_id_to_index,
+    lora_state,
+    scheduled_encoder_inputs,
+    batches,
+):
+    """Drive activate_mm_loras as EncoderRunner would, one hash list per batch."""
+    callbacks = []
+
+    @contextmanager
+    def mm_lora_batch_callback(callback):
+        callbacks.append(callback)
+        yield
+
+    encoder_runner = SimpleNamespace(
+        encoder_cache=encoder_cache, mm_lora_batch_callback=mm_lora_batch_callback
+    )
+    with activate_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_runner=encoder_runner,
+        req_id_to_index=req_id_to_index,
+        lora_state=lora_state,
+        scheduled_encoder_inputs=scheduled_encoder_inputs,
+    ):
+        for batch in batches:
+            callbacks[0](batch)
+
+
+def test_activate_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
     model.get_mm_lora_token_counts.side_effect = (
         lambda *, modality, mm_kwargs, num_mm_embeds: (
@@ -333,10 +367,10 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     lora_state.add_request("req-with-lora", 0, lora_request)
     lora_state.add_request("req-no-lora", 1, None)
 
-    set_active_mm_loras(
-        model=model,
-        lora_manager=lora_manager,
-        encoder_cache=encoder_cache,
+    _run_mm_lora_batches(
+        model,
+        lora_manager,
+        encoder_cache,
         req_id_to_index={
             "req-with-lora": 0,
             "req-no-lora": 1,
@@ -347,6 +381,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
             "req-no-lora": [0],
             "missing-req": [0],
         },
+        batches=[["img-1", "img-0", "img-2"]],
     )
 
     assert lora_manager.set_active_adapters.call_count == 2
@@ -368,7 +403,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
-def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
+def test_activate_mm_loras_maps_each_encoder_batch_separately():
     model = Mock()
     model.get_mm_lora_token_counts.side_effect = (
         lambda *, modality, mm_kwargs, num_mm_embeds: (num_mm_embeds, None)
@@ -391,18 +426,24 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     lora_state.add_request("req-a", 0, lora_request)
     lora_state.add_request("req-b", 1, None)
 
-    set_active_mm_loras(
-        model=model,
-        lora_manager=lora_manager,
-        encoder_cache=encoder_cache,
+    _run_mm_lora_batches(
+        model,
+        lora_manager,
+        encoder_cache,
         req_id_to_index={"req-a": 0, "req-b": 1},
         lora_state=lora_state,
         scheduled_encoder_inputs={"req-a": [0], "req-b": [0]},
+        # The encoder runs the image batch before the video batch.
+        batches=[["req-b-0"], ["req-a-0"]],
     )
 
-    # The image is encoded before the video, so its tokens come first.
-    _, tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args
-    assert tower_mapping.index_mapping == (0, 0, 7)
+    # Each batch gets a mapping covering only its own items.
+    tower_mappings = [
+        mapping.index_mapping
+        for _, mapping in (c.args for c in lora_manager.set_active_adapters.mock_calls)
+        if mapping.type is LoRAMappingType.TOWER
+    ]
+    assert tower_mappings == [(0, 0), (7,)]
 
 
 def test_reload_weights_path_replaces_object_storage_source(monkeypatch):

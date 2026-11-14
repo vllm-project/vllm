@@ -54,19 +54,15 @@ class EncoderRunner:
         self.enable_timing = enable_timing
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
         self._timing_lock = threading.Lock()
-        self._mm_lora_batch_callback: (
-            Callable[[list[tuple[str, MultiModalKwargsItem]]], None] | None
-        ) = None
+        self._mm_lora_batch_callback: Callable[[list[str]], None] | None = None
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
 
     @contextmanager
-    def mm_lora_batch_callback(
-        self,
-        callback: Callable[[list[tuple[str, MultiModalKwargsItem]]], None] | None,
-    ):
+    def mm_lora_batch_callback(self, callback: Callable[[list[str]], None] | None):
+        """Call `callback` with each encoder batch's mm hashes before it runs."""
         prev = self._mm_lora_batch_callback
         self._mm_lora_batch_callback = callback
         try:
@@ -163,7 +159,9 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        mm_hashes: list[str] | None = None,
     ) -> list[torch.Tensor]:
         # Stable-sort items by modality so each modality is encoded in as few
         # batches as possible. The returned outputs are restored to input order.
@@ -174,8 +172,11 @@ class EncoderRunner:
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
             if self._mm_lora_batch_callback is not None:
+                assert mm_hashes is not None, (
+                    "mm_hashes are required to apply per-batch multimodal LoRA"
+                )
                 batch_indices = order[offset : offset + num_items]
-                self._mm_lora_batch_callback([mm_kwargs[i] for i in batch_indices])
+                self._mm_lora_batch_callback([mm_hashes[i] for i in batch_indices])
             offset += num_items
             cg_manager = self.cudagraph_manager
             cudagraph_output = (

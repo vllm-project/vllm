@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.lora.layers import LoRAMappingType
@@ -15,7 +17,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.lora import activate_mm_loras, set_active_mm_loras
+from vllm.v1.worker.gpu.mm.lora import activate_mm_loras
 
 
 class _FakeModel:
@@ -45,50 +47,99 @@ class _FakeLoRAManager:
         self.set_active_adapters_calls.append((requests, mapping))
 
 
-def _mm_feature(modality: str, num_embeds: int):
+def _mm_feature(modality: str, identifier: str, num_embeds: int):
     return SimpleNamespace(
         modality=modality,
+        identifier=identifier,
         data=None,
         mm_position=SimpleNamespace(get_num_embeds=lambda: num_embeds),
     )
 
 
-def test_set_active_mm_loras_skips_prompt_embeds_passthrough():
+class _FakeEncoderRunner:
+    """Exposes the batch callback so tests can drive encoder batches directly."""
+
+    def __init__(self, encoder_cache):
+        self.encoder_cache = encoder_cache
+        self.callback = None
+
+    @contextmanager
+    def mm_lora_batch_callback(self, callback):
+        self.callback = callback
+        try:
+            yield
+        finally:
+            self.callback = None
+
+
+def test_activate_mm_loras_skips_prompt_embeds_passthrough():
     """`prompt_embeds` is a passthrough modality: the tensor is already in
     the model's embedding space, no encoder runs, and there is nothing to
-    apply tower/connector LoRA to. set_active_mm_loras must skip it instead
+    apply tower/connector LoRA to. activate_mm_loras must skip it instead
     of forwarding it to the model's get_mm_lora_token_counts (which doesn't
     know about it and would raise "Unsupported modality")."""
     req_id = "req-0"
     model = _FakeModel()
     lora_manager = _FakeLoRAManager()
-    encoder_cache = SimpleNamespace(
-        mm_features={
-            req_id: [
-                _mm_feature("prompt_embeds", num_embeds=32),
-                _mm_feature("image", num_embeds=4),
-            ]
-        }
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(
+            mm_features={
+                req_id: [
+                    _mm_feature("prompt_embeds", "h_embeds", num_embeds=32),
+                    _mm_feature("image", "h_img", num_embeds=4),
+                ]
+            }
+        )
     )
     lora_state = SimpleNamespace(
         lora_ids=np.array([7], dtype=np.int32),
         lora_requests={req_id: object()},
     )
 
-    set_active_mm_loras(
+    with activate_mm_loras(
         model=model,
         lora_manager=lora_manager,
-        encoder_cache=encoder_cache,
+        encoder_runner=runner,
         req_id_to_index={req_id: 0},
         lora_state=lora_state,
         scheduled_encoder_inputs={req_id: [0, 1]},
-    )
+    ):
+        # prepare_mm_inputs never sends prompt_embeds to the encoder.
+        runner.callback(["h_img"])
 
     # Only the real "image" item should ever reach the model.
     assert model.calls == ["image"]
     assert len(lora_manager.set_active_adapters_calls) == 1
     _, mapping = lora_manager.set_active_adapters_calls[0]
     assert mapping.index_mapping == (7, 7, 7, 7)
+
+
+def test_activate_mm_loras_rejects_unmatched_encoder_batch():
+    """A batch with no mapping must fail loudly instead of reusing the
+    previous batch's adapters."""
+    req_id = "req-0"
+    lora_manager = _FakeLoRAManager()
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(mm_features={req_id: [_mm_feature("image", "h_img", 4)]})
+    )
+    lora_state = SimpleNamespace(
+        lora_ids=np.array([7], dtype=np.int32),
+        lora_requests={req_id: object()},
+    )
+
+    with (
+        activate_mm_loras(
+            model=_FakeModel(),
+            lora_manager=lora_manager,
+            encoder_runner=runner,
+            req_id_to_index={req_id: 0},
+            lora_state=lora_state,
+            scheduled_encoder_inputs={req_id: [0]},
+        ),
+        pytest.raises(AssertionError, match="h_unknown"),
+    ):
+        runner.callback(["h_unknown"])
+    assert lora_manager.set_active_adapters_calls == []
 
 
 class _BatchRecordingModel:
@@ -183,8 +234,8 @@ def test_activate_mm_loras_scopes_mapping_per_encoder_batch():
         lora_state=lora_state,
         scheduled_encoder_inputs=scheduled,
     ):
-        _, mm_kwargs = runner.prepare_mm_inputs(scheduled)
-        outputs = runner.execute_mm_encoder(mm_kwargs)
+        mm_hashes, mm_kwargs = runner.prepare_mm_inputs(scheduled)
+        outputs = runner.execute_mm_encoder(mm_kwargs, mm_hashes)
 
     assert len(outputs) == 3
     assert model.recorded_batches == [

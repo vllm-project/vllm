@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict, deque
-from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -9,7 +7,7 @@ import numpy as np
 
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.worker_manager import WorkerLoRAManager
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
@@ -115,29 +113,6 @@ def _apply_mm_loras_for_items(
     )
 
 
-def set_active_mm_loras(
-    model: Any,
-    lora_manager: WorkerLoRAManager,
-    encoder_cache: EncoderCache | None,
-    req_id_to_index: dict[str, int],
-    lora_state: LoraState,
-    scheduled_encoder_inputs: dict[str, list[int]],
-) -> None:
-    mm_items = _collect_mm_items(
-        lora_manager,
-        encoder_cache,
-        req_id_to_index,
-        lora_state,
-        scheduled_encoder_inputs,
-    )
-    if not mm_items:
-        return
-
-    # Runs items sorted by modality.
-    mm_items.sort(key=lambda x: x[2].modality)
-    _apply_mm_loras_for_items(model, lora_manager, mm_items)
-
-
 @contextmanager
 def activate_mm_loras(
     model: Any,
@@ -164,26 +139,15 @@ def activate_mm_loras(
         yield
         return
 
-    items_by_data_id: dict[int, deque[tuple[int, Any, MultiModalFeatureSpec]]] = (
-        defaultdict(deque)
-    )
-    for item in mm_items:
-        items_by_data_id[id(item[2].data)].append(item)
+    items_by_hash = {item[2].identifier: item for item in mm_items}
 
-    def _on_encoder_batch(
-        batch_items: list[tuple[str, MultiModalKwargsItem]],
-    ) -> None:
-        batch_mm_items: list[tuple[int, Any, MultiModalFeatureSpec]] = []
-        for _, mm_data in batch_items:
-            queue = items_by_data_id.get(id(mm_data))
-            if not queue:
-                continue
-            entry = queue.popleft() if len(queue) > 1 else queue[0]
-            batch_mm_items.append(entry)
-        _apply_mm_loras_for_items(model, lora_manager, batch_mm_items)
+    def _on_encoder_batch(batch_mm_hashes: list[str]) -> None:
+        missing = [h for h in batch_mm_hashes if h not in items_by_hash]
+        # Otherwise the previous batch's mapping would silently stay active.
+        assert not missing, f"No LoRA mapping for encoder inputs {missing}"
+        _apply_mm_loras_for_items(
+            model, lora_manager, [items_by_hash[h] for h in batch_mm_hashes]
+        )
 
-    callback: Callable[[list[tuple[str, MultiModalKwargsItem]]], None] = (
-        _on_encoder_batch
-    )
-    with encoder_runner.mm_lora_batch_callback(callback):
+    with encoder_runner.mm_lora_batch_callback(_on_encoder_batch):
         yield

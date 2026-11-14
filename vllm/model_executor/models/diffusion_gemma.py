@@ -1018,7 +1018,9 @@ class DiffusionGemmaModelState(ModelState):
             scheduled_encoder_inputs
         )
         if mm_kwargs:
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                mm_kwargs, mm_hashes
+            )
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
         mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)
