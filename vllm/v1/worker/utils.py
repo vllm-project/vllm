@@ -962,6 +962,41 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
 
 
+def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
+    """Split copies between the `[2, num_copies]` source and destination
+    `block_ids` of `blocks` into contiguous runs.
+
+    Returns:
+        An int64 array of shape `[3, num_runs]` holding source addresses,
+        destination addresses and sizes in bytes.
+
+    """
+    shape, strides = list(blocks.shape[1:]), list(blocks.stride()[1:])
+    run_len = 1
+    while shape and (shape[-1] == 1 or strides[-1] == run_len):
+        run_len *= shape.pop()
+        strides.pop()
+    offsets = np.zeros(1, dtype=np.int64)
+    for size, stride in zip(shape, strides):
+        offsets = (offsets[:, None] + np.arange(size) * stride).ravel()
+    elements = (block_ids[:, :, None] * blocks.stride(0) + offsets).reshape(2, -1)
+    addresses = blocks.data_ptr() + elements * blocks.element_size()
+    sizes = np.full((1, addresses.shape[1]), run_len * blocks.element_size())
+    return np.concatenate([addresses, sizes])
+
+
+@triton.jit
+def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
+    # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
+    # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
+    run = tl.program_id(0)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < tl.load(runs_ptr + 2 * num_runs + run)
+    src = tl.load(runs_ptr + run).to(tl.pointer_type(WORD))
+    dst = tl.load(runs_ptr + num_runs + run).to(tl.pointer_type(WORD))
+    tl.store(dst + offsets, tl.load(src + offsets, mask=mask), mask=mask)
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
@@ -971,7 +1006,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    block_views: list[torch.Tensor] = []
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
@@ -991,11 +1026,6 @@ def copy_kv_cache_blocks_inplace(
         if key in seen:
             continue
         seen.add(key)
-
-        if indices is None:
-            indices = async_tensor_h2d(indices_np, device=cache.device)
-        assert cache.device == indices.device
-        src, dst = indices.unbind(dim=1)
 
         kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
         assert remainder == 0, (
@@ -1018,6 +1048,34 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        block_views.append(blocks)
+
+    if not block_views:
+        return
+    device = block_views[0].device
+    block_ids = indices_np.T
+    # Copy GPU blocks directly in one kernel: gathering the sources into a
+    # temporary can take GiBs. The kernel copies runs concurrently, so chained
+    # copies keep the indexed copy, which reads all sources first.
+    if device.type == "cuda" and not np.intersect1d(*block_ids).size:
+        runs = np.concatenate(
+            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+        )
+        # Copy in the widest word that divides every address and size.
+        bits = int(np.bitwise_or.reduce(runs, axis=None))
+        word_bytes = min(8, bits & -bits)
+        runs[2] //= word_bytes
+        block = 4096
+        _copy_runs_kernel[(runs.shape[1], triton.cdiv(int(runs[2].max()), block))](
+            async_tensor_h2d(runs, device=device),
+            runs.shape[1],
+            WORD={8: tl.int64, 4: tl.int32, 2: tl.int16, 1: tl.int8}[word_bytes],
+            BLOCK=block,
+        )
+        return
+
+    src, dst = async_tensor_h2d(indices_np, device=device).unbind(dim=1)
+    for blocks in block_views:
         blocks[dst] = blocks[src]
 
 
