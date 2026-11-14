@@ -238,19 +238,29 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
 
 @pytest.mark.parametrize("width", [131072, 1 << 20])
 @pytest.mark.parametrize("length", [100, 2048, 40000, 360000])
-def test_sampled_select_matches_decode(monkeypatch, width, length):
+@pytest.mark.parametrize("rows", [1, 4, 8, 64])
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("pitched", [False, True])
+def test_sampled_select_matches_decode(monkeypatch, width, length, rows, tied, pitched):
     """VLLM_K3_INDEXER_SAMPLED_TOPK: AITER's sampled select under a graph
-    picks the decode kernel's set, including rows shorter than k."""
+    picks the decode kernel's set, including rows shorter than k. ``tied``:
+    coarse logits (as MXFP4 scores are) with ties at the k-th value, where
+    either select may keep a different tied index: the same values then.
+    ``pitched``: the logits a column slice of a wider row pitch."""
     from vllm.models.kimi_k3.amd.dsa import _sampled_serves, _select
 
-    rows = 8
-    length = min(length, width)
+    cols = width // 2 if pitched else width
+    length = min(length, cols)
     if not _sampled_serves(rows, width, TOPK, torch.accelerator.current_device_index()):
         pytest.skip("sampled top-k not served on this GPU")
-    torch.manual_seed(length)
-    logits = torch.full((rows, width), 1e20, device="cuda")  # poisoned tail
-    s = torch.randn((rows, length, HEADS), device="cuda").relu_()
-    logits[:, :length] = (s * torch.randn((rows, 1, HEADS), device="cuda")).sum(-1)
+    torch.manual_seed(length + rows)
+    buf = torch.full((rows, width), 1e20, device="cuda")  # poisoned tail
+    if tied:
+        buf[:, :length] = torch.randint(0, 8, (rows, length), device="cuda").float()
+    else:
+        s = torch.randn((rows, length, HEADS), device="cuda").relu_()
+        buf[:, :length] = (s * torch.randn((rows, 1, HEADS), device="cuda")).sum(-1)
+    logits = buf[:, :cols]
     ends = torch.arange(length - rows + 1, length + 1, device="cuda")
     ends = ends.clamp(min=1).to(torch.int32)
 
@@ -266,6 +276,23 @@ def test_sampled_select_matches_decode(monkeypatch, width, length):
         _select(logits, ends, out)
     graph.replay()
     torch.accelerator.synchronize()
-    torch.testing.assert_close(
-        out.sort(dim=1).values, ref.sort(dim=1).values, rtol=0, atol=0
-    )
+
+    # each row: min(end, k) distinct indices below its end, -1 past them
+    live = ends.clamp(max=TOPK).long()
+    for sel in (out, ref):
+        idx = sel.sort(dim=1).values
+        valid = idx >= 0
+        torch.testing.assert_close(valid.sum(1), live, rtol=0, atol=0)
+        assert bool((idx[~valid] == -1).all())
+        assert bool((idx < ends[:, None]).all())
+        assert bool(((idx[:, 1:] != idx[:, :-1]) | ~valid[:, 1:]).all())
+    if not tied:
+        torch.testing.assert_close(
+            out.sort(dim=1).values, ref.sort(dim=1).values, rtol=0, atol=0
+        )
+
+    def picked(sel):
+        v = logits.gather(1, sel.clamp(min=0).long())
+        return v.masked_fill(sel < 0, float("-inf")).sort(dim=1).values
+
+    torch.testing.assert_close(picked(out), picked(ref), rtol=0, atol=0)
