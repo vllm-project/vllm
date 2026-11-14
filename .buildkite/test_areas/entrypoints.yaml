@@ -2,6 +2,35 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
+- label: ":computer: (CPU) Anthropic Contracts"
+  key: cpu-anthropic-contracts
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  env:
+    VLLM_TARGET_DEVICE: "cpu"
+  source_file_dependencies:
+  - vllm/entrypoints/
+  - vllm/config/
+  - vllm/exceptions.py
+  - vllm/envs.py
+  - vllm/platforms/
+  - vllm/renderers/
+  - vllm/tokenizers/
+  - tests/conftest.py
+  - tests/entrypoints/anthropic/
+  - requirements/common.txt
+  - requirements/cpu.txt
+  - requirements/test/cpu.txt
+  commands:
+  - >-
+    pytest -v -s
+    entrypoints/anthropic/test_protocol_exports.py
+    entrypoints/anthropic/test_error_type_mapping.py
+    entrypoints/anthropic/test_anthropic_messages_conversion.py
+
 - label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
   key: initialized-snapshot-e2e
   device: h200
