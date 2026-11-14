@@ -8,7 +8,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers import PreTrainedConfig
 
-from vllm.distributed import parallel_state
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -34,6 +34,56 @@ from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
+
+
+class MiniMaxVLSPMeta:
+    """Static description of one sequence-parallel encoder call.
+
+    Each TP rank owns ``rows`` consecutive patch rows starting at
+    ``q_start`` = rank * rows of the batch (all ranks' rows concatenated in
+    rank order; the real rows are the first ``P``, the rest is padding).
+    ``cu_q`` are this rank's query segments (one per image it touches, local
+    offsets); ``cu_k`` the matching images' full key ranges as absolute
+    offsets into the gathered rows. Both are padded with zero-length
+    segments to a fixed count so a CUDA graph can be replayed with new
+    values; ``max_q`` / ``max_k`` are worst-case bounds baked at capture.
+    """
+
+    def __init__(self, rows, q_start, cu_q, cu_k, max_q, max_k):
+        self.rows = rows
+        self.q_start = q_start
+        self.cu_q = cu_q
+        self.cu_k = cu_k
+        self.max_q = max_q
+        self.max_k = max_k
+
+
+def _sp_varlen_attention(q, k, v, sp, scale, backend):
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if backend == AttentionBackendEnum.ROCM_AITER_FA:
+        from aiter import flash_attn_varlen_func
+
+        kwargs = {"window_size": (-1, -1)}
+    elif backend == AttentionBackendEnum.FLASH_ATTN:
+        from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+        kwargs = {}
+    else:
+        raise ValueError(f"sequence-parallel ViT does not support {backend.name}")
+    return flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=sp.cu_q,
+        cu_seqlens_k=sp.cu_k,
+        max_seqlen_q=sp.max_q,
+        max_seqlen_k=sp.max_k,
+        dropout_p=0.0,
+        causal=False,
+        softmax_scale=scale,
+        **kwargs,
+    )
 
 
 class MiniMaxVLPatchEmbed(nn.Module):
@@ -184,6 +234,50 @@ class MiniMaxVLAttention(nn.Module):
         output, _ = self.out_proj(context)
         return output
 
+    def forward_sp(
+        self,
+        h_all: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
+        sp: "MiniMaxVLSPMeta",
+    ) -> torch.Tensor:
+        """Sequence-parallel attention for this rank's query rows.
+
+        ``h_all`` is the normalized input of every rank's rows, gathered in
+        rank order (all patches of the batch, padded at the end). Q, K and V
+        are projected for all rows (K and V are needed everywhere; the extra
+        Q rows are cheap next to gathering K and V, which is twice the
+        bytes), RoPE uses the planes of all rows, and only this rank's query
+        rows attend, to the full key range of their image.
+        """
+        n = h_all.shape[0]
+        x_qkv, _ = self.qkv_proj(h_all.unsqueeze(1))
+        qkv = x_qkv.view(n, 3, self.num_heads_per_partition, self.head_dim)
+        q = qkv[:, 0].reshape(n, -1)
+        k = qkv[:, 1].reshape(n, -1)
+        triton_mrope(
+            q,
+            k,
+            rotary_cos,
+            rotary_sin,
+            self.mrope_section,
+            self.head_dim,
+            self.rotary_dim,
+            mrope_interleaved=False,
+            is_neox_style=True,
+        )
+        q0 = sp.q_start
+        context = _sp_varlen_attention(
+            qkv[q0 : q0 + sp.rows, 0],
+            qkv[:, 1],
+            qkv[:, 2],
+            sp,
+            self.attn.scale,
+            self.attn.attn_backend,
+        )
+        output, _ = self.out_proj(context.reshape(sp.rows, 1, -1))
+        return output
+
 
 class MiniMaxVLEncoderLayer(nn.Module):
     """Single CLIP-style transformer block."""
@@ -241,6 +335,24 @@ class MiniMaxVLEncoderLayer(nn.Module):
             max_seqlen,
             sequence_lengths,
         )
+        residual = x
+        x, _ = self.fc1(self.layer_norm2(x))
+        x = self.act(x)
+        x, _ = self.fc2(x)
+        return residual + x
+
+    def forward_sp(
+        self,
+        x: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
+        sp: "MiniMaxVLSPMeta",
+    ) -> torch.Tensor:
+        # x: (rows, 1, hidden_size), this rank's rows only. One all-gather
+        # per layer: the attention input, not K and V.
+        h = self.layer_norm1(x).view(sp.rows, -1)
+        h_all = tensor_model_parallel_all_gather(h, dim=0)
+        x = x + self.self_attn.forward_sp(h_all, rotary_cos, rotary_sin, sp)
         residual = x
         x, _ = self.fc1(self.layer_norm2(x))
         x = self.act(x)
@@ -689,6 +801,29 @@ class MiniMaxVLVisionModel(nn.Module):
         hidden = self.multi_modal_projector(hidden)
         hidden = self.patch_merge_mlp(hidden)
         return hidden
+
+    def forward_sp(
+        self,
+        pixel_values: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
+        sp: MiniMaxVLSPMeta,
+    ) -> torch.Tensor:
+        """Sequence-parallel encoder for this rank's ``sp.rows`` patch rows.
+
+        ``pixel_values`` are this rank's rows (padded); ``rotary_cos/sin``
+        hold the planes of all ranks' rows. Returns this rank's merged
+        tokens, ``(sp.rows // merge**2, out_hidden_size)``; the caller
+        all-gathers them. ``sp.rows`` must be a multiple of merge**2 so no
+        merge group straddles two ranks.
+        """
+        vm = self.vision_model
+        x = vm.pre_layrnorm(vm.embeddings(pixel_values)).unsqueeze(1)
+        for layer in vm.encoder.layers:
+            x = layer.forward_sp(x, rotary_cos, rotary_sin, sp)
+        hidden = x.squeeze(1)
+        hidden = self.multi_modal_projector(hidden)
+        return self.patch_merge_mlp(hidden)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
