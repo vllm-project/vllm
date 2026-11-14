@@ -164,7 +164,7 @@ def _host_alloc_request(pool: "_InitState", nbytes: int, pool_total: int | None)
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ReceivePoolConfig:
     """Validated receive-pool settings recorded before the plan is known."""
 
@@ -174,7 +174,7 @@ class _ReceivePoolConfig:
     buffer_presize: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _InitCandidate:
     """The state one `init_transfer_engine` attempt builds, under the engine's
     own attribute names: `_commit_init` copies every field onto the engine on
@@ -220,7 +220,7 @@ class _InitCandidate:
 _InitState: TypeAlias = "_InitCandidate | ShardedRDTWeightTransferEngine"
 
 
-@dataclass
+@dataclass(slots=True)
 class _Chunk:
     """One packed pull plus its post-processing (see Data flow).
 
@@ -253,7 +253,7 @@ class _Chunk:
     stream: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _CallPlan:
     """The static plan for one sync (see Data flow). Pure, so it is built once
     and reused; runtime is then execution only.
@@ -270,7 +270,7 @@ class _CallPlan:
     num_streams: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingPull:
     """A dispatched pull whose blocking `ray.get` has not run (see Data flow).
 
@@ -285,7 +285,7 @@ class _PendingPull:
     slot: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _PullHooks:
     """Operations injected into the pure `_run_lanes` scheduler."""
 
@@ -302,7 +302,7 @@ class _PullHooks:
     signal: "Callable[[int], None]"
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProcItem:
     """A landed pull handed to the background scatter thread (see Data flow).
 

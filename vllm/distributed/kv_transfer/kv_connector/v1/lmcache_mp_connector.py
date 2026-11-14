@@ -282,7 +282,7 @@ class LMCacheMPRequestTracker:
         return self.__repr__()
 
 
-@dataclass
+@dataclass(slots=True)
 class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]

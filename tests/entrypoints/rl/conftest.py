@@ -184,7 +184,7 @@ def ok(resp) -> bool:
 STREAM_START_TIMEOUT = 20.0
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamResult:
     started: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)

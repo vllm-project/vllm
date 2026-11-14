@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Callable, Generator
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class BlameResult:
     found: bool = False
     trace_stack: str = ""

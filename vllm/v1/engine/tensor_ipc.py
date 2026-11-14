@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 TensorIpcQueue = MPQueue
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TensorIpcData:
     """Data sent via torch.multiprocessing.Queue for zero-copy IPC.
 
@@ -97,7 +97,7 @@ class TensorIpcSender(OOBTensorConsumer):
             return None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class _Sender:
     current_message_id: int = -1
     tensors: dict[int, dict[int, torch.Tensor]] = field(default_factory=dict)
