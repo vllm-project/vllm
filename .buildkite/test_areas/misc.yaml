@@ -404,6 +404,8 @@ steps:
   working_dir: "/vllm-workspace"
   source_file_dependencies:
     - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/model_executor/models/bailing_moe_v3.py
+    - vllm/model_executor/models/ming_v3_asr.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
     - tests/v1/kv_connector/extract_hidden_states_integration
@@ -423,6 +425,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/model_executor/models/bailing_moe_v3.py
+      - vllm/model_executor/models/ming_v3_asr.py
       - vllm/transformers_utils/configs/extract_hidden_states.py
       - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
       - tests/v1/kv_connector/extract_hidden_states_integration

@@ -9,9 +9,13 @@ import torch
 
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.model_executor.models.ming_v3_asr import MingV3ASRForConditionalGeneration
+from vllm.multimodal.media.audio import load_audio
 from vllm.platforms import current_platform
 
 
@@ -33,6 +37,72 @@ def get_and_check_output(output, expected_shape):
     assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
     return token_ids, hidden_states
+
+
+@create_new_process_for_each_test()
+def test_ming_audio_hidden_state_extraction(tmp_path):
+    """Export decoder features aligned with expanded audio prompts."""
+    layer_ids = [1, 3, 4]
+    llm = LLM(
+        model=os.environ.get(
+            "VLLM_TEST_MING_ASR_MODEL", "inclusionAI/Ming-3.0-asr-tiny"
+        ),
+        revision="ac95e7b1678c08ea6f4a2581a051e432ed63e9b7",
+        trust_remote_code=True,
+        seed=42,
+        dtype="bfloat16",
+        load_format="dummy",
+        hf_overrides={
+            "text_config": {"num_hidden_layers": 4},
+            "audio_config": {"n_audio_layer": 1},
+        },
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=512,
+        max_num_batched_tokens=1024,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        moe_backend="triton",
+    )
+    config = llm.llm_engine.model_config
+    stt_config = MingV3ASRForConditionalGeneration.get_speech_to_text_config(
+        config, "transcribe"
+    )
+    audio, _ = load_audio(
+        AudioAsset("mary_had_lamb").get_local_path(), sr=16000, backend="soundfile"
+    )
+    prompts = [
+        MingV3ASRForConditionalGeneration.get_generation_prompt(
+            SpeechToTextParams(
+                audio=audio[:samples], model_config=config, stt_config=stt_config
+            )
+        )
+        for samples in (16000, 32000)
+    ]
+    outputs = llm.generate(prompts, SamplingParams(max_tokens=1, temperature=0))
+    assert len(outputs) == len(prompts)
+    assert len(outputs[0].prompt_token_ids) < len(outputs[1].prompt_token_ids)
+    for output in outputs:
+        assert output.prompt_token_ids.count(config.hf_config.audio_token_id) > 1
+        _, hidden_states = get_and_check_output(
+            output,
+            (len(output.prompt_token_ids), len(layer_ids), config.get_hidden_size()),
+        )
+        assert hidden_states.dtype == torch.bfloat16
+        assert torch.isfinite(hidden_states).all()
 
 
 @pytest.fixture
