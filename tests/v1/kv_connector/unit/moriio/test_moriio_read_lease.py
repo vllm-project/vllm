@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
 from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.request import RequestStatus
 
 from ..utils import create_request, create_scheduler
@@ -234,8 +235,13 @@ def test_paused_decode_goes_idle_and_computes_lapsed_requests_locally(clock):
     scheduler = _decode_scheduler()
     request = _waiting_request(scheduler, 1, lease=LEASE)
     scheduler.add_request(request)
-    scheduler.set_pause_state(PauseState.PAUSED_NEW)
-    assert not scheduler.has_requests()
+    engine = EngineCoreProc.__new__(EngineCoreProc)
+    engine.scheduler = scheduler
+    engine.engines_running = False
+    engine.batch_queue = None
+    for pause in (PauseState.PAUSED_ALL, PauseState.PAUSED_NEW):  # keep, wait
+        scheduler.set_pause_state(pause)
+        assert engine._pause_complete()
 
     # Not renewed while paused, the prefill's lease lapses: after the pause the
     # request is computed locally, reads nothing and only releases the blocks.
