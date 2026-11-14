@@ -99,3 +99,13 @@ def test_streamed_call_closes_when_next_call_starts_in_same_delta(
         ("get_weather", {"city": "Paris"}),
         ("get_time", {"tz": "UTC"}),
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "value", ["123", "true", "null", "[1,2]", '{"x":1}', '"quoted"']
+)
+def test_escape_delimited_strings_reach_the_client_as_strings(server, stream, value):
+    """<escape> delimits a string literal, even when its text is valid JSON."""
+    output = f"{START}call:set_alarm{{label:<escape>{value}<escape>}}{END}"
+    assert _tool_calls(server, output, stream) == [("set_alarm", {"label": value})]
