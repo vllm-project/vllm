@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+from vllm.utils.host_memory import host_registration_ranges, host_tensor_offsets
+from vllm.utils.math_utils import round_up
 from vllm.v1.simple_kv_offload.host_buffer import (
     alloc_host_buffer,
     parse_hugepage_size,
@@ -29,6 +31,33 @@ def test_parse_hugepage_size_rejects_unknown():
 def test_buffer_rounds_up_to_whole_pages():
     buf = alloc_host_buffer(mmap.PAGESIZE + 1)
     assert buf.nbytes == 2 * mmap.PAGESIZE
+
+
+@pytest.mark.parametrize("page", [2 << 11, 2 << 20])
+def test_pool_over_one_chunk_splits_on_aligned_tensor_starts(page):
+    num_blocks = 6
+    sizes = [num_blocks * page // 4] + [num_blocks * page] * 8
+    max_chunk = 16 * page
+    with pytest.raises(ValueError, match="No block and page boundary"):
+        host_registration_ranges(
+            sizes, num_blocks, round_up(sum(sizes), page), max_chunk, page_size=page
+        )
+
+    offsets = host_tensor_offsets(sizes, max_chunk, page_size=page)
+    total = round_up(offsets[-1] + sizes[-1], page)
+    ranges = host_registration_ranges(
+        sizes, num_blocks, total, max_chunk, page_size=page, tensor_offsets=offsets
+    )
+
+    assert ranges[0][0] == 0 and ranges[-1][1] == total
+    assert all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
+    assert all(end - start <= max_chunk for start, end in ranges)
+    for _, split in ranges[:-1]:
+        assert split % page == 0
+        for offset, size in zip(offsets, sizes):
+            if offset < split < offset + size:
+                assert (split - offset) % (size // num_blocks) == 0
+    assert total - round_up(sum(sizes), page) < page * len(ranges)
 
 
 def test_hugepage_buffer_takes_pages_from_the_pool(free_hugepages, hugepage_with_free):
