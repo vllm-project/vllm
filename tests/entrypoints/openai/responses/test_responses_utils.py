@@ -268,6 +268,22 @@ class TestResponsesUtils:
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == ""
 
+    def test_build_output_items_keeps_empty_reasoning(self):
+        """An empty reasoning block ("") is kept as a reasoning item so clients
+        can replay it; None still means the model produced no reasoning."""
+        items = build_response_output_items(
+            reasoning="", content="Hello", tool_calls=None
+        )
+        assert isinstance(items[0], ResponseReasoningItem)
+        assert items[0].content[0].text == ""
+        assert isinstance(items[1], ResponseOutputMessage)
+
+        items = build_response_output_items(
+            reasoning=None, content="Hello", tool_calls=None
+        )
+        assert len(items) == 1
+        assert isinstance(items[0], ResponseOutputMessage)
+
 
 class TestCustomTools:
     def test_custom_tool_call_output_item(self):
