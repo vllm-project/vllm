@@ -1,3 +1,28 @@
+{%- macro format_argument(argument) -%}
+    {%- if argument is none -%}
+        {{- 'null' -}}
+    {%- elif argument is string -%}
+        {{- '<escape>' + argument + '<escape>' -}}
+    {%- elif argument is boolean -%}
+        {{- 'true' if argument else 'false' -}}
+    {%- elif argument is mapping -%}
+        {{- '{' -}}
+        {%- for key, value in argument.items() -%}
+            {%- if not loop.first %},{% endif -%}
+            {{- key -}}:{{- format_argument(value) -}}
+        {%- endfor -%}
+        {{- '}' -}}
+    {%- elif argument is sequence -%}
+        {{- '[' -}}
+        {%- for item in argument -%}
+            {{- format_argument(item) -}}
+            {%- if not loop.last %},{% endif -%}
+        {%- endfor -%}
+        {{- ']' -}}
+    {%- else -%}
+        {{- argument -}}
+    {%- endif -%}
+{%- endmacro -%}
 {%- set ns = namespace(developer_content='', has_tools=false) -%}
 
 {%- if tools is defined and tools | length > 0 -%}
@@ -34,7 +59,7 @@ Parameters: {{ tool.function.parameters | tojson }}
 {%- set args = args | fromjson -%}
 {%- endif -%}
 {%- for key, value in args.items() -%}
-{{ key }}:<escape>{{ value }}<escape>{% if not loop.last %},{% endif %}
+{{ key }}:{{- format_argument(value) -}}{% if not loop.last %},{% endif %}
 {%- endfor -%}
 }<end_function_call>
 {%- endfor %}
