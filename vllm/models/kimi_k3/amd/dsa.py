@@ -250,7 +250,9 @@ direct_register_custom_op(
 @functools.cache
 def _sampled_buffers(device, rows, width, k):
     """Zero row starts and scratch for AITER's sampled top-k, kept for every
-    graph: Phase A clears what it shares before anything reads it."""
+    graph: Phase A clears what it shares before anything reads it. One per
+    shape on a device: two selects of a shape must not run concurrently
+    (indexers on two streams at once, e.g. overlapped micro-batches)."""
     from aiter.ops.topk import topk_sampled_workspace_size
     from aiter.utility.graph_alloc import persistent_alloc
 
