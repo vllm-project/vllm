@@ -77,3 +77,33 @@ We describe two example workloads, where APC can provide huge performance benefi
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+
+## Diagnosing prefix-cache misses
+
+By default vLLM reports only *how many* tokens hit the prefix cache. To see what
+happened to the first block after the hit, enable the optional diagnostic with
+`--enable-prefix-cache-miss-attribution` (or
+`CacheConfig(enable_prefix_cache_miss_attribution=True)`).
+
+For each lookup, vLLM attaches a `PrefixCacheMissAttribution` to the request and
+emits a debug-level log line carrying one of three observations:
+
+| Reason | What vLLM observed |
+| --- | --- |
+| `evicted` | The block hash was cached and dropped from the cache recently. |
+| `no_match` | The hash was probed but was not in the cache or the bounded eviction history. Ambiguous by design: changed prompt tokens, changed extra keys, and evictions older than the history window all look the same. |
+| `lookup_limit` | No block was probed. The hit reached the lookup cap (`num_tokens - 1`, rounded down to a full block) because vLLM always recomputes the last prompt token to produce logits. |
+
+The report also lists the *names* of the extra keys mixed into that block's hash
+(`cache_salt`, `lora`, `mm`, `prompt_embeds`). Values are never logged, so the
+diagnostic cannot leak salts, adapter paths or multimodal identifiers.
+
+The labels describe observations, not root causes: vLLM cannot tell whether a
+`no_match` came from a prompt edit or an old eviction. `no_match` with a
+`cache_salt` or `lora` kind is a good first check before diffing prompts.
+
+This is off by default. When enabled, it keeps a bounded LRU of recently evicted
+block hashes (sized to the number of GPU blocks, roughly one cache turnover) and
+performs one set lookup per request; there is no cost when disabled. The initial
+implementation covers single-group full-attention models with one hash per cache
+block. Hybrid groups and fine-grained hashing are not covered yet.
