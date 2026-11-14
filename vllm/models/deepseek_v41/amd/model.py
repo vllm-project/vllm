@@ -72,7 +72,11 @@ from vllm.models.deepseek_v41.amd.mhc import (
     mhc_pre_delayed_overlap,
     supports_mhc_overlap,
 )
-from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
+from vllm.models.deepseek_v41.amd.mono_decode import (
+    MonoDecodeLayer,
+    link_layers,
+)
+from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -152,7 +156,6 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             self.image_sentinel_lo = IMAGE_SENTINEL_BASE_ID
             self.experts.router.bias_vl = self.gate.bias_vl
             self.experts.router.image_sentinel_lo = self.image_sentinel_lo
-        self.use_mega_moe = False
         # Expose the MixtureOfExperts protocol fields expected by the V4.1
         # outer model.  The current ROCm runner has no redundant EPLB copies,
         # so logical and physical expert counts are identical.
@@ -533,6 +536,8 @@ class DeepseekV4DecoderLayer(nn.Module):
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
+    _mono_link_key: tuple[int, ...] | None = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -541,14 +546,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = False
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
-        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
-            raise NotImplementedError(
-                "DeepSeek V4 MegaMoE currently requires expert parallel. "
-                "Enable it with --enable-expert-parallel, or pick a different "
-                "moe backend."
-            )
         self.vocab_size = config.vocab_size
         self.hc_eps = config.hc_eps
         self.hc_mult = config.hc_mult
@@ -617,6 +615,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        engram = next(
+            (
+                layer.engram
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if getattr(layer, "engram", None) is not None
+            ),
+            None,
+        )
+        if engram is not None:
+            # Shared host tables and GPU peer reads look up only local tokens.
+            self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off unless the CDNA version
@@ -700,6 +709,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _link_mono(self) -> None:
+        key = tuple(self.aux_hidden_state_layers)
+        if key != self._mono_link_key:
+            self._mono_link_key = key
+            link_layers(
+                list(islice(self.layers, self.start_layer, self.end_layer)), key
+            )
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -743,9 +760,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-
-        if self.use_mega_moe:
-            input_ids = input_ids.to(torch.int64)
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
@@ -816,6 +830,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+        self._link_mono()
         (
             hidden_states,
             residual,
@@ -842,6 +857,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # ran_layers, so that flag alone must not post again on the full batch.
         collapsed = False
         if self.decoder_replay_layers is not None:
+            if self.decoder_replay_layers.uses_replay_batch():
+                mono_flush()
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -854,6 +871,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             aux_hidden_states.extend(late_aux)
             final_aux_recon = None
             collapsed = True
+        mono_flush()
         if ran_layers and not collapsed:
             if (
                 self.end_layer in self.aux_hidden_state_layers
@@ -933,6 +951,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.decoder_replay_layers is not None
                 and idx + 1 == self.decoder_replay_start
             ):
+                mono_flush()
                 aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
@@ -969,6 +988,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # and sequence parallel is unsupported while replay is on.
         cut_aux: list[torch.Tensor] = []
         if self.decoder_replay_start in self.aux_hidden_state_layers:
+            mono_flush()
             cut_aux.append(
                 self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
             )
@@ -994,6 +1014,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             None,
             positions.shape[0],
         )
+        mono_flush()
         assert residual is not None and post_mix is not None
         assert res_mix is not None and pre_mix is not None
         if (
@@ -1206,9 +1227,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
         )
-
-    def finalize_mega_moe_weights(self) -> None:
-        return
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1486,7 +1504,6 @@ class DeepseekV41LLMForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

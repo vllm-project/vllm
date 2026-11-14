@@ -19,6 +19,13 @@ MODELS = [
         {},
     ),
     (
+        GenerateModelInfo(
+            "Qwen/Qwen2.5-Omni-3B", image_token_id=151655, hf_ppl=10.976678848266602
+        ),
+        28,
+        {},
+    ),
+    (
         GenerateModelInfo("Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172),
         32,
         {},

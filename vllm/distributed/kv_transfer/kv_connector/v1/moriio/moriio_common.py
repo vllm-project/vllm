@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -103,6 +103,8 @@ class RemoteAllocInfo:
     """Information about remote block allocation."""
 
     block_ids: BlockIds | None
+    # Leading blocks the consumer already holds from its own prefix cache.
+    num_skip_blocks: int = 0
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -268,6 +270,23 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     `dp_size_local == 0` (external-DP sentinel) collapses to a single pod.
     """
     return global_dp_rank // dp_size_local if dp_size_local else 0
+
+
+def fill_remote_pod_from_config(
+    params: dict[str, Any], extra_config: dict, is_producer: bool
+) -> None:
+    """Use serve-config peer hosts when the router did not send them."""
+    hosts = extra_config.get("remote_hosts")
+    dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    if not hosts or not dp_local or params.get("remote_hosts"):
+        return
+    params["remote_hosts"] = hosts
+    params["remote_dp_size_local"] = dp_local
+    if not is_producer and (
+        "remote_dp_rank" in params
+        or min(int(params.get("remote_dp_size") or 1), dp_local) <= 1
+    ):
+        params.setdefault("is_request_leader", True)
 
 
 def resolve_host_ip(extra_config: dict) -> str:
@@ -698,7 +717,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")

@@ -33,6 +33,8 @@ class Int8MoeBackend(Enum):
     TRITON = "TRITON"
     HUMMING = "HUMMING"
     CPU = "CPU"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(
@@ -104,6 +106,7 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
     """INT8 MoE backend selection for one deployment configuration."""
 
     name = "Int8"
+    placeholder_backend = Int8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Int8MoeBackend
@@ -118,7 +121,13 @@ def select_int8_moe_backend(
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
+    # TODO: migrate to oracle base method.
+    source = Int8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     oracle = Int8MoEKernelOracle(config, weight_key, activation_key)
@@ -152,6 +161,7 @@ def make_int8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if (a1_scale is None) != (a2_scale is None):
@@ -174,6 +184,8 @@ def make_int8_moe_quant_config(
         )
 
     if scales_absent and not per_act_token_quant:
+        # The W8A16 kernels always index weight scales per output channel and
+        # ignore per_out_ch_quant, so it is not forwarded here.
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -191,6 +203,7 @@ def make_int8_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
 
