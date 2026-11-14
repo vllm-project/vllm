@@ -101,6 +101,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
+    _localize_prefill_chunks,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
@@ -128,6 +129,65 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+
+
+def _make_prefill_chunk(chunk_cls, req_start_idx, num_reqs, chunk_tot_seqlen):
+    return chunk_cls(
+        tokens_slice=slice(0, 0),
+        block_table=torch.zeros((num_reqs, 1), dtype=torch.int32),
+        req_start_idx=req_start_idx,
+        workspace_starts=torch.zeros(num_reqs, dtype=torch.int32),
+        chunk_tot_seqlen=chunk_tot_seqlen,
+        seq_lens=None,
+    )
+
+
+def test_localize_prefill_chunks_matches_rank_token_ranges():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    # One decode token, then prefill requests of 10, 15 and 15 tokens.
+    query_start_loc = torch.tensor([0, 1, 11, 26, 41], dtype=torch.int32)
+    chunks = [
+        _make_prefill_chunk(chunk_cls, 0, 2, 25),
+        _make_prefill_chunk(chunk_cls, 2, 1, 15),
+    ]
+    local_ids = torch.tensor([0, 3, 9, 12, 24, 30, 39], dtype=torch.int32).numpy()
+
+    request_ids, ranges = _localize_prefill_chunks(
+        query_start_loc, num_decodes=1, chunks=chunks, local_ids=local_ids
+    )
+
+    assert request_ids.tolist() == [0, 0, 0, 1, 1, 2, 2]
+    assert ranges == [(0, 0, 5), (1, 5, 7)]
+
+
+def test_localize_prefill_chunks_skips_chunks_without_local_tokens():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    query_start_loc = torch.tensor([0, 10, 20], dtype=torch.int32)
+    chunks = [
+        _make_prefill_chunk(chunk_cls, 0, 1, 10),
+        _make_prefill_chunk(chunk_cls, 1, 1, 10),
+    ]
+    local_ids = torch.tensor([0, 4, 9], dtype=torch.int32).numpy()
+
+    request_ids, ranges = _localize_prefill_chunks(
+        query_start_loc, num_decodes=0, chunks=chunks, local_ids=local_ids
+    )
+
+    assert request_ids.tolist() == [0, 0, 0]
+    assert ranges == [(0, 0, 3)]
+
+
+def test_localize_prefill_chunks_rejects_uncovered_tokens():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    query_start_loc = torch.tensor([0, 10, 20], dtype=torch.int32)
+    chunks = [_make_prefill_chunk(chunk_cls, 0, 1, 10)]
+    local_ids = torch.tensor([0, 10], dtype=torch.int32).numpy()
+
+    with pytest.raises(AssertionError, match="cover every local token"):
+        _localize_prefill_chunks(
+            query_start_loc, num_decodes=0, chunks=chunks, local_ids=local_ids
+        )
+
 
 if current_platform.is_rocm():
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (

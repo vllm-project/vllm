@@ -242,6 +242,10 @@ class DeepseekV32Model(torch.nn.Module):
                 or not speculative_config.uses_aux_hidden_states
             )
             and not envs.VLLM_BATCH_INVARIANT
+            # The attention layer's ShardQ already shards the sparse-MLA
+            # token stream under HiSparse; model-level sequence parallelism
+            # would shard it a second time.
+            and vllm_config.attention_config.hisparse_config is None
             and all(layer.self_attn.use_shardq for layer in self.layers)
         )
         self.shardq_min_tokens = (

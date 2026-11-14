@@ -268,13 +268,14 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
+        num_decodes = self._prefill_num_decodes(attn_metadata)
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
             state_indices = cache.runtime.request_state_indices
             assert state_indices is not None
             staging_plan.ensure_gpu_sources(
                 cache.block_table,
-                state_indices[attn_metadata.num_decodes :],
+                state_indices[num_decodes:],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
@@ -284,9 +285,17 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             resident_cache=resident_cache,
         )
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
-        if attn_metadata.num_decodes > 0:
-            req_ids = req_ids - attn_metadata.num_decodes
+        if num_decodes > 0:
+            req_ids = req_ids - num_decodes
         return staged_cache, staging_plan.block_table, req_ids
+
+    @staticmethod
+    def _prefill_num_decodes(attn_metadata: Any) -> int:
+        # A ShardQ-narrowed batch reports no decodes but still stages against
+        # the full batch's prefill rows.
+        return getattr(attn_metadata, "shardq_num_decodes", 0) or (
+            attn_metadata.num_decodes
+        )
 
     def _prefill_gather_plan(
         self, layer_index: int, attn_metadata: Any
@@ -298,9 +307,10 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert cache.view is not None and cache.block_table is not None
         state_indices = cache.runtime.request_state_indices
         assert state_indices is not None
+        num_decodes = self._prefill_num_decodes(attn_metadata)
         plan.ensure_gpu_sources(
             cache.block_table,
-            state_indices[attn_metadata.num_decodes :],
+            state_indices[num_decodes:],
             cache.view.block_size,
         )
         assert plan.gpu_row_ids is not None
