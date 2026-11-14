@@ -47,6 +47,9 @@ else
     # passes CI_STANDALONE_MERGE_BASE from the agent checkout.
     if [[ -n "${CI_STANDALONE_MERGE_BASE:-}" ]]; then
         merge_base_commit="${CI_STANDALONE_MERGE_BASE}"
+    elif [[ -s /vllm-workspace/.ci-merge-base ]]; then
+        # Recorded when the CUDA CI image was built (docker/Dockerfile, test-src).
+        merge_base_commit="$(cat /vllm-workspace/.ci-merge-base)"
     elif merge_base_commit="$(git -C /vllm-workspace merge-base HEAD origin/main 2>/dev/null)"; then
         :
     elif merge_base_commit="$(git merge-base HEAD origin/main 2>/dev/null)"; then
@@ -169,6 +172,13 @@ fi
 set -x
 
 cd /vllm-workspace/
+
+# Without a git checkout setuptools-scm cannot derive the version for the
+# source install below, so reuse the version of the wheel the image came with.
+if [[ ! -e .git ]]; then
+    SETUPTOOLS_SCM_PRETEND_VERSION="$(python3 -c 'from importlib.metadata import version; print(version("vllm"))')"
+    export SETUPTOOLS_SCM_PRETEND_VERSION
+fi
 
 # uninstall vllm
 pip3 uninstall -y vllm
