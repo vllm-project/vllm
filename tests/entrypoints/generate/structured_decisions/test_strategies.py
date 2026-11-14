@@ -277,6 +277,27 @@ def test_gemma4_labels_start_the_reply(model_name, reply_start):
     assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
 
 
+def test_nemotron_lightning_labels_start_the_reply():
+    """Thinking must close before the single-token decision labels are read."""
+    from vllm.tokenizers import get_tokenizer
+
+    model_name = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+    config = ModelConfig(model=model_name, logprobs_mode="raw_logprobs")
+    assert select_read_strategy(config, ("generate",)) is NextTokenStrategy
+    tokenizer = get_tokenizer(model_name)
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "state"}],
+        add_generation_prompt=True,
+        enable_thinking=False,
+        tokenize=True,
+        return_dict=False,
+    )
+    assert tokenizer.decode(prompt).endswith("<|im_start|>assistant\n<think></think>")
+    labels = (*LABELS, "yes", "no", *"0123456789")
+    _, ids = reply_label_ids(tokenizer, prompt, labels)
+    assert [tokenizer.decode([i]) for i in ids] == list(labels)
+
+
 @pytest.fixture
 def engine_and_renderer(qwen, request):
     tokenizer, _ = qwen
