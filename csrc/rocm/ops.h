@@ -35,6 +35,12 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales, bool use_v2_format);
 
+torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
+                               torch::Tensor b_scales_e8m0);
+
+torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
+                               torch::Tensor const& b_scales);
+
 void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor b_q_weight, torch::Tensor b_scales,
                          torch::Tensor b_qzeros, torch::Tensor topk_weights,
@@ -43,6 +49,16 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
+
+void moe_mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales_e8m0,
+                          torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk,
+                          const std::optional<torch::Tensor>& bias);
 
 // RDNA3.5 decode and prefill attention: the fields of every build (none off
 // gfx1151), and a launch of one build by its index.

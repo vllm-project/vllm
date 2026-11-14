@@ -1776,8 +1776,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
+      "csrc/rocm/mxfp4_gemm_rdna3.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/moe_mxfp4_gemm_rdna3.cu"
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
+  endif()
+
+  set(VLLM_ROCM_HAS_GFX12X OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx120[01]")
+    set(VLLM_ROCM_HAS_GFX12X ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/mxfp4_gemm_rdna4.cu")
   endif()
 
   set(VLLM_ROCM_HAS_GFX115X OFF)
@@ -1829,6 +1838,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+  if(VLLM_ROCM_HAS_GFX12X)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX12X)
   endif()
   if(VLLM_ROCM_HAS_GFX115X)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)

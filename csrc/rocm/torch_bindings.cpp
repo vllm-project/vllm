@@ -73,6 +73,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 
   rocm_ops.def(
+      "mxfp4_gemm_rdna3(Tensor a, Tensor b_q_weight, "
+      "Tensor b_scales_e8m0) -> Tensor");
+  rocm_ops.impl("mxfp4_gemm_rdna3", torch::kCUDA, &mxfp4_gemm_rdna3);
+
+  rocm_ops.def(
       "moe_gptq_gemm_rdna3(Tensor a, Tensor! c, Tensor b_q_weight, "
       "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
       "Tensor sorted_token_ids, Tensor expert_ids, "
@@ -80,6 +85,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+
+  rocm_ops.def(
+      "moe_mxfp4_gemm_rdna3(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales_e8m0, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, Tensor? bias=None) -> ()");
+  rocm_ops.impl("moe_mxfp4_gemm_rdna3", torch::kCUDA, &moe_mxfp4_gemm_rdna3);
 #endif
 
 #ifdef VLLM_ROCM_RDNA_ATTN
@@ -127,6 +140,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str mfma_type,"
       "                bool use_interleaved_v_cache=False) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+#ifdef VLLM_ROCM_GFX12X
+  rocm_ops.def(
+      "mxfp4_gemm_rdna4(Tensor a, Tensor b_q, Tensor b_scales) -> Tensor");
+  rocm_ops.impl("mxfp4_gemm_rdna4", torch::kCUDA, &mxfp4_gemm_rdna4);
+#endif
 
 #ifdef VLLM_ROCM_GFX115X
   rocm_ops.def(
