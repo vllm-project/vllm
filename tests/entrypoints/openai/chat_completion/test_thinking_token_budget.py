@@ -70,6 +70,7 @@ def server():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -86,6 +87,7 @@ def server_with_auto_reasoning_config():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -149,9 +151,11 @@ async def client(request, server, server_with_auto_reasoning_config):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
-async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
+async def test_thinking_token_budget_mixed_requests_with_metrics(
+    client: openai.AsyncOpenAI,
+):
     """Test that mixed requests (some with thinking_token_budget, some without)
-    complete successfully without errors."""
+    complete successfully with per-request metrics."""
     response_with_budget = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -169,6 +173,10 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
     assert msg_with.content or getattr(msg_with, "reasoning", None)
     assert msg_without.content or getattr(msg_without, "reasoning", None)
+
+    metrics = response_with_budget.model_extra.get("metrics")
+    assert metrics is not None
+    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
 
 
 @pytest.mark.asyncio
