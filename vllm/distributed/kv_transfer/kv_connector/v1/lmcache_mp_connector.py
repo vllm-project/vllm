@@ -11,7 +11,8 @@ import zmq
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -88,9 +88,7 @@ def extract_world_size_and_kv_rank(
     rank: int,
     vllm_config: VllmConfig,
 ) -> tuple[int, int]:
-    """
-    Convert the rank for the MLA.
-    """
+    """Convert the rank for the MLA."""
     use_mla = mla_enabled(vllm_config.model_config)
     if not use_mla:
         return world_size, rank
@@ -174,8 +172,7 @@ def create_worker_adapter(
 
 
 class LMCacheMPRequestState(enum.Enum):
-    """
-    State machine:
+    """State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
     WAITING_FOR_LOAD -- process_loading_requests --> READY
     """
@@ -192,9 +189,8 @@ class LMCacheMPRequestTracker:
 
     request_id: str
 
-    # Read-only lists to track the token ids and block hashes
+    # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
-    block_hashes: ConstantList["BlockHash"]
 
     # Block ids and hashes will be updated at update_states_after_alloc and
     # during the generation
@@ -222,7 +218,6 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
-        self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
@@ -276,7 +271,6 @@ class LMCacheMPRequestTracker:
         return (
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
-            f"num_block_hashes={len(self.block_hashes)}, "
             f"num_allocated_blocks={len(self.allocated_block_ids)}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
             f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
@@ -288,7 +282,7 @@ class LMCacheMPRequestTracker:
         return self.__repr__()
 
 
-@dataclass
+@dataclass(slots=True)
 class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
@@ -301,15 +295,15 @@ class LMCacheMPRequestMetadata:
         blocks_in_chunk: int,
         vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
-        """
-        Generate the store metadata for the current request tracker.
+        """Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
             vllm_block_size: the block size used in vLLM
+
         """
-        # Store the blocks that has block hashes
+        # Store full blocks
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
@@ -335,7 +329,7 @@ class LMCacheMPRequestMetadata:
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
-            len(tracker.block_hashes),
+            len(tracker.all_token_ids) // vllm_block_size,
             len(tracker.allocated_block_ids),
             computed_blocks,
         )
@@ -375,13 +369,13 @@ class LMCacheMPRequestMetadata:
         blocks_in_chunk: int,
         vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
-        """
-        Generate the retrieve metadata for the current request tracker.
+        """Generate the retrieve metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
             vllm_block_size: the block size used in vLLM
+
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -397,8 +391,8 @@ class LMCacheMPRequestMetadata:
             "The number of LMCache hit blocks should be a multiple of the "
             "number of blocks in a lmcache chunk. "
         )
-        assert len(tracker.block_hashes) >= end, (
-            "The number of block hashes should be greater than or equal to the "
+        assert len(tracker.all_token_ids) // vllm_block_size >= end, (
+            "The number of full blocks should be greater than or equal to the "
             "number of LMCache hit blocks. "
         )
         if end > start:
@@ -462,8 +456,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
 
 class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
-    """
-    The connector for LMCache multi-process mode.
+    """The connector for LMCache multi-process mode.
 
     Extra configs (kv_transfer_config.extra_config):
     - lmcache.mp.host: the host of the LMCache server.
@@ -472,6 +465,11 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Shares the KV cache with the LMCache server via cudaIpcGetMemHandle.
+        return KVCacheAccess.LEGACY_IPC
 
     def __init__(
         self,
@@ -538,27 +536,26 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
         Returns:
             ConnectorMetadata: the connector metadata.
-        """
 
+        """
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """
-        Initialize with the KV caches. Useful for pre-registering the
+        """Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+
         """
         logger.info("Registering kv caches!")
         self.worker_adapter.register_kv_caches(kv_caches)
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
-        """
-        Start loading the KV cache from the connector to vLLM's paged
+        """Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
         forward pass to enable async loading during model execution.
 
@@ -597,8 +594,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """
-        Block until the KV for a specific layer is loaded into vLLM's
+        """Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
 
@@ -606,6 +602,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
         Args:
             layer_name: the name of that layer
+
         """
         return
 
@@ -616,8 +613,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        """
-        Start saving a layer of KV cache from vLLM's paged buffer
+        """Start saving a layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
@@ -627,12 +623,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
+
         """
         return
 
     def wait_for_save(self):
-        """
-        Block until all the save operations is done. This is called
+        """Block until all the save operations is done. This is called
         as the forward context exits to ensure that the async saving
         from save_kv_layer is complete before finishing the forward.
 
@@ -673,8 +669,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Notifies worker-side connector ids of requests that have
+        """Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
         The scheduler process (via the Executors) will use this output
         to track which workers are done.
@@ -685,14 +680,14 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
+
         """
         val = self.worker_adapter.get_finished(finished_req_ids)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Get the set of block IDs that failed to load.
+        """Get the set of block IDs that failed to load.
 
         Returns:
             Set of block IDs that encountered load errors.
@@ -702,17 +697,17 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             - Applies to both sync- and async-loading requests.
             - Async loading: failed blocks may be reported in any forward pass
               up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
+              `get_transfer_results()`. Even if failures occur, the request
+              must still be reported as finished receiving, and the failed
+              block IDs must appear here no later than that same pass.
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
+
         """
         return self.worker_adapter.get_block_ids_with_load_errors()
 
     def shutdown(self):
-        """
-        Shutdown the connector. This is called when the worker process
+        """Shutdown the connector. This is called when the worker process
         is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
@@ -721,9 +716,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
-        """
-        Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         return None
 
     # ==============================
@@ -735,8 +728,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -761,6 +753,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             call. If the cache cannot be loaded for some tokens (e.g., due to
             connectivity issues or eviction), those tokens must not be taken
             into account.
+
         """
         tracker = self._get_or_create_request_tracker(request)
         # TODO: support loading KV for preempted requests in the future
@@ -803,8 +796,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
+        """Update KVConnector state after block allocation.
 
         If get_num_new_matched_tokens previously returned True for a
         request, this function may be called twice for that same request -
@@ -817,6 +809,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
+
         """
         # NOTE: `blocks` comes from kv_cache_manager.get_blocks(request_id),
         # which returns ALL blocks for the request (not just newly allocated).
@@ -883,14 +876,14 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        """
-        Build the connector metadata for this step.
+        """Build the connector metadata for this step.
 
         This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         metadata = LMCacheMPConnectorMetadata()
 
@@ -907,12 +900,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        Update KVConnector state from worker-side connectors output.
+        """Update KVConnector state from worker-side connectors output.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
+
         """
         return
 
@@ -921,8 +914,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
+        """Called exactly once when a request has finished, before its blocks are
         freed.
 
         The connector may assumes responsibility for freeing the blocks
@@ -934,8 +926,8 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             get_finished().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
-        """
 
+        """
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None
 
@@ -962,26 +954,26 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return True, return_params
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        """
-        Take the KV cache events from the connector.
+        """Take the KV cache events from the connector.
 
         Yields:
             New KV cache events since the last call.
+
         """
         return ()
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-        """
 
+        """
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "
@@ -990,13 +982,13 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return None
 
     def get_finished_count(self) -> int | None:
-        """
-        Get the count of requests expected to complete send/receive operations
+        """Get the count of requests expected to complete send/receive operations
         via this connector. This method is used to initialize the
         KVOutputAggregator, overwriting the default world_size.
 
         Returns:
             int: expected sending or receiving completion count.
+
         """
         return None
 
@@ -1004,8 +996,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> "KVConnectorStats | None":
-        """
-        KVConnectorStats resolution method. This method allows dynamically
+        """KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
@@ -1019,8 +1010,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> "KVConnectorPromMetrics | None":
-        """
-        Create a KVConnectorPromMetrics subclass which should register
+        """Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
@@ -1079,8 +1069,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
             # Update block ids
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+            request_tracker.append_block_ids(new_block_ids)
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
@@ -1183,8 +1172,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return self.request_trackers[request_id]
 
     def _cleanup_request_tracker(self, request_id: str) -> None:
-        """
-        Clean up request tracker and associated lookup future for a request.
+        """Clean up request tracker and associated lookup future for a request.
         This should be called when a request is finished to prevent memory leak.
         """
         # Clean up request tracker

@@ -19,6 +19,7 @@ import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.attention.ops.dcp import _V_UP_PROJ_FIRST_MIN_TOKENS
 
 mp.set_start_method("spawn", force=True)
 
@@ -27,6 +28,7 @@ class _FakeCPGroup:
     def __init__(self, world_size: int, device_group: dist.ProcessGroup):
         self.world_size = world_size
         self.device_group = device_group
+        self.rank_in_group = dist.get_rank(device_group)
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -389,14 +391,31 @@ class TestPackedA2AKernels:
             cp_attn_out,
             cp_attn_lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            D,
-            lse_pack_dim,
+            None,
+            None,
+            has_mask=False,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual = _dcp_a2a_unpack_combine(
-            send_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        # The send buffer stands in for the all-to-all receive buffer.
+        out = torch.empty((B, h_per_rank, D), device=device, dtype=dtype)
+        out_lse = torch.empty(
+            (B, h_per_rank) if return_lse else (1, 1),
+            device=device,
+            dtype=torch.float32 if return_lse else dtype,
         )
+        _dcp_a2a_unpack_combine(
+            send_buffer,
+            out,
+            out_lse,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
+            return_lse=return_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+        )
+        actual = (out, out_lse) if return_lse else out
         expected_out, expected_lse = _packed_a2a_reference(
             cp_attn_out, cp_attn_lse, world_size, h_per_rank, is_lse_base_on_e
         )
@@ -448,17 +467,26 @@ class TestPackedA2AKernels:
             output,
             lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            head_dim,
-            lse_pack_dim,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
+            seq_lens,
+            query_start_loc,
+            has_mask=True,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual_output, actual_lse = _dcp_a2a_unpack_combine(
+        actual_output = torch.empty(
+            (num_tokens, h_per_rank, head_dim), device=device, dtype=output.dtype
+        )
+        actual_lse = torch.empty(
+            (num_tokens, h_per_rank), device=device, dtype=torch.float32
+        )
+        _dcp_a2a_unpack_combine(
             send_buffer,
-            head_dim,
-            lse_pack_dim,
+            actual_output,
+            actual_lse,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
             return_lse=True,
             is_lse_base_on_e=True,
         )
@@ -599,6 +627,145 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
             "USE_WORKSPACE": "1",
         },
     )
+
+
+def _distributed_v_up_proj_a2a_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=env["DISTRIBUTED_INIT_METHOD"],
+        rank=local_rank,
+        world_size=world_size,
+    )
+    try:
+        from vllm.v1.attention.ops.dcp import (
+            dcp_a2a_lse_reduce,
+            dcp_a2a_v_up_proj_lse_reduce,
+        )
+
+        dtype = _dtype_from_name(env["TEST_DTYPE"])
+        device = torch.device(f"cuda:{local_rank}")
+        rank = dist.get_rank()
+        B, h_per_rank, L, V = int(env["TEST_NUM_TOKENS"]), 2, 64, 32
+        H = world_size * h_per_rank
+        cp_group = _FakeCPGroup(world_size, dist.group.WORLD)
+
+        generator = torch.Generator(device=device)
+        generator.manual_seed(1234)
+        w_uv = torch.randn(
+            H, L, V, device=device, dtype=dtype, generator=generator
+        ) / math.sqrt(L)
+        generator.manual_seed(1235 + rank)
+        cp_attn_out = torch.randn(
+            B, H, L, device=device, dtype=dtype, generator=generator
+        )
+        cp_attn_lse = torch.randn(B, H, device=device, dtype=dtype, generator=generator)
+        # Rank 0 holds no KV for the first request; its output there is undefined.
+        seq_lens = torch.tensor([int(rank != 0), 3], device=device, dtype=torch.int32)
+        query_start_loc = torch.tensor([0, 2, B], device=device, dtype=torch.int32)
+        if rank == 0:
+            cp_attn_out[:2] = float("nan")
+
+        actual = torch.empty(B, h_per_rank * V, device=device, dtype=dtype)
+        dcp_a2a_v_up_proj_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            w_uv,
+            actual,
+            cp_group,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+
+        latent = dcp_a2a_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            cp_group,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        assert isinstance(latent, torch.Tensor)
+        local_w_uv = w_uv[rank * h_per_rank : (rank + 1) * h_per_rank]
+        expected = torch.bmm(latent.transpose(0, 1).float(), local_w_uv.float())
+        _assert_packed_a2a_close(actual, expected.transpose(0, 1).reshape(B, -1), dtype)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+)
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float32"])
+@pytest.mark.parametrize(
+    "num_tokens",
+    [_V_UP_PROJ_FIRST_MIN_TOKENS - 1, _V_UP_PROJ_FIRST_MIN_TOKENS],
+)
+def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(
+    dtype_name: str, num_tokens: int
+):
+    _distributed_run(
+        _distributed_v_up_proj_a2a_worker,
+        world_size=2,
+        extra_env={"TEST_DTYPE": dtype_name, "TEST_NUM_TOKENS": str(num_tokens)},
+    )
+
+
+@pytest.mark.parametrize(
+    "tp_size,pcp_size,dcp_size",
+    [(4, 1, 2), (4, 1, 4), (2, 2, 2), (2, 2, 4), (1, 4, 4)],
+)
+def test_dcp_group_ranks_match_collective_order(
+    monkeypatch, tp_size: int, pcp_size: int, dcp_size: int
+):
+    """torch.distributed orders group members by global rank, so each DCP
+    group must list them in that order or rank_in_group (which selects this
+    rank's LSE in the DCP merge) disagrees with the all-gathered layout."""
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import parallel_state
+
+    world_size = tp_size * pcp_size
+    config = SimpleNamespace(
+        model_config=None,
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        engram_config=None,
+    )
+    for name in ("_TP", "_ETP", "_ENGRAM_DP", "_DCP", "_PCP", "_PP", "_DP"):
+        monkeypatch.setattr(parallel_state, name, None)
+    monkeypatch.setattr(parallel_state, "_EP", None)
+    monkeypatch.setattr(parallel_state, "_EPLB", None)
+    monkeypatch.setattr(parallel_state, "_WORLD", SimpleNamespace(local_rank=0))
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+
+    groups: dict[str, list[list[int]]] = {}
+
+    def make_group(group_ranks, *args, group_name: str, **kwargs):
+        groups[group_name] = group_ranks
+        ranks = next(ranks for ranks in group_ranks if 0 in ranks)
+        return SimpleNamespace(ranks=ranks, rank_in_group=0, world_size=len(ranks))
+
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
+    with set_current_vllm_config(config):
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=tp_size,
+            prefill_context_model_parallel_size=pcp_size,
+            decode_context_model_parallel_size=dcp_size,
+            backend="gloo",
+        )
+
+    dcp_groups = groups["dcp"]
+    assert all(len(ranks) == dcp_size for ranks in dcp_groups)
+    assert all(ranks == sorted(ranks) for ranks in dcp_groups)
+    assert sorted(r for ranks in dcp_groups for r in ranks) == list(range(world_size))
+    if pcp_size > 1 and dcp_size == pcp_size:
+        assert dcp_groups == groups["pcp"]
 
 
 if __name__ == "__main__":

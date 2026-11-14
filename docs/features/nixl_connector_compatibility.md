@@ -52,7 +52,7 @@ th:not(:first-child) {
 | Dense Transformers | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | MLA (e.g. DeepSeek-V2/V3) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Sparse MLA (e.g. DeepSeek-V3.2) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
-| Hybrid SSM / Mamba | ✅ | ❔ | 🚧<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
+| Hybrid SSM / Mamba | ✅ | ❔ | 🟠<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
 | MoE | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -63,11 +63,11 @@ what may differ.
 
 <sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
-<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
+<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported with pull (`NixlPullConnector`); push (`NixlPushConnector`) requires identical P/D block sizes.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM (Mamba) models require **homogeneous TP** (`P TP == D TP`). Heterogeneous TP is not yet supported for Mamba layers.
+<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
@@ -97,12 +97,44 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
+- `prefill_context_kv_only` in the speculative config, set on the prefill instance
+  only (DFlash-based drafters such as DSpark, Model Runner V2): its drafter only
+  writes the context K/V the decode instance reads, so it drafts nothing,
+  reserves no lookahead KV slots and, for draft models that support it, frees
+  the draft weights only drafting reads
 
 ### KV cache layout
 
 - NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
+
+### Pipeline parallelism
+
+P can use pipeline parallelism (PP) while D runs with `PP=1`. Each P stage
+holds only some of the layers, so KV moves layer by layer: with the pull
+`NixlConnector`, D reads each layer from the P stage that holds it; with the
+push `NixlPushConnector`, each P stage writes its layers to D. See
+[NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+
+For both connectors, `PP>1` requires `kv_role="kv_producer"` and
+`bidirectional_kv_xfer=false`. Decode-side PP, including `kv_both`, is unsupported: completion notifications count consumer TP ranks, not PP stages. Bidirectional transfer would also make the PP producer receive KV on later turns.
+
+Current pull PP limitations:
+
+- Only P can use PP; D must run with `PP=1`.
+- Hybrid SSM/Mamba models, DCP and mixed-memory KV caches are not supported.
+- Attention-only hybrid cache groups are supported. MLA and CSA-linear combinations that require HMA are currently rejected; other MLA/CSA combinations have not been validated for pull PP. The HMA setting alone does not determine the physical cache layout or whether hybrid allocation is required.
+- Block-outermost packed layouts (`BLHNC` / `BHLNC`) on either endpoint are unsupported, whether HMA is enabled or disabled. A packed PP producer is rejected at initialization; a PP1 consumer can only reject a packed PP peer once its metadata is known. Use a non-packed layout supported by the attention backend, or check the separate push restrictions below. Sharing an allocation between HMA cache groups does not by itself make a layout packed.
+- P and D must put each layer in the same KV cache group.
+
+Current push PP + HMA limitations:
+
+- Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
+- Hybrid SSM/Mamba layouts are not supported under PP.
+- HMA requires the same block size on P and D.
+- Non-MLA attention under HMA requires decode TP to be no greater than prefill TP.
+- Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; layer pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache
 

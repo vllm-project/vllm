@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The draft model must honour ``moe_backend`` from --speculative-config.
+"""The draft model must honour `moe_backend` from --speculative-config.
 
 The draft is loaded with the target's VllmConfig, so without an explicit
 override it inherits the target's --moe-backend. An MTP head on a quantized
@@ -8,37 +8,45 @@ target is typically unquantized, and quantized-only backends reject it, so the
 server fails to start rather than falling back.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import pytest
 
+from vllm.config import LoadConfig, SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
-@dataclass
+@dataclass(slots=True)
 class _KernelConfig:
     moe_backend: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _CacheConfig:
     cache_dtype: str = "auto"
 
 
-@dataclass
+@dataclass(slots=True)
 class _SpeculativeConfig:
     attention_backend: str | None = None
     moe_backend: str | None = None
     kv_cache_dtype: str | None = None
+    draft_enable_eplb: bool = True
+    resolved_draft_num_redundant_experts: int | None = None
     draft_model_config: object = None
+    draft_load_config: object = None
+
+    apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
+    apply_draft_eplb_overrides = SpeculativeConfig.apply_draft_eplb_overrides
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmConfig:
     kernel_config: _KernelConfig
     cache_config: _CacheConfig
     speculative_config: _SpeculativeConfig
+    load_config: LoadConfig = field(default_factory=LoadConfig)
 
 
 def _config(target_moe: str, draft_moe: str | None) -> _VllmConfig:

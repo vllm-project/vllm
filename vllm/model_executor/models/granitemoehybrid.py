@@ -4,6 +4,7 @@
 
 # Added by the IBM Team, 2025
 from collections.abc import Iterable
+from itertools import islice
 
 import torch
 from torch import nn
@@ -42,7 +43,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -320,10 +320,6 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
-    # Transformers < 5.13.0
-    "attention": GraniteMoeHybridAttentionDecoderLayer,
-    "mamba": GraniteMoeHybridMambaDecoderLayer,
-    # Transformers >= 5.13.0
     "full_attention": GraniteMoeHybridAttentionDecoderLayer,
     "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
@@ -394,10 +390,7 @@ class GraniteMoeHybridModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_attn = 0
-        for i, layer in enumerate(self.layers):
-            if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
-                num_attn += 1
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions, hidden_states=hidden_states, residual=residual
             )
@@ -455,14 +448,12 @@ class GraniteMoeHybridModel(nn.Module):
             loaded_params.add(n)
 
         def _load_shard(n, p, shard_id):
-            # Skip layers on other devices.
-            if not is_pp_missing_parameter(n, self):
-                param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader", None)
-                if not callable(weight_loader):
-                    raise TypeError(f"{n} requires a shard-aware weight loader")
-                weight_loader(param, p, shard_id)
-                loaded_params.add(n)
+            param = params_dict[n]
+            weight_loader = getattr(param, "weight_loader", None)
+            if not callable(weight_loader):
+                raise TypeError(f"{n} requires a shard-aware weight loader")
+            weight_loader(param, p, shard_id)
+            loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
             if n not in params_dict:
@@ -486,10 +477,6 @@ class GraniteMoeHybridModel(nn.Module):
                     name_mapped, params_dict
                 )
 
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
-
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 success = False
@@ -509,6 +496,10 @@ class GraniteMoeHybridModel(nn.Module):
             return None
 
         for n, p in weights:
+            # Renames below keep the `layers.N.` prefix, so one check covers them.
+            if is_pp_missing_parameter(n, self):
+                continue
+
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
@@ -591,7 +582,6 @@ class GraniteMoeHybridForCausalLM(
     SupportsPP,
     IsHybrid,
     SupportsQuant,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -633,6 +623,7 @@ class GraniteMoeHybridForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -646,6 +637,7 @@ class GraniteMoeHybridForCausalLM(
             head_dim=hf_config.mamba_d_head,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

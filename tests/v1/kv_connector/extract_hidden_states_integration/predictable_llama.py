@@ -59,6 +59,7 @@ class PredictableLlamaModel(nn.Module, EagleModelMixin):
         Returns:
             If aux_hidden_state_layers is set: (hidden_states, aux_hidden_states)
             Otherwise: hidden_states
+
         """
         # Determine sequence length
         if inputs_embeds is not None:

@@ -3,8 +3,6 @@
 
 from typing import Any
 
-import pytest
-
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
@@ -36,21 +34,17 @@ def load_and_process_dataset(data_name: str):
 
 
 def run_acceptance_length_eval(
-    monkeypatch: pytest.MonkeyPatch,
     vllm_runner,
     spec_config: dict[str, Any],
     expected_acceptance_lengths: dict[str, float],
     chat_template_kwargs: dict[str, Any],
-    use_mrv2: bool,
 ):
-    """
-    E2E acceptance-rate validation for speculative decoding.
+    """E2E acceptance-rate validation for speculative decoding.
 
-    Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
+    Drives one or more datasets (keyed in `expected_acceptance_lengths`)
     through the spec decode engine and asserts the mean acceptance length
     stays within tolerance of the reference figure for each dataset.
     """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
     runner_config = spec_config.copy()
     model = runner_config.pop("model")
     runner_config.setdefault("block_size", None)

@@ -9,15 +9,20 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class Mxfp8LinearLayerConfig:
     """Configuration for an MXFP8 linear layer.
 
     All MXFP8 layers share the same structure: FP8-E4M3 weights with
     uint8 (E8M0) per-block scales at block size 32.
+
+    Attributes:
+        weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
+
     """
 
-    pass
+    weight_shape: tuple[int, int]
+    bmm_batch_size: int | None = None
 
 
 class Mxfp8LinearKernel(ABC):
@@ -26,6 +31,10 @@ class Mxfp8LinearKernel(ABC):
     Each subclass implements a specific GEMM backend (FlashInfer CUTLASS,
     Marlin, emulation).
     """
+
+    supports_pre_processed_weights: bool = False
+    """True if `process_weights_after_loading` only rewrites parameters, so
+    weights exported by the weight cache daemon can be used as-is."""
 
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
         assert self.can_implement(c)[0]
@@ -44,6 +53,16 @@ class Mxfp8LinearKernel(ABC):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

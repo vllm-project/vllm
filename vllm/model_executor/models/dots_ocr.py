@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
+from itertools import accumulate
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -9,7 +10,7 @@ from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -39,13 +40,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen2_vl import (
-    Qwen2VisionAttention,
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -54,9 +54,11 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
@@ -65,12 +67,11 @@ IMAGE_TOKEN = "<|imgpad|>"
 
 
 class DotsOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * patch_size * patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * patch_size * patch_size
     """
 
     type: Literal["pixel_values"]
@@ -80,11 +81,10 @@ class DotsOCRImagePixelInputs(TensorSchema):
 
 
 class DotsOCRImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - nf: Number of image features
-        - hs: Hidden size
-        - ni: Number of images
+    """Dimensions:
+    - nf: Number of image features
+    - hs: Hidden size
+    - ni: Number of images
     """
 
     type: Literal["image_embeds"]
@@ -105,20 +105,16 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
@@ -284,8 +280,18 @@ class DotsVisionAttention(nn.Module):
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
         x, _ = self.qkv(x)
-        q, k, v = Qwen2VisionAttention.split_qkv(self, x)
+        # self.qkv is a QKVParallelLinear, so this is already the local
+        # [q | k | v] shard. Qwen2VisionAttention.split_qkv() assumes the
+        # all-gathered ColumnParallelLinear layout and would scramble it.
+        q, k, v = x.chunk(3, dim=-1)
         bs = q.shape[1]
+        new_shape = (
+            q.shape[0],
+            bs,
+            self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head,
+        )
+        q, k, v = (t.view(*new_shape) for t in (q, k, v))
         # [S,B,H,D] -> [B,S,H,D]
         q = q.permute(1, 0, 2, 3).contiguous()
         k = k.permute(1, 0, 2, 3).contiguous()
@@ -506,7 +512,7 @@ class DotsVisionTransformer(nn.Module):
     def get_pos_ids_by_grid(self, grid_thw: list[list[int]]) -> list[torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h, device=self.device).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -516,7 +522,7 @@ class DotsVisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w, device=self.device).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -552,22 +558,20 @@ class DotsVisionTransformer(nn.Module):
     ) -> torch.Tensor:
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        # Convert grid_thw to tensor (always expecting list format now)
-        grid_thw_tensor = torch.tensor(
-            grid_thw, device=hidden_states.device, dtype=torch.long
-        )
         hidden_states = hidden_states.to(self.dtype)
-        hidden_states = self.patch_embed(hidden_states, grid_thw_tensor)
+        hidden_states = self.patch_embed(hidden_states)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
-        ).cumsum(
-            dim=0,
-            dtype=grid_thw_tensor.dtype if torch.jit.is_tracing() else torch.int32,
+        cu_seqlens = torch.tensor(
+            list(
+                accumulate((h * w for t, h, w in grid_thw for _ in range(t)), initial=0)
+            ),
+            dtype=torch.long if torch.jit.is_tracing() else torch.int32,
+            device="cpu",
         )
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
+        # Attention wrappers read max_seqlen with .item() on every layer.
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
@@ -648,7 +652,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+            self.language_model: Qwen3ForCausalLM = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=self.config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -718,13 +722,16 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 
         return image_embeds.split(sizes)
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         merge_size = self.vision_tower.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        merge_size = self.vision_tower.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -764,9 +771,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="vision_tower.merger",

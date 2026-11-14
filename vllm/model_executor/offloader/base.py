@@ -77,6 +77,7 @@ class BaseOffloader(ABC):
 
         Returns:
             List of modules, potentially with offloading hooks installed.
+
         """
         pass
 
@@ -128,22 +129,22 @@ def get_offloader() -> BaseOffloader:
     return _instance
 
 
-def set_offloader(instance: BaseOffloader) -> None:
-    """Set the global offloader instance."""
+def set_offloader(instance: BaseOffloader | None) -> None:
+    """Set or reset the global offloader instance."""
     global _instance
-    _instance = instance
-    if isinstance(instance, NoopOffloader):
+    _instance = NoopOffloader() if instance is None else instance
+    if isinstance(_instance, NoopOffloader):
         logger.debug_once("Offloader set to NoopOffloader (no offloading).")
     else:
-        logger.info_once("Offloader set to %s", type(instance).__name__)
+        logger.info_once("Offloader set to %s", type(_instance).__name__)
 
 
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     """Create an offloader based on the offload configuration.
 
-    Uses the explicit ``offload_backend`` selector.  When set to ``"auto"``,
-    selects prefetch if ``offload_group_size > 0``, UVA if
-    ``cpu_offload_gb > 0``, otherwise noop.
+    Uses the explicit `offload_backend` selector.  When set to `"auto"`,
+    selects prefetch if `offload_group_size > 0`, UVA if
+    `cpu_offload_gb > 0`, otherwise noop.
     """
     from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader

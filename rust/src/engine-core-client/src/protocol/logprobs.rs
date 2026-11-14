@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-mod array;
+pub(crate) mod array;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -12,7 +12,7 @@ use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use self::wire::*;
+pub use self::wire::WireLogprobs;
 use crate::error::{Error, Result, bail_ext_value_decode};
 use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::tensor::{WireArrayData, WireNdArray};
@@ -25,10 +25,13 @@ use crate::protocol::tensor::{WireArrayData, WireNdArray};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
+    /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
     /// use 1-based top-k ranks matching the engine's returned candidate
     /// order.
+    /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
+    /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
 }
 
@@ -53,10 +56,6 @@ impl PositionLogprobs {
                 logprobs.len()
             );
         }
-        if sampled_rank == 0 {
-            bail_ext_value_decode!("token_ranks must be >= 1 for decoded engine-core logprobs");
-        }
-
         let mut entries = Vec::with_capacity(token_ids.len());
         for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
             let rank = if index == 0 {
@@ -151,7 +150,8 @@ impl Serialize for MaybeWireLogprobs {
     where
         S: serde::Serializer,
     {
-        // For testing purposes only. We don't actually serialize it into aux frames.
+        // An engine serializes the wire form (`EngineCoreOutputs::into_frames`);
+        // `Direct` serves mocked outputs in tests.
         match self {
             Self::Wire(value) => value.serialize(serializer),
             Self::Direct(value) => WireLogprobs::from_direct(value)
@@ -168,6 +168,18 @@ impl MaybeWireLogprobs {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
+        }
+    }
+}
+
+impl MaybeWireLogprobs {
+    /// Move the large arrays of a wire payload into the ordered auxiliary-frame
+    /// list.
+    pub(super) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Self::Wire(value) = self {
+            value.logprob_token_ids.extract_aux_frame(aux_frames, threshold);
+            value.logprobs.extract_aux_frame(aux_frames, threshold);
+            value.token_ranks.extract_aux_frame(aux_frames, threshold);
         }
     }
 }

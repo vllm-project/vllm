@@ -8,6 +8,7 @@ import pytest
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.parser_manager import ParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.k2_horizon_tool_parser import K2HorizonToolParser
@@ -170,6 +171,32 @@ def test_request_level_format_overrides(tokenizer, tool_format, call, expected):
     assert json.loads(result.tool_calls[0].function.arguments) == expected
 
 
+@pytest.mark.parametrize("tool_format", ["json", "xml"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming):
+    request = _request(tool_format).model_copy(deep=True)
+    assert request.tools is not None
+    parameters = request.tools[0].function.parameters
+    assert parameters is not None
+    parameters["properties"]["limit"] = {"type": "number"}
+    parser = K2HorizonToolParser(tokenizer, request.tools)
+    value = 2**63 - 1
+    output = _group(
+        _json_call("lookup", {"limit": value})
+        if tool_format == "json"
+        else _xml_call("lookup", [("limit", str(value))])
+    )
+
+    if streaming:
+        content, calls = _collect_stream(parser, request, output)
+        assert content == ""
+        assert calls == [("lookup", {"limit": value})]
+    else:
+        result = parser.extract_tool_calls(output, request)
+        assert result.tools_called
+        assert json.loads(result.tool_calls[0].function.arguments) == {"limit": value}
+
+
 @pytest.mark.parametrize(
     "tool_format",
     ["yaml", "python", "xml_untyped", "", None, 1],
@@ -316,3 +343,14 @@ def test_whitespace_only_surrounding_content_is_not_preserved(tokenizer):
 def test_tool_parser_registered():
     assert ToolParserManager.get_tool_parser("k2_horizon") is K2HorizonToolParser
     assert K2HorizonToolParser.supports_required_and_named is False
+
+
+def test_named_tool_resolves_custom_choice():
+    # Custom tools ride the function shim; a ToolChoiceCustom must resolve to
+    # its name like ToolChoiceFunction does.
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    assert K2HorizonToolParser._named_tool(request) == "emit_command"

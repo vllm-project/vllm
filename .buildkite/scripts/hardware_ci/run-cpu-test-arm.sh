@@ -30,7 +30,7 @@ remove_docker_container
 docker pull "$IMAGE"
 
 # Run the image
-docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
 
 print_packages() {
   docker exec "$CONTAINER_NAME" bash -c "
@@ -38,19 +38,37 @@ print_packages() {
     pip list"
 }
 
-kernel_tests() {
+# Keep test_onednn.py whole (~19 min). Its tests are unseeded, so running a
+# subset changes later inputs and test_onednn_gemm can miss its bf16 tolerance.
+shard_0_kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/test_onednn.py"
+}
+
+shard_1_kernel_tests_1() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
+    pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
+}
+
+shard_2_kernel_tests_2_and_model_tests_and_serving_tests() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
     pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
-    pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
+    pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
+    pytest -x -v -s tests/v1/worker/cpu"
+  model_tests
+  serving_tests
 }
 
 model_tests() {
@@ -67,11 +85,14 @@ model_tests() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
+    pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
     pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
+    pytest -x -v -s tests/quantization/test_cpu_int8_w4a8.py
+  "
 }
 
 serving_tests() {
@@ -110,9 +131,10 @@ serving_tests() {
 
 print_packages
 export CONTAINER_NAME
-export -f kernel_tests model_tests serving_tests
+export -f shard_0_kernel_tests_0 shard_1_kernel_tests_1 \
+  shard_2_kernel_tests_2_and_model_tests_and_serving_tests model_tests serving_tests
 case "$SHARD_ID" in
-  0) timeout 30m bash -c kernel_tests ;;
-  1) timeout 30m bash -c model_tests ;;
-  2) timeout 30m bash -c serving_tests ;;
+  0) timeout 40m bash -c shard_0_kernel_tests_0 ;;
+  1) timeout 40m bash -c shard_1_kernel_tests_1 ;;
+  2) timeout 40m bash -c shard_2_kernel_tests_2_and_model_tests_and_serving_tests ;;
 esac

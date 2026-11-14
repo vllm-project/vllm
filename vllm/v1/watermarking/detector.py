@@ -10,7 +10,7 @@ import torch
 Context: TypeAlias = tuple[int, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WatermarkDetection:
     score: float
     p_value: float

@@ -7,7 +7,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.recoverssm_metadata import RecoverSSMMetadata
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 
 class RecoverSSMState:
@@ -29,7 +29,7 @@ class RecoverSSMState:
 
         step: list[RecoverSSMMetadata] = []
         for group_list in attn_groups:
-            for group in group_list:
+            for group in groups_with_metadata_builders(group_list):
                 metadata = attn_metadata[group.layer_names[0]]
                 if isinstance(metadata, RecoverSSMMetadata):
                     step.append(metadata)
@@ -94,7 +94,7 @@ def _postprocess_recoverssm_align_kernel(
     tl.store(
         state_idx_ptr + req_state_idx,
         tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
+            tl.maximum(num_computed + num_sampled - 1, 0) // MAMBA_BLOCK_SIZE,
             BLOCK_TABLE_WIDTH - 1,
         ),
     )

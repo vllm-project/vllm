@@ -9,7 +9,6 @@ import torch
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -17,6 +16,21 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 class _NonCausalMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     supports_non_causal_multi_token_decode = True
+
+
+class _CausalOnlyMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    pass
+
+
+class _DraftMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    """Triton-like: non-causal decode is supported, DCP draft decode is not."""
+
+    supports_non_causal_multi_token_decode = True
+
+
+class _DcpCapableMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    supports_non_causal_multi_token_decode = True
+    supports_non_causal_multi_token_dcp = True
 
 
 def _metadata(
@@ -49,7 +63,6 @@ def _builder(marked: bool = True) -> _NonCausalMLAMetadataBuilder:
     builder = object.__new__(_NonCausalMLAMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.reorder_batch_threshold = 1
-    builder.query_len_support = QueryLenSupport.SINGLE_ONLY
     builder.non_causal_multi_token_decode = marked
     builder.dcp_world_size = 1
     builder.use_pcp = False
@@ -58,6 +71,53 @@ def _builder(marked: bool = True) -> _NonCausalMLAMetadataBuilder:
         dtype=torch.bfloat16, get_head_size=lambda: 576
     )
     return builder
+
+
+def _mla_layer(*, non_causal: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        non_causal_multi_token_decode=non_causal,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        prefill_backend=SimpleNamespace(clone=lambda: None),
+    )
+
+
+def _mla_spec() -> MLAAttentionSpec:
+    return MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+
+
+def _dspark_dcp_vllm_config(
+    static_forward_context: dict[str, SimpleNamespace],
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dspark", num_speculative_tokens=None
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        compilation_config=SimpleNamespace(
+            static_forward_context=static_forward_context
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            max_model_len=128,
+            get_num_attention_heads=lambda _parallel_config: 16,
+        ),
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=64),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        attention_config=SimpleNamespace(use_prefill_query_quantization=False),
+    )
 
 
 def test_group_capability_keeps_runtime_causality_per_step():
@@ -122,18 +182,57 @@ def test_noncausal_decode_metadata_keeps_live_request_buffers():
     )
 
 
-def test_mla_cache_marker_is_promoted_to_group_capability():
-    kwargs = {
-        "block_size": 64,
-        "num_kv_heads": 1,
-        "head_size": 576,
-        "dtype": torch.bfloat16,
+def test_builder_scopes_noncausal_capability_to_its_layers():
+    spec = _mla_spec()
+    static_forward_context = {
+        "target": _mla_layer(non_causal=False),
+        "draft": _mla_layer(non_causal=True),
+        # Indexer and compressor caches share an MLA group but predate the flag.
+        "indexer": SimpleNamespace(),
     }
-    marked = MLAAttentionSpec(**kwargs, non_causal_multi_token_decode=True)
-    unmarked = MLAAttentionSpec(**kwargs)
+    vllm_config = _dspark_dcp_vllm_config(static_forward_context)
+    device = torch.device("cpu")
 
-    assert MLAAttentionSpec.merge([marked, marked]).non_causal_multi_token_decode
-    assert not MLAAttentionSpec.merge(
-        [unmarked, unmarked]
-    ).non_causal_multi_token_decode
-    assert MLAAttentionSpec.merge([unmarked, marked]).non_causal_multi_token_decode
+    def _flag(layer_names: list[str]) -> bool:
+        return _DcpCapableMLAMetadataBuilder(
+            spec,
+            layer_names,
+            vllm_config,
+            device,
+            supports_dcp_with_varlen=True,
+        ).non_causal_multi_token_decode
+
+    assert not _flag(["target"])
+    assert _flag(["draft"])
+    assert _flag(["target", "draft"])
+    assert not _flag(["target", "indexer"])
+
+
+def test_shared_group_does_not_mark_a_target_only_builder():
+    # Only the draft layer is non-causal. Constructing the target builder
+    # through __init__ would fail DCP validation if it were marked too.
+    spec = _mla_spec()
+    static_forward_context = {
+        "target": _mla_layer(non_causal=False),
+        "draft": _mla_layer(non_causal=True),
+    }
+    vllm_config = _dspark_dcp_vllm_config(static_forward_context)
+    device = torch.device("cpu")
+
+    target = _CausalOnlyMLAMetadataBuilder(
+        spec,
+        ["target"],
+        vllm_config,
+        device,
+        supports_dcp_with_varlen=True,
+    )
+    assert not target.non_causal_multi_token_decode
+
+    with pytest.raises(ValueError, match="non-causal draft"):
+        _DraftMLAMetadataBuilder(
+            spec,
+            ["draft"],
+            vllm_config,
+            device,
+            supports_dcp_with_varlen=True,
+        )

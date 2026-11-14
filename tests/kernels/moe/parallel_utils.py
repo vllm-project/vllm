@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepEP test utilities
-"""
+"""DeepEP test utilities."""
 
 import dataclasses
-import os
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -16,7 +13,7 @@ from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUs
 from typing_extensions import ParamSpec
 
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -40,7 +37,7 @@ class GINNotAvailableError(RuntimeError):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ProcessGroupInfo:
     world_size: int
     world_local_size: int
@@ -107,7 +104,7 @@ def parallel_launch(
                 world_size,
                 world_size,
                 0,
-                f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
+                get_file_store_init_method(),
                 worker,
             )
             + args,
@@ -126,12 +123,12 @@ def parallel_launch(
 ## DeepEP specific utils
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPHTArgs:
     num_local_experts: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPLLArgs:
     max_tokens_per_rank: int
     hidden_size: int
@@ -218,7 +215,7 @@ def make_deepep_a2a(
     return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPV2Args:
     num_local_experts: int
     num_experts: int

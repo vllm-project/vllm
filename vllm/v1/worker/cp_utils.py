@@ -18,16 +18,20 @@ else:
 logger = init_logger(__name__)
 
 
-def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
+def check_attention_cp_compatibility(
+    vllm_config: VllmConfig,
+    target_layer_names: set[str] | None = None,
+) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
-        for layer in layers.values():
+        for layer_name, layer in layers.items():
+            check_pcp = target_layer_names is None or layer_name in target_layer_names
             get_attn_backend = getattr(layer, "get_attn_backend", None)
-            if pcp_size > 1 and get_attn_backend is not None:
+            if pcp_size > 1 and check_pcp and get_attn_backend is not None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "
@@ -35,6 +39,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 )
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
+                continue
+            if not check_pcp and layer_impl.dcp_world_size == 1:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
@@ -49,65 +55,6 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "Try a different backend by setting "
                     "--attention-backend or disable DCP."
                 )
-
-
-def get_dcp_dummy_context_len(
-    dcp_world_size: int,
-    cp_kv_cache_interleave_size: int,
-    has_kv_cache_config: bool,
-    create_mixed_batch: bool,
-    is_graph_capturing: bool,
-    uniform_decode: bool,
-) -> int:
-    if (
-        dcp_world_size <= 1
-        or not has_kv_cache_config
-        or not (create_mixed_batch or (is_graph_capturing and uniform_decode))
-    ):
-        return 0
-    return dcp_world_size * cp_kv_cache_interleave_size
-
-
-def prepare_dcp_dummy_context_metadata(
-    *,
-    input_batch: Any,
-    kv_cache_config: Any,
-    query_pos: Any,
-    positions: torch.Tensor,
-    query_start_loc: Any,
-    num_reqs: int,
-    num_tokens_unpadded: int,
-    dcp_dummy_context_len: int,
-) -> None:
-    """Populate valid fake KV metadata for DCP CUDA graph warmup/capture."""
-    if dcp_dummy_context_len == 0:
-        return
-
-    # DCP graph warmup may exercise context attention, so block-table entries
-    # must point at allocated KV blocks.
-    assert kv_cache_config is not None
-    max_valid_block_id = kv_cache_config.num_blocks - 1
-    assert max_valid_block_id > 0
-    for blk_table in input_batch.block_table.block_tables:
-        max_row_blocks = (
-            blk_table.max_num_blocks_per_req // blk_table.blocks_per_kv_block
-        )
-        block_ids = [
-            (block_idx % max_valid_block_id) + 1 for block_idx in range(max_row_blocks)
-        ]
-        for req_idx in range(num_reqs):
-            blk_table.add_row(block_ids, req_idx)
-        blk_table.commit_block_table(num_reqs)
-
-    query_pos.copy_to_gpu(num_tokens_unpadded)
-    positions[:num_tokens_unpadded] = (
-        query_pos.gpu[:num_tokens_unpadded] + dcp_dummy_context_len
-    )
-    input_batch.block_table.compute_slot_mapping(
-        num_reqs,
-        query_start_loc.gpu[: num_reqs + 1],
-        positions[:num_tokens_unpadded],
-    )
 
 
 def should_skip_dcp_context_attention(context_kv_lens_cpu: torch.Tensor) -> bool:

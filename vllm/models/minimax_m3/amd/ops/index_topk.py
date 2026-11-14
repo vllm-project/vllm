@@ -7,13 +7,13 @@ then the top-k blocks (plus forced init/local blocks) are selected per query
 token. Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
 sparse block size (128), so one sparse block maps to exactly one page.
 
-Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (one shared
+Index-K cache layout (vLLM): `(num_blocks, 128, idx_head_dim)` (one shared
 key vector per token).
 
 Only the paths MiniMax M3 uses are implemented: score_type="max", index value
 disabled (score-only indexer), and shared index keys. Each local index-query
 head selects its own block ids for the block-sparse attention kernels in
-``sparse_attn``.
+`sparse_attn`.
 """
 
 import torch
@@ -37,6 +37,7 @@ MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 20
 MAX_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 64
 MAX_DECODE_SCORE_KV_CHUNKS = 256
 DECODE_TOPK_BLOCKS_PER_CHUNK = 512
+DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK = 128
 MAX_DECODE_TOPK_FAST_CHUNKS = 16
 DECODE_TOPK_TARGET_GRID = 64
 
@@ -103,14 +104,23 @@ def _decode_topk_launch_policy(
     topk: int,
     *,
     is_gfx950: bool,
-) -> tuple[int, bool, bool]:
-    """Choose the graph grid and bounded-context selector specialization."""
+) -> tuple[int, int, int, int, bool, bool]:
+    """Choose the selector grid and compile-time launch configuration."""
     if (
         is_gfx950
         and topk == 16
         and 0 < max_block <= MAX_DECODE_TOPK_FAST_CHUNKS * DECODE_TOPK_BLOCKS_PER_CHUNK
     ):
-        return MAX_DECODE_TOPK_FAST_CHUNKS, True, True
+        if max_block <= DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK:
+            return 1, DECODE_TOPK_SHORT_BLOCKS_PER_CHUNK, 2, 1, True, True
+        return (
+            MAX_DECODE_TOPK_FAST_CHUNKS,
+            DECODE_TOPK_BLOCKS_PER_CHUNK,
+            4,
+            2,
+            True,
+            True,
+        )
 
     target = max(
         1,
@@ -119,7 +129,14 @@ def _decode_topk_launch_policy(
             DECODE_TOPK_TARGET_GRID // max(1, total_q * num_idx_heads),
         ),
     )
-    return 1 << (target.bit_length() - 1), False, False
+    return (
+        1 << (target.bit_length() - 1),
+        DECODE_TOPK_BLOCKS_PER_CHUNK,
+        8,
+        2,
+        False,
+        False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -212,15 +229,16 @@ def _index_block_score_kernel(
     if BLOCK_SIZE_Q * pid_q >= q_len:
         return
 
-    q_ptrs = tl.make_block_ptr(
+    q_desc = tl.make_tensor_descriptor(
         base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
-        shape=(q_len, head_dim),
-        strides=(stride_q_n, stride_q_d),
-        offsets=(pid_q * BLOCK_SIZE_Q, 0),
-        block_shape=(BLOCK_SIZE_Q, head_dim),
-        order=(1, 0),
+        shape=[q_len, head_dim],
+        strides=[stride_q_n, stride_q_d],
+        block_shape=[BLOCK_SIZE_Q, head_dim],
+        padding_option="zero",
     )
-    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+
+    # 2. Perform the load by providing the multi-dimensional offset directly
+    q = q_desc.load([pid_q * BLOCK_SIZE_Q, 0])
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -396,6 +414,7 @@ def _decode_index_score_kernel(
     score_ptr,  # [num_idx_heads, total_q, max_block]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
     init_blocks,
@@ -415,6 +434,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -422,15 +442,21 @@ def _decode_index_score_kernel(
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
-    q_ids = pid_r * decode_query_len + q_offsets
+    if VARLEN:
+        q_start = tl.load(query_start_loc_ptr + pid_r)
+        q_len = tl.load(query_start_loc_ptr + pid_r + 1) - q_start
+    else:
+        q_start = pid_r * decode_query_len
+        q_len = decode_query_len
+    q_mask = q_offsets < q_len
+    q_ids = q_start + q_offsets
 
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
 
     seq_len = tl.load(seq_lens + pid_r)
-    query_pos = seq_len - decode_query_len + q_offsets
+    query_pos = seq_len - q_len + q_offsets
     # Full-CG padding uses zero-length request rows. Clamp to an empty
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
@@ -506,6 +532,7 @@ def _decode_index_score_mapped_range(
     ik_cache_ptr,
     score_ptr,
     block_table_ptr,
+    query_start_loc_ptr,
     pid_r,
     seq_len,
     chunk_start_block,
@@ -527,15 +554,22 @@ def _decode_index_score_mapped_range(
     stride_bt_b,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
-    q_ids = pid_r * decode_query_len + q_offsets
+    if VARLEN:
+        q_start = tl.load(query_start_loc_ptr + pid_r)
+        q_len = tl.load(query_start_loc_ptr + pid_r + 1) - q_start
+    else:
+        q_start = pid_r * decode_query_len
+        q_len = decode_query_len
+    q_mask = q_offsets < q_len
+    q_ids = q_start + q_offsets
 
-    query_pos = seq_len - decode_query_len + q_offsets
+    query_pos = seq_len - q_len + q_offsets
     kv_len = tl.maximum(query_pos + 1, 0)
     num_blocks_q = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
     kv_len_max = tl.max(tl.where(q_mask, kv_len, 0), axis=0)
@@ -607,6 +641,7 @@ def _decode_index_score_balanced_kernel(
     score_ptr,
     block_table_ptr,
     seq_lens,
+    query_start_loc_ptr,
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
     init_blocks,
@@ -626,6 +661,7 @@ def _decode_index_score_balanced_kernel(
     stride_bt_b,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     pid = tl.program_id(0)
     total_blocks = tl.zeros((), dtype=tl.int32)
@@ -685,6 +721,7 @@ def _decode_index_score_balanced_kernel(
         ik_cache_ptr,
         score_ptr,
         block_table_ptr,
+        query_start_loc_ptr,
         pid_r,
         selected_seq_len,
         chunk_start_block,
@@ -706,6 +743,7 @@ def _decode_index_score_balanced_kernel(
         stride_bt_b,
         BLOCK_SIZE_K,
         BLOCK_SIZE_Q,
+        VARLEN,
     )
 
 
@@ -857,6 +895,9 @@ def _decode_topk_fused_kernel(
     attention_block_table_ptr,  # [num_reqs, max_blocks]
     sparse_bt_ptr,  # [total_q, topk * PAGES_PER_SPARSE_BLOCK]
     sparse_ctx_ptr,  # [total_q]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
+    token_to_req_ptr,  # [total_q] int32; read only when VARLEN
+    num_reqs,
     decode_query_len,
     stride_s_h,
     stride_s_b,
@@ -882,17 +923,28 @@ def _decode_topk_fused_kernel(
     EMIT_SPARSE_TABLE: tl.constexpr,
     SINGLE_TILE_GUARANTEED: tl.constexpr,
     ADAPTIVE_FINAL_MERGE: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     tl.static_assert(topk <= BLOCK_SIZE_T)
     tl.static_assert(BLOCK_SIZE_T <= BLOCK_SIZE_K)
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_chunk = tl.program_id(2)
-    req_id = pid_b // decode_query_len
-    q_offset = pid_b - req_id * decode_query_len
+    if VARLEN:
+        req_id = tl.load(token_to_req_ptr + pid_b)
+        q_start = tl.load(query_start_loc_ptr + req_id)
+        q_len = tl.load(query_start_loc_ptr + req_id + 1) - q_start
+        valid_token = pid_b < tl.load(query_start_loc_ptr + num_reqs)
+    else:
+        req_id = pid_b // decode_query_len
+        q_start = req_id * decode_query_len
+        q_len = decode_query_len
+        valid_token = True
+    q_offset = pid_b - q_start
 
     seq_len = tl.load(seq_lens_ptr + req_id)
-    query_pos = seq_len - decode_query_len + q_offset
+    query_pos = seq_len - q_len + q_offset
+    query_pos = tl.where(valid_token, query_pos, -1)
     kv_len = tl.maximum(query_pos + 1, 0)
     num_blocks = (kv_len + block_size - 1) // block_size
 
@@ -1236,8 +1288,8 @@ def minimax_m3_index_topk(
 ) -> torch.Tensor:
     """Select index top-k from a precomputed score tensor.
 
-    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
-    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    When `out` is provided (a `[num_idx_heads, >=total_q, topk]` buffer), the
+    result is written into `out[:, :total_q, :]` instead of a fresh tensor --
     used to keep the top-k output at a stable address for cudagraph capture.
     """
     num_idx_heads = score.shape[0]
@@ -1296,14 +1348,16 @@ def minimax_m3_index_decode(
     sparse_context_lens_out: torch.Tensor | None = None,
     block_page_stride: int | None = None,
     completion_counter: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    token_to_req_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score followed by fused adaptive top-k selection.
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
-    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
-    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
+    When `out` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    `out[:, :total_q, :]` (stable address for cudagraph) instead of allocating.
     The optional sparse-table arguments fuse current-layer table construction
-    into the selector. They must be provided together. ``completion_counter``
+    into the selector. They must be provided together. `completion_counter`
     provides stable per-query synchronization storage for CUDA graphs. It must
     be zero before its first launch and must not be shared by overlapping
     selector invocations; every completed launch resets its active entries.
@@ -1312,8 +1366,18 @@ def minimax_m3_index_decode(
     assert num_idx_heads == num_kv_heads, (
         "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
     )
-    assert 0 < decode_query_len <= max_decode_query_len
-    assert total_q == seq_lens.shape[0] * decode_query_len
+    varlen = query_start_loc is not None
+    if query_start_loc is not None:
+        assert token_to_req_indices is not None
+        assert query_start_loc.shape[0] == seq_lens.shape[0] + 1
+        assert token_to_req_indices.shape[0] >= total_q
+    else:
+        assert 0 < decode_query_len <= max_decode_query_len
+        assert total_q == seq_lens.shape[0] * decode_query_len
+    # Triton requires pointer arguments even when the constexpr branch
+    # does not read them.
+    qsl_arg = query_start_loc if query_start_loc is not None else seq_lens
+    t2r_arg = token_to_req_indices if token_to_req_indices is not None else seq_lens
     batch = total_q
     emit_sparse_table = attention_block_table is not None
     if emit_sparse_table and (
@@ -1448,6 +1512,7 @@ def minimax_m3_index_decode(
             score,
             block_table,
             seq_lens,
+            qsl_arg,
             num_idx_heads,
             head_dim,
             init_blocks,
@@ -1467,6 +1532,7 @@ def minimax_m3_index_decode(
             block_table.stride(0),
             BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            VARLEN=varlen,
             num_warps=2,
             num_stages=1,
         )
@@ -1491,6 +1557,7 @@ def minimax_m3_index_decode(
             score,
             block_table,
             seq_lens,
+            qsl_arg,
             num_idx_heads,
             head_dim,
             init_blocks,
@@ -1510,6 +1577,7 @@ def minimax_m3_index_decode(
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             num_kv_chunks=num_kv_chunks,
             USE_PDL=use_pdl,
+            VARLEN=varlen,
             **score_kwargs,
         )
 
@@ -1525,6 +1593,9 @@ def minimax_m3_index_decode(
     # only the number of chunks needed for its live context.
     (
         num_topk_chunks,
+        topk_block_size,
+        selector_num_warps,
+        selector_num_stages,
         single_tile_guaranteed,
         adaptive_final_merge,
     ) = _decode_topk_launch_policy(
@@ -1588,6 +1659,9 @@ def minimax_m3_index_decode(
         selector_attention_block_table,
         selector_sparse_block_table,
         selector_sparse_context_lens,
+        qsl_arg,
+        t2r_arg,
+        seq_lens.shape[0],
         decode_query_len,
         score.stride(0),
         score.stride(1),
@@ -1608,12 +1682,13 @@ def minimax_m3_index_decode(
         pages_per_sparse_block=PAGES_PER_SPARSE_BLOCK,
         block_page_stride=selector_block_page_stride,
         NUM_TOPK_CHUNKS=num_topk_chunks,
-        BLOCK_SIZE_K=512,
+        BLOCK_SIZE_K=topk_block_size,
         BLOCK_SIZE_T=block_size_t,
         EMIT_SPARSE_TABLE=emit_sparse_table,
         SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
         ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
-        num_warps=4 if adaptive_final_merge else 8,
-        num_stages=2,
+        VARLEN=varlen,
+        num_warps=selector_num_warps,
+        num_stages=selector_num_stages,
     )
     return topk_idx

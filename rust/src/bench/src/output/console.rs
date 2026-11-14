@@ -137,6 +137,28 @@ pub fn print_results(
         metrics.median_e2el_ms,
         &metrics.percentiles_e2el_ms,
     );
+    if let Some(stats) = &metrics.client_queue_time {
+        print_metric_section(
+            "client_queue_time",
+            "Client Queue Time",
+            "Client-side Queueing",
+            &config.selected_percentile_metrics,
+            stats.mean_ms,
+            stats.median_ms,
+            &stats.percentiles_ms,
+        );
+    }
+    if let Some(stats) = &metrics.e2el_including_client_queue {
+        print_metric_section(
+            "e2el_including_client_queue",
+            "E2EL incl. Client Queue",
+            "Queue-inclusive End-to-end Latency",
+            &config.selected_percentile_metrics,
+            stats.mean_ms,
+            stats.median_ms,
+            &stats.percentiles_ms,
+        );
+    }
 
     if let Some(stats) = spec_decode_stats {
         print_spec_decode_section(stats);
@@ -322,6 +344,7 @@ fn print_spec_decode_section(stats: &SpecDecodeStats) {
     println!("{:<40} {:<10}", "Drafts:", stats.num_drafts);
     println!("{:<40} {:<10}", "Draft tokens:", stats.draft_tokens);
     println!("{:<40} {:<10}", "Accepted tokens:", stats.accepted_tokens);
+    println!("{:<40} {:<10}", "Verified tokens:", stats.verified_tokens);
     if !stats.per_position_acceptance_rates.is_empty() {
         println!("Per-position acceptance (%):");
         for (i, rate) in stats.per_position_acceptance_rates.iter().enumerate() {

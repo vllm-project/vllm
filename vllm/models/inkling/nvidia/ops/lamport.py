@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Deadlock-free fused RS + short-conv + AG + residual + RMSNorm.
 
-The public integration surface is ``LamportRSConv.rs_sconv_ag_add_norm``.
+The public integration surface is `LamportRSConv.rs_sconv_ag_add_norm`.
 
 Liveness
 --------
 Large grids are deliberately split at the two communication dependencies:
 
-  1. ``_publish_input_kernel`` only publishes rank partials.
-  2. ``_reduce_insert_kernel`` waits, reduces, and inserts the local shard.
-  3. ``_sconv_publish_kernel`` only computes and publishes the local result.
-  4. ``_gather_norm_kernel`` waits, gathers, and normalizes.
+  1. `_publish_input_kernel` only publishes rank partials.
+  2. `_reduce_insert_kernel` waits, reduces, and inserts the local shard.
+  3. `_sconv_publish_kernel` only computes and publishes the local result.
+  4. `_gather_norm_kernel` waits, gathers, and normalizes.
 
 Without PDL, CUDA stream order completes a producer before its consumer.  With
 PDL, every producer CTA posts all peer stores before triggering its dependent,
-and the consumer executes ``gdc_wait`` before polling.  A consumer therefore
+and the consumer executes `gdc_wait` before polling.  A consumer therefore
 waits only for stores from a producer that is already running (or complete) on
 another GPU.  It never waits for another block in its own grid.  Consequently
 spinning consumers cannot occupy resources needed by any producer, and the
@@ -607,7 +607,7 @@ class LamportRSConv:
         block_size: int,
         shared_tensor: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Return ``(normed | None, new_residual)``, both shaped ``[T, 6144]``."""
+        """Return `(normed | None, new_residual)`, both shaped `[T, 6144]`."""
         tokens, hidden_size = residual.shape
         if not self.usable(tokens):
             raise ValueError(f"num_tokens must be in [1, {self.max_tokens}]")
@@ -783,7 +783,7 @@ def initialize_lamport_rs_conv(
 
 
 def get_lamport_rs_conv(hidden_size: int, window_size: int) -> LamportRSConv | None:
-    """Return the state initialized with the model, or ``None`` for fallback."""
+    """Return the state initialized with the model, or `None` for fallback."""
     if _STATE is not None and (
         _STATE.hidden_size != hidden_size or _STATE.window_size != window_size
     ):

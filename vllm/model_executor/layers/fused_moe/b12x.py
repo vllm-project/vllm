@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -24,9 +25,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.b12x import (
+    B12X_BLOCK_CODECS,
     B12xWarmupUnit,
     get_b12x_fused_moe,
     reuse_packed_weight_storage,
@@ -38,6 +40,7 @@ _B12X_MOE_MODES: dict[
     tuple[torch.dtype | str | None, torch.dtype | str | None],
     tuple[str, str, str],
 ] = {
+    **{(codec, None): ("w4a16", codec, "w31") for codec in B12X_BLOCK_CODECS},
     ("mxfp4", "mxfp8"): ("w4a8_mx", "fp4_e8m0_k32", "w31"),
     ("mxfp4", None): ("w4a16", "fp4_e8m0_k32", "w31"),
     ("nvfp4", "nvfp4"): ("nvfp4", "modelopt_nvfp4", "w31"),
@@ -173,9 +176,17 @@ def _replace_parameter_with_empty(
     parameter = getattr(layer, name, None)
     if not isinstance(parameter, torch.Tensor):
         return None
-    empty = torch.empty((0,), dtype=parameter.dtype, device=parameter.device)
-    replace_parameter(layer, name, empty)
-    return getattr(layer, name)
+    # The prepared experts may own this parameter object, so register a new
+    # empty one instead of emptying it in place.
+    empty = torch.nn.Parameter(
+        torch.empty((0,), dtype=parameter.dtype, device=parameter.device),
+        requires_grad=False,
+    )
+    weight_loader = getattr(parameter, "weight_loader", None)
+    if weight_loader is not None:
+        set_weight_attrs(empty, {"weight_loader": weight_loader})
+    setattr(layer, name, empty)
+    return empty
 
 
 def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -187,6 +198,43 @@ def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:
             )
         scale = scale[:, 0]
     return scale.to(dtype=torch.float32).contiguous()
+
+
+# Expansion targets of the compressed CSF scales, shared by all layers of one
+# shape. b12x rewrites the routed experts' scales before each call, so sharing
+# is safe while layers run one at a time on one stream.
+_CSF_SCALE_SCRATCH: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _csf_scale_scratch(
+    w1_scale: torch.Tensor, w2_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (w1_scale.device, w1_scale.shape, w2_scale.shape)
+    if key not in _CSF_SCALE_SCRATCH:
+        _CSF_SCALE_SCRATCH[key] = (
+            torch.zeros_like(w1_scale),
+            torch.zeros_like(w2_scale),
+        )
+    return _CSF_SCALE_SCRATCH[key]
+
+
+def _csf_scale_planes(swizzled: torch.Tensor) -> Any:
+    """Compress 128x4-swizzled expert block scales into b12x CSF planes."""
+    from flashinfer.quantization import encode_csf_scales
+
+    experts, rows, cols = swizzled.shape
+    logical = (
+        swizzled.view(experts, rows // 128, cols // 4, 32, 4, 4)
+        .permute(0, 1, 4, 3, 2, 5)
+        .reshape(experts, rows, cols)
+    )
+    csf = encode_csf_scales(logical)
+    bounds = csf.exc_offsets[:: rows // 16].tolist()
+    exceptions = csf.exceptions.cpu()
+    return _require_b12x_fused_moe().CsfScalePlanes(
+        tuple(csf.fixed.cpu()),
+        tuple(exceptions[a:b] for a, b in zip(bounds, bounds[1:])),
+    )
 
 
 def _canonicalize_fp4_zero_signs_(packed: torch.Tensor) -> None:
@@ -204,12 +252,16 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         self,
         moe_config: mk.FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        csf_scales: bool = False,
     ):
         super().__init__(moe_config, quant_config)
-        if quant_config.weight_quant_dtype not in ("mxfp4", "nvfp4"):
+        if quant_config.weight_quant_dtype not in (
+            "mxfp4",
+            "nvfp4",
+            *B12X_BLOCK_CODECS,
+        ):
             raise ValueError(
-                "b12x MoE requires MXFP4 or NVFP4 weights, got "
-                f"{quant_config.weight_quant_dtype}"
+                f"unsupported b12x MoE weight format: {quant_config.weight_quant_dtype}"
             )
         scheme = (
             quant_config.weight_quant_dtype,
@@ -223,6 +275,11 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise ValueError(
                 f"unsupported b12x MoE quantization scheme {scheme}"
             ) from exc
+        # Keep NVFP4 block scales CSF-compressed; b12x expands them per call
+        # and needs the FC1 halves in up/gate order.
+        self._csf_scales = csf_scales
+        if csf_scales:
+            self._w13_layout = "w13"
         self._prepared_experts: Any | None = None
         self._source_parameters_released = False
         self._unit_scales: dict[torch.device, torch.Tensor] = {}
@@ -293,6 +350,31 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise RuntimeError(
                 "b12x MoE weights must be prepared before CUDA graph capture"
             )
+        if self._source_format in B12X_BLOCK_CODECS:
+            fused_moe = _require_b12x_fused_moe()
+            block_size, _ = B12X_BLOCK_CODECS[self._source_format]
+            plan = fused_moe.plan_weights(
+                source=fused_moe.PackedSource(
+                    format=self._source_format, w13_layout=self._w13_layout
+                ),
+                activation=fused_moe.ActivationSpec(
+                    mode="a16",
+                    nonlinearity=_b12x_activation_name(activation),
+                    io_dtype=params_dtype,
+                ),
+                geometry=fused_moe.MoEGeometry(
+                    num_experts=w1.shape[0],
+                    hidden_size=w2.shape[1],
+                    intermediate_size=w2.shape[2] * block_size,
+                ),
+            )
+            prepared = fused_moe.prepare_weights(
+                plan=plan,
+                weights=fused_moe.BlockQuantWeights(
+                    w13=w1, w2=w2, codec=self._source_format
+                ),
+            )
+            return prepared._impl
         if self.w1_scale is None or self.w2_scale is None:
             raise ValueError("b12x MoE requires w1 and w2 block scales")
 
@@ -321,6 +403,39 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             a1_gscale = unit_scale
             a2_gscale = unit_scale
 
+        if self._csf_scales:
+            csf_plan = fused_moe.plan_weights(
+                source=fused_moe.PackedSource(
+                    format=self._source_format, w13_layout=self._w13_layout
+                ),
+                activation=fused_moe.ActivationSpec(
+                    mode="a4",
+                    nonlinearity=_b12x_activation_name(activation),
+                    io_dtype=params_dtype,
+                ),
+                geometry=fused_moe.MoEGeometry(
+                    num_experts=num_experts,
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                ),
+            )
+            w1_scratch, w2_scratch = _csf_scale_scratch(self.w1_scale, self.w2_scale)
+            weights = fused_moe.Nvfp4CsfWeights(
+                packed=fused_moe.PackedWeights(
+                    w13=w1,
+                    w2=w2,
+                    w13_block_scales=w1_scratch,
+                    w2_block_scales=w2_scratch,
+                    w13_global_scales=w1_global_scale,
+                    w2_global_scales=w2_global_scale,
+                    input_scale=a1_gscale,
+                    intermediate_scale=a2_gscale,
+                ),
+                w13_scales=_csf_scale_planes(self.w1_scale),
+                w2_scales=_csf_scale_planes(self.w2_scale),
+            )
+            return fused_moe.prepare_weights(plan=csf_plan, weights=weights)._impl
+
         weight_plan = fused_moe.plan_weights(
             quant_modes=quant_mode,
             source_format=self._source_format,
@@ -345,6 +460,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         )
 
     def _refresh_quant_config(self, layer: torch.nn.Module) -> None:
+        if self._source_format in B12X_BLOCK_CODECS:
+            return
         self.quant_config._w1.scale = layer.w13_weight_scale
         self.quant_config._w2.scale = layer.w2_weight_scale
         if self._source_format != "modelopt_nvfp4":
@@ -356,7 +473,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             self.quant_config._a1.alpha_or_gscale = 1.0 / layer.w13_input_scale
             self.quant_config._a2.alpha_or_gscale = 1.0 / layer.w2_input_scale
 
-    def _release_source_parameters(self, layer: torch.nn.Module) -> None:
+    def _release_source_parameters(
+        self, layer: torch.nn.Module, weights: bool = True
+    ) -> None:
         if self._source_parameters_released:
             return
         w1_scale = _replace_parameter_with_empty(layer, "w13_weight_scale")
@@ -365,8 +484,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             self.quant_config._w1.scale = w1_scale
         if w2_scale is not None:
             self.quant_config._w2.scale = w2_scale
-        _replace_parameter_with_empty(layer, "w13_weight")
-        _replace_parameter_with_empty(layer, "w2_weight")
+        if weights:
+            _replace_parameter_with_empty(layer, "w13_weight")
+            _replace_parameter_with_empty(layer, "w2_weight")
         self._source_parameters_released = True
 
     def _reuse_prepared_storage(self, layer: torch.nn.Module, prepared: Any) -> Any:
@@ -384,6 +504,11 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise ValueError(
                 "b12x MoE supports apply_router_weight_on_input only with W4A16"
             )
+        if self._csf_scales and hasattr(layer, "_b12x_prepared_experts"):
+            # Captured graphs read the compressed storage of the first load.
+            raise NotImplementedError(
+                "b12x MoE with compressed CSF scales does not support weight reloading"
+            )
         self._source_parameters_released = False
         self._refresh_quant_config(layer)
         prepared = self._prepare_experts(
@@ -393,8 +518,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             params_dtype=self.moe_config.in_dtype,
         )
         prepared = self._reuse_prepared_storage(layer, prepared)
-        if prepared.plan.discards_source_parameters:
-            self._release_source_parameters(layer)
+        discards_weights = prepared.plan.discards_source_parameters
+        if discards_weights or self._csf_scales:
+            self._release_source_parameters(layer, weights=discards_weights)
         layer.b12x_warmup_provider = self
 
     @staticmethod
@@ -418,7 +544,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         ):
             return False, "kernel supports only SiTU beta=4 and linear_beta=25"
         if (
-            activation_key is not None
+            cls.executed_activation_key(weight_key, activation_key) is not None
             and moe_config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
         ):
             return (
@@ -446,8 +572,10 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             ):
                 return (
                     False,
-                    "MXFP4 W4A8 requires hidden size divisible by 256 and "
-                    "per-rank intermediate size divisible by 32",
+                    (
+                        "MXFP4 W4A8 requires hidden size divisible by 256 and "
+                        "per-rank intermediate size divisible by 32"
+                    ),
                 )
         return mk.FusedMoEExperts.is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
@@ -468,6 +596,21 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return True
+
+    @staticmethod
+    def supports_csf_scales(moe_config: mk.FusedMoEConfig) -> bool:
+        """Whether NVFP4 W4A4 experts can keep `csf` scales compressed."""
+        # b12x expands CSF scales into 128-row tiles of the hidden dimension.
+        return moe_config.is_act_and_mul and moe_config.hidden_dim % 128 == 0
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        if weight_key == kNvfp4Static and envs.VLLM_B12X_MOE_FP4_FORCE_A16:
+            return None
+        return activation_key
 
     @staticmethod
     def _supports_quant_scheme(
@@ -530,14 +673,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        if w1.numel() and w2.numel():
+        if w1.numel() and w2.numel() and self._source_format not in B12X_BLOCK_CODECS:
             return super().moe_problem_size(a1, w1, w2, topk_ids)
         prepared = self._prepared()
         tokens = int(a1.shape[0] if a1.ndim == 2 else a1.shape[1])
         return (
             int(prepared.num_experts),
             tokens,
-            int(prepared.intermediate_size) * 2,
+            int(prepared.intermediate_size)
+            * (2 if self.moe_config.activation.is_gated else 1),
             int(a1.shape[-1]),
             int(topk_ids.shape[1]),
         )

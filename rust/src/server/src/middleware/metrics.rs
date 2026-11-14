@@ -25,9 +25,6 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/reset_mm_cache",
     "/reset_encoder_cache",
     "/collective_rpc",
-    "/sleep",
-    "/wake_up",
-    "/is_sleeping",
 ];
 
 /// Map the request method to a bounded Prometheus label.

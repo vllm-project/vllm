@@ -10,11 +10,13 @@ set -ex
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 # Pinned in full: an abbreviated hash is not a ref, so a consumer that
 # fetches the pin directly ("git fetch origin <sha>") cannot resolve it.
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb"}
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"a56d6156febcd9976e55adc85b5155bfac9f28f8"}
 
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
+# Directory holding vendored DeepEP patches applied by this script
+PATCHES_DIR=${PATCHES_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches"}
 CUDA_VERSION_MAJOR=$("${CUDA_HOME}"/bin/nvcc --version | grep -E -o "release [0-9]+" | cut -d ' ' -f 2)
 
 # Parse arguments
@@ -78,10 +80,25 @@ mkdir -p "$WHEEL_DIR"
 pushd "$WORKSPACE"
 
 # install dependencies if not installed
+UV_PIP_TARGET=()
 if [ -z "$VIRTUAL_ENV" ]; then
-  uv pip install --system cmake torch ninja
-else
-  uv pip install cmake torch ninja
+  UV_PIP_TARGET=(--system)
+fi
+uv pip install "${UV_PIP_TARGET[@]}" cmake torch ninja
+
+# DeepEPv2 needs NCCL >= 2.30.4 at both build time and runtime, but PyTorch
+# pins an older release.
+DEEPEP_V2_MIN_NCCL="2.30.4"
+NCCL_PACKAGE="nvidia-nccl-cu${CUDA_VERSION_MAJOR}"
+NCCL_WARNING=""
+NCCL_INSTALLED=$(uv pip show "${UV_PIP_TARGET[@]}" "$NCCL_PACKAGE" 2>/dev/null | sed -n 's/^Version: //p')
+if [ -n "$NCCL_INSTALLED" ] && \
+    [ "$(printf '%s\n' "$DEEPEP_V2_MIN_NCCL" "$NCCL_INSTALLED" | sort -V | head -n1)" != "$DEEPEP_V2_MIN_NCCL" ]; then
+    NCCL_WARNING="WARNING: ${NCCL_PACKAGE} ${NCCL_INSTALLED} is installed, but the deepep_v2 backend
+requires NCCL >= ${DEEPEP_V2_MIN_NCCL} when DeepEP is built and when it runs. To use deepep_v2, run
+    uv pip install \"${NCCL_PACKAGE}>=${DEEPEP_V2_MIN_NCCL}\" --no-deps
+and then run this script again. See tools/ep_kernels/README.md."
+    echo "$NCCL_WARNING" >&2
 fi
 
 # fetch nvshmem
@@ -167,6 +184,23 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
+    # Upstream supplies the NVLink fence, but completion still signals only QP 0.
+    # Cover every context carrying RDMA puts until upstream provides that ordering.
+    # Apply only to the pinned source revision; skip loudly on any other ref.
+    if [[ "$name" == "DeepEP" ]]; then
+        local deepep_head
+        deepep_head=$(git rev-parse HEAD)
+        if [[ "$deepep_head" != a56d6156febcd9976e55adc85b5155bfac9f28f8 ]]; then
+            echo "WARNING: Skipping DeepEP GIN barrier data-visibility patch: HEAD is $deepep_head, expected a56d6156febcd9976e55adc85b5155bfac9f28f8." >&2
+        elif patch --batch --force --reverse --dry-run -p1 \
+            < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch" > /dev/null 2>&1; then
+            echo "DeepEP GIN barrier data-visibility patch is already applied."
+        elif ! patch --batch -p1 < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch"; then
+            echo "ERROR: Failed to apply DeepEP GIN barrier data-visibility patch; aborting build." >&2
+            exit 1
+        fi
+    fi
+
     # DeepEP CUDA 13 patch
     if [[ "$name" == "DeepEP" && "${CUDA_VERSION_MAJOR}" -ge 13 ]]; then
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
@@ -212,6 +246,20 @@ do_build() {
         fi
         cuda_driver_stub_dir=$(dirname "$cuda_driver_stub")
         export LIBRARY_PATH="${cuda_driver_stub_dir}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+        # DeepEP 2.1 links NCCL by SONAME, so pip installs need a search path.
+        local nccl_root_dir=${EP_NCCL_ROOT_DIR:-${NCCL_DIR:-}}
+        if [[ -z "$nccl_root_dir" ]]; then
+            local nccl_location
+            nccl_location=$(uv pip show "${UV_PIP_TARGET[@]}" "$NCCL_PACKAGE" \
+                2>/dev/null | sed -n 's/^Location: //p')
+            if [[ -z "$nccl_location" ]]; then
+                echo "Cannot locate $NCCL_PACKAGE; set EP_NCCL_ROOT_DIR to the NCCL installation." >&2
+                exit 1
+            fi
+            nccl_root_dir="${nccl_location}/nvidia/nccl"
+        fi
+        export LIBRARY_PATH="${nccl_root_dir}/lib:$LIBRARY_PATH"
     fi
 
     if [ "$MODE" = "install" ]; then
@@ -235,4 +283,9 @@ do_build \
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
     ls -l "$WHEEL_DIR"
+fi
+
+# Repeat after the verbose build output, where the first copy is easy to miss.
+if [ -n "$NCCL_WARNING" ]; then
+    echo "$NCCL_WARNING" >&2
 fi

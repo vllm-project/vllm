@@ -10,33 +10,43 @@ block); the allocation is the same either way.
 """
 
 from dataclasses import replace
+from math import lcm, prod
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_layer
 from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
-    generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+)
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    HiSparseHotManager,
+    MambaManager,
+)
+from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
+    HiSparseHotPageSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheLayout,
-    KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -49,16 +59,15 @@ def _mla(head_size: int) -> MLAAttentionSpec:
     )
 
 
-def _full() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _full() -> AttentionSpec:
+    return AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float16
     )
 
 
-def _uniform_group(specs: dict) -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        list(specs),
-        UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs),
+def _uniform_group(specs: dict) -> KVCacheGroup:
+    return KVCacheGroup.from_layers(
+        {name: full_layer(spec) for name, spec in specs.items()}
     )
 
 
@@ -75,16 +84,44 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config = CacheConfig()
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
+    config.attention_config.hisparse_config = None
     return config
+
+
+def test_packed_alignment_preserves_hot_rows_and_generic_stride():
+    """One shared stride must satisfy both constraints, regardless of rounding
+    order. Hot blocks need only be whole rows apart."""
+    spec = replace(_mla(128), block_stride_alignment=1152)
+    hot = HiSparseHotPageSpec(block_size=16, page_size=5120)
+    hot_layer = HiSparseHotManager.layer_config(hot, blocks_per_request=2)
+    groups = [
+        new_kv_cache_group(["attention"], spec),
+        new_kv_cache_group(["hot"], hot_layer),
+    ]
+    alignment = lcm(1152, hot.page_size_bytes // hot.block_size)
+    stride = _pool_bytes_per_block(_mock_vllm_config("BLHNC"), groups)
+    assert stride == 2 * alignment
+    layout = KVCacheLayout.BLHNC
+    tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
+    assert {tensor.block_stride for tensor in tensors} == {stride}
+    assert {tensor.size for tensor in tensors} == {3 * stride}
+
+
+@pytest.mark.parametrize("spec", [_full(), _mla(128)])
+def test_block_alignment_survives_grouping_and_rejects_non_positive(spec):
+    aligned = replace(spec, block_stride_alignment=512)
+    group = KVCacheGroup.from_layers({"a": full_layer(aligned), "b": full_layer(spec)})
+    assert group.kv_cache_specs["a"].block_stride_alignment == 512
+    assert group.kv_cache_specs["b"].block_stride_alignment is None
+    with pytest.raises(ValueError, match="must be positive"):
+        replace(spec, block_stride_alignment=0)
 
 
 def _pages(groups) -> dict[str, int]:
     return {
-        name: group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        else group.kv_cache_spec.page_size_bytes
+        name: spec.page_size_bytes
         for group in groups
-        for name in group.layer_names
+        for name, spec in group.kv_cache_specs.items()
     }
 
 
@@ -95,6 +132,119 @@ def _expected_bytes_per_block(groups) -> int:
 
 def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
+
+
+class _MambaLayer(MambaBase):
+    def __init__(self, spec: MambaSpec):
+        self.spec = spec
+        self.state_alignment = spec.state_alignment
+
+    def get_state_shape(self):
+        return self.spec.shapes
+
+    def get_state_dtype(self):
+        return self.spec.dtypes
+
+    @property
+    def mamba_type(self):
+        return self.spec.mamba_type
+
+
+def _mamba_states(cache, spec):
+    mixer = _MambaLayer(spec)
+    mixer.bind_kv_cache(cache)
+    return mixer.kv_cache
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_replayssm_low_head_packed_alignment(layout):
+    # Two-head STP leaves a 136-byte dt ring before the B ring.
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((3, 384), (2, 64, 128), (2, 17, 64), (2, 17), (1, 17, 128)),
+        dtypes=(
+            torch.bfloat16,
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+        ),
+        state_alignment=16,
+        block_stride_alignment=16,
+    )
+    with pytest.raises(AssertionError, match="page_size_padded must be aligned"):
+        replace(spec, page_size_padded=spec.state_content_size_bytes + 1)
+    padded_page_size = spec.state_content_size_bytes + 16
+    spec = replace(spec, page_size_padded=padded_page_size)
+    assert spec.page_size_bytes == padded_page_size
+    # Block-outer packing must also align an overlay with a larger, odd page.
+    other_bytes = (
+        2 * spec.page_size_bytes + 4
+        if layout.is_block_outermost
+        else spec.page_size_bytes
+    )
+    other = MambaSpec(block_size=16, shapes=((other_bytes,),), dtypes=(torch.int8,))
+    groups = [
+        new_kv_cache_group(["a0", "a1"], spec),
+        new_kv_cache_group(["other"], other),
+    ]
+    vllm_config = _mock_vllm_config(layout.name)
+    bytes_per_block = _get_kv_cache_bytes_per_block(groups, layout)
+    config = get_kv_cache_config_from_groups(
+        vllm_config,
+        groups,
+        4 * bytes_per_block,
+    )
+    assert config.num_blocks == 4
+    pages = allocate_kv_cache(config, torch.device("cpu"), layout)
+    states = [_mamba_states(pages[name], spec) for name in ("a0", "a1")]
+    for layer_states in states:
+        assert [tuple(state.shape[1:]) for state in layer_states] == list(spec.shapes)
+        for state in layer_states:
+            assert state[0].is_contiguous()
+            assert state.stride(0) * state.element_size() % 16 == 0
+            for slot in range(config.num_blocks):
+                assert state[slot].data_ptr() % 16 == 0
+    for index, state in enumerate((*states[0], *states[1]), start=1):
+        state[1].fill_(index)
+    for index, state in enumerate((*states[0], *states[1]), start=1):
+        assert torch.all(state[1] == index)
+
+
+def test_generic_mamba_keeps_unaligned_packed_layout():
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2,), (3,), (4,), (5,), (6,)),
+        dtypes=(torch.float32,) * 5,
+    )
+    state_sizes = [
+        prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(spec.shapes, spec.dtypes)
+    ]
+    spec = replace(
+        spec, page_size_padded=sum(state_sizes) + 2 * get_dtype_size(torch.float32)
+    )
+    assert spec.state_content_size_bytes == sum(state_sizes)
+    assert spec.page_size_bytes == spec.page_size_padded
+    assert spec.get_block_stride_alignment() == 1
+    pages = torch.zeros((3, 1, 1, spec.page_size_bytes), dtype=torch.int8)
+    states = _mamba_states(pages, spec)
+    offset = 0
+    for state, size in zip(states, state_sizes):
+        assert state.data_ptr() - pages.data_ptr() == offset
+        assert state.stride(0) * state.element_size() == spec.page_size_bytes
+        offset += size
+
+
+def test_mamba_grouping_allows_different_state_shapes_with_equal_page_size():
+    spec = MambaSpec(
+        block_size=2,
+        shapes=((8,), (12,), (4,), (4,), (4,)),
+        dtypes=(torch.float32,) * 5,
+    )
+    other = replace(spec, shapes=(*spec.shapes[:2], (1, 4), *spec.shapes[3:]))
+    assert other.page_size_bytes == spec.page_size_bytes
+    assert MambaManager.can_share_block_table([spec, other])
 
 
 MAIN_KV_PAGE_BYTES = 2_048
@@ -118,41 +268,50 @@ def _compressor_state_name(layer_index: int) -> str:
 def _make_csa_linear_specs(
     num_mamba: int = 7,
     num_tuples: int = NUM_CACHE_TUPLES,
-) -> dict[str, KVCacheSpec]:
-    specs: dict[str, KVCacheSpec] = {}
+    mamba_cache_mode: str = "none",
+) -> dict[str, KVCacheLayerConfig]:
+    specs: dict[str, KVCacheLayerConfig] = {}
     for layer_index in range(num_mamba):
-        specs[f"model.layers.{layer_index}.linear_attn"] = MambaSpec(
-            block_size=16,
-            shapes=((32,),),
-            dtypes=(torch.bfloat16,),
+        specs[f"model.layers.{layer_index}.linear_attn"] = MambaManager.layer_config(
+            MambaSpec(block_size=16, shapes=((32,),), dtypes=(torch.bfloat16,)),
+            mamba_cache_mode=mamba_cache_mode,
         )
-    specs["model.layers.0.ple"] = MambaSpec(
-        block_size=16,
-        shapes=((24,),),
-        dtypes=(torch.bfloat16,),
-        tp_replicated=True,
+    specs["model.layers.0.ple"] = MambaManager.layer_config(
+        MambaSpec(
+            block_size=16,
+            shapes=((24,),),
+            dtypes=(torch.bfloat16,),
+            tp_replicated=True,
+        ),
+        mamba_cache_mode=mamba_cache_mode,
     )
     for layer_index in range(num_tuples):
-        specs[_main_kv_name(layer_index)] = FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=2,
-            head_size=16,
-            head_size_v=16,
-            dtype=torch.bfloat16,
+        specs[_main_kv_name(layer_index)] = full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=16,
+                head_size_v=16,
+                dtype=torch.bfloat16,
+            )
         )
-        specs[_compressed_name(layer_index)] = MLAAttentionSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=16,
-            dtype=torch.bfloat16,
-            tokens_per_state=4,
+        specs[_compressed_name(layer_index)] = full_layer(
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+            )
         )
-        specs[_compressor_state_name(layer_index)] = CircularBufferSpec(
-            block_size=4,
-            num_kv_heads=1,
-            head_size=8,
-            head_size_v=0,
-            dtype=torch.bfloat16,
+        specs[_compressor_state_name(layer_index)] = CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=8,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+            )
         )
     return specs
 
@@ -184,7 +343,7 @@ class TestCSALinearGrouping:
         """(group, per-layer mamba spec) for every group holding mamba state."""
         out = []
         for group in groups:
-            spec = next(iter(iter_layer_specs(group.kv_cache_spec)))
+            spec = next(iter(group.kv_cache_specs.values()))
             if isinstance(spec, MambaSpec):
                 out.append((group, spec))
         return out
@@ -215,18 +374,18 @@ class TestCSALinearGrouping:
                 *(_compressed_name(i) for i in range(NUM_CACHE_TUPLES)),
             ]
         )
-        assert owner.kv_cache_spec.prefix_cacheable
+        assert owner.prefix_cacheable
 
         scratch = next(g for g in groups if _compressor_state_name(0) in g.layer_names)
         assert scratch.layer_names == [
             _compressor_state_name(i) for i in range(NUM_CACHE_TUPLES)
         ]
-        assert not scratch.kv_cache_spec.prefix_cacheable
+        assert not scratch.prefix_cacheable
 
     def test_every_group_fits_one_packed_block(self):
         config = _shared_layout_config()
         groups = get_kv_cache_groups(config, _make_csa_linear_specs())
-        bytes_per_block = _get_kv_cache_bytes_per_block(groups)
+        bytes_per_block = _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
 
         pages = _pages(groups)
         for group in groups:
@@ -248,7 +407,10 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
+        config.cache_config.mamba_cache_mode = "align"
+        groups = get_kv_cache_groups(
+            config, _make_csa_linear_specs(mamba_cache_mode="align")
+        )
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
         )
@@ -262,9 +424,7 @@ class TestCSALinearGrouping:
         )
         blocks = manager.create_kv_cache_blocks(
             tuple(
-                manager.block_pool.get_new_blocks(3)
-                if group.kv_cache_spec.prefix_cacheable
-                else []
+                manager.block_pool.get_new_blocks(3) if group.prefix_cacheable else []
                 for group in scheduler_config.kv_cache_groups
             )
         )
@@ -272,7 +432,7 @@ class TestCSALinearGrouping:
         scratch_index = next(
             i
             for i, group in enumerate(scheduler_config.kv_cache_groups)
-            if not group.kv_cache_spec.prefix_cacheable
+            if not group.prefix_cacheable
         )
         assert truncated.blocks[scratch_index] == []
 
@@ -281,12 +441,7 @@ class TestCSALinearGrouping:
         config.cache_config.enable_prefix_caching = True
         config.cache_config.prefix_match_unit = 16
         config.cache_config.mamba_cache_mode = "align"
-        specs = {
-            name: replace(spec, mamba_cache_mode="align")
-            if isinstance(spec, MambaSpec)
-            else spec
-            for name, spec in _make_csa_linear_specs(num_tuples=1).items()
-        }
+        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
@@ -303,12 +458,7 @@ class TestCSALinearGrouping:
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         config.cache_config.mamba_cache_mode = "align"
-        specs = {
-            name: replace(spec, mamba_cache_mode="align")
-            if isinstance(spec, MambaSpec)
-            else spec
-            for name, spec in _make_csa_linear_specs(num_tuples=1).items()
-        }
+        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
@@ -321,26 +471,32 @@ class TestCSALinearGrouping:
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         specs = {
-            "compressed.4": MLAAttentionSpec(
-                block_size=256,
-                num_kv_heads=1,
-                head_size=16,
-                dtype=torch.bfloat16,
-                tokens_per_state=4,
+            "compressed.4": full_layer(
+                MLAAttentionSpec(
+                    block_size=256,
+                    num_kv_heads=1,
+                    head_size=16,
+                    dtype=torch.bfloat16,
+                    tokens_per_state=4,
+                )
             ),
-            "compressed.128": MLAAttentionSpec(
-                block_size=256,
-                num_kv_heads=1,
-                head_size=16,
-                dtype=torch.bfloat16,
-                tokens_per_state=128,
+            "compressed.128": full_layer(
+                MLAAttentionSpec(
+                    block_size=256,
+                    num_kv_heads=1,
+                    head_size=16,
+                    dtype=torch.bfloat16,
+                    tokens_per_state=128,
+                )
             ),
-            "compressor_state.4": SlidingWindowMLASpec(
-                block_size=4,
-                num_kv_heads=1,
-                head_size=8,
-                head_size_v=0,
-                dtype=torch.bfloat16,
+            "compressor_state.4": sliding_window_layer(
+                MLAAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=8,
+                    head_size_v=0,
+                    dtype=torch.bfloat16,
+                ),
                 sliding_window=8,
             ),
         }
@@ -365,45 +521,109 @@ class TestCSALinearGrouping:
         specs = {}
         if wide == "unbalanced_attention":
             for i in range(3):
-                specs[f"wide.{i}"] = _mla(1024)
-            specs["wide.odd"] = _mla(800)
+                specs[f"wide.{i}"] = full_layer(_mla(1024))
+            specs["wide.odd"] = full_layer(_mla(800))
         else:
-            specs["wide.state"] = MambaSpec(
-                block_size=16,
-                shapes=((51_200,),),
-                dtypes=(torch.bfloat16,),
-                tp_replicated=True,
+            specs["wide.state"] = MambaManager.layer_config(
+                MambaSpec(
+                    block_size=16,
+                    shapes=((51_200,),),
+                    dtypes=(torch.bfloat16,),
+                    tp_replicated=True,
+                )
             )
         # Mixed and balanced, but far narrower than the bucket above.
         for i in range(10):
-            specs[f"narrow.a.{i}"] = FullAttentionSpec(
-                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.uint8
+            specs[f"narrow.a.{i}"] = full_layer(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=8, dtype=torch.uint8
+                )
             )
-            specs[f"narrow.b.{i}"] = FullAttentionSpec(
-                block_size=16, num_kv_heads=1, head_size=16, dtype=torch.uint8
+            specs[f"narrow.b.{i}"] = full_layer(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=16, dtype=torch.uint8
+                )
             )
         for i in range(100):
-            specs[f"gdn.{i}"] = MambaSpec(
-                block_size=16, shapes=((512,),), dtypes=(torch.bfloat16,)
+            specs[f"gdn.{i}"] = MambaManager.layer_config(
+                MambaSpec(block_size=16, shapes=((512,),), dtypes=(torch.bfloat16,))
             )
 
         groups = _get_packed_kv_cache_groups(config, specs)
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
-        assert _get_kv_cache_bytes_per_block(groups) == sum(
-            specs[name].page_size_bytes for name in specs if name.startswith("wide.")
+        assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
+            specs[name].spec.page_size_bytes
+            for name in specs
+            if name.startswith("wide.")
         )
         # That block holds every GDN state at once, so the repeat pattern alone
         # decides the split; the cap must not add groups on top of it.
         assert len(gdn) == 10
 
 
+class TestSlidingWindowBucketCap:
+    def test_sliding_window_bucket_is_capped_at_the_main_page(self):
+        """DeepSeek-V4.1 shape: 43 sliding-window MLA caches beside an
+        unbalanced 8-layer paged MLA bucket. Left whole, the SWA bucket would
+        set the block width and the MLA group would fill under a third of
+        every block; capped, it splits into groups no wider than the MLA
+        page."""
+        config = _shared_layout_config()
+        specs: dict[str, KVCacheLayerConfig] = {}
+        for layer, ratio in ((2, 2), (8, 2), (14, 2), (20, 1)):
+            specs[f"layers.{layer}.attn"] = full_layer(
+                MLAAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=584,
+                    dtype=torch.uint8,
+                    tokens_per_state=ratio,
+                    alignment=576,
+                )
+            )
+            specs[f"layers.{layer}.idx"] = full_layer(
+                MLAAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=132,
+                    dtype=torch.uint8,
+                    tokens_per_state=ratio,
+                    alignment=576,
+                )
+            )
+        for layer in range(43):
+            specs[f"layers.{layer}.swa"] = sliding_window_layer(
+                MLAAttentionSpec(
+                    block_size=64,
+                    num_kv_heads=1,
+                    head_size=584,
+                    dtype=torch.uint8,
+                    alignment=576,
+                ),
+                sliding_window=128,
+            )
+        groups = get_kv_cache_groups(config, specs)
+        pages = _pages(groups)
+        main = next(g for g in groups if "layers.2.attn" in g.layer_names)
+        main_bytes = sum(pages[n] for n in main.layer_names)
+        assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == main_bytes
+        swa_groups = [g for g in groups if g.layer_names[0].endswith(".swa")]
+        per_group = main_bytes // pages["layers.0.swa"]
+        assert len(swa_groups) == -(-43 // per_group)
+        for g in swa_groups:
+            assert sum(pages[n] for n in g.layer_names) <= main_bytes
+        assert sorted(n for g in swa_groups for n in g.layer_names) == sorted(
+            f"layers.{i}.swa" for i in range(43)
+        )
+
+
 class TestDensePacking:
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
-        assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
-            groups
-        )
+        assert _get_kv_cache_bytes_per_block(
+            groups, KVCacheLayout.BLHNC
+        ) == _expected_bytes_per_block(groups)
 
         config = get_kv_cache_config_from_groups(
             _mock_vllm_config("BLHNC"), groups, MEMORY
@@ -436,7 +656,7 @@ class TestDensePacking:
     @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
     def test_allocation_is_layout_invariant(self, layout):
         specs = {f"l.{i}": _full() for i in range(4)}
-        groups = [KVCacheGroupSpec(list(specs), _full())]
+        groups = [new_kv_cache_group(list(specs), _full())]
         config = get_kv_cache_config_from_groups(
             _mock_vllm_config(layout), groups, MEMORY
         )
@@ -476,6 +696,20 @@ class TestDensePacking:
             assert idx_tensor.offset == 2 * _mla(512).page_size_bytes
             assert mla_tensor.block_stride == block_stride
 
+    def test_layer_outer_pads_only_unaligned_pages(self):
+        """Layer-outer block strides are pages, so only an unaligned page pads."""
+        mla_page = _mla(512).page_size_bytes
+        idx = replace(_mla(128), block_stride_alignment=12288)
+        groups = [_uniform_group({"mla.0": _mla(512), "idx.0": idx})]
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, MEMORY
+        )
+        mla_tensor, idx_tensor = config.kv_cache_tensors
+        assert config.num_blocks == MEMORY // (mla_page + 12288)
+        assert (mla_tensor.block_stride, idx_tensor.block_stride) == (mla_page, 12288)
+        assert idx_tensor.offset == mla_page * config.num_blocks
+        _bind(config, "LBNHC")
+
     def test_overlaid_groups_alias_and_stay_isolated(self):
         groups, g1, g2 = _mixed_page_groups()
         # Overlay models resolve to a block-outer layout at backend selection (the
@@ -484,7 +718,9 @@ class TestDensePacking:
             _mock_vllm_config("BLNHC"), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
+        assert _pool_bytes_per_block(
+            _mock_vllm_config("BLNHC"), groups
+        ) == _expected_bytes_per_block(groups)
 
         views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)
@@ -548,3 +784,134 @@ class TestDensePacking:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestCompressorRingGroup:
+    def test_ring_beside_paged_groups_keeps_the_kv_block_as_scheduler_block(self):
+        """DeepSeek-V4.1 compressor state: a circular-buffer ring (capacity
+        8) beside 128-token paged MLA groups and 64-token SWA groups. The ring
+        claims one block per request, never hashes, and does not disturb the
+        scheduler/hash block sizes the paged groups imply."""
+        config = _shared_layout_config()
+        config.cache_config.enable_prefix_caching = True
+        specs: dict[str, KVCacheLayerConfig] = {
+            "layers.2.attn": full_layer(
+                MLAAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=584,
+                    dtype=torch.uint8,
+                    tokens_per_state=2,
+                    alignment=576,
+                )
+            ),
+            "layers.2.attn.compressor.state_cache": CircularBufferManager.layer_config(
+                AttentionSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=1024,
+                    head_size_v=0,
+                    dtype=torch.float32,
+                )
+            ),
+        }
+        for layer in range(4):
+            specs[f"layers.{layer}.attn.swa_cache"] = sliding_window_layer(
+                MLAAttentionSpec(
+                    block_size=64,
+                    num_kv_heads=1,
+                    head_size=584,
+                    dtype=torch.uint8,
+                    alignment=576,
+                ),
+                sliding_window=128,
+            )
+        groups = get_kv_cache_groups(config, specs)
+        ring_groups = [g for g in groups if "state_cache" in g.layer_names[0]]
+        assert len(ring_groups) == 1
+        assert not ring_groups[0].prefix_cacheable
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config,
+            groups,
+            available_memory=64
+            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
+        )
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 64)
+        manager = KVCacheManager(
+            generate_scheduler_kv_cache_config([kv_cache_config]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=64,
+            scheduler_block_size=128,
+        )
+        assert len(manager.coordinator.single_type_managers) == len(groups)
+
+
+class TestSWABoundedReplayGrouping:
+    def test_non_cacheable_swa_leaves_hits_to_the_paged_group(self):
+        """Under SWA bounded replay only the paged MLA group hashes (hash
+        block = its block) and the coordinator probes one spec group."""
+        config = _shared_layout_config()
+        config.cache_config.enable_prefix_caching = True
+        specs: dict[str, KVCacheLayerConfig] = {
+            "layers.2.attn": full_layer(
+                MLAAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=584,
+                    dtype=torch.uint8,
+                    tokens_per_state=2,
+                    alignment=576,
+                )
+            )
+        }
+        swa = sliding_window_layer(
+            MLAAttentionSpec(
+                block_size=32,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                alignment=576,
+            ),
+            sliding_window=128,
+            bounded_replay=True,
+        )
+        for layer in range(4):
+            specs[f"layers.{layer}.attn.swa_cache"] = swa
+
+        groups = get_kv_cache_groups(config, specs)
+        # The worker reads the replay window off the (packed) group specs to
+        # arm the window clamp; the wrapper must forward it like cacheability.
+        assert sorted((g.prefix_cacheable, g.prefix_replay_tokens) for g in groups) == [
+            (False, 128)
+        ] * 4 + [(True, 0)]
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config,
+            groups,
+            available_memory=64
+            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
+        )
+        manager = KVCacheManager(
+            generate_scheduler_kv_cache_config([kv_cache_config]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=128,
+            scheduler_block_size=128,
+        )
+        (group,) = manager.coordinator.attention_groups
+        assert group.manager_cls is FullAttentionManager
+
+        # Allocating and caching a request goes through every group's manager;
+        # the 32-token SWA group must skip hashing rather than assert on the
+        # 128-token hash block.
+        from tests.v1.core.utils import create_requests
+
+        request = create_requests(num_requests=1, num_tokens=256, block_size=128)[0]
+        assert manager.allocate_slots(request, 256) is not None
+        request.num_computed_tokens = 256
+        manager.cache_blocks(request, 256)
+        for single in manager.coordinator.single_type_managers:
+            cached = single.num_cached_block.get(request.request_id, 0)
+            assert cached == (
+                2 if single.prefix_cacheable(single.manager_config) else 0
+            )

@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
+    _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
@@ -17,8 +18,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
+    _is_attention_spec,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -41,10 +44,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Registration generation of each remote engine's loaded agent.
+        self._remote_registration_generations: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
-        """
-        Start loading by triggering non-blocking nixl_xfer.
+        """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
@@ -63,23 +67,26 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
-            # always store metadata for failure recovery
-            self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
+            # Full local hits and aborted cleanup only notify P; no recv is awaited.
+            # On a full local hit:
+            # - Notification failure must not fail the request: its KV is local.
+            # - Receive completion must not be reported: num_external_tokens == 0,
+            #   so the scheduler never entered WAITING_FOR_REMOTE_KVS to begin with.
+            # Aborted cleanup requests have already been removed from the scheduler.
+            if meta.awaiting_kvs or any(meta.local_block_ids):
+                self._recving_metadata[req_id] = meta
             self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
+            # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
+            # has nothing to send. Report the requests as sent right away so
+            # the scheduler-side aggregation (world_size workers, and any
+            # sibling connector inside a MultiConnector) still completes.
+            self._replicated_pcp_done_sending.update(metadata.reqs_to_send)
             return
 
         # Keep around the requests that have been part of a batch. This is
@@ -132,6 +139,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        if engine_id in self._invalid_remote_engines:
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+        generation = meta.remote.registration_generation
+        if self._remote_registration_generations.get(engine_id, 0) < generation:
+            # The remote registered its KV cache again, eg after a sleep.
+            if engine_id in self._remote_agents:
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
+            self._remote_registration_generations[engine_id] = generation
+        if engine_id not in self._remote_agents:
+            # Also re-handshakes queued requests that outlived invalid-peer cleanup.
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
@@ -143,7 +165,44 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            self._handle_failed_transfer(req_id, None)
+            # KV expiry is reported separately from transport failures, so only
+            # the state cleanup side of _handle_failed_transfer runs here.
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+
+        plan = self.tp_mappings[engine_id]
+        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+
+        dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
+        different_block_sizes = (
+            self.block_size != remote_info.remote_block_size
+            or remote_info.remote_physical_blocks_per_logical
+            != self._physical_blocks_per_logical_kv_block
+        )
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
+        local_block_ids = meta.local_physical_block_ids
+        if (
+            local_block_ids
+            and different_block_sizes
+            and not dcp_active
+            and meta.remote.num_tokens is None
+        ):
+            # P's block size is only known after the handshake, so this is the
+            # earliest point to reject a pull the blocks can't be paired for.
+            logger.error_once(
+                "Declining remote reads from engine %s: different P/D block "
+                "sizes require remote_num_tokens in kv_transfer_params. Make "
+                "the proxy forward it.",
+                engine_id,
+            )
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -154,23 +213,49 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Seed the entry so this rank still reports completion.
             self._recving_transfers.setdefault(req_id, [])
 
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        # One stage per PP rank of the remote; a PP=1 remote is a single stage.
+        stages = self._remote_stages[engine_id]
+        num_groups = len(meta.local_block_ids)
 
-        dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
-        local_block_ids = meta.local_physical_block_ids
-        local_region_groups = getattr(self, "region_group_ids", [])
-        remote_region_groups = getattr(self, "dst_region_group_ids", {}).get(
-            engine_id, local_region_groups
-        )
-        if local_region_groups != remote_region_groups:
+        def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
+            return [
+                list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
+                for g in range(num_groups)
+            ]
+
+        if not local_block_ids:
+            # Region expansion cannot index empty groups. Pass empty specs to
+            # _read_blocks so its existing cache-hit notification path runs.
+            read_specs = [
+                ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
+                for rank in plan.all_source_ranks
+            ]
+        elif not all(stage.pairs.groups_match for stage in stages.values()):
+            # The two sides put some layer in different cache groups: read each
+            # region at its own blocks. PP remotes must match cache groups.
+            stage = self._single_remote_stage(engine_id)
+            pairs = stage.pairs
+            remote_region_groups = stage.region_group_ids
+            local_region_groups = self.region_group_ids or remote_region_groups
+            if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
+                raise NotImplementedError(
+                    "Different NIXL cache-group layouts need the same KV regions "
+                    "on both sides"
+                )
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
-            assert len(plan.all_source_ranks) == 1
+            if dcp_active and self._dcp_replicated_groups:
+                raise NotImplementedError(
+                    "Region-mapped NIXL pulls with DCP do not support "
+                    "DCP-replicated MLA draft groups"
+                )
+            if self.block_size != remote_info.remote_block_size:
+                raise NotImplementedError(
+                    "Region-mapped NIXL transfers require matching physical block sizes"
+                )
             remote_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
@@ -178,15 +263,77 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_by_region = self._block_ids_by_region(
                 remote_physical_block_ids, remote_region_groups
             )
+            local_by_region = self._block_ids_by_region(
+                local_block_ids, local_region_groups
+            )
+            num_computed_blocks = None
+            num_remote_blocks = None
+            if (
+                meta.remote.num_tokens is not None
+                and meta.local_num_computed_blocks
+                and all(group >= 0 for group in local_region_groups)
+                and all(group >= 0 for group in remote_region_groups)
+            ):
+                transfer_groups = self.kv_cache_config.transfer_group_ids
+                num_computed_blocks = [
+                    meta.local_num_computed_blocks[transfer_groups[group]]
+                    * self._physical_blocks_per_logical_kv_block
+                    for group in local_region_groups
+                ]
+                num_remote_blocks = cdiv(
+                    meta.remote.num_tokens, remote_info.remote_block_size
+                )
+            elif any(local_by_region) and (
+                dcp_active
+                or remote_info.remote_physical_blocks_per_logical
+                != self._physical_blocks_per_logical_kv_block
+            ):
+                raise NotImplementedError(
+                    "Region-mapped pulls with DCP or different logical block sizes "
+                    "require remote_num_tokens, per-group prefix counts "
+                    "and unshared regions"
+                )
             read_specs = [
                 ReadSpec(
-                    remote_rank=plan.all_source_ranks[0],
-                    local_block_ids=self._block_ids_by_region(
-                        local_block_ids, local_region_groups
+                    rank,
+                    *self._apply_prefix_caching_by_region(
+                        local_by_region,
+                        remote_by_region,
+                        num_computed_blocks=num_computed_blocks,
+                        num_remote_blocks=num_remote_blocks,
+                        remote_rank=rank,
+                        remote_dcp_size=remote_info.remote_dcp_size,
                     ),
-                    remote_block_ids=remote_by_region,
                     block_ids_by_region=True,
                 )
+                for rank in plan.all_source_ranks
+            ]
+            meta.region_blocks_to_zero = [
+                list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
+                for r, blocks in enumerate(local_by_region)
+            ]
+        elif not dcp_active and different_block_sizes:
+            assert meta.remote.num_tokens is not None
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            local_ids, remote_ids, meta.covered_sub_blocks = (
+                self._pair_blocks_by_last_token(
+                    meta.local_physical_block_ids,
+                    meta.remote.block_ids,
+                    meta.remote.num_tokens,
+                    block_size_ratio,
+                    remote_info.remote_physical_blocks_per_logical,
+                )
+            )
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=group_ids(local_ids, rank),
+                    remote_block_ids=group_ids(remote_ids, rank),
+                )
+                for rank in plan.all_source_ranks
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
@@ -194,13 +341,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_logical_block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
-            num_groups = len(meta.local_block_ids)
-
-            def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
-                return [
-                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
-                    for g in range(num_groups)
-                ]
 
             read_specs = []
             for rank in plan.all_source_ranks:
@@ -208,7 +348,24 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_ids = group_ids(meta.local_block_ids, rank)
                     remote_ids = group_ids(remote_logical_block_ids, rank)
                     for g in range(num_groups):
-                        if not local_ids[g]:
+                        if not local_ids[g] or not _is_attention_spec(
+                            self._group_spec_types[g]
+                        ):
+                            continue
+                        if g in self._dcp_replicated_groups:
+                            # Every remote rank holds the whole group: read it
+                            # from one rank, paired as a non-DCP read (end-trim
+                            # the remote to the blocks D still needs).
+                            ranks = plan.source_ranks_per_group[g]
+                            if rank != ranks[self.tp_rank % len(ranks)]:
+                                local_ids[g] = remote_ids[g] = []
+                                continue
+                            num_local = len(local_ids[g])
+                            assert num_local <= len(remote_ids[g]), (
+                                f"Group {g}: decode needs {num_local} blocks, "
+                                f"prefill sent {len(remote_ids[g])}"
+                            )
+                            remote_ids[g] = remote_ids[g][-num_local:]
                             continue
                         local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
                             local_ids[g],
@@ -228,6 +385,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_ids,
                         remote_info.remote_physical_blocks_per_logical,
                     )
+                    # DCP requires equal logical block sizes, so the lists start
+                    # and end at the same token and pair by position.
+                    if block_size_ratio > 1:
+                        local_physical_ids, remote_physical_ids = (
+                            self._map_block_ids_for_block_size_ratio(
+                                local_physical_ids,
+                                remote_physical_ids,
+                                block_size_ratio,
+                            )
+                        )
                 else:
                     local_physical_ids = group_ids(meta.local_physical_block_ids, rank)
                     remote_physical_ids = group_ids(meta.remote.block_ids, rank)
@@ -279,22 +446,29 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     else None
                 )
 
-            # Destination handle: remote_engine_id -> remote_rank -> handle.
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
-            ]
-
-            if not self._read_blocks(
-                read_spec=spec,
-                request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_xfer_side_handle=local_xfer_side_handle,
-                local_dram_handle=local_dram_handle,
-                remote_xfer_side_handle=remote_xfer_side_handle,
-                expected_consumers=plan.local_consumers,
-            ):
-                return
+            # Read every stage of the remote rank; each holds a slice of the
+            # layers when the remote is pipeline-parallel.
+            for stage in stages.values():
+                # Once a read routes the request to failure reporting, the
+                # scheduler may free and reuse its blocks, so no sibling READs
+                # may be posted (and P must not be notified).
+                if not self._read_blocks(
+                    read_spec=spec,
+                    request_id=req_id,
+                    dst_engine_id=engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    local_xfer_side_handle=local_xfer_side_handle,
+                    local_dram_handle=local_dram_handle,
+                    remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
+                    expected_consumers=plan.local_consumers,
+                    awaiting_kvs=meta.awaiting_kvs,
+                    region_pairs=stage.pairs,
+                    remote_region_num_blocks=stage.region_num_blocks,
+                    remote_agent=self._remote_agents[engine_id][
+                        (stage.pp_rank, spec.remote_rank)
+                    ],
+                ):
+                    return
 
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
             # ..but we still need to notify the other remote ranks that we
@@ -304,8 +478,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != (0, read_specs[0].remote_rank):
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                # Every PP stage of the chosen rank was read and notified.
+                if rank_to_notify[1] != read_specs[0].remote_rank:
+                    try:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                    except Exception as e:
+                        self._log_failure(
+                            failure_type="notification_failed",
+                            msg="Remote rank will not update request state. "
+                            "This may indicate network issues.",
+                            req_id=req_id,
+                            error=e,
+                            dst_engine_id=meta.remote.engine_id,
+                            remote_rank=rank_to_notify[1],
+                            remote_agent_name=agent,
+                        )
+                        self.xfer_stats.record_failed_notification()
 
     def _read_blocks(
         self,
@@ -317,10 +505,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_dram_handle: int | None,
         remote_xfer_side_handle: int,
         expected_consumers: int,
+        awaiting_kvs: bool,
+        region_pairs: _RegionPairs,
+        remote_region_num_blocks: list[int],
+        remote_agent: str,
     ) -> bool:
-        """
-        Post a READ point-to-point xfer request from a single local worker to
+        """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
+
+        The caller resolves the remote region mapping, block counts and
+        notification agent.
+
+        Returns True when the read was posted (or was unnecessary), False
+        when the request was routed to failure reporting — the caller must
+        not post further transfers for it.
         """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
@@ -331,16 +529,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
-        if block_size_ratio > 1:
-            if read_spec.block_ids_by_region:
-                raise NotImplementedError(
-                    "Region-mapped NIXL transfers require matching physical block sizes"
-                )
-            local_block_ids, remote_block_ids = (
-                self._map_block_ids_for_block_size_ratio(
-                    local_block_ids, remote_block_ids, block_size_ratio
-                )
-            )
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -353,14 +541,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Number of local workers that will notify this producer worker.
         # Propagate on notification so dst worker can wait before freeing.
         notif_id = f"{remote_request_id}:{expected_consumers}".encode()
+        pairs = region_pairs
+        by_region = read_spec.block_ids_by_region
 
-        # Full prefix cache hit: do not need to read remote blocks,
-        # just notify P worker that we have the blocks we need.
-        if not any(len(group) > 0 for group in local_block_ids):
+        # Full prefix cache hit, or none of the blocks are in a cache group the
+        # remote holds layers of: just notify P that we have the blocks we need.
+        read_keys = (
+            range(len(local_block_ids))
+            if self._has_mamba
+            else set(pairs.local if by_region else pairs.group)
+        )
+        if not any(
+            len(ids) > 0 and key in read_keys for key, ids in enumerate(local_block_ids)
+        ):
             # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
             try:
-                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+                self.nixl_wrapper.send_notif(remote_agent, notif_msg=notif_id)
             except Exception as e:
                 self._log_failure(
                     failure_type="notification_failed",
@@ -370,17 +566,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     dst_engine_id=dst_engine_id,
                     remote_rank=remote_rank,
-                    remote_agent_name=agent_name,
+                    remote_agent_name=remote_agent,
                 )
                 self.xfer_stats.record_failed_notification()
+            # Report even on notification failure: the KV is already local, and
+            # an unreported parked request would hold its blocks forever.
+            # Notify-only recvs must stay unreported (scheduler asserts).
+            if awaiting_kvs:
+                self._recving_transfers.setdefault(request_id, [])
             return True
 
-        if read_spec.block_ids_by_region:
-            local_block_ids, remote_block_ids = self._apply_prefix_caching_by_region(
-                decode_block_ids=local_block_ids,
-                prefill_block_ids=remote_block_ids,
-            )
-        else:
+        if not read_spec.block_ids_by_region:
             assert (
                 len(remote_block_ids)
                 == len(local_block_ids)
@@ -402,40 +598,25 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
+        # Get descs ids. Pair k reads remote region pairs.remote[k] into local
+        # region pairs.local[k], at its cache group's blocks (its own regions'
+        # blocks for region-mapped reads).
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
-            region_group_ids=(
-                list(range(self.num_regions))
-                if read_spec.block_ids_by_region
-                else self.dst_region_group_ids[dst_engine_id]
-            ),
-            uses_region_group_mapping=(
-                self.num_regions > 1
-                if read_spec.block_ids_by_region
-                else self.dst_uses_region_group_mapping[dst_engine_id]
-            ),
+            region_num_blocks=remote_region_num_blocks,
+            pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
+            ssm_regions=pairs.remote_ssm_regions,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
-            region_group_ids=(
-                list(range(self.num_regions))
-                if read_spec.block_ids_by_region
-                else self.region_group_ids
-            ),
-            uses_region_group_mapping=(
-                self.num_regions > 1
-                if read_spec.block_ids_by_region
-                else self._uses_region_group_mapping
-            ),
+            region_num_blocks=self.region_num_blocks or None,
+            pairs=(pairs.local, pairs.local if by_region else pairs.group),
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
@@ -452,7 +633,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
-                    notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
+                    notif_agent=remote_agent,
                     notif_id=notif_id,
                 )
                 return True
@@ -472,16 +653,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recving_transfers[request_id].append(handle)
             return True
         except Exception as e:
-            # mark all (logical) blocks for this request as invalid
             self._log_failure(
                 failure_type="transfer_setup_failed",
                 req_id=request_id,
-                msg="Marking blocks as invalid",
+                msg="Deferring failure reporting until outstanding transfers finish",
                 error=e,
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            self._handle_failed_transfer(request_id, handle)
+            if not self._handle_failed_transfer(
+                request_id, handle, self._recv_failures
+            ):
+                assert handle is not None
+                self._recving_transfers[request_id].append(handle)
             return False
 
     def _read_blocks_mixed(
@@ -503,7 +687,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
@@ -523,24 +716,25 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
         except Exception:
             for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
+                if not self._try_release_xfer_handle(request_id, handle):
+                    self._recving_transfers[request_id].append(handle)
             raise
 
         self._pending_recv_notifs.setdefault(request_id, []).append(
             (notif_agent, notif_id)
         )
-        for index, handle in enumerate(handles):
+        for i, handle in enumerate(handles):
             try:
                 self.nixl_wrapper.transfer(handle)
             except Exception:
-                for unstarted in handles[index:]:
-                    self.nixl_wrapper.release_xfer_handle(unstarted)
+                for unstarted in handles[i:]:
+                    if not self._try_release_xfer_handle(request_id, unstarted):
+                        self._recving_transfers[request_id].append(unstarted)
                 raise
             self._recving_transfers[request_id].append(handle)
 
     def _get_new_notifs(self) -> set[str]:
-        """
-        Get req_ids which got a remote xfer message. When multiple consumers
+        """Get req_ids which got a remote xfer message. When multiple consumers
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 
@@ -563,6 +757,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "

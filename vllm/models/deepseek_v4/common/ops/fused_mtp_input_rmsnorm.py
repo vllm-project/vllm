@@ -22,11 +22,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -53,7 +53,7 @@ def _rmsnorm_row(
 class FusedMTPInputRMSNormKernel(
     VllmTritonJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         hidden: int
@@ -118,7 +118,7 @@ class FusedMTPInputRMSNormKernel(
                 HIDDEN,
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -234,7 +234,7 @@ class FusedMTPInputRMSNormKernel(
 class MTPSharedHeadRMSNormKernel(
     VllmTritonJitKernel["MTPSharedHeadRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         hidden: int
@@ -265,7 +265,7 @@ class MTPSharedHeadRMSNormKernel(
             HIDDEN,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

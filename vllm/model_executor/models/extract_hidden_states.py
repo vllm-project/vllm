@@ -24,7 +24,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -32,10 +32,12 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
+    is_quantized_kv_cache,
 )
 
 ########## Custom Ops ########
@@ -45,8 +47,7 @@ def unified_kv_cache_update(
     to_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
+    """Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
@@ -127,10 +128,6 @@ class CacheOnlyAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:
         return CacheOnlyAttentionMetadataBuilder
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
@@ -159,11 +156,6 @@ class CacheOnlyAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CacheOnlyAttentionMetadata:
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            raise NotImplementedError(
-                "Cascade attention not supported by CacheOnlyAttention"
-            )
         causal = common_attn_metadata.causal
         if not causal:
             raise NotImplementedError(
@@ -294,6 +286,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
 
         Returns:
             Dummy output tensor (not used)
+
         """
         # Note: we set num_heads to num_hidden_layers and
         # head_size to hidden_size for hidden states storage
@@ -311,14 +304,15 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Re-read block_size: hybrid models may bump it after __init__.
-        return HiddenStateCacheSpec(
+        spec = HiddenStateCacheSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
         )
+        return FullAttentionManager.layer_config(spec)
 
 
 ############ ExtractHiddenStatesModel definition ##########
@@ -373,8 +367,8 @@ class ExtractHiddenStatesModel(nn.Module):
 
         Returns:
             Tuple of (dummy_output, dummy_output) - both unused
-        """
 
+        """
         # Call dummy attention layer to cache hidden states
         # Output is ignored - we only care about the KV cache side effects
         _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)

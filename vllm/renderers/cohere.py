@@ -3,86 +3,86 @@
 """Cohere prompt renderer.
 
 Templates the Cohere Command-family prompt formats (cmd3 / cmd4) using
-the ``cohere_melody`` Rust bindings instead of Jinja. Enabled by
-passing ``--tokenizer-mode cohere`` on the engine; tokenization itself
+the `cohere_melody` Rust bindings instead of Jinja. Enabled by
+passing `--tokenizer-mode cohere` on the engine; tokenization itself
 still flows through the cached HuggingFace tokenizer.
 
-The renderer's client surface is ``chat_template_kwargs`` (vLLM's
+The renderer's client surface is `chat_template_kwargs` (vLLM's
 generic passthrough for template-time inputs). It is fed by two
 different code paths, which speak different vocabularies:
 
-1. :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` --
-   translates a native `Cohere Chat v2 request
-   <https://docs.cohere.com/reference/chat>`__ into
-   ``chat_template_kwargs``.
-2. :class:`OpenAIServingChat` -- forwards whatever the client puts in
-   ``request.chat_template_kwargs`` directly, without translation.
+1. `vllm.entrypoints.cohere.serving.CohereServingChatV2` --
+   translates a native
+   [Cohere Chat v2 request](https://docs.cohere.com/reference/chat) into
+   `chat_template_kwargs`.
+2. `OpenAIServingChat` -- forwards whatever the client puts in
+   `request.chat_template_kwargs` directly, without translation.
 
 Accordingly the renderer accepts keys from both vocabularies.
 
 **Cohere Chat v2 request fields** (populated automatically by
-``CohereServingChatV2``; a direct ``chat_template_kwargs`` caller may
+`CohereServingChatV2`; a direct `chat_template_kwargs` caller may
 also pass them):
 
-* ``documents``: list of documents (v2 ``documents``)
-* ``tools``: list of tools (v2 ``tools``)
-* ``safety_mode``: v2 ``safety_mode`` (``CONTEXTUAL`` / ``STRICT`` /
-  ``NONE``) -- forwarded to melody's cmd3 ``safety_mode`` slot;
+* `documents`: list of documents (v2 `documents`)
+* `tools`: list of tools (v2 `tools`)
+* `safety_mode`: v2 `safety_mode` (`CONTEXTUAL` / `STRICT` /
+  `NONE`) -- forwarded to melody's cmd3 `safety_mode` slot;
   lowercased.
-* ``citation_options``: v2 ``citation_options``. Its ``.mode``
-  (``ENABLED`` / ``DISABLED`` / ``FAST`` / ``ACCURATE`` / ``OFF``) is
-  normalized into melody's cmd3 ``citation_quality`` (``on`` / ``off``)
-  and cmd4 ``grounding`` (``enabled`` / ``disabled`` / ``unknown``)
+* `citation_options`: v2 `citation_options`. Its `.mode`
+  (`ENABLED` / `DISABLED` / `FAST` / `ACCURATE` / `OFF`) is
+  normalized into melody's cmd3 `citation_quality` (`on` / `off`)
+  and cmd4 `grounding` (`enabled` / `disabled` / `unknown`)
   slots. cmd4 has no fast/accurate distinction at the prompt-template
   layer -- both mean grounding-on.
-* ``response_format``: v2 ``response_format`` (``json_object`` /
-  ``json_schema``) -- mapped onto melody's ``json_mode`` /
-  ``json_schema`` config slots.
-* ``thinking``: v2 ``thinking``; its ``.type`` (``enabled`` /
-  ``disabled``) becomes melody's ``reasoning_type``.
+* `response_format`: v2 `response_format` (`json_object` /
+  `json_schema`) -- mapped onto melody's `json_mode` /
+  `json_schema` config slots.
+* `thinking`: v2 `thinking`; its `.type` (`enabled` /
+  `disabled`) becomes melody's `reasoning_type`.
 
 **Melody template-config knobs** (accepted for direct-passthrough
 callers; not part of the Cohere Chat v2 surface):
 
-* ``cohere_format``: renderer selector, ``cmd3`` or ``cmd4`` (default
-  ``cmd4``).
-* ``template_id``: pick one of melody's built-in template variants.
-* ``available_tools``: melody's own name for tools; takes precedence
-  over ``tools`` when both are set.
-* ``reasoning_type``: direct ``enabled`` / ``disabled`` toggle;
-  overrides derivation from ``thinking.type``.
-* ``dev_instruction``: developer-instruction override.
-* ``json_mode`` / ``json_schema``: direct structured-output toggles;
-  override derivation from ``response_format``.
-* cmd3-only: ``citation_quality`` (``on`` / ``off``), ``skip_preamble``.
-* cmd4-only: ``grounding`` (``enabled`` / ``disabled`` / ``unknown``;
-  overrides derivation from ``citation_options.mode``),
-  ``platform_instruction``.
+* `cohere_format`: renderer selector, `cmd3` or `cmd4` (default
+  `cmd4`).
+* `template_id`: pick one of melody's built-in template variants.
+* `available_tools`: melody's own name for tools; takes precedence
+  over `tools` when both are set.
+* `reasoning_type`: direct `enabled` / `disabled` toggle;
+  overrides derivation from `thinking.type`.
+* `dev_instruction`: developer-instruction override.
+* `json_mode` / `json_schema`: direct structured-output toggles;
+  override derivation from `response_format`.
+* cmd3-only: `citation_quality` (`on` / `off`), `skip_preamble`.
+* cmd4-only: `grounding` (`enabled` / `disabled` / `unknown`;
+  overrides derivation from `citation_options.mode`),
+  `platform_instruction`.
 
-**Rejected inputs**: ``template_jinja`` and ``template`` are Cohere's
+**Rejected inputs**: `template_jinja` and `template` are Cohere's
 own inlets for raw Jinja template source. They are valid at Cohere's
 API surface but not at vLLM's -- raw template source must flow through
-the standard ``chat_template`` request field (guarded by
-``--trust-request-chat-template``), which this renderer forwards to
-melody as ``template_jinja``. Setting these keys explicitly in
-``chat_template_kwargs`` raises ``ValueError`` so client
+the standard `chat_template` request field (guarded by
+`--trust-request-chat-template`), which this renderer forwards to
+melody as `template_jinja`. Setting these keys explicitly in
+`chat_template_kwargs` raises `ValueError` so client
 misconfiguration surfaces loudly.
 
-**Everything else** in ``chat_template_kwargs`` is forwarded verbatim
-to melody as ``additional_template_fields`` and becomes accessible as
+**Everything else** in `chat_template_kwargs` is forwarded verbatim
+to melody as `additional_template_fields` and becomes accessible as
 Jinja variables inside the template. This matches vLLM's documented
-contract for ``chat_template_kwargs`` ("kwargs accessible by the
-template"), so e.g. ``chat_template_kwargs={"reasoning_effort":
-"low"}`` resolves ``{{ reasoning_effort }}`` inside cmd3 / cmd4
+contract for `chat_template_kwargs` ("kwargs accessible by the
+template"), so e.g. `chat_template_kwargs={"reasoning_effort":
+"low"}` resolves `{{ reasoning_effort }}` inside cmd3 / cmd4
 templates.
 
 Citations produced by Cohere models are surfaced through the
-Cohere-scoped ``CohereChatMessage.citations`` /
-``CohereDeltaMessage.citations`` fields (see
-:mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
-``cohere2`` reasoning parser. The base OpenAI ``ChatMessage`` /
-``DeltaMessage`` keep their declared schemas unchanged; the response
-envelope declares them as ``SerializeAsAny[...]`` so the subclass
+Cohere-scoped `CohereChatMessage.citations` /
+`CohereDeltaMessage.citations` fields (see
+`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
+`cohere2` reasoning parser. The base OpenAI `ChatMessage` /
+`DeltaMessage` keep their declared schemas unchanged; the response
+envelope declares them as `SerializeAsAny[...]` so the subclass
 fields survive JSON serialization.
 """
 
@@ -90,17 +90,17 @@ from __future__ import annotations
 
 import copy
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -116,12 +116,12 @@ _DEFAULT_FORMAT = "cmd4"
 _VALID_FORMATS = ("cmd3", "cmd4")
 
 
-class MelodyContentType(str, Enum):
+class MelodyContentType(StrEnum):
     """Wire-format discriminator for melody content blocks.
 
     These strings are what the cmd3 / cmd4 Jinja templates check against
-    in ``message.content[0].type`` (e.g. the ``thinking`` branch in
-    ``cmd4-v1.jinja``). Keep new values in sync with melody's template
+    in `message.content[0].type` (e.g. the `thinking` branch in
+    `cmd4-v1.jinja`). Keep new values in sync with melody's template
     schema.
     """
 
@@ -165,7 +165,7 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 # melody-shape content list the renderer emits.
 #
 # Motivation: OpenAI's ``ChatCompletionContentPartParam`` union (in
-# ``vllm/entrypoints/chat_utils.py``) only allows ``text`` / ``image_url``
+# ``vllm/renderers/chat_utils.py``) only allows ``text`` / ``image_url``
 # / ``audio`` / ``video`` / ``file`` content parts on tool messages, so
 # ``{"type": "document", "document": {...}}`` blocks -- valid in Cohere
 # v2 -- get rejected by vLLM's shared chat validator before they can
@@ -244,7 +244,7 @@ def _try_import_melody():
         raise ImportError(
             "The `cohere` tokenizer/renderer mode requires the "
             "`cohere_melody` package. Install it via "
-            "`pip install 'cohere-melody>=0.11.1'` or build from "
+            "`pip install 'cohere-melody>=0.14.0'` or build from "
             "https://github.com/cohere-ai/melody."
         ) from e
 
@@ -272,9 +272,9 @@ _CMD4_GROUNDING_FROM_MODE = {
 def _normalize_cmd4_grounding(value: Any) -> str:
     """Coerce a user-facing grounding/citation mode to melody's vocab.
 
-    Raises ``ValueError`` rather than letting an unrecognized value
-    slip through to ``render_cmd4`` and surface as a generic
-    ``Invalid config: grounding`` from melody.
+    Raises `ValueError` rather than letting an unrecognized value
+    slip through to `render_cmd4` and surface as a generic
+    `Invalid config: grounding` from melody.
     """
     out = _CMD4_GROUNDING_FROM_MODE.get(value.lower())
     if out is None:
@@ -290,19 +290,19 @@ def _normalize_cmd4_grounding(value: Any) -> str:
 def _role_to_melody(role: str) -> str:
     """Map an OpenAI role to the role string melody expects.
 
-    The cmd3 / cmd4 jinja templates only recognize ``system``, ``user``,
-    ``assistant``/``chatbot``, and ``tool``: any other role is silently
+    The cmd3 / cmd4 jinja templates only recognize `system`, `user`,
+    `assistant`/`chatbot`, and `tool`: any other role is silently
     dropped by the template's role-dispatch chain (no fallback branch),
     which produces a malformed prompt without any error. We therefore
     refuse unknown roles up front rather than letting them disappear.
 
     Aliases:
 
-    * ``assistant`` -> ``chatbot`` (Cohere's historical assistant role
+    * `assistant` -> `chatbot` (Cohere's historical assistant role
       name used by the templates).
-    * ``developer`` -> ``system`` (OpenAI's ``developer`` role is
+    * `developer` -> `system` (OpenAI's `developer` role is
       documented as high-priority instructions, which maps onto the
-      ``system`` slot in Cohere's prompt format).
+      `system` slot in Cohere's prompt format).
     """
     role = role.lower()
     if role == "assistant":
@@ -320,8 +320,8 @@ def _role_to_melody(role: str) -> str:
 def _normalize_tool_call(tc: dict[str, Any] | Any) -> dict[str, Any]:
     """Normalize an OpenAI tool call dict into melody's tool call shape.
 
-    melody expects ``{id, name, parameters: <json str>}`` whereas OpenAI
-    delivers ``{id, type, function: {name, arguments: <json|str>}}``.
+    melody expects `{id, name, parameters: <json str>}` whereas OpenAI
+    delivers `{id, type, function: {name, arguments: <json|str>}}`.
     """
     # Pydantic objects
     if hasattr(tc, "model_dump"):
@@ -345,12 +345,12 @@ def _normalize_tool_call(tc: dict[str, Any] | Any) -> dict[str, Any]:
 
 
 def _content_blocks(content: Any) -> list[dict[str, Any]]:
-    """Convert OpenAI ``ConversationMessage.content`` into melody content blocks.
+    """Convert OpenAI `ConversationMessage.content` into melody content blocks.
 
-    The chat_utils ``content_format="openai"`` produces a list of
-    ``{type: text, text: ...}`` dicts already; we pass those through with
+    The chat_utils `content_format="openai"` produces a list of
+    `{type: text, text: ...}` dicts already; we pass those through with
     minimal coercion. Plain string content is wrapped in a single text block.
-    Image / multimodal placeholder dicts (``{"type": "image"}``) are
+    Image / multimodal placeholder dicts (`{"type": "image"}`) are
     forwarded as-is so that templates can reference image placeholders that
     the upstream tokenizer expands separately.
     """
@@ -414,43 +414,43 @@ def _content_blocks(content: Any) -> list[dict[str, Any]]:
 
 def _v2_tool_content_to_melody_block(block: dict[str, Any]) -> dict[str, Any] | None:
     """Convert one Cohere v2 tool-message content block into a melody
-    ``document`` content block.
+    `document` content block.
 
     Cohere's chat v2 admits two shapes for tool-message content parts:
 
-    * ``TextToolContent`` -- ``{"type": "text", "text": "..."}``.
-    * ``DocumentToolContent`` -- ``{"type": "document", "document":
-      {"id"?: str, "data": {...}}}``.
+    * `TextToolContent` -- `{"type": "text", "text": "..."}`.
+    * `DocumentToolContent` -- `{"type": "document", "document":
+      {"id"?: str, "data": {...}}}`.
 
-    Both are emitted as melody ``document`` blocks, mirroring the cohere
+    Both are emitted as melody `document` blocks, mirroring the cohere
     api, which routes every tool content part through the same
     "tool output as document" conversion. The rules:
 
     * Text that parses to a JSON object becomes that object directly
       (so structured tool output flows through as first-class fields).
     * Text that doesn't parse as an object -- empty, non-JSON,
-      or JSON scalar/array -- gets wrapped as ``{"content": <text>}``
+      or JSON scalar/array -- gets wrapped as `{"content": <text>}`
       so templates have a stable field name to look up.
-    * ``document`` blocks unwrap ``document.data`` (a flat map) into
-      the melody payload; ``document.id`` is intentionally dropped
+    * `document` blocks unwrap `document.data` (a flat map) into
+      the melody payload; `document.id` is intentionally dropped
       here because outbound citation binding tracks it separately via
-      ``POSITION_TO_SOURCE_KEY``.
+      `POSITION_TO_SOURCE_KEY`.
 
     Only the JSON-object case actually changes what gets rendered. The
-    cmd3/cmd4 templates already wrap a bare ``text`` content block as
-    ``{"content": <text>}`` themselves, so routing plain text through
+    cmd3/cmd4 templates already wrap a bare `text` content block as
+    `{"content": <text>}` themselves, so routing plain text through
     here is a no-op on the prompt -- it is the JSON-object unwrap that
     promotes structured tool output from an escaped string blob into
     individually addressable (and citable) result fields.
 
-    Note the payload is the *flat* field map: melody's ``Content``
-    carries ``document`` as a plain map, so re-nesting it under a
-    ``data`` key would render a spurious ``{"data": {...}}`` wrapper
+    Note the payload is the *flat* field map: melody's `Content`
+    carries `document` as a plain map, so re-nesting it under a
+    `data` key would render a spurious `{"data": {...}}` wrapper
     into the tool-result block.
 
-    Returns ``None`` for unrecognised shapes; the caller should skip
+    Returns `None` for unrecognised shapes; the caller should skip
     those blocks (the citation-numbering walk in
-    ``CohereServingChatV2._walk_citable_positions`` advances its own
+    `CohereServingChatV2._walk_citable_positions` advances its own
     cursor over unknown blocks, so slot alignment is preserved).
     """
     block_type = block.get("type")
@@ -476,7 +476,7 @@ def _v2_tool_content_to_melody_block(block: dict[str, Any]) -> dict[str, Any] | 
 
 
 def _document_to_melody(doc: Any) -> dict[str, Any]:
-    """Coerce a Cohere v2 document into melody's ``Document`` (dict) shape."""
+    """Coerce a Cohere v2 document into melody's `Document` (dict) shape."""
     match doc:
         case str():
             return {"text": doc}
@@ -495,11 +495,11 @@ def _document_to_melody(doc: Any) -> dict[str, Any]:
 
 
 def _tool_to_melody(tool: Any) -> dict[str, Any]:
-    """Coerce a chat completions tool definition into melody's ``Tool`` shape.
+    """Coerce a chat completions tool definition into melody's `Tool` shape.
 
-    Accepts either the raw OpenAI tool wrapper ``{type:"function", function:
-    {name, description, parameters}}`` or a flat ``{name, description,
-    parameters}`` dict (which is what melody itself expects).
+    Accepts either the raw OpenAI tool wrapper `{type:"function", function:
+    {name, description, parameters}}` or a flat `{name, description,
+    parameters}` dict (which is what melody itself expects).
     """
     if hasattr(tool, "model_dump"):
         tool = tool.model_dump()
@@ -521,32 +521,32 @@ def _conversation_to_melody_messages(
     messages_citations: dict[int, list[dict[str, Any]]] | None = None,
     tool_message_v2_content: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Convert vLLM ``ConversationMessage``s into melody's message dict shape.
+    """Convert vLLM `ConversationMessage`s into melody's message dict shape.
 
-    ``messages_citations`` is an optional index-keyed lookup of
+    `messages_citations` is an optional index-keyed lookup of
     per-message citations from the request, populated by
-    ``CohereServingChatV2`` under the
-    :data:`MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values
-    must already be in melody's ``FilterCitation`` dict shape (see
-    ``CohereServingChatV2._sdk_citation_to_melody``).
+    `CohereServingChatV2` under the
+    `MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values
+    must already be in melody's `FilterCitation` dict shape (see
+    `CohereServingChatV2._sdk_citation_to_melody`).
 
-    ``tool_message_v2_content`` is an optional index-keyed lookup of
+    `tool_message_v2_content` is an optional index-keyed lookup of
     the original Cohere v2 tool-message content blocks (as plain
-    dicts), populated by ``CohereServingChatV2`` under the
-    :data:`TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given
+    dicts), populated by `CohereServingChatV2` under the
+    `TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given
     index, its blocks -- run through
-    :func:`_v2_tool_content_to_melody_block` to apply the v2 → melody
+    `_v2_tool_content_to_melody_block` to apply the v2 → melody
     mapping -- replace the block list this function would otherwise
-    derive from ``msg["content"]``. This lets the renderer own the
-    v2-shape → melody-shape conversion for the structured ``document``
+    derive from `msg["content"]`. This lets the renderer own the
+    v2-shape → melody-shape conversion for the structured `document`
     blocks cohere v2 allows on tool messages (which don't survive
     OpenAI's content-parts validator on the way in, so
-    ``_convert_tool_message`` rewrites them into ``text`` parts).
+    `_convert_tool_message` rewrites them into `text` parts).
 
-    Both index lookups key by position in the *input* ``conversation``
+    Both index lookups key by position in the *input* `conversation`
     list, which currently maps 1-to-1 with
-    ``CohereChatV2Request.messages`` for text-only Cohere requests.
-    This mapping breaks silently if ``parse_chat_messages`` ever
+    `CohereChatV2Request.messages` for text-only Cohere requests.
+    This mapping breaks silently if `parse_chat_messages` ever
     expands a single input message into multiple entries (e.g.
     multi-modal splitting), which is not the case today.
     """
@@ -603,16 +603,16 @@ def _build_render_config(
     chat_template_kwargs: dict[str, Any],
     chat_template: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Build the ``render_cmd3`` / ``render_cmd4`` config dict.
+    """Build the `render_cmd3` / `render_cmd4` config dict.
 
-    ``chat_template`` is the standard vLLM per-request template override
-    (from ``ChatCompletionRequest.chat_template`` / the server-side
-    ``--chat-template`` flag). When non-``None`` it is forwarded to melody
-    as ``template_jinja`` so a single vLLM-native path drives template
+    `chat_template` is the standard vLLM per-request template override
+    (from `ChatCompletionRequest.chat_template` / the server-side
+    `--chat-template` flag). When non-`None` it is forwarded to melody
+    as `template_jinja` so a single vLLM-native path drives template
     source through the trust guard.
 
-    Returns ``(format, config_dict)`` where ``format`` is either ``"cmd3"``
-    or ``"cmd4"``.
+    Returns `(format, config_dict)` where `format` is either `"cmd3"`
+    or `"cmd4"`.
     """
     fmt = chat_template_kwargs.get("cohere_format", _DEFAULT_FORMAT)
     if fmt not in _VALID_FORMATS:
@@ -749,8 +749,8 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
     """Renderer that templates Cohere prompts via the melody Rust bindings.
 
     Tokenization is delegated to the standard HF tokenizer; only the
-    chat-template step is replaced with ``cohere_melody.render_cmd3`` /
-    ``render_cmd4``. Enabled via ``--tokenizer-mode cohere``.
+    chat-template step is replaced with `cohere_melody.render_cmd3` /
+    `render_cmd4`. Enabled via `--tokenizer-mode cohere`.
     """
 
     def __init__(

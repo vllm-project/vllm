@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Laguna reasoning parser.
+"""Laguna reasoning parser.
 
-``DeepSeekV3ReasoningParser.is_reasoning_end`` walks the entire
-token sequence backwards and returns ``True`` on the first ``</think>`` it
-sees. When called on ``prompt_token_ids`` that mistakes any stray
-``</think>`` in conversation history, few-shot examples or tool descriptions
+`DeepSeekV3ReasoningParser.is_reasoning_end` walks the entire
+token sequence backwards and returns `True` on the first `</think>` it
+sees. When called on `prompt_token_ids` that mistakes any stray
+`</think>` in conversation history, few-shot examples or tool descriptions
 for a template-injected "thinking already ended" marker. In the streaming
-path (see ``vllm/entrypoints/openai/chat_completion/serving.py``,
-``prompt_is_reasoning_end_arr``) that false positive short-circuits the
-reasoning parser for the whole response, so any ``<think>...</think>`` the
+path (see `vllm/entrypoints/openai/chat_completion/serving.py`,
+`prompt_is_reasoning_end_arr`) that false positive short-circuits the
+reasoning parser for the whole response, so any `<think>...</think>` the
 model emits itself ends up in the content field instead of the reasoning
 field.
 
 As we have more flexible templates, we instead scope
 the backward search to the current assistant turn: the
-walk terminates as soon as we hit the ``<assistant>`` start-of-message
-token. A ``</think>`` in a prior user turn or few-shot example is no longer
+walk terminates as soon as we hit the `<assistant>` start-of-message
+token. A `</think>` in a prior user turn or few-shot example is no longer
 visible.
 """
 
@@ -28,10 +27,11 @@ from transformers import PreTrainedTokenizerBase
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 
 class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
-    """Drop-in replacement for ``deepseek_v3`` that tolerates ``</think>``
+    """Drop-in replacement for `deepseek_v3` that tolerates `</think>`
     tokens appearing anywhere in the prompt other than the generation prefix.
     """
 
@@ -54,19 +54,17 @@ class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
             return True
 
         assert isinstance(self._parser, DeepSeekR1ReasoningParser)
-        for tok_id in reversed(input_ids):
-            # <think>: reasoning is not yet ended.
-            if tok_id == self._parser.start_token_id:
-                return False
-            # </think>: reasoning has ended.
-            if tok_id == self._parser.end_token_id:
-                return True
-            # <assistant>: reached the start of the current assistant turn
-            # without seeing either marker. Anything further back belongs to
-            # the prior conversation and should be ignored.
-            if tok_id == self._start_of_assistant_message_token_id:
-                return False
-        return False
+        # The newest of <think>, </think> and <assistant> decides: reasoning has
+        # ended only on </think>. Tokens before the current assistant turn
+        # belong to the prior conversation.
+        end_token_id = self._parser.end_token_id
+        tokens = (
+            self._parser.start_token_id,
+            end_token_id,
+            self._start_of_assistant_message_token_id,
+        )
+        i = rfind_tokens(input_ids, tokens)
+        return i >= 0 and input_ids[i] == end_token_id
 
 
 __all__ = ["PoolsideV1ReasoningParser"]

@@ -10,16 +10,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+    CompletionStreamResponse,
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
 )
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
+from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -35,12 +37,15 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 @router.post(
     "/v1/completions",
     dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
+    **json_or_sse_responses(
+        CompletionResponse,
+        CompletionStreamResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        },
+    ),
 )
 @with_cancellation
 @load_aware_call

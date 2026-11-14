@@ -76,21 +76,12 @@ FROM ${BASE_IMAGE_NAME}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION="ascend910b1"
 
-# Install uv and configure uv to use internal PyPI mirror
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-ENV UV_SYSTEM_PYTHON=true
-ENV UV_INDEX_URL="http://cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_PORT}/pypi/simple"
-ENV UV_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-
-RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev && \
-    rm -rf /var/cache/apt/* && \
-    rm -rf /var/lib/apt/lists/*
+RUN pip config set global.index-url http://cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_PORT}/pypi/simple && \
+    pip config set global.trusted-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local
 
 # Install for pytest to make the docker build cache layer always valid
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install pytest>=6.0  'modelscope<1.38' --quiet
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install pytest>=6.0
 
 WORKDIR /workspace/vllm
 
@@ -167,5 +158,5 @@ docker run \
     "${image_name}" \
     bash -c '
     set -e
-    pytest -v -s tests/e2e/vllm_interface/test_vllm_pr_interface_compatibility.py
+    pytest --noconftest -v -s tests/e2e/vllm_interface/test_vllm_pr_interface_compatibility.py
 '

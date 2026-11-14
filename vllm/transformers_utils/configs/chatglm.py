@@ -3,10 +3,10 @@
 
 # Adapted from
 # https://github.com/zai-org/ChatGLM2-6B
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 
-class ChatGLMConfig(PretrainedConfig):
+class ChatGLMConfig(PreTrainedConfig):
     model_type = "chatglm"
     attribute_map = {
         "num_hidden_layers": "num_layers",

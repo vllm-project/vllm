@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MXFP4 linear kernel selection logic (CPU-only)
+"""Tests for MXFP4 linear kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_mxfp4_kernel_selection.py`.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
-    HummingMxFp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp4_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
@@ -44,7 +45,20 @@ _TRUE_W4A4_KERNELS = [
 
 # Weight-only (A16) kernels: they never quantize activations. They still accept
 # MXFP4 activation keys as an intentional compatibility fallback.
-_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel, HummingMxFp4LinearKernel]
+_WEIGHT_ONLY_KERNELS = [MarlinMxFp4LinearKernel]
+
+
+def _make_emulation_layer():
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        torch.nn.Parameter(torch.ones((2, 2), dtype=torch.uint8), False),
+    )
+    layer.register_parameter(
+        "weight_scale",
+        torch.nn.Parameter(torch.ones((2, 1), dtype=torch.uint8), False),
+    )
+    return layer
 
 
 def test_can_implement_is_abstract():
@@ -81,25 +95,31 @@ def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
 @pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
+@patch("vllm.model_executor.kernels.linear.current_platform")
 def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
-    kernel_cls, activation_quant_key
+    platform_mock, kernel_cls, activation_quant_key
 ):
-    """Marlin/Humming never quantize activations, so an unset activation key,
-    or one that already describes MXFP4-shaped data, is tolerated. When an
-    activation key is explicitly set, a warning must be logged noting that it
-    is ignored, since these kernels are weight-only (A16)."""
-    config = MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
-    with patch(f"{kernel_cls.__module__}.logger.warning_once") as warning_once:
-        can_implement, reason = kernel_cls.can_implement(config)
-    assert can_implement, reason
+    """Marlin never quantizes activations, so an unset activation key, or one
+    that already describes MXFP4-shaped data, is tolerated. When an
+    activation key is explicitly set, selection must warn that the kernel runs
+    it unquantized, since these kernels are weight-only (A16)."""
+    platform_mock._enum = PlatformEnum.CUDA
+    with (
+        patch.dict(
+            "vllm.model_executor.kernels.linear._POSSIBLE_MXFP4_KERNELS",
+            {PlatformEnum.CUDA: [kernel_cls]},
+        ),
+        patch.object(kernel_cls, "is_supported", return_value=(True, None)),
+        patch(f"{quant_utils.__name__}.logger.warning_once") as warning_once,
+    ):
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=activation_quant_key)
+    assert isinstance(kernel, kernel_cls)
 
     if activation_quant_key is None:
         warning_once.assert_not_called()
     else:
         warning_once.assert_called_once()
-        message = warning_once.call_args.args[0]
-        assert "the requested activation quantization" in message
-        assert "is ignored" in message
+        assert "activations as unquantized" in warning_once.call_args.args[1]
 
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
@@ -154,6 +174,77 @@ def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
         w4a4_config = MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
         kernel = EmulationMxfp4LinearKernel(w4a4_config)
         assert kernel.quant_dequant_func is quant_dequant_mxfp4
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_emulation_kernel_dequantizes_at_load_and_keeps_activation_qdq(
+    dtype, monkeypatch
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
+    kernel = EmulationMxfp4LinearKernel(
+        MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+    )
+    kernel.quant_dequant_func = MagicMock(side_effect=lambda x: x * 0.5)
+    layer = _make_emulation_layer()
+    dequantized = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
+    x = torch.tensor([[2.0, 4.0]], dtype=dtype)
+
+    with (
+        patch.object(envs, "VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD", True),
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp4.emulation.dequant_mxfp4",
+            return_value=dequantized,
+        ) as dequant,
+    ):
+        kernel.process_weights_after_loading(layer)
+        actual = kernel.apply_weights(layer, x)
+
+    expected = torch.nn.functional.linear(x * 0.5, dequantized.to(dtype))
+    torch.testing.assert_close(actual, expected)
+    dequant.assert_called_once()
+    kernel.quant_dequant_func.assert_called_once_with(x)
+    assert layer.weight.dtype == torch.bfloat16
+    assert layer.weight.device == dequantized.device
+    assert not layer.weight.requires_grad
+    assert layer.weight_scale is not None
+    assert not layer.weight_scale.requires_grad
+
+
+def test_emulation_kernel_opt_out_dequantizes_per_invocation(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
+    kernel = EmulationMxfp4LinearKernel(
+        MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+    )
+    kernel.quant_dequant_func = MagicMock(side_effect=lambda x: x * 0.5)
+    layer = _make_emulation_layer()
+    dequantized = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
+    x = torch.tensor([[2.0, 4.0]], dtype=torch.bfloat16)
+
+    with (
+        patch.object(envs, "VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD", False),
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp4.emulation.dequant_mxfp4",
+            return_value=dequantized,
+        ) as dequant,
+    ):
+        kernel.process_weights_after_loading(layer)
+        dequant.assert_not_called()
+        first = kernel.apply_weights(layer, x)
+        second = kernel.apply_weights(layer, x)
+
+    expected = torch.nn.functional.linear(x * 0.5, dequantized)
+    torch.testing.assert_close(first, expected)
+    torch.testing.assert_close(second, expected)
+    assert dequant.call_count == 2
+    assert kernel.quant_dequant_func.call_count == 2
+    assert layer.weight.dtype == torch.uint8
+    assert layer.weight_scale is not None
 
 
 def test_aiter_kernel_is_supported_requires_native_mx_support():
