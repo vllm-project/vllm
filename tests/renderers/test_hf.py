@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+
 import jinja2
 import pytest
 import torch
@@ -10,16 +12,21 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.engine import MultiModalInput
 from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
-from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
+from vllm.renderers.chat_utils import (
+    ConversationMessage,
+    load_chat_template,
+    parse_chat_messages,
+)
 from vllm.renderers.hf import (
     HfRenderer,
+    _append_content,
     _build_prompt_embeds_updates,
-    _consolidate_system_messages,
-    _convert_developer_to_system,
     _detect_content_format,
     _detect_developer_role_support,
     _ensure_prompt_embeds_placeholder_token,
     _get_hf_base_chat_template_params,
+    _lower_developer_messages,
+    _resolve_developer_role_mode,
     _template_error_reason,
     _try_extract_ast,
     resolve_chat_template,
@@ -742,47 +749,149 @@ def test_get_gen_prompt(
     )
 
 
-class TestConvertDeveloperToSystem:
-    def test_converts_role(self):
-        conversation = [
-            {"role": "developer", "content": "You are helpful."},
-            {"role": "user", "content": "Hello"},
-        ]
-        result = _convert_developer_to_system(conversation)
-        assert result[0]["role"] == "system"
-        assert result[0]["content"] == "You are helpful."
-        assert result[1]["role"] == "user"
-
+class TestLowerDeveloperMessages:
     def test_removes_tools_key(self):
         conversation = [
+            {"role": "user", "content": "Hello"},
             {
                 "role": "developer",
                 "content": "Instructions",
                 "tools": [{"type": "function"}],
             },
         ]
-        result = _convert_developer_to_system(conversation)
-        assert "tools" not in result[0]
+        result = _lower_developer_messages(conversation, "system")
+        assert result[1] == {"role": "system", "content": "Instructions"}
 
-    def test_no_developer_messages_unchanged(self):
+    def test_leading_run_merged_keeping_parts(self):
         conversation = [
-            {"role": "system", "content": "System prompt"},
-            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": [{"type": "text", "text": "Rule 1."}]},
+            {
+                "role": "developer",
+                "content": [{"type": "text", "text": "Rule 2."}, {"type": "image"}],
+            },
+            {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
         ]
-        result = _convert_developer_to_system(conversation)
-        assert result[0]["role"] == "system"
-        assert result[1]["role"] == "user"
+        result = _lower_developer_messages(conversation, "leading_system")
+        assert result == [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "Rule 1.\n\nRule 2."},
+                    {"type": "image"},
+                ],
+            },
+            conversation[2],
+        ]
 
-    def test_does_not_mutate_original(self):
-        original = {
-            "role": "developer",
-            "content": "Instructions",
-            "tools": [{"type": "function"}],
-        }
-        conversation = [original]
-        _convert_developer_to_system(conversation)
-        assert original["role"] == "developer"
-        assert "tools" in original
+    @pytest.mark.parametrize("mode", ["system", "leading_system"])
+    def test_does_not_mutate_original(self, mode):
+        conversation = [
+            {"role": "developer", "content": "base"},
+            {"role": "user", "content": [{"type": "text", "text": "question"}]},
+            {"role": "developer", "content": "update", "tools": []},
+        ]
+        original = copy.deepcopy(conversation)
+        _lower_developer_messages(conversation, mode)
+        assert conversation == original
+
+    def test_append_content_joins_text_at_the_boundary(self):
+        # The cases of the Rust frontend's `ChatContent::append` test.
+        image = {"type": "image"}
+
+        def text(value: str) -> dict[str, str]:
+            return {"type": "text", "text": value}
+
+        assert _append_content("a", "b") == "a\n\nb"
+        assert _append_content("a", [text("b"), image]) == [text("a\n\nb"), image]
+        assert _append_content([text("a"), image], "b") == [
+            text("a"),
+            image,
+            text("b"),
+        ]
+        assert _append_content("", [image]) == [image]
+        assert _append_content("a", "") == "a"
+
+
+# Like Llama 2's and Mistral 7B's templates: user and assistant turns alternate
+# after an optional first system message.
+ALTERNATING_TURNS_TEMPLATE = (
+    "{%- if messages[0].role == 'system' %}"
+    "{%- set loop_messages = messages[1:] %}"
+    "{{ messages[0].role }}={{ messages[0].content }};"
+    "{%- else %}{%- set loop_messages = messages %}{%- endif %}"
+    "{%- for m in loop_messages %}"
+    "{%- if (m.role == 'user') != (loop.index0 % 2 == 0) %}"
+    "{{ raise_exception('Conversation roles must alternate "
+    "user/assistant/user/assistant/...') }}"
+    "{%- endif %}"
+    "{{ m.role }}={{ m.content }};"
+    "{%- endfor %}"
+)
+
+
+# The templates of the Rust frontend's
+# `probes_how_templates_take_developer_messages` test.
+@pytest.mark.parametrize(
+    ("chat_template", "expected_mode"),
+    [
+        pytest.param(
+            "{%- for m in messages %}{%- if m.role == 'developer' %}<dev>"
+            "{%- endif %}{{ m.content }}{%- endfor %}",
+            "native",
+            id="names_developer",  # gpt-oss
+        ),
+        pytest.param(
+            "{%- for m in messages %}<{{ m.role }}>{{ m.content }}{%- endfor %}",
+            "system",
+            id="any_role",  # Qwen3, Qwen3-Coder
+        ),
+        pytest.param(
+            "{%- for m in messages %}"
+            "{{ bos_token + '<' + m.role + '>' + m.content }}{%- endfor %}",
+            "system",
+            id="needs_bos_token",  # Llama 3
+        ),
+        pytest.param(
+            "{%- if not tools %}{{ raise_exception('tools required') }}"
+            "{%- endif %}{%- for m in messages %}<{{ m.role }}>{{ m.content }}"
+            "{%- endfor %}",
+            "system",
+            id="needs_tools",  # a `tool_use` template
+        ),
+        pytest.param(
+            "{%- for m in messages %}"
+            "{%- if m.role == 'system' and not loop.first %}"
+            "{{ raise_exception('System message must be at the beginning.') }}"
+            "{%- endif %}<{{ m.role }}>{{ m.content }}{%- endfor %}",
+            "leading_system",
+            id="leading_system_raises",  # Qwen3.5
+        ),
+        pytest.param(
+            "{%- for m in messages %}{%- if m.role == 'system' and "
+            "loop.previtem is defined and loop.previtem.role == 'assistant' %}"
+            "{{ raise_exception('Unexpected role system after role assistant') }}"
+            "{%- endif %}<{{ m.role }}>{{ m.content }}{%- endfor %}",
+            "leading_system",
+            id="system_after_user_only",  # Ministral 3
+        ),
+        pytest.param(
+            ALTERNATING_TURNS_TEMPLATE,
+            "leading_system",
+            id="alternating_turns",  # Llama 2
+        ),
+        pytest.param(
+            "{%- if messages[0].role == 'system' %}<system>"
+            "{{ messages[0].content }}{%- endif %}{%- for m in messages %}"
+            "{%- if m.role != 'system' %}<{{ m.role }}>{{ m.content }}{%- endif %}"
+            "{%- endfor %}",
+            "leading_system",
+            id="leading_system_only",
+        ),
+    ],
+)
+def test_resolve_developer_role_mode(chat_template, expected_mode):
+    tokenizer = get_tokenizer("facebook/opt-125m")
+    assert _resolve_developer_role_mode(tokenizer, chat_template) == expected_mode
 
 
 # --- Developer role detection and conversion tests ---
@@ -849,6 +958,53 @@ class TestDetectDeveloperRoleSupport:
         assert _detect_developer_role_support(STRICT_ROLE_TEMPLATE) is False
 
 
+# Codex: instructions, its base prompt as a developer message, and a developer
+# context update mid-conversation.
+CODEX_MESSAGES = [
+    {"role": "system", "content": "instructions"},
+    {"role": "developer", "content": "base"},
+    {"role": "user", "content": "question"},
+    {"role": "assistant", "content": "answer"},
+    {"role": "developer", "content": "update"},
+    {"role": "user", "content": "follow-up"},
+]
+
+# The caller's own non-leading system message stays as sent.
+CALLER_SYSTEM_MESSAGES = [
+    {"role": "developer", "content": "base"},
+    {"role": "user", "content": "question"},
+    {"role": "system", "content": "update"},
+    {"role": "user", "content": "follow-up"},
+]
+
+# No user turn follows the developer message: it joins the previous one.
+BEFORE_ASSISTANT_MESSAGES = [
+    {"role": "user", "content": "question"},
+    {"role": "developer", "content": "update"},
+    {"role": "assistant", "content": "answer"},
+    {"role": "user", "content": "follow-up"},
+]
+
+
+def _render_messages(
+    model_config, tokenizer, messages, chat_template=None, add_generation_prompt=True
+):
+    # Parse the messages for the template's content format, as `HfRenderer` does.
+    chat_template = chat_template or tokenizer.chat_template
+    content_format = resolve_chat_template_content_format(
+        chat_template, None, "auto", tokenizer, model_config=model_config
+    )
+    conversation, _, _ = parse_chat_messages(messages, model_config, content_format)
+    return safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        conversation,
+        chat_template=chat_template,
+        tokenize=False,
+        add_generation_prompt=add_generation_prompt,
+    )
+
+
 class TestSafeApplyChatTemplateDeveloperRole:
     @pytest.fixture
     def model_config(self):
@@ -863,6 +1019,10 @@ class TestSafeApplyChatTemplateDeveloperRole:
     @pytest.fixture
     def tokenizer(self):
         return get_tokenizer("facebook/opt-125m")
+
+    @pytest.fixture
+    def qwen3_5_tokenizer(self):
+        return get_tokenizer("Qwen/Qwen3.5-0.8B")
 
     def test_developer_converted_to_system_for_chatml(self, model_config, tokenizer):
         conversation: list[ConversationMessage] = [
@@ -931,9 +1091,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "<|im_start|>system" in result
         assert "You are helpful." in result
 
-    def test_developer_at_non_first_position_consolidated(
-        self, model_config, tokenizer
-    ):
+    def test_later_developer_joins_next_user_turn(self, model_config, tokenizer):
         conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
@@ -949,12 +1107,17 @@ class TestSafeApplyChatTemplateDeveloperRole:
             tokenize=False,
             add_generation_prompt=True,
         )
-        assert "<|im_start|>system" in result
-        assert "You are helpful." in result
-        assert "Be concise." in result
-        assert "What is 2+2?" in result
+        assert result == (
+            "<|im_start|>system\nYou are helpful.<|im_end|>\n"
+            "<|im_start|>user\nHello<|im_end|>\n"
+            "<|im_start|>assistant\nHi there!<|im_end|>\n"
+            "<|im_start|>user\nBe concise.\n\nWhat is 2+2?<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
 
-    def test_developer_only_no_prior_system(self, model_config, tokenizer):
+    def test_developer_without_system_joins_next_user_turn(
+        self, model_config, tokenizer
+    ):
         conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "developer", "content": "Be concise."},
@@ -968,8 +1131,181 @@ class TestSafeApplyChatTemplateDeveloperRole:
             tokenize=False,
             add_generation_prompt=True,
         )
-        assert "<|im_start|>system" in result
-        assert "Be concise." in result
+        assert result == (
+            "<|im_start|>user\nHello<|im_end|>\n"
+            "<|im_start|>user\nBe concise.\n\nWhat is 2+2?<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+
+    # Expected prompts from the Rust frontend's
+    # `developer_messages_follow_template_system_support` test. Qwen3 renders a
+    # system message anywhere; Qwen3.5 only first, and Llama 2 also requires
+    # alternating user and assistant turns.
+    @pytest.mark.parametrize(
+        ("model", "chat_template", "messages", "expected"),
+        [
+            (
+                "Qwen/Qwen3-0.6B",
+                None,
+                CODEX_MESSAGES,
+                (
+                    "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n"
+                    "<|im_start|>user\nquestion<|im_end|>\n"
+                    "<|im_start|>assistant\nanswer<|im_end|>\n"
+                    "<|im_start|>system\nupdate<|im_end|>\n"
+                    "<|im_start|>user\nfollow-up<|im_end|>\n"
+                    "<|im_start|>assistant\n"
+                ),
+            ),
+            (
+                "Qwen/Qwen3-0.6B",
+                None,
+                CALLER_SYSTEM_MESSAGES,
+                (
+                    "<|im_start|>system\nbase<|im_end|>\n"
+                    "<|im_start|>user\nquestion<|im_end|>\n"
+                    "<|im_start|>system\nupdate<|im_end|>\n"
+                    "<|im_start|>user\nfollow-up<|im_end|>\n"
+                    "<|im_start|>assistant\n"
+                ),
+            ),
+            (
+                "Qwen/Qwen3.5-0.8B",
+                None,
+                CODEX_MESSAGES,
+                (
+                    "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n"
+                    "<|im_start|>user\nquestion<|im_end|>\n"
+                    "<|im_start|>assistant\nanswer<|im_end|>\n"
+                    "<|im_start|>user\nupdate\n\nfollow-up<|im_end|>\n"
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                ),
+            ),
+            (
+                "facebook/opt-125m",
+                ALTERNATING_TURNS_TEMPLATE,
+                CODEX_MESSAGES,
+                (
+                    "system=instructions\n\nbase;user=question;assistant=answer;"
+                    "user=update\n\nfollow-up;"
+                ),
+            ),
+            (
+                "facebook/opt-125m",
+                ALTERNATING_TURNS_TEMPLATE,
+                BEFORE_ASSISTANT_MESSAGES,
+                "user=question\n\nupdate;assistant=answer;user=follow-up;",
+            ),
+        ],
+        ids=[
+            "qwen3-codex",
+            "qwen3-caller-system",
+            "qwen3.5-codex",
+            "alternating-turns-codex",
+            "alternating-turns-before-assistant",
+        ],
+    )
+    def test_developer_messages_follow_template_system_support(
+        self, model_config, model, chat_template, messages, expected
+    ):
+        tokenizer = get_tokenizer(model)
+        result = _render_messages(model_config, tokenizer, messages, chat_template)
+        assert result == expected
+
+    def test_caller_system_message_left_to_template(
+        self, model_config, qwen3_5_tokenizer
+    ):
+        with pytest.raises(
+            VLLMValidationError, match="System message must be at the beginning."
+        ):
+            _render_messages(model_config, qwen3_5_tokenizer, CALLER_SYSTEM_MESSAGES)
+
+    @pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"])
+    def test_developer_update_keeps_prompt_prefix(self, model_config, model):
+        tokenizer = get_tokenizer(model)
+        turn = _render_messages(
+            model_config, tokenizer, CODEX_MESSAGES, add_generation_prompt=False
+        )
+        next_turn = _render_messages(
+            model_config,
+            tokenizer,
+            [
+                *CODEX_MESSAGES,
+                {"role": "assistant", "content": "answer 2"},
+                {"role": "developer", "content": "update 2"},
+                {"role": "user", "content": "follow-up 2"},
+            ],
+        )
+        assert next_turn.startswith(turn)
+
+    def test_developer_media_stays_in_place(self, model_config, qwen3_5_tokenizer):
+        # A developer message after the leading run joins the user turn next
+        # to it, so its image placeholder stays in media order. Content parts
+        # are as `parse_chat_messages` makes them for an `openai` template.
+        conversation: list[ConversationMessage] = [
+            {"role": "developer", "content": [{"type": "text", "text": "base"}]},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "question"}, {"type": "image"}],
+            },
+            {
+                "role": "developer",
+                "content": [{"type": "text", "text": "update"}, {"type": "image"}],
+            },
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            qwen3_5_tokenizer,
+            conversation,
+            chat_template=qwen3_5_tokenizer.chat_template,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert result == (
+            "<|im_start|>system\nbase<|im_end|>\n"
+            "<|im_start|>user\nquestion<|vision_start|><|image_pad|><|vision_end|>"
+            "update<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("template_kwargs", "expected"),
+        [
+            ({}, "<system>base<user>question<assistant>answer<user>update\n\nnext"),
+            (
+                {"allow_later_system": True},
+                "<system>base<user>question<assistant>answer<system>update<user>next",
+            ),
+        ],
+    )
+    def test_probe_renders_with_template_kwargs(
+        self, model_config, tokenizer, template_kwargs, expected
+    ):
+        # The template renders a later system message only when a template
+        # variable allows it, so the probe must see the request's variables.
+        chat_template = (
+            "{%- for m in messages %}"
+            "{%- if m.role == 'system' and not loop.first and not allow_later_system %}"
+            "{{ raise_exception('System message must be at the beginning.') }}"
+            "{%- endif %}<{{ m.role }}>{{ m.content }}{%- endfor %}"
+        )
+        conversation: list[ConversationMessage] = [
+            {"role": "developer", "content": "base"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "developer", "content": "update"},
+            {"role": "user", "content": "next"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=chat_template,
+            tokenize=False,
+            add_generation_prompt=True,
+            **template_kwargs,
+        )
+        assert result == expected
 
 
 SYSTEM_FIRST_TEMPLATE = (
@@ -1090,74 +1426,6 @@ def test_template_error_reason_prefers_template_error():
 def test_template_error_reason_falls_back_to_message():
     err = ValueError("plain failure")
     assert _template_error_reason(err) == "plain failure"
-
-
-class TestConsolidateSystemMessages:
-    def test_no_system_messages_unchanged(self):
-        conversation = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-        ]
-        result = _consolidate_system_messages(conversation)
-        assert result == conversation
-
-    def test_single_system_at_start_unchanged(self):
-        conversation = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hello"},
-        ]
-        result = _consolidate_system_messages(conversation)
-        assert result == conversation
-
-    def test_system_at_non_first_position_moved(self):
-        conversation = [
-            {"role": "user", "content": "Hello"},
-            {"role": "system", "content": "You are helpful."},
-        ]
-        result = _consolidate_system_messages(conversation)
-        assert result[0]["role"] == "system"
-        assert result[0]["content"] == "You are helpful."
-        assert result[1]["role"] == "user"
-        assert result[1]["content"] == "Hello"
-
-    def test_multiple_system_messages_merged(self):
-        conversation = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hello"},
-            {"role": "system", "content": "Be concise."},
-        ]
-        result = _consolidate_system_messages(conversation)
-        assert len(result) == 2
-        assert result[0]["role"] == "system"
-        assert result[0]["content"] == "You are helpful.\n\nBe concise."
-        assert result[1]["role"] == "user"
-
-    def test_list_content_handled(self):
-        conversation = [
-            {"role": "user", "content": "Hello"},
-            {
-                "role": "system",
-                "content": [
-                    {"type": "text", "text": "Rule 1."},
-                    {"type": "text", "text": "Rule 2."},
-                ],
-            },
-        ]
-        result = _consolidate_system_messages(conversation)
-        assert result[0]["role"] == "system"
-        assert result[0]["content"] == "Rule 1.\nRule 2."
-        assert result[1]["role"] == "user"
-
-    def test_does_not_mutate_original(self):
-        conversation = [
-            {"role": "user", "content": "Hello"},
-            {"role": "system", "content": "You are helpful."},
-        ]
-        original_len = len(conversation)
-        _consolidate_system_messages(conversation)
-        assert len(conversation) == original_len
-        assert conversation[0]["role"] == "user"
-        assert conversation[1]["role"] == "system"
 
 
 GRANITE_20B_FC_TOOLS = [
