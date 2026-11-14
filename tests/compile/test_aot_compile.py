@@ -18,6 +18,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.kernels  # noqa: F401 to register kernels
+import vllm.plugins
 from vllm import ir
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
@@ -96,6 +97,19 @@ class SparseActivationAotModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return self.down_proj(self.activation(self.up_proj(x)))
+
+
+def plugin_target(x: torch.Tensor):
+    return x * 2
+
+
+@support_torch_compile
+class PluginTargetMod(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor):
+        return plugin_target(x)
 
 
 def make_vllm_config() -> VllmConfig:
@@ -194,6 +208,64 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+def write_general_plugin(
+    monkeypatch: pytest.MonkeyPatch, root: Path, name: str, source: str
+) -> Path:
+    """Install `source` as a real `vllm.general_plugins` entry point."""
+    dist_info = root / f"{name}-0.1.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1\n"
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[vllm.general_plugins]\n{name} = {name}:register\n"
+    )
+    (root / f"{name}.py").write_text(source)
+    monkeypatch.setenv("VLLM_PLUGINS", name)
+    return root
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_general_plugin_misses_aot_cache(
+    monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
+):
+    # The AOT key leaves traced files out, so a general plugin that patches
+    # traced code must change the key, or a cache warmed without it is reused.
+    plugin_dir = write_general_plugin(
+        monkeypatch,
+        vllm_tmp_cache / "plugin",
+        "aot_patch_plugin",
+        "import sys\n\n\ndef patched(x):\n    return x * 3\n\n\n"
+        f"def register():\n    sys.modules[{__name__!r}].plugin_target = patched\n",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "plugin_target", plugin_target)
+    monkeypatch.setattr(vllm.plugins, "plugins_loaded", False)
+    monkeypatch.setattr(vllm.plugins, "loaded_general_plugins", [], raising=False)
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    x = torch.randn(10, 10)
+
+    disable_envs_cache()
+    vllm_config = make_vllm_config()
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(num_aot_artifacts_saved=1),
+    ):
+        torch.testing.assert_close(PluginTargetMod(vllm_config=vllm_config)(x), x * 2)
+
+    monkeypatch.syspath_prepend(str(plugin_dir))
+    vllm.plugins.load_general_plugins()
+    sys.modules.pop("aot_patch_plugin")
+    disable_envs_cache()
+    vllm_config = make_vllm_config()
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(num_aot_artifacts_loaded=0),
+    ):
+        torch.testing.assert_close(PluginTargetMod(vllm_config=vllm_config)(x), x * 3)
 
 
 @pytest.mark.skipif(
@@ -520,6 +592,60 @@ def test_standalone_compile_correctness():
             "VLLM_USE_MEGA_AOT_ARTIFACT": "0",
         },
     )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+@create_new_process_for_each_test("spawn")
+def test_gpt2_general_plugin_misses_aot_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A cache warmed without a plugin that patches GPT2Block is not reused."""
+    from vllm import LLM, SamplingParams
+
+    def _snap(self):
+        from vllm.compilation.counter import compilation_counter
+
+        return (
+            compilation_counter.num_aot_compiles,
+            compilation_counter.num_aot_artifacts_saved,
+            compilation_counter.num_aot_artifacts_loaded,
+        )
+
+    plugin_dir = write_general_plugin(
+        monkeypatch,
+        tmp_path / "plugin",
+        "gpt2_patch_plugin",
+        "def register():\n"
+        "    from vllm.model_executor.models import gpt2\n\n"
+        "    forward = gpt2.GPT2Block.forward\n"
+        "    gpt2.GPT2Block.forward = lambda self, h: forward(self, h) * 0.5\n",
+    )
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    greedy = SamplingParams(temperature=0.0, max_tokens=16)
+
+    def run() -> tuple[str, tuple[int, int, int]]:
+        llm = LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+            max_model_len=256,
+        )
+        text = llm.generate("Hello, my name is", greedy)[0].outputs[0].text
+        counters = llm.collective_rpc(_snap)[0]
+        del llm
+        disable_envs_cache()
+        return text, counters
+
+    unpatched, counters = run()
+    assert counters == (1, 1, 0)
+    # Load the plugin here too, so engine processes see it forked or spawned.
+    monkeypatch.syspath_prepend(str(plugin_dir))
+    monkeypatch.setenv("PYTHONPATH", str(plugin_dir))
+    monkeypatch.setattr(vllm.plugins, "plugins_loaded", False)
+    patched, counters = run()
+    assert counters == (1, 1, 0)
+    assert patched != unpatched
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
