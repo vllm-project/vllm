@@ -27,6 +27,18 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
 
+# The ops' dtype checks require float8_e4m3fn tensors, but on gfx942 the kernels
+# encode e4m3fnuz, so fp8 tensors are relabeled at the op boundary.
+_OP_FP8 = torch.float8_e4m3fn
+
+
+def _to_op_fp8(t: torch.Tensor) -> torch.Tensor:
+    return t.view(_OP_FP8) if t.dtype == torch.float8_e4m3fnuz else t
+
+
+def _op_fp8_cache(kv_cache: torch.Tensor) -> torch.Tensor:
+    return kv_cache if kv_cache.dtype == _OP_FP8 else kv_cache.view(_OP_FP8)
+
 
 def fused_mla_key_concat_kv_cache_insert(
     q: torch.Tensor,  # [Tp, H, qk_head_dim], RoPE is applied in place
@@ -134,7 +146,7 @@ def fused_mla_qkv_quant_kv_cache_fp8_insert(
     tp, num_heads, _ = q.shape
     qk_head_dim = q.shape[2]
     v_head_dim = v.shape[2]
-    fp8 = torch.float8_e4m3fn
+    fp8 = current_platform.fp8_dtype()
     q_fp8 = torch.empty((tp, num_heads, qk_head_dim), dtype=fp8, device=q.device)
     k_fp8 = torch.empty((tp, num_heads, qk_head_dim), dtype=fp8, device=q.device)
     v_fp8 = torch.empty((tp, num_heads, v_head_dim), dtype=fp8, device=q.device)
@@ -146,10 +158,10 @@ def fused_mla_qkv_quant_kv_cache_fp8_insert(
         k_pe,
         kv_c_normed,
         v,
-        q_fp8,
-        k_fp8,
-        v_fp8,
-        kv_cache,
+        _to_op_fp8(q_fp8),
+        _to_op_fp8(k_fp8),
+        _to_op_fp8(v_fp8),
+        _op_fp8_cache(kv_cache),
         slot_mapping,
         q_scale_inv,
         k_scale_inv,
@@ -205,12 +217,12 @@ def fused_mla_kv_concat_quant_fp8(
     Returns contiguous `(k_fp8, v_fp8)`.
     """
     k_pe = k_pe.reshape(k_pe.shape[0], k_pe.shape[-1])
-    fp8 = torch.float8_e4m3fn
+    fp8 = current_platform.fp8_dtype()
     k_fp8 = _empty_full_key(k_nope, k_pe, fp8)
     v_fp8 = torch.empty(v.shape, dtype=fp8, device=v.device)
     if k_fp8.shape[0]:
         torch.ops._C.fused_kimi_k3_mla_kv_concat_quant_fp8(
-            k_nope, k_pe, v, k_fp8, v_fp8
+            k_nope, _to_op_fp8(k_pe), v, _to_op_fp8(k_fp8), _to_op_fp8(v_fp8)
         )
     return k_fp8, v_fp8
 
@@ -268,7 +280,7 @@ def fused_mla_decode_q_concat_kv_cache_insert(
     b, num_heads, kv_lora_rank = ql_nope.shape
     entry = kv_lora_rank + q_pe.shape[-1]
     fp8_q = q_scale_inv is not None
-    out_dtype = torch.float8_e4m3fn if fp8_q else ql_nope.dtype
+    out_dtype = current_platform.fp8_dtype() if fp8_q else ql_nope.dtype
     mqa_q = torch.empty((b, num_heads, entry), dtype=out_dtype, device=ql_nope.device)
     if b == 0:
         return mqa_q
@@ -291,17 +303,13 @@ def fused_mla_decode_q_concat_kv_cache_insert(
         )
     elif fp8_q:
         assert cache_scale_inv is not None, "fp8 decode requires cache_scale_inv"
-        cache = (
-            kv_cache
-            if kv_cache.dtype == torch.float8_e4m3fn
-            else kv_cache.view(torch.float8_e4m3fn)
-        )
+        cache = _op_fp8_cache(kv_cache)
         torch.ops._C.fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
             ql_nope,
             q_pe,
             kv_c_normed,
             k_pe,
-            mqa_q,
+            _to_op_fp8(mqa_q),
             cache,
             slot_mapping,
             q_scale_inv,

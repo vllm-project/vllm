@@ -18,8 +18,11 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Kimi-K3 fused MLA requires CUDA"
+    not current_platform.is_cuda_alike(),
+    reason="Kimi-K3 fused MLA requires CUDA or ROCm",
 )
+
+_FP8 = current_platform.fp8_dtype()
 
 _DTYPE = torch.bfloat16
 _NUM_TOKENS = 3
@@ -64,7 +67,7 @@ def _cache_rows(cache: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
 def _assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     torch.testing.assert_close(
         actual.float(),
-        expected.to(torch.float8_e4m3fn).float(),
+        expected.to(_FP8).float(),
         atol=0.03125,
         rtol=0.15,
     )
@@ -80,7 +83,7 @@ def _strided_context_inputs(
     k_nope, v = kv_nope.split((128, 128), dim=-1)
     workspace = _randn(num_tokens, 576, dtype=dtype)
     if k_pe_fp8:
-        workspace = workspace.to(torch.float8_e4m3fn)
+        workspace = workspace.to(_FP8)
     return k_nope, workspace[:, 512:].unsqueeze(1), v
 
 
@@ -122,7 +125,7 @@ def test_context_kv_pack_quantizes_strided_inputs(
 
     k_actual, v_actual = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
 
-    fp8 = torch.float8_e4m3fn
+    fp8 = _FP8
     k_expected = torch.empty_like(k_actual)
     k_expected[..., :128] = k_nope.to(fp8)
     k_expected[..., 128:] = k_pe.to(fp8)
@@ -174,9 +177,7 @@ def test_prefill_epilogue_fuses_gptj_rope(cache_kind: str) -> None:
         torch.testing.assert_close(k_actual, k_expected)
         torch.testing.assert_close(_cache_rows(cache, slots), cache_expected)
     elif cache_kind == "fp8":
-        cache = torch.zeros(
-            2, _BLOCK_SIZE, 576, device="cuda", dtype=torch.float8_e4m3fn
-        )
+        cache = torch.zeros(2, _BLOCK_SIZE, 576, device="cuda", dtype=_FP8)
         one = torch.ones(1, device="cuda", dtype=torch.float32)
         q_actual, k_actual, v_actual = fused_mla_qkv_quant_kv_cache_fp8_insert(
             q,
@@ -242,9 +243,7 @@ def test_decode_epilogue_fuses_gptj_rope(cache_kind: str) -> None:
         torch.testing.assert_close(q_actual, q_expected)
         torch.testing.assert_close(_cache_rows(cache, slots), cache_expected)
     elif cache_kind == "fp8":
-        cache = torch.zeros(
-            2, _BLOCK_SIZE, 576, device="cuda", dtype=torch.float8_e4m3fn
-        )
+        cache = torch.zeros(2, _BLOCK_SIZE, 576, device="cuda", dtype=_FP8)
         one = torch.ones(1, device="cuda", dtype=torch.float32)
         q_actual = fused_mla_decode_q_concat_kv_cache_insert(
             ql_nope,
