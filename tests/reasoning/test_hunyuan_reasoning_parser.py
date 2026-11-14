@@ -60,6 +60,14 @@ MULTIPLE_LINES_WITH_THINK = {
     "content": "This is the rest\nThat",
 }
 
+TEXT_BEFORE_THINK = {
+    "output": f"Let me check. {START_REASONING}This is a reasoning section"
+    f"{START_RESPONSE}This is the rest",
+    "reasoning": None,
+    "content": f"Let me check. {START_REASONING}This is a reasoning section"
+    f"{START_RESPONSE}This is the rest",
+}
+
 TEST_CASES = [
     pytest.param(
         False,
@@ -138,6 +146,8 @@ TEST_CASES = [
         MULTIPLE_LINES_WITH_THINK,
         id="multiple_lines_with_think_streaming",
     ),
+    pytest.param(False, TEXT_BEFORE_THINK, id="text_before_think"),
+    pytest.param(True, TEXT_BEFORE_THINK, id="text_before_think_streaming"),
 ]
 
 # Global tokenizer initialization to avoid repeated loading
