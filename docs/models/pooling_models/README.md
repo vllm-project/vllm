@@ -263,6 +263,17 @@ shown in the table below.
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
 
+### Head Precision
+
+BERT masked-language-model and SPLADE heads use the resolved `head_dtype`,
+which defaults to `float32`. Their encoder can run in a lower precision while
+keeping the MLM transform and vocabulary projection in the configured head
+precision.
+
+Set `hf_overrides={"head_dtype": "model"}` to use the encoder dtype for the head,
+or specify a supported dtype such as `"bfloat16"`. For online serving, pass
+`--hf-overrides '{"head_dtype": "model"}'`.
+
 ### Pooler Configuration
 
 #### Predefined models
