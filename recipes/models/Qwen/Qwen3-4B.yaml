@@ -152,7 +152,7 @@ guide: |
   ## Configuration Tips
 
   - `--max-model-len 4096` is the TPU-recipe default; native context is 40K — raise it if you have headroom.
-  - vLLM uses 90% of device memory by default; the TPU recipe pushes `--gpu-memory-utilization 0.98` to maximize KV cache.
+  - On TPU, the recipe raises `--gpu-memory-utilization` to 0.98 to maximize KV cache.
   - For thinking mode Qwen recommends `temperature=0.6, top_p=0.95, top_k=20`; for non-thinking, `temperature=0.7, top_p=0.8`.
 
   ## Benchmarking

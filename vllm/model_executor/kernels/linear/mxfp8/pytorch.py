@@ -26,7 +26,7 @@ _E8M0 = torch.float8_e8m0fnu
 
 
 class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
-    """MXFP8 W8A8 GEMM using the native ``torch._scaled_mm`` dispatch.
+    """MXFP8 W8A8 GEMM using the native `torch._scaled_mm` dispatch.
 
     Supported on XPU (oneDNN) and CUDA (cuBLASLt, SM90+).
     """

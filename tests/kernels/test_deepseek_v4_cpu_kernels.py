@@ -20,7 +20,7 @@ from tests.kernels.test_fused_deepseek_v4_qnorm_rope_kv_insert import (
     make_cos_sin_cache,
 )
 from tests.kernels.utils import bf16_ulp_distance, fp8_ulp_distance
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     compress_norm_rope_store_cpu,
     compress_norm_rope_store_indexer_cpu,
     flash_mla_with_kvcache_cpu,
@@ -1341,7 +1341,7 @@ def test_fused_indexer_q_rope_quant_dispatches_to_cpu_kernel():
         positions, q, cos_sin_cache, weights, softmax_scale, head_scale
     )
 
-    with mock.patch("vllm._custom_ops.fused_indexer_q_rope_quant_cpu") as mocked:
+    with mock.patch("vllm._cpu_ops.fused_indexer_q_rope_quant_cpu") as mocked:
         fused_indexer_q_rope_quant(
             positions,
             q.clone(),

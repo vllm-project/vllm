@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DFlash2 drafter for Ricursive Ripple, whose ``no_rope_layers`` are NoPE."""
+"""DFlash2 drafter for Ricursive Ripple, whose `no_rope_layers` are NoPE."""
 
 import torch
 from torch import nn

@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     group_kernel_blocks,
 )
 from vllm.v1.kv_offload.base import (
@@ -90,18 +89,22 @@ class OffloadingConnectorWorker:
         for kv_cache_group in selected_groups:
             assert not kv_cache_group.host_resident
             num_blocks = kv_cache_config.num_blocks
-            group_layer_names = kv_cache_group.layer_names
-            group_kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs = group_kv_cache_spec.kv_cache_specs
-            else:
-                per_layer_specs = {}
-            for layer_name in group_layer_names:
-                layer_kv_cache_spec = per_layer_specs.get(
-                    layer_name, group_kv_cache_spec
-                )
+            per_layer_specs = kv_cache_group.kv_cache_specs
+            for layer_name, layer_kv_cache_spec in per_layer_specs.items():
                 ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
+                # A padded page split into kernel blocks spreads its padding
+                # over them, but offloading copies the payload from page start.
+                if (
+                    isinstance(layer_kv_cache_spec, AttentionSpec)
+                    and page > layer_kv_cache_spec.unpadded_page_size_bytes
+                    and kv_caches[layer_name].shape[0] != num_blocks
+                ):
+                    raise NotImplementedError(
+                        "KV offloading does not support padded KV pages split "
+                        f"into kernel blocks (layer {layer_name}). Use an "
+                        "attention backend that takes the full block size."
+                    )
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
                 # Packed layouts (e.g. DSv4) interleave layers per block, so the

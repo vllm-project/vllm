@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Two-shot Lamport all-reduce of BF16 rows [B, width] over TP ranks.
 
-Rank ``o`` owns columns [o W, (o + 1) W), W = width / owners. Every buffer is
+Rank `o` owns columns [o W, (o + 1) W), W = width / owners. Every buffer is
 Lamport-armed and only its local reader re-arms it:
 
-- ``push``: a rank stores its 8-column chunk of row ``token`` into the owner's
-  receive slot [rank] (a peer store; the owner's ``recv`` [TP, cap, W]; callers with a
+- `push`: a rank stores its 8-column chunk of row `token` into the owner's
+  receive slot [rank] (a peer store; the owner's `recv` [TP, cap, W]; callers with a
   runtime parity pass the whole [parities x TP, cap, W] and slot parity x TP + rank).
-- ``reduce``: the owner polls the TP slots of an owned chunk in its own memory, sums
+- `reduce`: the owner polls the TP slots of an owned chunk in its own memory, sums
   them in FP32 in rank order, rounds once and multicasts the BF16 sum into every
   rank's gather row [cap, width]; then re-arms the slots.
 - every rank then polls its gather row (one slot) and re-arms it.
 
 Each GPU moves ~2 x B x width x 2 bytes instead of TP x B x width x 2 (one-shot), and
-every rank gets the same bits. ``owners`` = 1 is a one-GPU stand-in: rank 0 owns every
-column and its TP local slots play the ranks. The o-projection reduces with ``reduce``
+every rank gets the same bits. `owners` = 1 is a one-GPU stand-in: rank 0 owns every
+column and its TP local slots play the ranks. The o-projection reduces with `reduce`
 and re-arms at once (two parities); the MoE tail reduces in WaveMoeTail and re-arms the
 previous MoE layer's rows (three parities).
 """
@@ -44,9 +44,9 @@ SENTINEL = -0x80000000
 
 
 class TwoShot:
-    """Symmetric buffers per layer parity: ``recv`` [TP, cap, W] (this rank's owned
-    columns, one slot per source rank), ``gather`` [1, cap, width] (multicast) and the
-    ranks' ``recv`` base addresses [parity, TP]."""
+    """Symmetric buffers per layer parity: `recv` [TP, cap, W] (this rank's owned
+    columns, one slot per source rank), `gather` [1, cap, width] (multicast) and the
+    ranks' `recv` base addresses [parity, TP]."""
 
     def __init__(self, group, device, tp, rank, width=7168, cap=64, parities=2):
         self.tp, self.rank, self.width = tp, rank, width
@@ -79,7 +79,7 @@ class TwoShot:
 @cute.jit
 def push(recv, peers, slot, token, column, words):
     """Store this rank's BF16 chunk (token, column .. column + 7) in receive slot
-    ``slot`` of its owner."""
+    `slot` of its owner."""
     width: cutlass.Constexpr = recv.shape[2]
     owner = column // width
     offset = cute.crd2idx((slot, token, column - owner * width), recv.layout)
@@ -90,7 +90,7 @@ def push(recv, peers, slot, token, column, words):
 def reduce(recv, gather, gather_mc, rank, token, column):
     """Owner of (token, column): the TP slots summed in FP32 in rank order, rounded
     once (no negative zero, the sentinel), multicast to every gather row; slots
-    re-armed. Returns nothing; callers then poll ``gather`` like a one-slot mailbox."""
+    re-armed. Returns nothing; callers then poll `gather` like a one-slot mailbox."""
     tp: cutlass.Constexpr = recv.shape[0]
     local = column - rank * recv.shape[2]
     raw = zeros((tp, 4), Uint32)

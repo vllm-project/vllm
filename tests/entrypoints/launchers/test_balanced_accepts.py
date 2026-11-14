@@ -46,7 +46,7 @@ def _app(hold_s: float = 0.0):
 
 
 async def _get(port: int, requests: int = 1, ssl_ctx=None) -> list[bytes]:
-    """``requests`` requests on one keep-alive connection; returns the bodies."""
+    """`requests` requests on one keep-alive connection; returns the bodies."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=ssl_ctx)
     bodies = []
     for _ in range(requests):

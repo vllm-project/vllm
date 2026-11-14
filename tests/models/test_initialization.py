@@ -77,11 +77,11 @@ def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
     """Reclaim GPU memory left over by each test's forked subprocess.
 
     These tests are known to leave behind GPU memory (see the comment at
-    ``gpu_memory_utilization=0.80`` below). Each parametrized case builds an
+    `gpu_memory_utilization=0.80` below). Each parametrized case builds an
     LLM in a forked subprocess whose VRAM is only reclaimed asynchronously
     when the subprocess exits, so the leftovers can OOM a later test in this
     module (observed with the heavier multimodal archs, e.g.
-    InternVLChatModel). Mirrors ``clean_gpu_memory_between_tests`` in the
+    InternVLChatModel). Mirrors `clean_gpu_memory_between_tests` in the
     top-level conftest, but unconditionally for this module.
     """
     yield
@@ -125,20 +125,20 @@ def can_initialize(
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
-            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+            [lc for layers in layer_configs for lc in layers.values()],
         )
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs,
+            layer_configs,
             [10 * GiB_bytes],
             global_kv_cache_groups,
         )
@@ -147,7 +147,7 @@ def can_initialize(
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                g.block_size for g in kv_cache_groups
             )
 
         vllm_config.validate_block_size()

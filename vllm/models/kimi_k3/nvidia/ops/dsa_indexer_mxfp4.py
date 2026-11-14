@@ -3,17 +3,17 @@
 """MXFP4 writers of the Kimi K3.1 DSA indexer: the key LayerNorm + MXFP4 quant +
 cache insert (standalone, and fused into the DSA prologue) and the MXFP4 query quant.
 
-Format (DeepSeek V4's MXFP4 indexer cache, what DeepGEMM's ``fp8_fp4_*mqa_logits``
-read): one UE8M0 scale ``2^ceil(log2(amax / 6))`` per 32 values, E2M1 values (round to
+Format (DeepSeek V4's MXFP4 indexer cache, what DeepGEMM's `fp8_fp4_*mqa_logits`
+read): one UE8M0 scale `2^ceil(log2(amax / 6))` per 32 values, E2M1 values (round to
 nearest even, saturating), two per byte with the even element in the low nibble. A
-cache block of ``B`` tokens is ``[B x D/2 E2M1 | B x D/32 UE8M0]``, ``D/2 + D/32`` =
-68 B/token for ``D = 128``. The query is ``[T, P, D/2]`` E2M1 with its four UE8M0
-bytes per head packed into one int32 (``q_scale [T, P]``); the head weights take only
-``weight_scale`` (the MX scales stay in the logits MMA).
+cache block of `B` tokens is `[B x D/2 E2M1 | B x D/32 UE8M0]`, `D/2 + D/32` =
+68 B/token for `D = 128`. The query is `[T, P, D/2]` E2M1 with its four UE8M0
+bytes per head packed into one int32 (`q_scale [T, P]`); the head weights take only
+`weight_scale` (the MX scales stay in the logits MMA).
 
-Used only with an explicit ``--attention-config '{"indexer_kv_dtype": "mxfp4"}'``
-(``kimi_k3_indexer_uses_fp4``); the default FP8 cache keeps the writers of
-``dsa_indexer.py``, whose LayerNorm this key insert repeats op for op. Triton only (no
+Used only with an explicit `--attention-config '{"indexer_kv_dtype": "mxfp4"}'`
+(`kimi_k3_indexer_uses_fp4`); the default FP8 cache keeps the writers of
+`dsa_indexer.py`, whose LayerNorm this key insert repeats op for op. Triton only (no
 CuTe import), so every engine of a P/D pair writes the same bytes.
 """
 
@@ -55,9 +55,9 @@ def _fp32x2_to_fp4x2(x_lo, x_hi):
 
 @triton.jit
 def _mxfp4_quant(x, HEAD_DIM: tl.constexpr):
-    """MXFP4 of one ``HEAD_DIM`` fp32 row, same math as DeepSeek V4's
-    ``_quantize_mxfp4_pair``. Returns ``(packed [HEAD_DIM // 2] uint8 with the
-    even element in the low nibble, ue8m0 [HEAD_DIM // 32] uint8)``.
+    """MXFP4 of one `HEAD_DIM` fp32 row, same math as DeepSeek V4's
+    `_quantize_mxfp4_pair`. Returns `(packed [HEAD_DIM // 2] uint8 with the
+    even element in the low nibble, ue8m0 [HEAD_DIM // 32] uint8)`.
 
     cutedsl/dsa/index.py (mxfp4_scale) replays the PTX Triton emits for this
     scale: keep the two in step."""
@@ -171,12 +171,12 @@ def mxfp4_k_norm_quant_insert(
     topk_indices_buffer: torch.Tensor,
     num_tokens: int,
 ) -> None:
-    """``indexer_k_norm_quant_insert`` for the MXFP4 cache: LayerNorm + MXFP4
+    """`indexer_k_norm_quant_insert` for the MXFP4 cache: LayerNorm + MXFP4
     quant + cache insert of the indexer key, and the -1 fill of the top-k rows
-    ``[:num_tokens]``.
+    `[:num_tokens]`.
 
-    ``kv_cache`` is ``[num_blocks, block_size, indexer_cache_entry_bytes]`` uint8,
-    possibly a strided page view of a packed cache. Rows past ``slot_mapping`` or
+    `kv_cache` is `[num_blocks, block_size, indexer_cache_entry_bytes]` uint8,
+    possibly a strided page view of a packed cache. Rows past `slot_mapping` or
     with a negative slot are not inserted.
     """
     if num_tokens == 0:
@@ -263,13 +263,13 @@ def mxfp4_q_quant(
     weight_scale: float,
     padded_num_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize ``index_q`` ``[T, H, D]`` to MXFP4 (one ue8m0 scale per 32
+    """Quantize `index_q` `[T, H, D]` to MXFP4 (one ue8m0 scale per 32
     values), the query format of the MXFP4 indexer key cache, and scale
-    ``index_weights`` ``[T, H]`` by ``weight_scale``.
+    `index_weights` `[T, H]` by `weight_scale`.
 
-    Returns ``(q_packed [T, P, D // 2] uint8, q_scale [T, P] int32 packing the
-    four ue8m0 bytes of each head, weights [T, P] fp32)`` where ``P =
-    padded_num_heads``; heads ``[H, P)`` are zero.
+    Returns `(q_packed [T, P, D // 2] uint8, q_scale [T, P] int32 packing the
+    four ue8m0 bytes of each head, weights [T, P] fp32)` where `P =
+    padded_num_heads`; heads `[H, P)` are zero.
     """
     num_tokens, num_heads, head_dim = index_q.shape
     assert index_q.stride(-1) == 1
@@ -442,17 +442,17 @@ def mxfp4_fused_prologue(
     index_cache: torch.Tensor | None,
     index_slot_mapping: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``dsa_fused_prologue`` for the MXFP4 indexer cache, in one launch: the
-    q_a / kv_a RMSNorms, the fp8_ds_mla insert of ``[kv_c_normed | k_pe]`` and
+    """`dsa_fused_prologue` for the MXFP4 indexer cache, in one launch: the
+    q_a / kv_a RMSNorms, the fp8_ds_mla insert of `[kv_c_normed | k_pe]` and
     the -1 fill of the top-k rows (the stock kernel's code), and the indexer key
     LayerNorm + MXFP4 insert.
 
-    ``mla_cache`` (``[num_blocks, block_size, 656]``) and ``index_cache``
-    (``[num_blocks, block_size, indexer_cache_entry_bytes]``) are uint8, possibly
-    strided page views of a packed cache; ``None`` (profile runs) skips the
+    `mla_cache` (`[num_blocks, block_size, 656]`) and `index_cache`
+    (`[num_blocks, block_size, indexer_cache_entry_bytes]`) are uint8, possibly
+    strided page views of a packed cache; `None` (profile runs) skips the
     insert. Rows past a slot mapping or with a negative slot are not inserted.
 
-    Returns ``(q_c_normed, kv_c_normed)``.
+    Returns `(q_c_normed, kv_c_normed)`.
     """
     num_tokens, q_dim = q_c.shape
     kv_dim, rope_dim, index_dim = kv_c.shape[1], k_pe.shape[1], index_k.shape[1]

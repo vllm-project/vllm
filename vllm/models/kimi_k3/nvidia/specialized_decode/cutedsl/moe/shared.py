@@ -7,9 +7,9 @@ barrier instead of kernel bounds.
 120 CTAs of 160 threads in clusters of ks = 120 / tiles (TP8 5, TP16 10). Loader warps
 0-3 feed a 128B-swizzled ring of W [64, 64] (TMA) and x [N, 64] (cp.async) K blocks to
 warp 4, which issues each block's four M=64 kind::f16 MMAs warp-uniformly
-(``mma_bf16_block``). Gate/up M-tile m (32 gate rows and the matching 32 up rows)
+(`mma_bf16_block`). Gate/up M-tile m (32 gate rows and the matching 32 up rows)
 belongs to cluster m, whose CTAs split its K. Each CTA pushes its FP32 partial rows
-over DSMEM to the owner of their h columns (``width`` columns per owner); an owner
+over DSMEM to the owner of their h columns (`width` columns per owner); an owner
 thread per (column, token) sums the parts in K (rank) order, rounds gate and up to BF16
 for SiTU, and the owner stores h rows as vectors. After the grid's h barrier, CTAs
 below 112 run 64 down rows (the first ring's worth of weights already staged) and
@@ -68,7 +68,7 @@ COUNTERS = 4  # h ready, exit
 
 @asm()
 def prefetch_tma2(descriptor, column, row):
-    """L2 prefetch of the 2D TMA box at (``column``, ``row``)."""
+    """L2 prefetch of the 2D TMA box at (`column`, `row`)."""
     code = "cp.async.bulk.prefetch.tensor.2d.L2.global.tile [$0,{$1,$2}];"
     return code, "l,r,r", (descriptor, Int32(column), Int32(row))
 
@@ -122,7 +122,7 @@ class SharedBase:
 
     @cute.jit
     def load_weight(self, tile, descriptor, barrier, row0, row1, column):
-        """W rows [row0, + 32) and [row1, + 32), 64 columns from ``column``, as a
+        """W rows [row0, + 32) and [row1, + 32), 64 columns from `column`, as a
         K-major 128B-swizzled [64, 64] tile (two TMA boxes)."""
         cute.arch.mbarrier_arrive_and_expect_tx(barrier, 8192)
         load_tma2(tile, descriptor, barrier, column, row0)
@@ -130,7 +130,7 @@ class SharedBase:
 
     @cute.jit
     def load_rows(self, tile, source, column):
-        """Rows [0, batch) of ``source``, 64 columns from ``column``, as the B tile
+        """Rows [0, batch) of `source`, 64 columns from `column`, as the B tile
         (threads [0, 128))."""
         tid, _, _, _ = thread()
         count: Constexpr = self.batch * 8
@@ -160,9 +160,9 @@ class SharedBase:
 
     @cute.jit
     def push(self, mailbox, staging, values, row0):
-        """Down rows [row0, + 64) (``values`` from ``accumulated``) -> FP32 [token,
-        row] tile at ``staging`` -> BF16 (-0 made +0) 16-byte peer stores into the RS
-        mailbox slot; ``mailbox`` is (peers, parity, rank, capacity). Warps 0-3."""
+        """Down rows [row0, + 64) (`values` from `accumulated`) -> FP32 [token,
+        row] tile at `staging` -> BF16 (-0 made +0) 16-byte peer stores into the RS
+        mailbox slot; `mailbox` is (peers, parity, rank, capacity). Warps 0-3."""
         peers, parity, rank, capacity = mailbox
         tid, warp, lane, _ = thread()
         tile = view(staging, 0, Float32, (self.n, 68), (68, 1))
@@ -281,7 +281,7 @@ class SharedUmma(SharedBase):
 
     @cute.jit
     def load_tile(self, tile, maps, barrier, m, k):
-        """K block ``k`` of M-tile ``m``: 32 gate and the matching 32 up rows, or (front
+        """K block `k` of M-tile `m`: 32 gate and the matching 32 up rows, or (front
         tiles past the gate/up ones) 64 consecutive front rows."""
         if m < self.gtiles:
             rows = (32 * m, self.hidden + 32 * m)
@@ -292,7 +292,7 @@ class SharedUmma(SharedBase):
 
     @cute.jit
     def prefetch_tile(self, maps, m, k):
-        """L2 prefetch of ``load_tile``'s two boxes."""
+        """L2 prefetch of `load_tile`'s two boxes."""
         if m < self.gtiles:
             prefetch_tma2(maps.iterator, 64 * k, 32 * m)
             prefetch_tma2(maps.iterator, 64 * k, self.hidden + 32 * m)
@@ -436,8 +436,8 @@ class SharedUmma(SharedBase):
 
     @cute.jit
     def slot(self, t, j):
-        """Token ``t``'s place in a partial row of column ``j``: with the front rows
-        the row's 16-byte chunks rotate by ``j`` (conflict-free staging stores)."""
+        """Token `t`'s place in a partial row of column `j`: with the front rows
+        the row's 16-byte chunks rotate by `j` (conflict-free staging stores)."""
         if c.const_expr(self.front is None):
             return t
         chunks: Constexpr = self.n // 4
@@ -446,7 +446,7 @@ class SharedUmma(SharedBase):
     @cute.jit
     def reduce(self, args, received, staged, bars, cta):
         """Owner: a thread per (column, token) sums the parts in rank order and
-        applies SiTU; the rows leave in ``width``-column vectors. Then the CTA counts
+        applies SiTU; the rows leave in `width`-column vectors. Then the CTA counts
         into the h barrier (fused only)."""
         h, counters = args[2:4]
         beta, linear_beta = args[8:10]
@@ -472,7 +472,7 @@ class SharedUmma(SharedBase):
 
     @cute.jit
     def owned_h(self, h, parts, staged, m, rank, beta, linear_beta):
-        """Owner of gate/up tile ``m``: SiTU of the summed parts into ``width``-column
+        """Owner of gate/up tile `m`: SiTU of the summed parts into `width`-column
         h vectors."""
         tid, _, _, _ = thread()
         batch, width = self.batch, self.width
@@ -497,10 +497,10 @@ class SharedUmma(SharedBase):
 
     @cute.jit
     def publish(self, args, parts, rows, f, rank):
-        """Owner of front tile ``f``: sums each (row, token) in rank order, then
-        publishes ``width``-row vectors like the front GEMM: FP32 router logits (rows
+        """Owner of front tile `f`: sums each (row, token) in rank order, then
+        publishes `width`-row vectors like the front GEMM: FP32 router logits (rows
         < valid) and BF16 latent columns (rows >= split), -0 made +0, as multicast
-        stores into the front mailbox (``mc``; this rank's ``slot`` / ``base``)."""
+        stores into the front mailbox (`mc`; this rank's `slot` / `base`)."""
         mc, slot, base = args[10:13]
         _, split, valid, pitch = self.front
         tid, _, _, _ = thread()
@@ -534,9 +534,9 @@ class SharedUmma(SharedBase):
 
 
 class SharedDown(SharedBase):
-    """The split variant's down projection beside the routed experts: ``sms``
+    """The split variant's down projection beside the routed experts: `sms`
     persistent CTAs (one per SM the experts' grid leaves) stage h [N, hidden] once,
-    take every ``sms``-th 64-row tile, stream its W blocks through a TMA ring (warp 5)
+    take every `sms`-th 64-row tile, stream its W blocks through a TMA ring (warp 5)
     into alternating TMEM accumulators (warp 4) and peer-store each tile like the
     fused kernel (warps 0-3). Exactly the fused kernel's down numerics."""
 
@@ -636,11 +636,11 @@ class SharedDown(SharedBase):
 
 @functools.cache
 def compile_shared(tp, batch, device, gate=False, front=None):
-    """Arguments: x, ``weight_maps``, h, counters, RS peers, parity, rank, capacity,
-    beta, linear beta. ``gate``: the split variant's gate/up + SiTU half; ``front``
+    """Arguments: x, `weight_maps`, h, counters, RS peers, parity, rank, capacity,
+    beta, linear beta. `gate`: the split variant's gate/up + SiTU half; `front`
     (rows, split, valid, mailbox row): with the MoE front GEMM's rows, whose results
     go to the front mailbox (more arguments: multicast address, logit slot, latent
-    base; ``weight_maps`` with the front's)."""
+    base; `weight_maps` with the front's)."""
     maps = fake((256 if front is None else 384,), None, c.Uint8, 64)
     args: tuple = (fake((batch, 7168)), maps, fake((batch, 6144 // tp)))
     args += (fake((COUNTERS,), None, Int32), fake((tp,), None, Int64))
@@ -655,7 +655,7 @@ def compile_shared(tp, batch, device, gate=False, front=None):
 
 @functools.cache
 def compile_down(tp, batch, device, sms):
-    """Arguments: h, ``weight_maps``, RS peers, parity, rank, capacity."""
+    """Arguments: h, `weight_maps`, RS peers, parity, rank, capacity."""
     args: tuple = (fake((batch, 6144 // tp)), fake((256,), None, c.Uint8, 64))
     args += (fake((tp,), None, Int64), Int32(0), Int32(0), Int32(0))
     kernel = SharedDown(tp, batch, sms)
