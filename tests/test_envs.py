@@ -228,7 +228,8 @@ class TestEnvWithChoices:
             env_func = env_with_choices(
                 "TEST_ENV", "default", ["OPTION1", "OPTION2"], case_sensitive=False
             )
-            assert env_func() == "option1"
+            # Case-insensitive lookup returns the configured canonical value.
+            assert env_func() == "OPTION1"
 
     def test_valid_uppercase_value_returned_case_insensitive(self):
         """Test that uppercase value is accepted in case insensitive mode."""
@@ -236,7 +237,13 @@ class TestEnvWithChoices:
             env_func = env_with_choices(
                 "TEST_ENV", "default", ["option1", "option2"], case_sensitive=False
             )
-            assert env_func() == "OPTION1"
+            assert env_func() == "option1"
+
+    def test_float32_precision_uses_canonical_torch_value(self):
+        # The GPU worker passes this value to torch.set_float32_matmul_precision,
+        # which only accepts the canonical lowercase spelling.
+        with patch.dict(os.environ, {"VLLM_FLOAT32_MATMUL_PRECISION": "HIGH"}):
+            assert environment_variables["VLLM_FLOAT32_MATMUL_PRECISION"]() == "high"
 
     def test_invalid_value_raises_error_case_sensitive(self):
         """Test that invalid value raises ValueError in case sensitive mode."""
