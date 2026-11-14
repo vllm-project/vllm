@@ -915,3 +915,29 @@ def test_top_k_tokens_stay_in_the_processor_vocabulary(default_vllm_config):
     _, ids = processor.get_top_k_tokens(head, hidden_states, 4)
     assert (ids < vocab_size).all()
     assert (processor.get_top_tokens(head, hidden_states) < vocab_size).all()
+
+
+def test_top_k_values_scale_before_soft_cap(default_vllm_config):
+    """DFlash2 drafters use scale-then-cap (z-lab/dflash
+    DFlashDraftModel.compute_logits), unlike LogitsProcessor.forward()."""
+    vocab_size, hidden_size, k = 64, 16, 8
+    scale, soft_cap = 0.196, 20.0  # z-lab/Muse-Glimmer-30B-DFlash2
+    with (
+        mock.patch(f"{_EMBEDDING}.get_tensor_model_parallel_rank", return_value=0),
+        mock.patch(
+            f"{_EMBEDDING}.get_tensor_model_parallel_world_size", return_value=1
+        ),
+    ):
+        head = ParallelLMHead(vocab_size, hidden_size, params_dtype=torch.float32)
+    torch.manual_seed(0)
+    with torch.no_grad():
+        head.weight.normal_(std=10.0)  # raw logits well above soft_cap
+    head.quant_method.process_weights_after_loading(head)
+    hidden_states = torch.randn(4, hidden_size, dtype=torch.float32)
+    processor = LogitsProcessor(vocab_size, scale=scale, soft_cap=soft_cap)
+
+    ids, values = processor.get_top_k_tokens(head, hidden_states, k)
+
+    raw = hidden_states @ head.weight.T
+    expected = torch.tanh(raw * scale / soft_cap) * soft_cap
+    torch.testing.assert_close(values, expected.gather(-1, ids))

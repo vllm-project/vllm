@@ -320,6 +320,12 @@ class LogitsProcessor(PluggableLayer):
         values = values.float()
         if return_log_probs:
             return ids, values - log_partition
+        # NOTE: Unlike forward(), scaling is intentionally applied before
+        # soft_cap here. The callers of get_top_k_tokens(return_log_probs=False)
+        # are DFlash2 drafters, whose training and reference implementation
+        # (DFlashDraftModel.compute_logits) apply output_multiplier before
+        # soft capping. Reversing this order significantly degrades draft
+        # acceptance length.
         if self.scale != 1.0:
             values = values * self.scale
         if self.soft_cap is not None:
