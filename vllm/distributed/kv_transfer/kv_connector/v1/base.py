@@ -642,6 +642,15 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def validate_request(self, request: "Request") -> None:
+        """Validate a request before scheduler admission.
+
+        Runs in the engine input thread. Implementations must not mutate the
+        request or connector state, and must raise `VLLMValidationError` for
+        invalid client input so only that request fails.
+        """
+        return
+
     def on_new_request(self, request: "Request") -> None:
         """Called by the scheduler when a new request is added.
 

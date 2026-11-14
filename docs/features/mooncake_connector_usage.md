@@ -41,6 +41,15 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+### Request validation
+
+Invalid `kv_transfer_params` are rejected before scheduling and return HTTP 400
+on the inference API. A `kv_producer` cannot request `do_remote_prefill`, and a
+`kv_consumer` cannot request `do_remote_decode`. A remote-prefill request must
+provide non-empty string values for `transfer_id`, `remote_engine_id`, and
+`remote_bootstrap_addr`; a remote-decode request must provide `transfer_id`.
+The proxy supplies these values when coordinating a transfer.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server

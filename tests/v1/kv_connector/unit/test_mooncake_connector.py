@@ -19,7 +19,7 @@ import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
-from vllm import envs
+from vllm import SamplingParams, envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
@@ -56,13 +56,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheLayout,
     MLAAttentionSpec,
 )
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
     create_model_runner_output,
@@ -552,6 +553,118 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("kv_role", "params", "parameter"),
+    [
+        ("kv_consumer", [], "kv_transfer_params"),
+        ("kv_consumer", "invalid", "kv_transfer_params"),
+        ("kv_producer", {"do_remote_prefill": True}, "do_remote_prefill"),
+        ("kv_consumer", {"do_remote_decode": True}, "do_remote_decode"),
+        (
+            "kv_consumer",
+            {"do_remote_prefill": True, "do_remote_decode": True},
+            "do_remote_decode",
+        ),
+        ("kv_producer", {"do_remote_decode": True}, "transfer_id"),
+    ],
+)
+def test_mooncake_rejects_invalid_transfer_roles(kv_role, params, parameter):
+    """Reject role mismatches before they reach scheduler assertions."""
+    config = _make_worker_vllm_config(kv_role)
+    connector = MooncakeConnector(
+        config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+    )
+    request = Request(
+        request_id="invalid-transfer",
+        prompt_token_ids=[1, 2],
+        sampling_params=SamplingParams(extra_args={"kv_transfer_params": params}),
+        pooling_params=None,
+    )
+    with pytest.raises(VLLMValidationError, match=parameter):
+        connector.validate_request(request)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "parameter", ["transfer_id", "remote_engine_id", "remote_bootstrap_addr"]
+)
+@pytest.mark.parametrize("value", [None, "", 7, []])
+def test_mooncake_rejects_incomplete_abort_metadata(parameter, value):
+    """Even rejected inference requests need valid peer metadata for cleanup."""
+    config = _make_worker_vllm_config("kv_consumer")
+    connector = MooncakeConnector(
+        config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+    )
+    params = {
+        "do_remote_prefill": True,
+        "transfer_id": "transfer",
+        "remote_engine_id": "producer",
+        "remote_bootstrap_addr": "http://producer:1234",
+    }
+    if value is None:
+        params.pop(parameter)
+    else:
+        params[parameter] = value
+    request = Request(
+        request_id="rejected-transfer",
+        prompt_token_ids=[1, 2],
+        sampling_params=SamplingParams(extra_args={"kv_transfer_params": params}),
+        pooling_params=None,
+        abort_immediately=True,
+    )
+    with pytest.raises(VLLMValidationError, match=parameter):
+        connector.validate_request(request)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("kv_role", "do_remote_prefill", "do_remote_decode"),
+    [
+        ("kv_consumer", True, False),
+        ("kv_producer", False, True),
+        ("kv_both", True, False),
+        ("kv_both", False, True),
+        ("kv_both", True, True),
+    ],
+)
+def test_mooncake_validation_preserves_abort_cleanup(
+    kv_role, do_remote_prefill, do_remote_decode
+):
+    """Valid transfers still notify the peer when aborted before scheduling."""
+    config = _make_worker_vllm_config(kv_role)
+    scheduler = create_scheduler(config)
+    connector = scheduler.get_kv_connector()
+    params = {
+        "do_remote_prefill": do_remote_prefill,
+        "do_remote_decode": do_remote_decode,
+        "transfer_id": "transfer",
+        "remote_engine_id": "producer",
+        "remote_bootstrap_addr": "http://producer:1234",
+    }
+    request = Request(
+        request_id="aborted-transfer",
+        prompt_token_ids=[1, 2],
+        sampling_params=SamplingParams(
+            extra_args={"kv_transfer_params": params.copy()}
+        ),
+        pooling_params=None,
+    )
+    connector.validate_request(request)
+    assert request.kv_transfer_params == params
+    scheduler.add_request(request)
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+    metadata = scheduler.schedule().kv_connector_metadata
+    assert isinstance(metadata, MooncakeConnectorMetadata)
+    if do_remote_prefill:
+        pull = metadata.reqs_to_recv["producer"][request.request_id]
+        assert pull.transfer_id == "transfer"
+        assert pull.remote_bootstrap_addr == "http://producer:1234"
+        assert pull.local_block_ids == []
+    else:
+        assert metadata.reqs_not_processed == {"transfer"}
 
 
 def test_basic_interface():

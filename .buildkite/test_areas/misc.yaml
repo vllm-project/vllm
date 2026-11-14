@@ -189,6 +189,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/v1/engine/core.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
   - tests/v1/kv_connector/unit/moriio/
@@ -294,6 +296,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/v1/engine/core.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - vllm/model_executor/model_loader/dummy_loader.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py

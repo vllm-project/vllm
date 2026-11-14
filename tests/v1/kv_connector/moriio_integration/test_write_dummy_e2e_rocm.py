@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
+"""Single-node MoRIIO admission and P/D checks, in WRITE and READ mode.
 
-Each case serves a real model architecture with `--load-format dummy`, widened
+Admission checks use real Qwen weights to verify inference after rejection.
+P/D cases serve a real model architecture with `--load-format dummy`, widened
 by `moriio_wide_dummy` (see `DUMMY_WEIGHT_RANGE`): the
 config keeps the real hidden size, head geometry, MLA ranks and recurrent-state
 shapes, so the connector registers and transfers exactly the production cache
@@ -569,6 +570,112 @@ def _moriio_config(
             "notify_port": str(_open_port_block()),
         },
     }
+
+
+@pytest.fixture(scope="module")
+def validation_server() -> Generator[RemoteOpenAIServer]:
+    """Use real weights to check rejection and subsequent ordinary inference."""
+    selector, devices = _visible_devices()
+    port, ping_port = _open_port(), _open_port()
+    config = _moriio_config("kv_consumer", port, ping_port)
+    with (
+        _proxy(ping_port),
+        RemoteOpenAIServer(
+            "Qwen/Qwen3-0.6B",
+            [
+                "--revision",
+                "c1899de289a04d12100db370d81485cdf75e47ca",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--dtype",
+                "bfloat16",
+                "--enforce-eager",
+                "--max-model-len",
+                "256",
+                "--max-num-seqs",
+                "8",
+                "--gpu-memory-utilization",
+                "0.2",
+                "--kv-transfer-config",
+                json.dumps(config),
+            ],
+            env_dict={
+                **_device_env(selector, devices[:1]),
+                "VLLM_HOST_IP": "127.0.0.1",
+                "VLLM_PORT": str(_open_port_block(32)),
+                "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            },
+            auto_port=False,
+            max_wait_seconds=900,
+        ) as server,
+    ):
+        yield server
+
+
+@pytest.mark.parametrize(
+    "path,payload",
+    [
+        ("v1/completions", {"prompt": "Hello", "max_tokens": 1}),
+        (
+            "v1/chat/completions",
+            {"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 1},
+        ),
+        (
+            "v1/responses",
+            {"input": "Hello", "max_output_tokens": 1, "store": False},
+        ),
+        (
+            "v1/messages",
+            {"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 1},
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"do_remote_prefill": True},
+        {"do_remote_prefill": True, "remote_host": "127.0.0.1"},
+        {
+            "do_remote_prefill": True,
+            "remote_host": "127.0.0.1",
+            "remote_notify_port": "invalid",
+        },
+        {
+            "do_remote_prefill": True,
+            "remote_host": "127.0.0.1",
+            "remote_notify_port": 61005,
+            "remote_dp_size": "invalid",
+        },
+    ],
+    ids=["missing-peer", "missing-port", "invalid-port", "invalid-dp-size"],
+)
+def test_invalid_transfer_params_preserve_serving(
+    validation_server, path, payload, params
+):
+    """Reject one malformed request without killing or occupying the engine."""
+    server = validation_server
+    response = requests.post(
+        server.url_for(path),
+        json={"model": "Qwen/Qwen3-0.6B", **payload, "kv_transfer_params": params},
+        timeout=60,
+    )
+    assert response.status_code == 400, response.text
+    assert "kv_transfer_params" in response.json()["error"]["message"]
+    healthy = requests.post(
+        server.url_for("v1/completions"),
+        json={
+            "model": "Qwen/Qwen3-0.6B",
+            "prompt": "Hello",
+            "max_tokens": 1,
+            "temperature": 0,
+        },
+        timeout=60,
+    )
+    assert healthy.status_code == 200, healthy.text
+    assert healthy.json()["usage"]["completion_tokens"] == 1
+    assert requests.get(server.url_for("health"), timeout=10).status_code == 200
 
 
 @contextlib.contextmanager

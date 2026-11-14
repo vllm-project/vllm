@@ -123,6 +123,13 @@ The connector is configured at two levels: the application level and the transpo
 
 WRITE mode is used by default. READ mode can be configured by setting `--kv-transfer-config.kv_connector_extra_config.read_mode true`.
 
+Invalid `kv_transfer_params` are rejected before scheduling and return HTTP 400
+on the inference API. Supplied DP size and rank fields must be convertible to
+integers. A WRITE consumer requesting remote prefill must identify the producer
+through the router's encoded request ID or explicit `remote_host` and
+`remote_notify_port` fields. Missing peer details are rejected instead of
+leaving the request waiting for a transfer.
+
 **Control-plane configuration:** MoRI moves KV bytes over RDMA/xGMI, but producers and consumers also need out-of-band TCP channels for handshake, block id exchange, liveness, and completion signaling. These keys live under `kv_connector_extra_config`:
 
 - `proxy_ip`: IP address of the disaggregation proxy/router that fronts the prefiller and decoder. Each vLLM instance uses it to register itself and to send heartbeats so the proxy knows where to route incoming requests.

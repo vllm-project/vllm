@@ -62,6 +62,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
@@ -850,6 +851,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         return self._kv_cache_config.transfer_group_ids
 
+    def validate_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.validate_request(request)
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -1126,6 +1131,41 @@ class MooncakeConnectorScheduler:
                 hash_block_size, self.vllm_config.num_hash_lookahead_tokens
             )
             params["_p_side_truncated"] = True
+
+    def validate_request(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if params is None:
+            return
+        if not isinstance(params, dict):
+            raise VLLMValidationError(
+                "kv_transfer_params must be a dictionary",
+                parameter="kv_transfer_params",
+            )
+
+        do_remote_prefill = params.get("do_remote_prefill")
+        do_remote_decode = params.get("do_remote_decode")
+        for flag, incompatible_role in (
+            ("do_remote_prefill", self.is_kv_producer),
+            ("do_remote_decode", self.is_kv_consumer),
+        ):
+            if params.get(flag) and incompatible_role:
+                raise VLLMValidationError(
+                    f"{flag} is incompatible with this Mooncake connector's kv_role",
+                    parameter=f"kv_transfer_params.{flag}",
+                )
+
+        required: tuple[str, ...] = (
+            ("transfer_id",) if do_remote_prefill or do_remote_decode else ()
+        )
+        if do_remote_prefill:
+            required += ("remote_engine_id", "remote_bootstrap_addr")
+        for name in required:
+            value = params.get(name)
+            if not isinstance(value, str) or not value:
+                raise VLLMValidationError(
+                    f"{name} must be a non-empty string for Mooncake KV transfer",
+                    parameter=f"kv_transfer_params.{name}",
+                )
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params

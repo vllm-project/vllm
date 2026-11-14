@@ -42,6 +42,25 @@ from enum import Enum
 logger = init_logger(__name__)
 
 
+def coerce_kv_int_param(
+    params: dict[str, Any],
+    key: str,
+    default: int,
+) -> int:
+    """Coerce a supplied integer, defaulting only absent or `None` values."""
+    if key not in params:
+        return default
+    raw = params[key]
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(
+            f"kv_transfer_params[{key!r}] must be an integer, got {raw!r}"
+        ) from e
+
+
 Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
@@ -567,6 +586,25 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     return m.group(1)
 
 
+def get_moriio_write_notify_address(
+    request_id: str, params: dict[str, Any], *, prefer_explicit: bool = False
+) -> tuple[str, int]:
+    """Resolve the producer notification address for a WRITE consumer."""
+    peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=False)
+    host = params.get("remote_host")
+    explicit_address = host is not None and params.get("remote_notify_port") is not None
+    if peer_zmq is not None and not (prefer_explicit and explicit_address):
+        host, _, port = parse_moriio_zmq_address(peer_zmq)
+    else:
+        port = coerce_kv_int_param(params, "remote_notify_port", 0)
+    if not isinstance(host, str) or not host or not 1 <= port <= 65535:
+        raise ValueError(
+            "MoRIIO WRITE requires remote_host and a valid remote_notify_port "
+            "in the request ID or kv_transfer_params"
+        )
+    return host, port
+
+
 @dataclass(slots=True)
 class ReqMeta:
     """Metadata for a single request."""
@@ -677,12 +715,13 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         if not isinstance(_pod_hosts, list):
             _pod_hosts = [_pod_hosts]
         _pod_hosts = [str(h) for h in _pod_hosts]
-        _remote_dp_size_local = int(
-            kv_transfer_params.get(
-                "remote_dp_size_local",
-                kv_transfer_params.get("remote_dp_size", 1),
-            )
+        _remote_dp_size = (
+            coerce_kv_int_param(kv_transfer_params, "remote_dp_size", 1) or 1
         )
+        _remote_dp_size_local = coerce_kv_int_param(
+            kv_transfer_params, "remote_dp_size_local", _remote_dp_size
+        )
+        _remote_dp_rank = coerce_kv_int_param(kv_transfer_params, "remote_dp_rank", 0)
 
         _req = ReqMeta(
             transfer_id=transfer_id,
@@ -705,8 +744,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 or kv_transfer_params.get("tp_size")
                 or 0
             ),
-            remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
-            remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
+            remote_dp_size=_remote_dp_size,
+            remote_dp_rank=_remote_dp_rank,
             multi_pod_hosts=_pod_hosts,
             remote_dp_size_local=_remote_dp_size_local,
         )

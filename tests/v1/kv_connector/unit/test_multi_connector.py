@@ -400,11 +400,12 @@ def test_multi_example_connector_consistency():
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
     # The cache manager is bound, completion counts queried, and handshake
-    # metadata exchanged before the request is enqueued.
-    assert storage1_scheduler_events[:7] == [
+    # metadata exchanged before the request is validated and enqueued.
+    assert storage1_scheduler_events[:8] == [
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
+        "validate_request",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
@@ -427,10 +428,11 @@ def test_multi_example_connector_consistency():
         assert worker_events.index("start_load_kv") > worker_events.index(
             "save_kv_layer"
         )
-    assert storage2_scheduler_events[:7] == [
+    assert storage2_scheduler_events[:8] == [
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
+        "validate_request",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",

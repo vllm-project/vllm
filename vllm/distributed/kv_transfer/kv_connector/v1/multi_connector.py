@@ -534,6 +534,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 # Other connectors still receive the request's real blocks
                 c.update_state_after_alloc(request, blocks, 0)
 
+    def validate_request(self, request: "Request") -> None:
+        for c in self._connectors:
+            c.validate_request(request)
+
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)

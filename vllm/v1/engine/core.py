@@ -1288,6 +1288,8 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )
+        if connector := self.scheduler.get_kv_connector():
+            connector.validate_request(req)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -2244,10 +2246,6 @@ class EngineCoreProc(EngineCore):
                             self._handle_mm_cache_miss(req, e)
                             continue
                         except VLLMValidationError as e:
-                            # Note(arpera):
-                            # Currently we validate in engine core
-                            # only if request uses the same structured output backend
-                            # as engine core latched
                             self._handle_request_validation_error(req, e)
                             continue
                         except Exception:
