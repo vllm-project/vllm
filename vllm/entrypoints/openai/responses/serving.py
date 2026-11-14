@@ -255,13 +255,6 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-                param="logprobs",
-            )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -809,6 +802,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                     context.function_tool_names,
                     incomplete=(
                         i == len(harmony_msgs) - 1 and context.last_append_flush_status
+                    ),
+                    message_logprobs=(
+                        self._to_response_logprobs(
+                            context._message_logprobs.get(id(msg)),
+                            tokenizer,
+                            request.top_logprobs,
+                        )
+                        if request.is_include_output_logprobs()
+                        else None
                     ),
                 )
                 if next_streamed is not None and next_streamed[0] is msg:
@@ -1455,3 +1457,42 @@ class OpenAIServingResponses(GenerateBaseServing):
                     response=final_response,
                 )
             yield _increment_sequence_number_and_return(terminal_event)
+
+    def _to_response_logprobs(
+        self,
+        per_token_logprobs: list[dict[int, Any]] | None,
+        tokenizer: TokenizerLike,
+        top_logprobs: int | None = None,
+    ) -> list[Logprob] | None:
+        """Convert per-token Harmony logprobs into OpenAI response logprobs."""
+        if not per_token_logprobs:
+            return None
+
+        out: list[Logprob] = []
+        for token_logprobs in per_token_logprobs:
+            if not token_logprobs:
+                continue
+            token_id, logprob = next(iter(token_logprobs.items()))
+            text = self._get_decoded_token(
+                logprob=logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
+            )
+            out.append(
+                Logprob(
+                    token=text,
+                    logprob=max(logprob.logprob, -9999.0),
+                    bytes=list(text.encode("utf-8", errors="replace")),
+                    top_logprobs=(
+                        self._topk_logprobs(
+                            token_logprobs,
+                            top_logprobs=top_logprobs,
+                            tokenizer=tokenizer,
+                        )
+                        if top_logprobs
+                        else []
+                    ),
+                )
+            )
+        return out
