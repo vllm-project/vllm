@@ -141,6 +141,37 @@ def test_fused_recurrent_kda_matches_reference(num_seqs: int, query_len: int):
     torch.testing.assert_close(state[used], expected_state[used], rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("num_accepted", [0, 4])
+@torch.inference_mode()
+def test_fused_recurrent_kda_invalid_accepted_count_is_fail_closed(
+    num_accepted: int,
+):
+    """An accepted count outside the state row zeroes the output, keeps the state."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    inputs, state = make_inputs(1, 3, device)
+    inputs["num_accepted_tokens"] = torch.tensor(
+        [num_accepted], dtype=torch.int32, device=device
+    )
+    state_before = state.clone()
+
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    previous_fill = torch.utils.deterministic.fill_uninitialized_memory
+    torch.use_deterministic_algorithms(True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    try:
+        out = run_kernel(inputs, state)
+    finally:
+        torch.utils.deterministic.fill_uninitialized_memory = previous_fill
+        torch.use_deterministic_algorithms(
+            previous_deterministic, warn_only=previous_warn_only
+        )
+
+    torch.testing.assert_close(out, torch.zeros_like(out), rtol=0, atol=0)
+    torch.testing.assert_close(state, state_before, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     ("num_seqs", "query_len"), [(7, 1), (3, 3)], ids=["7x1", "3x3"]
 )
