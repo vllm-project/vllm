@@ -139,7 +139,79 @@ def test_runtime_selected_by_max_tokens_across_dp(
     )
     # Every rank must take the same runtime, so a small local batch still gets
     # the prefill runtime when another DP rank is over the decode capacity.
-    assert experts.select_runtime(4) == expected
+    runtime, max_tokens = experts.select_runtime(4)
+    assert runtime == expected
+    # The route hint is the EP-wide row count (the DP-group max), identical on
+    # every rank, not this rank's own local batch of 4.
+    assert max_tokens == max(tokens_across_dp)
+
+
+@pytest.mark.cpu_test
+def test_select_runtime_without_forward_context_passes_no_hint(monkeypatch):
+    # No forward context (TBO ubatch, plugin bridge, a step without DP
+    # metadata): select_runtime returns max_tokens=None, so forward keeps the
+    # staged route rather than guessing a row bound from the local batch.
+    experts = _make_experts(monkeypatch)
+    experts._runtimes = [(128, "decode"), (4096, "prefill")]
+    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: False)
+    runtime, max_tokens = experts.select_runtime(64)
+    assert runtime == "decode"
+    assert max_tokens is None
+
+
+class _RouteRuntime:
+    """A MegaMoEV2 whose forward() picks its route from a max_tokens hint."""
+
+    small_m_mtpr = 512
+
+    def forward(self, x, wts, ids, *, max_tokens=None, mask_invalid_slots=None):
+        return x
+
+
+class _StagedOnlyRuntime:
+    """An older MegaMoEV2 whose forward() takes no max_tokens (staged only)."""
+
+    small_m_mtpr = 0
+
+    def forward(self, x, wts, ids):
+        return x
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "runtime_cls, max_tokens, capturing, expected",
+    [
+        # No row bound (no forward context): keep the staged route.
+        (_RouteRuntime, None, False, {}),
+        # Older AITER (forward without max_tokens): never hint, any build.
+        (_StagedOnlyRuntime, 256, False, {}),
+        (_StagedOnlyRuntime, 8192, True, {}),
+        # Decode-sized call, eager and captured: small-input route is captured.
+        (_RouteRuntime, 256, False, {"max_tokens": 256}),
+        (_RouteRuntime, 512, True, {"max_tokens": 512}),
+        # Prefill-sized call: hinted eagerly, but never while capturing a graph
+        # (the large-input route is not graph-captured).
+        (_RouteRuntime, 8192, False, {"max_tokens": 8192}),
+        (_RouteRuntime, 8192, True, {}),
+    ],
+)
+def test_route_hint(monkeypatch, runtime_cls, max_tokens, capturing, expected):
+    monkeypatch.setattr(
+        torch.cuda, "is_current_stream_capturing", lambda: capturing
+    )
+    hint = DeepseekV4AiterMegaMoEExperts.route_hint(runtime_cls(), max_tokens)
+    assert hint == expected
+
+
+@pytest.mark.cpu_test
+def test_each_layer_gets_a_distinct_large_m_slot(monkeypatch):
+    # All layers share one MegaMoEV2 instance but need independent large-input
+    # protocol state, so each takes a distinct slot.
+    a = _make_experts(monkeypatch)
+    b = _make_experts(monkeypatch)
+    c = _make_experts(monkeypatch)
+    assert b.layer_slot == a.layer_slot + 1
+    assert c.layer_slot == a.layer_slot + 2
 
 
 @pytest.mark.cpu_test
