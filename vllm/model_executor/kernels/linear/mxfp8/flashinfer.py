@@ -114,6 +114,9 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale,
             out_dtype=out_dtype,
             backend="cutlass",
+            # can_implement checked the weight shape; the activation is
+            # quantized above in the layout the backend reads.
+            skip_check=True,
         )
 
         if bias is not None:
@@ -189,6 +192,9 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale,
             out_dtype=out_dtype,
             backend="cute-dsl",
+            # can_implement checked the weight shape; the activation is
+            # quantized above in the layout the backend reads.
+            skip_check=True,
         )
 
         if bias is not None:
