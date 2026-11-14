@@ -5,7 +5,7 @@
 The asm persistent decode requires a 16-aligned head count, so unaligned
 counts through 128 are tile-padded to the next multiple of 16 and sliced back
 off the output. Small divisor counts (1/2/4/8) preserve their existing
-repeat-interleave path and may keep the Gluon kernel on gfx950.
+repeat-interleave path. On gfx950 every count below 16 keeps the Gluon kernel.
 """
 
 import math
@@ -261,10 +261,7 @@ def test_fp8_prefill_rejects_head_counts_padding_doubles():
     assert not AiterMLAHelper.is_valid_fp8_prefill_num_heads(129)
 
 
-def test_nondivisor_and_multitoken_never_use_gluon():
-    # Non-divisor decode always takes the asm path (12 heads/rank at TP8).
-    assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
-    assert not AiterMLAHelper.use_gluon_decode(6, 1, "auto")
+def test_large_and_multitoken_never_use_gluon():
     # >=16 heads never use Gluon, including unaligned counts padded for asm.
     assert not AiterMLAHelper.use_gluon_decode(16, 1, "auto")
     assert not AiterMLAHelper.use_gluon_decode(24, 1, "auto")
@@ -273,13 +270,11 @@ def test_nondivisor_and_multitoken_never_use_gluon():
     assert not AiterMLAHelper.use_gluon_decode(12, 4, "auto")
 
 
-def test_divisor_gluon_selection_follows_arch():
-    # Divisor head counts keep Gluon only where the kernel exists (gfx950).
-    # On gfx942 / non-ROCm they must route to the asm persistent decode.
+@pytest.mark.parametrize("num_heads", DIVISOR_HEADS + NON_DIVISOR_HEADS)
+def test_small_head_gluon_selection_follows_arch(num_heads):
     on_gfx950 = _on_gfx950()
-    assert AiterMLAHelper.use_gluon_decode(8, 1, "auto") is on_gfx950
-    assert AiterMLAHelper.use_gluon_decode(4, 1, "auto") is on_gfx950
-    assert AiterMLAHelper.use_gluon_decode(1, 1, "auto") is on_gfx950
+    assert AiterMLAHelper.use_gluon_decode(num_heads, 1, "auto") is on_gfx950
+    assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, "fp8")
 
 
 def test_asm_padding_env_default_is_auto(monkeypatch):
@@ -309,9 +304,8 @@ def test_asm_padding_env_force_gluon_follows_arch(monkeypatch):
 def test_asm_padding_env_auto_matches_arch_gate(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "auto")
     on_gfx950 = _on_gfx950()
-    # auto: divisor counts keep Gluon on gfx950, non-divisor counts take asm.
     assert AiterMLAHelper.use_gluon_decode(8, 1, "auto") is on_gfx950
-    assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
+    assert AiterMLAHelper.use_gluon_decode(12, 1, "auto") is on_gfx950
 
 
 @pytest.mark.skipif(
@@ -322,9 +316,8 @@ def test_asm_padding_env_auto_matches_arch_gate(monkeypatch):
 def test_h12_aiter_mla_decode_matches_reference():
     """The 12-head AITER decode output must match an attention reference.
 
-    12 is a non-divisor of 16 so use_gluon_decode is False on every arch; the
-    query is tile-padded to 16 heads and served by the asm persistent decode
-    (the CDNA3 path this PR enables, and unchanged on CDNA4).
+    Pins the asm persistent decode, which serves 12 heads on gfx942 and under
+    VLLM_ROCM_AITER_MLA_ASM_PADDING=asm.
     """
     device = torch.device("cuda:0")
     torch.manual_seed(42)
@@ -367,3 +360,79 @@ def test_h12_aiter_mla_decode_matches_reference():
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+@pytest.mark.skipif(
+    not _on_gfx950(),
+    reason="the small-head Gluon MLA decode only has a gfx950 build",
+)
+@pytest.mark.parametrize("num_heads", [6, 12])
+@torch.inference_mode()
+def test_nondivisor_gluon_mla_decode_matches_reference(num_heads):
+    """A non-divisor head count on the Gluon decode must match SDPA."""
+    device = torch.device("cuda:0")
+    torch.manual_seed(42)
+    seq_lens = [CONTEXT_LEN, 1000, 37]
+    num_reqs = len(seq_lens)
+    total = sum(seq_lens)
+
+    q = torch.randn(
+        num_reqs, num_heads, QK_HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    kv_cache = torch.randn(total, 1, QK_HEAD_DIM, dtype=torch.bfloat16, device=device)
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = num_heads
+    impl.dcp_world_size = 1
+    impl.kv_lora_rank = KV_LORA_RANK
+    impl.qk_rope_head_dim = QK_ROPE_HEAD_DIM
+    impl.scale = SCALE
+    impl.kv_cache_dtype = "auto"
+
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    indptr = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+    indptr[1:] = seq_lens_t.cumsum(0)
+    page_indices = torch.arange(total, dtype=torch.int32, device=device)
+    qo_indptr = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+    decode = AiterMLADecodeMetadata(
+        block_table=page_indices.view(1, -1),
+        seq_lens=seq_lens_t,
+        dcp_tot_seq_lens=None,
+        paged_kv_indptr=indptr,
+        paged_kv_indices=page_indices,
+        paged_kv_last_page_len=torch.ones(num_reqs, dtype=torch.int32, device=device),
+        qo_indptr=qo_indptr,
+        attn_out_dtype=torch.bfloat16,
+        max_qo_len=1,
+        min_kv_seq_len=min(seq_lens),
+        use_gluon_decode=True,
+    )
+    metadata = AiterMLAMetadata(
+        num_reqs=num_reqs,
+        max_query_len=1,
+        max_seq_len=max(seq_lens),
+        num_actual_tokens=num_reqs,
+        query_start_loc=qo_indptr,
+        slot_mapping=(indptr[1:] - 1).long(),
+        num_decodes=num_reqs,
+        num_decode_tokens=num_reqs,
+        num_prefills=0,
+        decode=decode,
+    )
+    one = torch.ones(1, dtype=torch.float32, device=device)
+    layer = types.SimpleNamespace(_q_scale=one, _k_scale=one)
+
+    out, _ = impl.forward_mqa(q, kv_cache, metadata, layer)
+
+    assert out.shape == (num_reqs, num_heads, KV_LORA_RANK)
+    assert torch.isfinite(out).all()
+    for i in range(num_reqs):
+        key = kv_cache[indptr[i] : indptr[i + 1], 0].float().unsqueeze(0)
+        out_ref = F.scaled_dot_product_attention(
+            q[i].float().unsqueeze(1),
+            key,
+            key[..., :KV_LORA_RANK],
+            scale=SCALE,
+            enable_gqa=True,
+        ).squeeze(1)
+        torch.testing.assert_close(out[i].float(), out_ref, atol=1e-2, rtol=1e-2)

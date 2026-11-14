@@ -105,11 +105,11 @@ def test_segmented_dcp_verify_does_not_depend_on_gluon(monkeypatch):
 
 
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
-@pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
-def test_unquantized_divisor_heads_keep_gluon_decode(
+@pytest.mark.parametrize("num_heads", [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15])
+def test_unquantized_small_heads_keep_gluon_decode(
     gluon_available, kv_cache_dtype, num_heads
 ):
-    """Divisor head counts keep the Gluon single-token decode for bf16.
+    """Every head count below 16 keeps the Gluon single-token decode for bf16.
 
     Gluon does not scale with KV length the way the asm persistent decode does,
     so this is the faster path where it is usable.
@@ -118,23 +118,12 @@ def test_unquantized_divisor_heads_keep_gluon_decode(
 
 
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
-@pytest.mark.parametrize("num_heads", [3, 5, 6, 7, 9, 12, 15])
-def test_unquantized_non_divisor_heads_use_asm_decode(kv_cache_dtype, num_heads):
-    """Non-divisor head counts are padded to 16 and take the asm decode."""
-    assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
-
-
-@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
 @pytest.mark.parametrize("num_heads", [5, 8, 12])
 @pytest.mark.parametrize("max_qo_len", [2, 4, 8, 15])
 def test_unquantized_small_head_verify_keeps_gluon(
     gluon_available, kv_cache_dtype, num_heads, max_qo_len
 ):
-    """bf16 has no gqa<16, qseqlen>1 asm kernel, so verify still flattens onto Gluon.
-
-    Unlike the decode predicate, this one does not care whether the head count
-    divides 16 -- the flatten reshapes to qseqlen=1 either way.
-    """
+    """bf16 has no gqa<16, qseqlen>1 asm kernel, so verify still flattens onto Gluon."""
     assert AiterMLAHelper.use_gluon_verify(num_heads, max_qo_len, kv_cache_dtype)
     # The verify flatten is a separate entry point from the single-token decode.
     assert not AiterMLAHelper.use_gluon_decode(num_heads, max_qo_len, kv_cache_dtype)
