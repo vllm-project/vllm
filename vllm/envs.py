@@ -1800,8 +1800,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0"))
     ),
     # Kimi-K3.1 specialized decode on MI355X: mono spin waits check the health
-    # word and their deadline every 64 polls instead of every poll, and the
-    # MoE router ranks its live candidates only instead of all 64 lanes.
+    # word and their deadline every 64 polls instead of every poll, a
+    # single-word sentinel poll loads its word once, and the MoE router ranks
+    # its live candidates only instead of all 64 lanes.
     "VLLM_K31_BEAT_K2SYNC": lambda: bool(int(os.getenv("VLLM_K31_BEAT_K2SYNC", "0"))),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
