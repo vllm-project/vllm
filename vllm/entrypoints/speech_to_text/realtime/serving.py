@@ -3,11 +3,13 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Literal, cast
 
 import numpy as np
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -41,6 +43,12 @@ class OpenAIServingRealtime(GenerateBaseServing):
         )
 
         self.task_type: Literal["realtime"] = "realtime"
+        # Turn detection runs here, off the event loop, sized like the
+        # transcription endpoints' audio preprocessing pool.
+        self.turn_detection_executor = ThreadPoolExecutor(
+            max_workers=envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS,
+            thread_name_prefix="realtime-turn-detection",
+        )
 
         logger.info("OpenAIServingRealtime initialized for task: %s", self.task_type)
 
