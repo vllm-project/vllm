@@ -23,7 +23,8 @@ class StructuredOutputsConfig:
     """If `True`, json output will always be compact without any whitespace.
     If `False`, the model may generate whitespace between JSON fields,
     which is still valid JSON. This is only supported for xgrammar
-    and guidance backends."""
+    and guidance backends. Requests can override it with
+    `structured_outputs.disable_any_whitespace`."""
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
     in the JSON schema. This is only supported for the `guidance` backend and

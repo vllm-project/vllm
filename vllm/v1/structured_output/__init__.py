@@ -15,6 +15,7 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
+    GrammarCompileOptions,
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
@@ -201,7 +202,10 @@ class StructuredOutputManager:
                 else None
             )
             return backend.compile_grammar(
-                request_type, grammar_spec, stop_token_ids=stop_token_ids
+                request_type,
+                grammar_spec,
+                stop_token_ids=stop_token_ids,
+                options=GrammarCompileOptions.from_params(struct_request.params),
             )
         except Exception:
             logger.exception(

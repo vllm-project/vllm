@@ -346,6 +346,51 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
     assert params.structured_outputs._backend == expected_backend
 
 
+_OUTLINES_ONLY_SCHEMA = {
+    "type": "object",
+    "properties": {"a": {"type": "string"}},
+    "patternProperties": {"^a$": {"type": "string"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("backend", "schema", "value", "rejected"),
+    [
+        ("outlines", JSON_SCHEMA, True, True),
+        # auto resolves this schema to outlines
+        ("auto", _OUTLINES_ONLY_SCHEMA, True, True),
+        ("outlines", JSON_SCHEMA, False, False),
+        ("outlines", JSON_SCHEMA, None, False),
+        ("xgrammar", JSON_SCHEMA, True, False),
+        ("guidance", JSON_SCHEMA, True, False),
+    ],
+)
+def test_request_disable_any_whitespace_backend_support(
+    backend, schema, value, rejected
+):
+    """vllm#48765: a request-level value the backend cannot honour is an error."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=schema, disable_any_whitespace=value
+        )
+    )
+    # trick to create tokenizer that guidance backend accepts
+    tokenizer = object.__new__(TokenizersBackend)
+
+    def validate():
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=tokenizer,
+        )
+
+    if rejected:
+        with pytest.raises(VLLMValidationError, match="disable_any_whitespace"):
+            validate()
+    else:
+        validate()
+
+
 # ================================================
 # Test validate_structured_outputs functionality
 # ================================================

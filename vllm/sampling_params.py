@@ -107,7 +107,11 @@ class StructuredOutputsParams:
     grammar: str | None = None
     json_object: bool | None = None
     # These are other options that can be set.
-    disable_any_whitespace: bool = False
+    disable_any_whitespace: bool | None = None
+    """If `True`, JSON output is compact, without any whitespace. `None`
+    inherits the engine's `structured_outputs_config.disable_any_whitespace`.
+    Only supported for the xgrammar and guidance backends; `True` with any
+    other backend is rejected."""
     disable_additional_properties: bool = False
     whitespace_pattern: str | None = None
     structural_tag: str | None = None
@@ -1437,6 +1441,16 @@ class SamplingParams(
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
+
+        # Mirrors the server-level rule in StructuredOutputsConfig.
+        if self.structured_outputs.disable_any_whitespace and (
+            self.structured_outputs._backend not in ("xgrammar", "guidance")
+        ):
+            raise VLLMValidationError(
+                "disable_any_whitespace is only supported for the xgrammar and "
+                "guidance backends, but this request uses "
+                f"'{self.structured_outputs._backend}'."
+            )
 
         # Run post-init validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
