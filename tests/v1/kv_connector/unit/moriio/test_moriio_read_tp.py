@@ -9,6 +9,8 @@ ends up with exactly its shard, and that every prefill rank holding the
 request is released as many times as it waits for.
 """
 
+import dataclasses
+import queue
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +22,10 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
+    MoRIIOConstants,
     MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
@@ -160,7 +164,10 @@ def _make_reader(
     # _groups() puts attention groups before mamba, as the READ payload does.
     worker._hybrid_payload_index_by_layer = dict(worker.layer_to_group)
     worker.moriio_config = SimpleNamespace(
-        backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
+        backend=backend,
+        transfer_timeout=30.0,
+        recv_abort_timeout=600.0,
+        qp_per_transfer=1,
     )
     worker._get_built_session = get_built_session
     worker.moriio_wrapper = SimpleNamespace(
@@ -178,6 +185,7 @@ def _make_reader(
     worker._reads_issued_this_step = []
     worker._mamba_reads_this_step = []
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
     consumer.sent = read_from
     return released
 
@@ -213,6 +221,7 @@ def _prewarm(consumer: Rank, meta: ReqMeta, monkeypatch) -> dict[str, int]:
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_lock = threading.Lock()
     worker._eager_handshaked_engines = set()
+    worker._handshake_cooldowns = {}
     worker._remote_agents = {}
     worker.layer_name_to_remote_kv_cache_metadata = {}
     worker.tp_group = SimpleNamespace(cpu_group=None)
@@ -424,6 +433,169 @@ def test_failed_read_releases_every_holder():
     assert consumer.worker._pop_done_transfers() == set()
     assert sorted(p for p, _, _ in released) == [0, 1]
     assert consumer.worker._invalid_block_ids == set(DECODE_BLOCKS["full"])
+
+
+def _fail_handshakes_to(worker, bad_host: str, monkeypatch) -> None:
+    def handshake(host, port, tp_size, engine_id, dp_rank, tp_rank):
+        if host == bad_host:
+            raise HandshakeError("unexpected frame")
+        return set()
+
+    worker._moriio_handshake = handshake
+    worker._handshake_initiation_executor = ThreadPoolExecutor(1)
+    worker._handshake_lock = threading.Lock()
+    worker._eager_handshaked_engines = set()
+    worker._handshake_cooldowns = {}
+    worker._remote_agents = {}
+    worker.layer_name_to_remote_kv_cache_metadata = {}
+    worker.tp_group = SimpleNamespace(cpu_group=None)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda *a, **k: None)
+
+
+def test_failed_handshake_fails_only_its_requests(monkeypatch):
+    """A failed prefill handshake turns that engine's requests into released
+    load errors; other engines' requests are still read, and the failed
+    engine is retried next step instead of failing the whole decode step."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "bad", monkeypatch)
+    sent = []
+    worker.moriio_wrapper.send_notify = lambda transfer_id, host, port, **_: (
+        sent.append((transfer_id, host, int(port) - NOTIFY_PORT))
+    )
+    worker.moriio_wrapper.waiting_for_transfer_complete = lambda *a, **k: None
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_recv["req-bad"] = dataclasses.replace(
+        _meta(["full"], 2),
+        transfer_id="t-bad",
+        remote_host="bad",
+        local_block_ids=[[90, 91]],
+    )
+    metadata.reqs_to_recv["req-ok"] = _meta(["full"], 2)
+
+    worker.start_load_kv(metadata)
+    worker._handshake_initiation_executor.shutdown()
+
+    assert worker._invalid_block_ids == {90, 91}
+    assert sorted(s for s in sent if s[0] == "t-bad") == [
+        ("t-bad", "bad", 0),
+        ("t-bad", "bad", 1),
+    ]
+    assert worker._pop_done_transfers() == {"t"}
+    assert worker._eager_handshaked_engines == {"prefill:0"}
+
+
+def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
+    """This rank's handshake succeeds but a peer rank's fails: the vote makes
+    this rank skip the reads too. The engine is not handshaked again for its
+    next few references, since a timed-out handshake stalls the whole batch,
+    and then it is retried."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 1, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "bad", monkeypatch)
+    handshakes = []
+    succeed = worker._moriio_handshake
+    worker._moriio_handshake = lambda *a: handshakes.append(a) or succeed(*a)
+    worker.moriio_wrapper.send_notify = lambda *a, **k: None
+    worker.moriio_wrapper.waiting_for_transfer_complete = lambda *a, **k: None
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+
+    def step(req_id, vote):
+        monkeypatch.setattr(
+            torch.distributed, "all_reduce", lambda t, *a, **k: t.fill_(vote)
+        )
+        metadata = MoRIIOConnectorMetadata()
+        meta = _meta(["full"], 1)
+        metadata.reqs_to_recv[req_id] = meta
+        worker._invalid_block_ids.clear()
+        worker.start_load_kv(metadata)
+        return meta
+
+    meta = step("req-0", vote=0)
+    assert worker._invalid_block_ids == set(meta.local_block_ids[0])
+    assert worker._pop_done_transfers() == set()
+    assert worker._eager_handshaked_engines == set()
+
+    for i in range(MoRIIOConstants.HANDSHAKE_FAILURE_COOLDOWN):
+        meta = step(f"req-cooldown-{i}", vote=1)
+        assert worker._invalid_block_ids == set(meta.local_block_ids[0])
+    assert len(handshakes) == 1
+
+    step("req-retry", vote=1)
+    worker._handshake_initiation_executor.shutdown()
+    assert len(handshakes) == 2
+    assert worker._invalid_block_ids == set()
+    assert worker._pop_done_transfers() == {"t"}
+    assert worker._eager_handshaked_engines == {"prefill:0"}
+    assert worker._handshake_cooldowns == {}
+
+
+def test_release_to_a_failing_engine_skips_the_handshake(monkeypatch):
+    """A release carries no blocks and only notifies prefill, so it neither
+    handshakes nor counts toward a failed engine's cooldown."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 1, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "bad", monkeypatch)
+    handshakes = []
+    fail = worker._moriio_handshake
+    worker._moriio_handshake = lambda *a: handshakes.append(a) or fail(*a)
+    sent = []
+    worker.moriio_wrapper.send_notify = lambda transfer_id, host, port, **_: (
+        sent.append(transfer_id)
+    )
+    worker.moriio_wrapper.waiting_for_transfer_complete = lambda *a, **k: None
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_recv["req-release"] = dataclasses.replace(
+        _meta(["full"], 1),
+        transfer_id="t-release",
+        remote_host="bad",
+        local_block_ids=[[]],
+    )
+
+    worker.start_load_kv(metadata)
+    worker._handshake_initiation_executor.shutdown()
+
+    assert handshakes == []
+    assert sent == ["t-release"]
+    assert worker._invalid_block_ids == set()
+    assert worker._handshake_cooldowns == {}
+
+
+@pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])
+def test_failed_handshake_without_block_recovery_fails_the_request(model, monkeypatch):
+    """With several KV cache groups or recurrent state, a failed handshake is
+    reported per request for the scheduler to recover, not raised."""
+    heads, layers = MODELS[model]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks(model, 1, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "prefill", monkeypatch)
+    metadata = MoRIIOConnectorMetadata()
+    meta = _meta(["full"], 1)
+    metadata.reqs_to_recv["req"] = meta
+
+    assert worker._eager_handshake_all_dp_ranks(metadata) == {"prefill:0"}
+    worker._handshake_initiation_executor.shutdown()
+    meta.remote_engine_id = "prefill:0"
+    worker._fail_recv_without_read("req", meta)
+
+    assert worker._failed_sync_recving == {"req"}
+    assert worker._invalid_block_ids == set()
 
 
 def _mixed_layout_pair():
