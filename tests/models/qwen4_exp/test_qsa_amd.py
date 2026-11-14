@@ -403,11 +403,20 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
     [
+        # The >512-program profile is tuned per CDNA version; each shape has
+        # cases on both sides of that boundary (rows x KV heads).
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
+        pytest.param(256, 24, 2, 1792, id="tp1_split4"),
+        pytest.param(257, 24, 2, 1792, id="tp1_split1"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
+        pytest.param(512, 12, 1, 1792, id="tp2_split4"),
+        pytest.param(513, 12, 1, 1792, id="tp2_split1"),
         pytest.param(32, 6, 1, 1024, id="tp4_split8"),
         pytest.param(257, 6, 1, 1024, id="tp4_split4"),
+        pytest.param(512, 6, 1, 1024, id="tp4_split4_edge"),
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        pytest.param(512, 3, 1, 1024, id="tp8_split4"),
+        pytest.param(513, 3, 1, 1024, id="tp8_split1"),
     ],
 )
 def test_qsa_sparse_paged_attention_matches_reference(
