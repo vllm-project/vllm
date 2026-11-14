@@ -101,6 +101,20 @@ def grouped_topk(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    num_experts = gating_output.size(-1)
+    if num_expert_group > 0 and topk_group > 0:
+        experts_per_group = num_experts // num_expert_group
+        num_eligible_experts = topk_group * experts_per_group
+        if topk > num_eligible_experts:
+            # Only experts in the selected groups are unmasked. Selecting more
+            # pulls -inf entries into top-k: NaN weights without a correction
+            # bias, or masked experts given real scores when one is supplied.
+            raise ValueError(
+                f"topk={topk} exceeds the {num_eligible_experts} experts "
+                f"available in the {topk_group} selected groups of "
+                f"{experts_per_group} experts; reduce topk or increase "
+                "topk_group."
+            )
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
         and (current_platform.is_cuda() or current_platform.is_xpu())
