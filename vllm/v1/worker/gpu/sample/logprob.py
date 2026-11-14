@@ -4,6 +4,7 @@
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -66,6 +67,7 @@ def _ranks_kernel(
     token_ids_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    TAIL_BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
@@ -74,8 +76,15 @@ def _ranks_kernel(
     x = tl.load(row_ptr + token_id)
 
     n = 0
-    for i in range(0, vocab_size, BLOCK_SIZE):
+    # Full blocks need no mask. A masked 8192-wide tile makes the Triton CPU
+    # backend compile for tens of minutes, so only the small tail is masked.
+    num_full = (vocab_size // BLOCK_SIZE) * BLOCK_SIZE
+    for i in range(0, num_full, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block)
+        n += tl.sum((logits >= x).to(tl.int32))
+    for i in range(num_full, vocab_size, TAIL_BLOCK_SIZE):
+        block = i + tl.arange(0, TAIL_BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         n += tl.sum((logits >= x).to(tl.int32))
     tl.store(output_ptr + req_idx, n)
@@ -178,6 +187,7 @@ def compute_topk_scores(
         sampled_token_ids,
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
+        TAIL_BLOCK_SIZE=64 if current_platform.is_cpu() else 8192,  # type: ignore
     )
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
