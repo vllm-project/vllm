@@ -287,8 +287,21 @@ def test_sampled_select_matches_decode(monkeypatch, width, length, rows, tied, p
         assert bool((idx < ends[:, None]).all())
         assert bool(((idx[:, 1:] != idx[:, :-1]) | ~valid[:, 1:]).all())
     if not tied:
+        # Random logits can still tie at the k-th value (e.g. rows=64 at 128k);
+        # compare index sets only on rows whose k-th and (k+1)-th values differ.
+        masked = torch.where(
+            torch.arange(cols, device="cuda")[None] < ends[:, None],
+            logits,
+            float("-inf"),
+        )
+        kk = min(TOPK + 1, cols)
+        top = masked.topk(kk, dim=1).values
+        untied = (ends <= TOPK) | (top[:, TOPK - 1] != top[:, kk - 1])
         torch.testing.assert_close(
-            out.sort(dim=1).values, ref.sort(dim=1).values, rtol=0, atol=0
+            out.sort(dim=1).values[untied],
+            ref.sort(dim=1).values[untied],
+            rtol=0,
+            atol=0,
         )
 
     def picked(sel):
