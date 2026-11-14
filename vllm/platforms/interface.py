@@ -390,8 +390,11 @@ class Platform:
         Platforms whose Triton kernels need replacement implementations
         override this method and call
         `vllm.triton_utils.dispatcher.register_kernels`
-        with their overrides. It runs during model runner init, before any
-        kernel launch. The default implementation does nothing.
+        with their overrides. Platforms that only need other launch values
+        (e.g. block sizes) call
+        `vllm.triton_utils.dispatcher.override_kernel_heuristics`.
+        It runs during model runner init, before any kernel launch. The
+        default implementation does nothing.
         """
         return
 

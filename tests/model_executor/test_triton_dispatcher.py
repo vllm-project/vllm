@@ -18,9 +18,10 @@ import pytest
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     _DecoratedTritonJitKernel,
 )
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.triton_utils.dispatcher import (
     KernelOverride,
+    override_kernel_heuristics,
     register_kernels,
 )
 
@@ -393,3 +394,44 @@ def test_real_triton_kernel_override_end_to_end() -> None:
         "out_ptr",
         "BLOCK",
     )
+
+
+class _RecordingJitKernel:
+    """Stands in for a JITFunction below `triton.heuristics`; records launches."""
+
+    arg_names = ("out_ptr", "num_tokens", "BLOCK_SIZE", "HAS_BIAS")
+
+    def run(self, *args: Any, **kwargs: Any) -> None:
+        self.launched = kwargs
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not installed")
+def test_override_kernel_heuristics_changes_launch_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A platform retunes a kernel's declared heuristics without replacing it."""
+    jit_kernel = _RecordingJitKernel()
+    kernel = triton.heuristics({"HAS_BIAS": lambda args: False})(
+        triton.heuristics({"BLOCK_SIZE": lambda args: 8192})(jit_kernel)
+    )
+    module = types.ModuleType("vllm.tests.heuristics_kernel_home")
+    module._kernel = kernel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    name = "vllm.tests.heuristics_kernel_home._kernel"
+
+    kernel[(1,)](None, 4)
+    assert jit_kernel.launched["BLOCK_SIZE"] == 8192
+
+    override_kernel_heuristics({name: {"BLOCK_SIZE": 1024}})
+    kernel[(1,)](None, 4)
+    assert jit_kernel.launched["BLOCK_SIZE"] == 1024
+    assert jit_kernel.launched["HAS_BIAS"] is False
+
+    override_kernel_heuristics(
+        {name: {"BLOCK_SIZE": lambda args: 16 * args["num_tokens"]}}
+    )
+    kernel[(1,)](None, 4)
+    assert jit_kernel.launched["BLOCK_SIZE"] == 64
+
+    with pytest.raises(ValueError, match="declares no heuristic 'num_warps'"):
+        override_kernel_heuristics({name: {"num_warps": 8}})

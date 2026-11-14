@@ -19,9 +19,6 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# Overridden on CPU in vllm/v1/worker/cpu/shm.py.
-PENALTIES_BLOCK_SIZE = 8192
-
 
 class PenaltiesState(LogitsProcessor):
     def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
@@ -104,6 +101,7 @@ class PenaltiesState(LogitsProcessor):
         return logits
 
 
+@triton.heuristics({"BLOCK_SIZE": lambda args: 8192})
 @triton.jit
 def _penalties_kernel(
     logits_ptr,
@@ -197,9 +195,8 @@ def apply_penalties(
     output_bin_counts: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = PENALTIES_BLOCK_SIZE
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _penalties_kernel[(num_tokens, num_blocks)](
+    grid = lambda meta: (num_tokens, triton.cdiv(vocab_size, meta["BLOCK_SIZE"]))
+    _penalties_kernel[grid](
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -213,7 +210,6 @@ def apply_penalties(
         output_bin_counts,
         output_bin_counts.stride(0),
         vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
 

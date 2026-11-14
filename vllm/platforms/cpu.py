@@ -40,6 +40,22 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+_TRITON_CPU_KERNEL_HEURISTICS = {
+    # Triton-CPU lowers the bitmask unpack in these kernels to IR quadratic in
+    # the block size: ~70 s per cold compile at 8192, ~2 s at 1024, at no
+    # runtime cost.
+    "vllm.v1.worker.gpu.sample.penalties._penalties_kernel": {"BLOCK_SIZE": 1024},
+    "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": {
+        "BLOCK_SIZE": 1024
+    },
+    # Smaller tiles compile and run faster on CPU.
+    "vllm.v1.sample.ops.topk_topp_triton._topk_topp_kernel": {
+        "BLOCK_SIZE": 256,
+        "BLOCK_SIZE_TRUNC": 128,
+        "num_warps": 4,
+    },
+}
+
 
 def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
     """Return the CPU state backend selected by the model configuration."""
@@ -697,6 +713,15 @@ class CpuPlatform(Platform):
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning_once("Failed to import from vllm._C: %s", repr(e))
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Tune core Triton kernels for Triton-CPU."""
+        from vllm.triton_utils import HAS_TRITON
+        from vllm.triton_utils.dispatcher import override_kernel_heuristics
+
+        if HAS_TRITON:
+            override_kernel_heuristics(_TRITON_CPU_KERNEL_HEURISTICS)
 
     @classmethod
     def pack_kv_cache(

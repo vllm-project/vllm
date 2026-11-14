@@ -141,6 +141,11 @@ def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
+    @pytest.fixture(autouse=True, scope="class")
+    def platform_kernel_values(self):
+        """Launch with the platform's kernel values, as worker init does."""
+        current_platform.register_triton_kernel_overrides()
+
     @pytest.fixture(autouse=True)
     def setup(self):
         """Set up test fixtures."""
