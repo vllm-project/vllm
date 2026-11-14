@@ -60,6 +60,7 @@ from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
+    is_tracing,
 )
 
 if TYPE_CHECKING:
@@ -451,6 +452,8 @@ class GroupCoordinator:
     # device communicator (if use_device_communicator=True)
     device_communicator: DeviceCommunicatorBase | None
     mq_broadcaster: Any | None  # shared memory broadcaster
+    # Collectives go through the custom ops only while traced.
+    custom_op_only_when_tracing: bool = False
 
     def __init__(
         self,
@@ -576,6 +579,10 @@ class GroupCoordinator:
         self.use_custom_op_call = (
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
+        # On CUDA/ROCm the collective custom ops are only needed as graph
+        # nodes for tracers; eager callers (models run without torch.compile)
+        # skip the dispatcher.
+        self.custom_op_only_when_tracing = current_platform.is_cuda_alike()
 
         self.use_cpu_custom_send_recv = (
             current_platform.is_cpu()
@@ -745,10 +752,15 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        if self.use_custom_op_call:
+        if self._use_custom_op():
             return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
         else:
             return self._all_reduce_out_place(input_)
+
+    def _use_custom_op(self) -> bool:
+        return self.use_custom_op_call and (
+            not self.custom_op_only_when_tracing or is_tracing()
+        )
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:
@@ -764,7 +776,7 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
         )
 
-        if self.use_custom_op_call:
+        if self._use_custom_op():
             return torch.ops.vllm.all_gather(
                 input_, dim, world_size, group_name=self.unique_name
             )
@@ -795,7 +807,7 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
         )
 
-        if self.use_custom_op_call:
+        if self._use_custom_op():
             return torch.ops.vllm.reduce_scatter(
                 input_, dim, world_size, group_name=self.unique_name
             )
