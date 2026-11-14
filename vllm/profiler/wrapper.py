@@ -225,6 +225,22 @@ TorchProfilerActivityMap = {
 }
 
 
+def graph_capture_profiler_config(profiler_config: ProfilerConfig) -> ProfilerConfig:
+    """Apply one-shot graph-capture overrides to a profiler config."""
+    return replace(
+        profiler_config,
+        delay_iterations=0,
+        max_iterations=0,
+        warmup_iterations=0,
+        wait_iterations=0,
+        torch_profiler_record_shapes=True,
+        torch_profiler_with_stack=True,
+        torch_profiler_dir=os.path.join(
+            profiler_config.torch_profiler_dir, "capture_traces"
+        ),
+    )
+
+
 class TorchProfilerWrapper(WorkerProfiler):
     def __init__(
         self,
@@ -401,9 +417,13 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Mark done even on failure, to avoid retrying every step.
         self._version_metadata_added = True
 
+    def build_profiler(self) -> torch.profiler.profile:
+        """Build one unstarted profiler from the current settings."""
+        return torch.profiler.profile(**self._profiler_kwargs)
+
     @override
     def _start(self) -> None:
-        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self.profiler = self.build_profiler()
         self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
         self.profiler.start()

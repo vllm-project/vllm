@@ -135,8 +135,11 @@ class ProfilerConfig:
     Disabled by default."""
 
     capture_torch_profiler: bool = False
-    """Deprecated and has no effect: only the removed Model Runner V1 profiled CUDA
-    graph capture. It will be removed in a future release."""
+    """If `True`, enables a torch profiler during GPU graph capture on rank 0.
+    Uses the same activities as serving (`torch_profiler_activities` or the
+    platform default).
+    Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
+    Requires `profiler` to be set to 'torch'."""
 
     detailed_trace_annotation: bool = False
     """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
@@ -292,11 +295,6 @@ class ProfilerConfig:
             raise ValueError(
                 "capture_torch_profiler is only applicable when profiler is "
                 "set to 'torch'"
-            )
-        if self.capture_torch_profiler:
-            logger.warning_once(
-                "capture_torch_profiler is deprecated and has no effect. It will "
-                "be removed in a future release."
             )
 
         return self
