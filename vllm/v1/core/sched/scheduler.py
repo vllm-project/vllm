@@ -1243,6 +1243,23 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
+                    # A request redoing dropped prompt logprobs must recompute
+                    # the whole prompt. Only rows covered by the new prefill are
+                    # written; a retained prefix hit leaves those rows
+                    # uninitialized (#61490). The marker stays set
+                    # until the prompt logprobs are produced, so a redo that is
+                    # itself preempted before producing them still recomputes
+                    # in full on its next resume.
+                    if request.prompt_logprobs_dropped and num_computed_tokens > 0:
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        num_new_local_computed_tokens = 0
+                        num_external_computed_tokens = 0
+                        connector_prefix_cache_hits = 0
+                        num_computed_tokens = 0
+                        load_kv_async = False
+
                     # Include encoder inputs needed to replay the prefix tail.
                     ec_computed_tokens = num_computed_tokens
                     if not window_loaded:
@@ -1580,12 +1597,12 @@ class Scheduler(SchedulerInterface):
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
-                # A resumed request is re-sent in full, like a new one: its
-                # blocks were freed and its worker state dropped at preemption.
-                if request.status not in (
-                    RequestStatus.WAITING,
-                    RequestStatus.PREEMPTED,
-                ):
+                if request.status == RequestStatus.WAITING:
+                    # A fresh schedule re-registers prompt logprobs on the
+                    # runner's new-request path; drop any stale redo marker.
+                    request.prompt_logprobs_dropped = False
+                    request.prompt_logprobs_emitted = False
+                elif request.status != RequestStatus.PREEMPTED:
                     raise RuntimeError(f"Invalid request status: {request.status}")
                 scheduled_new_reqs.append(request)
 
@@ -1829,6 +1846,16 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        if (
+            drop_stale_output
+            and request.sampling_params is not None
+            and request.sampling_params.prompt_logprobs is not None
+            and not request.prompt_logprobs_emitted
+        ):
+            # Arm the redo before any stale output returns. An active reset can
+            # resume immediately, and a prefix hit on that first resume would
+            # otherwise leave the fresh prompt-logprobs tensor unwritten.
+            request.prompt_logprobs_dropped = True
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -2328,6 +2355,11 @@ class Scheduler(SchedulerInterface):
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
+                if prompt_logprobs_dict and req_id in prompt_logprobs_dict:
+                    # The dropped output carried the completed prompt
+                    # logprobs; the resumed prefill must recompute them
+                    # (#61490).
+                    request.prompt_logprobs_dropped = True
                 continue
 
             req_index = req_indices[req_id]
@@ -2516,6 +2548,12 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
+            if prompt_logprobs_tensors is not None:
+                # The prompt logprobs are produced; the redo is complete and the
+                # request no longer needs to recompute its whole prompt.
+                request.prompt_logprobs_dropped = False
+                if should_emit_output:
+                    request.prompt_logprobs_emitted = True
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

@@ -100,6 +100,26 @@ def _delta_frame_template(
     return prefix, infix, suffix
 
 
+def _prompt_logprob_rows(
+    prompt_token_ids: GenericSequence[int],
+    prompt_logprobs: GenericSequence[dict[int, Logprob] | None] | None,
+) -> list[dict[int, Logprob] | None]:
+    """Return prompt logprob rows aligned one-to-one with ``prompt_token_ids``.
+
+    A request resumed after ``reset_prefix_cache`` can keep its prompt token ids
+    while the prompt logprobs that came with the dropped prefill output are gone
+    (#61490). Echoing those tokens then concatenated a short logprob list ahead
+    of the sampled rows, which both indexed past the end of the list and shifted
+    the sampled logprobs onto prompt positions. Missing prompt rows become
+    explicit ``None`` placeholders so the positions stay honest and the sampled
+    rows keep their own values.
+    """
+    rows: list[dict[int, Logprob] | None] = list(prompt_logprobs or [])
+    if len(rows) < len(prompt_token_ids):
+        rows.extend([None] * (len(prompt_token_ids) - len(rows)))
+    return rows[: len(prompt_token_ids)]
+
+
 class OpenAIServingCompletion(GenerateBaseServing):
     def __init__(
         self,
@@ -417,11 +437,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             prompt_text = self._extract_prompt_text(
                                 engine_inputs[prompt_idx]
                             )
+                        echoed_prompt_logprobs = _prompt_logprob_rows(
+                            prompt_token_ids, prompt_logprobs
+                        )
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
-                            out_logprobs = prompt_logprobs
+                            out_logprobs = echoed_prompt_logprobs
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
@@ -430,7 +453,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 *output.token_ids,
                             ]
                             out_logprobs = [
-                                *(prompt_logprobs or []),
+                                *echoed_prompt_logprobs,
                                 *(output.logprobs or []),
                             ]
                         prompt_token_ids_to_return = prompt_token_ids
@@ -801,8 +824,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
             else self.return_tokens_as_token_ids
         )
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
-            if step_top_logprobs is None:
+            # A step can be missing outright when a resumed request kept its
+            # token ids but lost its logprobs to a prefix-cache reset (#61490).
+            # Treat it as a step with no candidates rather than indexing past
+            # the end of the list, which is what the chat path already does.
+            step_top_logprobs = top_logprobs[i] if i < len(top_logprobs) else None
+            if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
                     token = format_token_id_placeholder(token_id)
                 else:

@@ -160,12 +160,30 @@ def convert_ids_list_to_tokens(
     """
     if not token_ids:
         return []
+
+    def _safe_decode(tid: int) -> str:
+        try:
+            return tokenizer.decode([tid]) or ""
+        except (OverflowError, ValueError, RuntimeError):
+            return ""
+
+    def _safe_raw(tid: int) -> str:
+        try:
+            return tokenizer.convert_ids_to_tokens([tid])[0]
+        except (KeyError, OverflowError, ValueError, RuntimeError):
+            return ""
+
     marker = get_leading_space_marker(tokenizer)
     if marker is None:
-        return [tokenizer.decode([tid]) or "" for tid in token_ids]
-    raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
+        return [_safe_decode(tid) for tid in token_ids]
+    try:
+        raw_tokens: list[str] = tokenizer.convert_ids_to_tokens(token_ids)
+    except (KeyError, OverflowError, ValueError, RuntimeError):
+        # A single garbage id from an unwritten logprobs row (#61490) can
+        # poison the batch call; fall back to per-id so valid ids survive.
+        raw_tokens = [_safe_raw(tid) for tid in token_ids]
     return [
-        _restore_leading_spaces(raw, tokenizer.decode([tid]) or "", marker)
+        _restore_leading_spaces(raw, _safe_decode(tid), marker)
         for tid, raw in zip(token_ids, raw_tokens)
     ]
 

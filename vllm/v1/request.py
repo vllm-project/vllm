@@ -173,6 +173,14 @@ class Request:
         # Drop the stale output instead, for same-step preempt + resume
         # (reset_prefix_cache).
         self.drop_stale_output = False
+        # Drop-mode preemption arms prompt-logprobs recomputation immediately,
+        # before a reset can resume while the dropped output is still in flight.
+        # It stays set until the prompt logprobs are actually produced, so it
+        # survives repeated preemptions of the redo.
+        self.prompt_logprobs_dropped = False
+        # Complete prompt logprobs were included in an EngineCoreOutput.
+        # Recomputing them after reset would append a duplicate block.
+        self.prompt_logprobs_emitted = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
