@@ -17,6 +17,7 @@ import torch
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
 from vllm.config.utils import hash_config
+from vllm.distributed.utils import init_gloo_process_group
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
@@ -192,10 +193,21 @@ def test_flashinfer_autotune_lifecycle(
         broadcast_object=events.broadcast,
         barrier=events.barrier,
     )
+    stateless = elastic_ep and world_size > 1
+    if stateless:
+        world.cpu_group = init_gloo_process_group(
+            torch.distributed.PrefixStore("autotune", torch.distributed.HashStore()),
+            group_rank=0,
+            group_size=1,
+            timeout=torch.distributed.default_pg_timeout,
+        )
 
     @contextmanager
     def autotune_context(**kwargs):
         assert torch.is_inference_mode_enabled()
+        if stateless:
+            (group,) = events.set_group.call_args.args
+            assert torch.distributed.get_backend(group) == "gloo"
         events.enter()
         try:
             yield
@@ -252,6 +264,10 @@ def test_flashinfer_autotune_lifecycle(
     else:
         with pytest.raises(RuntimeError, match="warmup failed"):
             warmup.flashinfer_autotune(runner)
+
+    if stateless:
+        with pytest.raises(ValueError, match="world group map"):
+            torch.distributed.get_backend(world.cpu_group)
 
     kwargs = {"skip_ops": set(skip_ops)} if skip_ops else {}
     expected = []
