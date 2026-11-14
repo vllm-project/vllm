@@ -331,6 +331,16 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def on_kv_cache_ready(self) -> None:
+        """Finish deferred registration after startup warmup and final KV sizing.
+
+        Called on each worker before requests, after preceding device work.
+        Must return in bounded time: an unbounded wait blocks engine startup.
+        No hook timeout or cancellation is provided. Exceptions fail startup;
+        background tasks are not awaited. Not called on sleep/wake.
+        """
+        return
+
     def unregister_kv_caches(self) -> None:
         """Drop KV cache registrations before sleep. Transfers are already
         drained. Idempotent."""

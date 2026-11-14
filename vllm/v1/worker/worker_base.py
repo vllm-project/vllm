@@ -9,6 +9,10 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -147,6 +151,12 @@ class WorkerBase:
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def notify_kv_cache_ready(self) -> None:
+        """Finish startup device work before notifying the worker connector."""
+        if has_kv_transfer_group():
+            self.synchronize_device()
+            get_kv_transfer_group().on_kv_cache_ready()
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
