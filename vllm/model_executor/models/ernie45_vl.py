@@ -1615,16 +1615,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             out_hidden_size=self.config.hidden_size,
         )
 
-    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
-        # Min: a 224x224 image -> 16x16 patches (patch_size=14),
-        # spatial_merge_size=2 -> 8x8 = 64 output tokens.
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
-
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
