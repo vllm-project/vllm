@@ -1587,6 +1587,54 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
 
+def _maybe_pack_gfx942_strip16(weight, scale, name: str) -> None:
+    """Re-lay column-major MXFP4 expert weights into the STRIP16 record layout of
+    the AITER gfx942 a16w4 Gluon kernel (16 columns x 128 K of fp4 plus that
+    block's e8m0 scales = 17 contiguous cache lines per record) and free the
+    column-major copy. The kernel output is bit-identical; the scale tensor is
+    kept because the wrapper reads its shape and checks the scale range.
+
+    On by default on gfx942 when AITER provides the layout;
+    VLLM_ROCM_AITER_A16W4_STRIP16=0 keeps the column-major layout.
+    """
+    if not envs.VLLM_ROCM_AITER_A16W4_STRIP16:
+        return
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        return
+    try:
+        from aiter.ops.triton.moe.moe_op_gemm_a16w4 import gfx942_strip16_pack
+    except ImportError:
+        return
+    w = weight.storage.data
+    s = scale.storage.data
+    if w.dim() != 3 or s.dim() != 3:
+        return
+    e, k2, n = w.shape
+    if k2 % 64 != 0 or n % 16 != 0 or tuple(s.shape) != (e, k2 // 16, n):
+        logger.warning_once(
+            "AITER a16w4 STRIP16 layout not applicable to %s w=%s scale=%s; "
+            "keeping the column-major layout",
+            name,
+            tuple(w.shape),
+            tuple(s.shape),
+        )
+        return
+    weight.storage.data = gfx942_strip16_pack(w.view(torch.uint8), s.view(torch.uint8))
+    weight.storage.w_layout = "GFX942_STRIP16"
+    del w
+    torch.cuda.empty_cache()
+    logger.info_once(
+        "AITER a16w4 STRIP16 weight layout: %s (E=%d, K=%d, N=%d) -> records %s",
+        name,
+        e,
+        k2 * 2,
+        n,
+        tuple(weight.storage.data.shape),
+    )
+
+
 def convert_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -1955,6 +2003,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_weight,
             w2_weight_scale,
         )
+
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            _maybe_pack_gfx942_strip16(w13_weight, w13_scale, "w13")
+            _maybe_pack_gfx942_strip16(w2_weight, w2_scale, "w2")
 
         w13_precision_config = PrecisionConfig(
             **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
