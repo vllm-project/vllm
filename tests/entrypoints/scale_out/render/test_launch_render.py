@@ -9,6 +9,7 @@ import pytest_asyncio
 from tests.utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+LORA_NAME = "sql"
 
 
 @pytest.fixture(scope="module")
@@ -198,3 +199,58 @@ async def test_models_endpoint(client):
     assert "data" in data
     model_ids = [m["id"] for m in data["data"]]
     assert MODEL_NAME in model_ids
+
+
+# -- LoRA Modules --
+
+
+@pytest.fixture(scope="module")
+def lora_server(tmp_path_factory):
+    lora_path = tmp_path_factory.mktemp("lora")
+    args = ["--lora-modules", f"{LORA_NAME}={lora_path}"]
+    with RemoteLaunchRenderServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
+        yield srv
+
+
+@pytest_asyncio.fixture
+async def lora_client(lora_server):
+    async with httpx.AsyncClient(
+        base_url=lora_server.url_for(""), timeout=30.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_lora_module_listed_in_models(lora_client):
+    response = await lora_client.get("/v1/models")
+    assert response.status_code == 200
+    cards = {m["id"]: m for m in response.json()["data"]}
+    assert cards[LORA_NAME]["parent"] == MODEL_NAME
+
+
+_LORA_CHAT = {"model": LORA_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+_LORA_DERENDER = {
+    "model": LORA_NAME,
+    "generate_response": {
+        "request_id": "lora",
+        "choices": [{"index": 0, "token_ids": [15043, 29889], "finish_reason": "stop"}],
+    },
+    "prompt_tokens": 3,
+    "chat_request": _LORA_CHAT,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions/render", _LORA_CHAT),
+        ("/v1/chat/completions/derender", _LORA_DERENDER),
+    ],
+)
+async def test_lora_module_name_is_served(lora_client, path, body):
+    """A `--lora-modules` name is a valid `model` and is echoed back, so the
+    rendered request selects the adapter on the generate server."""
+    response = await lora_client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["model"] == LORA_NAME

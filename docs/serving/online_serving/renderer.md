@@ -17,6 +17,21 @@ server. To expose them with `vllm serve`, opt in explicitly:
 vllm serve <model> --enable-scale-out
 ```
 
+## LoRA adapters
+
+Give `vllm launch render` the same `--lora-modules` names as the generation
+servers:
+
+```bash
+vllm launch render <model> --lora-modules sql=/path/to/sql-lora
+```
+
+The render server registers each name and does not read the adapter files.
+`/v1/models` lists the names, and `/render` and `/derender` accept them as
+`model`. A rendered `GenerateRequest` carries the name in `model`, which selects
+the adapter on `/inference/v1/generate`. The render server does not know
+adapters loaded on a generation server at runtime with `/v1/load_lora_adapter`.
+
 ## API Reference
 
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
