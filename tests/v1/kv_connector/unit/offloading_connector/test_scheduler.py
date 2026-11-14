@@ -4651,6 +4651,155 @@ def test_fence_at_build_store_jobs(request_runner):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("shared_prefix", [True, False])
+def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
+    """A prefix hit preserves the store; a reallocation still flushes it."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    scheduler = create_scheduler(config, num_blocks=3 if shared_prefix else 2)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    offloading = connector.scheduler
+    manager = offloading.manager
+    assert isinstance(manager, CPUOffloadingManager)
+
+    request_a = create_request(
+        request_id=1, num_tokens=4, common_prefix_len=4, block_size=4
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    state = offloading._req_status[request_a.request_id]
+    key = state.group_states[0].offload_keys[0]
+    block = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks[0][0]
+    block_id, block_hash = block.block_id, block.block_hash
+    assert block_hash is not None
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert manager.lookup(key, state.req_context) is LookupResult.HIT_PENDING
+
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert block.ref_cnt == 0
+    request_b = create_request(
+        request_id=2,
+        num_tokens=8 if shared_prefix else 4,
+        common_prefix_len=4 if shared_prefix else 0,
+        block_size=4,
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert output.scheduled_new_reqs[0].num_computed_tokens == (
+        4 if shared_prefix else 0
+    )
+    b_block = scheduler.kv_cache_manager.get_blocks(request_b.request_id).blocks[0][0]
+    assert b_block.block_id == block_id
+    if shared_prefix:
+        assert b_block.block_hash == block_hash and b_block.ref_cnt == 1
+        assert not (metadata.jobs_to_flush or set()) & jobs
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output(
+                scheduler.running,
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs=dict.fromkeys(jobs, 1)
+                ),
+            ),
+        )
+        assert manager.lookup(key, state.req_context) is LookupResult.HIT
+    else:
+        assert b_block.block_hash != block_hash
+        assert jobs <= (metadata.jobs_to_flush or set())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("prefix_tokens", [8, 20])
+def test_full_attention_pending_store_with_bounded_replay(prefix_tokens):
+    """Retained replay hits do not flush; discarded hits still fence reuse."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 8 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = False
+    spec = AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    groups = [
+        make_kv_cache_group(["full"], spec),
+        make_kv_cache_group(
+            ["swa"],
+            SlidingWindowManager.layer_config(
+                spec, sliding_window=8, bounded_replay=True
+            ),
+        ),
+    ]
+    cache = KVCacheConfig(
+        num_blocks=7 if prefix_tokens == 8 else 32,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    scheduler = create_scheduler(config, kv_cache_config=cache, hash_block_size=4)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    request_a = create_request(
+        request_id=1,
+        num_tokens=prefix_tokens,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    a_ids = scheduler.kv_cache_manager.get_block_ids(request_a.request_id)[0]
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+
+    request_b = create_request(
+        request_id=2,
+        num_tokens=prefix_tokens + 4,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    state = connector.scheduler._req_status[request_b.request_id]
+    assert state.num_locally_computed_tokens == prefix_tokens
+    b_ids = scheduler.kv_cache_manager.get_block_ids(request_b.request_id)
+    if prefix_tokens > 8:
+        assert b_ids[0][: len(a_ids)] == a_ids
+        assert output.scheduled_new_reqs[0].replay_start == prefix_tokens - 8
+        assert not (metadata.jobs_to_flush or set()) & jobs
+    else:
+        assert output.scheduled_new_reqs[0].num_computed_tokens == 0
+        assert set(a_ids) & set().union(*b_ids)
+        assert jobs <= (metadata.jobs_to_flush or set())
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     """complete_store fires per-job, not deferred to request finish.

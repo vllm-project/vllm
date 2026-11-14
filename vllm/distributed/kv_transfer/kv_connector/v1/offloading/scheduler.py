@@ -1061,14 +1061,27 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        # Track allocated block IDs regardless of num_external_tokens so
-        # re-allocation flush detection sees blocks allocated by other
-        # connectors in a MultiConnector setup.
-        for group_blocks in blocks.blocks:
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
+        req_status = self._req_status[request.request_id]
+        # Include allocations made by other connectors in a MultiConnector.
+        # Full-attention prefix hits were touched, not allocated.
+        num_locally_computed_tokens = req_status.num_locally_computed_tokens
+        for group_id, group_blocks in enumerate(blocks.blocks):
+            group = next(
+                (
+                    config
+                    for config in self.config.kv_group_configs
+                    if config.group_idx == group_id
+                ),
+                None,
             )
-
+            start = (
+                num_locally_computed_tokens // group.tokens_per_block
+                if group is not None and group.sliding_window_size_in_chunks is None
+                else 0
+            )
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks[start:] if block.block_id != 0
+            )
         if num_external_tokens == 0:
             return
 
@@ -1076,11 +1089,9 @@ class OffloadingConnectorScheduler:
         # already saw as HIT, so both must sit inside the same region.
         self._acquire_step()
 
-        req_status = self._req_status[request.request_id]
         req_status.loaded_from_offload = True
         sync_load = request.request_id in self._current_batch_sync_loads
 
-        num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
         partial_tail_boundary = req_status.partial_tail_boundary
         if partial_tail_boundary is not None:
@@ -1209,7 +1220,6 @@ class OffloadingConnectorScheduler:
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
-
         for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
             req_status.update_offload_keys()
@@ -1227,6 +1237,28 @@ class OffloadingConnectorScheduler:
                 req_status.update_block_id_groups(block_id_groups)
                 for group_config in self.config.kv_group_configs:
                     new_blocks = block_id_groups[group_config.group_idx]
+                    if (
+                        is_full_table
+                        and group_config.sliding_window_size_in_chunks is None
+                    ):
+                        # A new/resumed request carries its complete table.
+                        # The leading blocks can be local prefix-cache hits and
+                        # therefore were touched, not allocated.  Only the
+                        # suffix past the local hit can represent fresh
+                        # blocks; partial hits are kept private by core's CoW
+                        # destination and start at the floor boundary here.
+                        # Bounded replay keeps the local hit's FA blocks even
+                        # though the execution boundary moves back. A short
+                        # hit may instead be discarded completely.
+                        local_tokens = req_status.num_locally_computed_tokens
+                        if not req_status.req.replay_start:
+                            local_tokens = min(
+                                local_tokens, req_status.req.num_computed_tokens
+                            )
+                        num_prefix_blocks = (
+                            local_tokens // group_config.tokens_per_block
+                        )
+                        new_blocks = new_blocks[num_prefix_blocks:]
                     for bid in new_blocks:
                         if bid != 0:
                             self._current_batch_allocated_block_ids.add(bid)
