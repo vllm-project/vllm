@@ -2,8 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FileMapper."""
 
-from unittest.mock import MagicMock
+from typing import cast
+from unittest.mock import MagicMock, patch
 
+import torch
+
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
+from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
+    KVCacheTensor,
+    MLAAttentionSpec,
+)
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -326,3 +344,114 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+def _make_mapper_for_tp(
+    tp_size: int,
+    *,
+    canonical_layout: bool = False,
+    use_mla: bool = False,
+) -> FileMapper:
+    """Build a FileMapper via build_offloading_config as secondary tiers do."""
+    total_kv_heads = 4
+    spec: KVCacheSpec
+    if use_mla:
+        spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            max_tp_shards=1,
+            head_size=512,
+            dtype=torch.float16,
+        )
+    else:
+        spec = AttentionSpec(
+            block_size=16,
+            num_kv_heads=max(1, total_kv_heads // tp_size),
+            head_size=128,
+            dtype=torch.float16,
+        )
+    group = KVCacheGroup.from_layers(
+        {"layer0": KVCacheLayerConfig(FullAttentionManager.config(), spec)}
+    )
+    num_blocks = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * num_blocks,
+                layers=["layer0"],
+                layer_stride=spec.page_size_bytes * num_blocks,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[group],
+        kv_tp_replicas=tp_size if use_mla else 1,
+    )
+
+    vllm_config = MagicMock()
+    vllm_config.num_hash_lookahead_tokens = 0
+    vllm_config.cache_config.block_size = 16
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.cache_config.prefix_match_unit = None
+    vllm_config.cache_config.cache_dtype = torch.float16
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    vllm_config.model_config.model = "test-model"
+    vllm_config.model_config.dtype = torch.float16
+    vllm_config.model_config.max_model_len = 4096
+    vllm_config.model_config.use_mla = use_mla
+    vllm_config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
+    with patch.object(current_platform, "device_count", return_value=tp_size):
+        vllm_config.parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            distributed_executor_backend="mp",
+        )
+    vllm_config.kv_events_config = None
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=(
+            {"canonical_layout": True} if canonical_layout else {}
+        ),
+    )
+
+    offloading_config = build_offloading_config(
+        cast(VllmConfig, vllm_config), kv_cache_config
+    )
+    offloading_spec = MagicMock(spec=OffloadingSpec)
+    offloading_spec.config = offloading_config
+    return FileMapper.from_offloading_spec(
+        root_dir="/tmp/cache",
+        offloading_spec=offloading_spec,
+        blocks_per_file=offloading_config.cache.blocks_per_chunk,
+        parallel_agnostic=True,
+    )
+
+
+def test_direct_layout_separates_base_path_across_tp_sizes():
+    tp1 = _make_mapper_for_tp(1)
+    tp2 = _make_mapper_for_tp(2)
+
+    assert tp1.base_path != tp2.base_path
+    assert tp1.fields["tp_size"] == 1
+    assert tp2.fields["tp_size"] == 2
+
+
+def test_canonical_layout_shares_base_path_across_tp_sizes():
+    tp1 = _make_mapper_for_tp(1, canonical_layout=True)
+    tp2 = _make_mapper_for_tp(2, canonical_layout=True)
+    direct = _make_mapper_for_tp(1)
+
+    assert tp1.base_path == tp2.base_path
+    assert tp1.get_run_config() == tp2.get_run_config()
+    assert tp1.base_path != direct.base_path
+
+
+def test_replicated_mla_shares_base_path_for_multi_rank_tp():
+    tp1 = _make_mapper_for_tp(1, use_mla=True)
+    tp2 = _make_mapper_for_tp(2, use_mla=True)
+    tp4 = _make_mapper_for_tp(4, use_mla=True)
+
+    assert tp2.base_path == tp4.base_path
+    assert tp2.get_run_config() == tp4.get_run_config()
+    assert tp1.base_path != tp2.base_path
