@@ -1889,6 +1889,230 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
+def test_cached_kv_waiting_request_reserves_its_tail_budget():
+    """A waiting request that already holds its KV blocks (e.g. a finished
+    async KV load) must get enough budget to be admitted mid-prefill."""
+    scheduler = create_scheduler(max_num_batched_tokens=1024, max_model_len=2048)
+    long_req = create_requests(num_requests=1, num_tokens=2048)[0]
+    scheduler.add_request(long_req)
+
+    # The long request is alone, so its first chunk takes the whole budget.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 1024
+
+    # 5 of this request's 10 prompt tokens are already resident, so admitting
+    # it only costs the 5-token tail.
+    cached_req = create_requests(num_requests=1, num_tokens=10, req_ids=["cached"])[0]
+    cached_req.num_computed_tokens = 5
+    scheduler.add_request(cached_req)
+
+    output = scheduler.schedule()
+    # The running prefill leaves exactly the tail's worth of budget behind.
+    assert output.num_scheduled_tokens[long_req.request_id] == 1019
+    assert output.num_scheduled_tokens["cached"] == 5
+
+
+def test_queued_request_reserves_what_it_can_consume():
+    """A queued request is charged min(tokens it has left, one equal share),
+    so a short request does not hold back budget the running batch could use,
+    while a request with nothing resident still gets its share to be probed."""
+    scheduler = create_scheduler(max_num_batched_tokens=1024, max_model_len=2048)
+    long_req = create_requests(num_requests=1, num_tokens=2048)[0]
+    scheduler.add_request(long_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 1024
+
+    cold_req = create_requests(num_requests=1, num_tokens=10, req_ids=["cold"])[0]
+    scheduler.add_request(cold_req)
+
+    output = scheduler.schedule()
+    # Two eligible requests -> one share of 512, but the request only has 10
+    # tokens left, so it reserves 10 and the running prefill keeps the rest.
+    assert output.num_scheduled_tokens[long_req.request_id] == 1014
+    assert output.num_scheduled_tokens["cold"] == 10
+
+
+def test_queued_request_reserves_nothing_when_admission_is_blocked():
+    """The waiting loop stops at the active-request cap, so a queued request
+    that cannot be admitted must not take budget from the running prefill."""
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_num_batched_tokens=1024, max_model_len=2048
+    )
+    long_req = create_requests(num_requests=1, num_tokens=2048)[0]
+    scheduler.add_request(long_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 1024
+
+    blocked_req = create_requests(num_requests=1, num_tokens=10, req_ids=["blocked"])[0]
+    scheduler.add_request(blocked_req)
+
+    output = scheduler.schedule()
+    # The queue cannot be admitted, so the running prefill keeps the whole budget
+    # (minus the one token the model len cap already leaves out).
+    assert output.num_scheduled_tokens[long_req.request_id] == 1023
+    assert "blocked" not in output.num_scheduled_tokens
+
+
+def test_queued_request_reserves_nothing_when_paused_new():
+    """Under PAUSED_NEW only KV-holding requests drain, so a queued cold
+    request must not take budget from the running prefill."""
+    scheduler = create_scheduler(max_num_batched_tokens=1024, max_model_len=2048)
+    long_req = create_requests(num_requests=1, num_tokens=2048)[0]
+    scheduler.add_request(long_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 1024
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    # 5 of this request's 10 prompt tokens are resident, as after an async load.
+    kv_req = create_requests(num_requests=1, num_tokens=10, req_ids=["kv"])[0]
+    kv_req.num_computed_tokens = 5
+    queued_req = create_requests(num_requests=1, num_tokens=10, req_ids=["queued"])[0]
+    for request in (kv_req, queued_req):
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # The KV-holding request still drains for its 5-token tail, while the
+    # queued request cannot drain and is not charged.
+    assert output.num_scheduled_tokens[long_req.request_id] == 1019
+    assert output.num_scheduled_tokens["kv"] == 5
+    assert "queued" not in output.num_scheduled_tokens
+
+
+def test_cached_prefix_is_admitted_mid_prefill():
+    """A request whose prompt is already in the prefix cache is admitted while
+    a cold chunked prefill is still running."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        enable_prefix_caching=True,
+    )
+    # Fill the prefix cache with a 512-token prompt, then release its blocks.
+    cached_req = create_requests(
+        num_requests=2, num_tokens=512, same_prompt=True, req_ids=["cached", "hit"]
+    )[0]
+    scheduler.add_request(cached_req)
+    scheduler.schedule()
+    scheduler.finish_requests(cached_req.request_id, RequestStatus.FINISHED_ABORTED)
+
+    # A cold request starts a chunked prefill that would use the whole step.
+    long_req = create_requests(
+        num_requests=2, num_tokens=2048, req_ids=["unused", "long"]
+    )[1]
+    scheduler.add_request(long_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[long_req.request_id] == 1024
+
+    hit_req = create_requests(
+        num_requests=2, num_tokens=512, same_prompt=True, req_ids=["other", "hit"]
+    )[1]
+    scheduler.add_request(hit_req)
+
+    output = scheduler.schedule()
+    # The hit is charged one share (512), so the running prefill keeps 512
+    # tokens, and the hit is admitted for its 16 uncached tokens.
+    assert output.num_scheduled_tokens[long_req.request_id] == 512
+    assert output.num_scheduled_tokens[hit_req.request_id] == 16
+
+
+def test_queued_request_of_another_lora_reserves_nothing():
+    """A queued request on a second LoRA cannot be admitted while the running
+    batch already uses max_loras, so it must not take budget from it."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=256,
+        max_model_len=2048,
+        lora_config=LoRAConfig(max_loras=1),
+    )
+    (prefill,) = create_requests(num_requests=1, num_tokens=2000, req_ids=["prefill"])
+    prefill.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    scheduler.add_request(prefill)
+    assert scheduler.schedule().num_scheduled_tokens == {"prefill": 256}
+
+    (queued,) = create_requests(num_requests=1, num_tokens=600, req_ids=["queued"])
+    queued.lora_request = LoRARequest("lora-b", 2, "/path/b")
+    scheduler.add_request(queued)
+
+    output = scheduler.schedule()
+    # The skipped request would cost half the 256-token step and still never be
+    # admitted; the prefill keeps all of it.
+    assert output.num_scheduled_tokens == {"prefill": 256}
+    assert queued.status == RequestStatus.WAITING
+
+
+def test_grammar_pending_request_reserves_nothing():
+    """A request whose structured-output grammar is not compiled is skipped by
+    the waiting loop, so it must not take budget from the running prefill."""
+    scheduler = create_scheduler(max_num_batched_tokens=256, max_model_len=2048)
+    (prefill,) = create_requests(num_requests=1, num_tokens=2000, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    assert scheduler.schedule().num_scheduled_tokens == {"prefill": 256}
+
+    (pending,) = create_requests(num_requests=1, num_tokens=600, req_ids=["pending"])
+    pending.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    pending.structured_output_request = Mock(grammar=None)
+    scheduler.add_request(pending)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"prefill": 256}
+    assert pending.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+
+
+def test_stale_output_request_reserves_nothing():
+    """A request with deliverable stale output in flight is skipped by the
+    waiting loop, so it must not take budget from the running prefill."""
+    scheduler = create_scheduler(max_num_batched_tokens=256, max_model_len=2048)
+    (prefill,) = create_requests(num_requests=1, num_tokens=2000, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    assert scheduler.schedule().num_scheduled_tokens == {"prefill": 256}
+
+    (stale,) = create_requests(num_requests=1, num_tokens=600, req_ids=["stale"])
+    stale.num_stale_output_tokens = 2
+    scheduler.add_request(stale)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"prefill": 256}
+    assert stale.num_computed_tokens == 0
+
+
+def test_fair_share_counts_only_reservable_requests():
+    """Requests the waiting loop skips do not dilute the share of the ones it
+    can admit."""
+    scheduler = create_scheduler(max_num_batched_tokens=256, max_model_len=2048)
+    (prefill,) = create_requests(num_requests=1, num_tokens=2000, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    assert scheduler.schedule().num_scheduled_tokens == {"prefill": 256}
+
+    (pending,) = create_requests(num_requests=1, num_tokens=600, req_ids=["pending"])
+    pending.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    pending.structured_output_request = Mock(grammar=None)
+    (cold,) = create_requests(num_requests=1, num_tokens=600, req_ids=["cold"])
+    scheduler.add_request(pending)
+    scheduler.add_request(cold)
+
+    output = scheduler.schedule()
+    # One reservable request, so its share is 256 // 2 rather than 256 // 3.
+    assert output.num_scheduled_tokens == {"prefill": 128, "cold": 128}
+
+
+def test_remote_kv_load_is_charged_at_least_one_token():
+    """An in-flight async KV load is still charged a share: that budget keeps
+    the waiting loop running so a load finished this step can be promoted."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=256, max_model_len=2048, use_kv_connector=True
+    )
+    (prefill,) = create_requests(num_requests=1, num_tokens=2000, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    assert scheduler.schedule().num_scheduled_tokens == {"prefill": 256}
+
+    (loading,) = create_requests(num_requests=1, num_tokens=600, req_ids=["loading"])
+    loading.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.add_request(loading)
+    scheduler.finished_recving_kv_req_ids.add(loading.request_id)
+
+    output = scheduler.schedule()
+    # The load got 256 // 2 = 128 tokens, was promoted and scheduled for them.
+    assert output.num_scheduled_tokens == {"prefill": 128, "loading": 128}
+
+
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""
     scheduler = create_scheduler()
