@@ -520,7 +520,6 @@ class AfmoeForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.num_dense_layers
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[MoERunner] = []
@@ -534,8 +533,7 @@ class AfmoeForCausalLM(
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_moe is None and self.num_moe_layers > 0:
-            raise RuntimeError("No AfmoeMoE layer found in model.layers.")
+        self.num_moe_layers = len(self.moe_layers)
 
         if example_moe is not None:
             self.num_logical_experts = example_moe.n_logical_experts
