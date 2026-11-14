@@ -93,16 +93,22 @@ def test_extract_tool_calls_with_arguments_key(parser):
     assert '"query": "test"' in result.tool_calls[0].function.arguments
 
 
-def test_extract_tool_calls_with_output_end_token(parser):
+@pytest.mark.parametrize("prefix", ["", "Before."])
+def test_extract_tool_calls_with_output_end_token(mock_tokenizer, mock_request, prefix):
+    parser = ToolParserManager.get_tool_parser("llama3_json")(mock_tokenizer)
     model_output = (
-        f'{TOOL_START}{{"name": "searchTool", '
-        '"arguments": {"query": "test"}}<|eom_id|>'
+        f'{prefix}{TOOL_START}{{"name": "searchTool", '
+        '"arguments": {"query": "<|eom_id|>"}}<|eom_id|>'
     )
-    result = parser.extract_tool_calls(model_output, None)
+    result = parser.extract_tool_calls(model_output, mock_request)
 
     assert result.tools_called is True
+    assert result.content == (prefix or None)
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].function.name == "searchTool"
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "<|eom_id|>"
+    }
 
 
 @pytest.mark.parametrize("suffix", [";", "; "])
