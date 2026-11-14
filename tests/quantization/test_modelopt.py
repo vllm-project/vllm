@@ -393,28 +393,34 @@ def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
 
 
 @pytest.mark.parametrize(
-    ("config_cls", "quantization"),
+    "projections",
     [
-        (ModelOptInt8Config, {"quant_algo": "INT8_PB_WO", "group_size": 32}),
-        (
-            ModelOptMixedPrecisionConfig,
-            {
-                "quant_algo": "MIXED_PRECISION",
-                "quantized_layers": {
-                    "model.layers.0.mlp.experts.0.down_proj": {
-                        "quant_algo": "INT8_PB_WO",
-                        "group_size": 32,
-                    }
-                },
-            },
-        ),
+        {"down_proj": ("NVFP4", 16), "gate_proj": ("INT8_PB_WO", 16)},
+        {"gate_proj": ("INT8_PB_WO", 16), "down_proj": ("INT8_PB_WO", 32)},
     ],
+    ids=["other_algo", "other_group_size"],
 )
-def test_modelopt_int8_pb_wo_rejects_moe(config_cls, quantization):
-    """INT8_PB_WO is linear-only: routed experts must fail rather than load as
-    an unquantized or FP8 MoE."""
-    config = config_cls.from_config({"quantization": quantization})
-    with pytest.raises(NotImplementedError):
+def test_modelopt_int8_pb_wo_experts_share_algo_and_group_size(projections):
+    """One WNA16 MoE kernel serves every expert and projection of a layer, so
+    INT8_PB_WO experts beside another algo or group size must fail rather than
+    load with the first entry's format."""
+    quantized_layers = {
+        f"model.layers.0.mlp.experts.{expert}.{proj}": {
+            "quant_algo": algo,
+            "group_size": group_size,
+        }
+        for expert in range(2)
+        for proj, (algo, group_size) in projections.items()
+    }
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": quantized_layers,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="INT8_PB_WO"):
         config.get_quant_method(
             MagicMock(spec=RoutedExperts), "model.layers.0.mlp.experts"
         )
@@ -909,28 +915,75 @@ def _pack_int8_pb_wo_weight(
     )
 
 
+def _tiny_checkpoint(moe: bool) -> tuple[Any, dict[str, torch.Tensor]]:
+    """A tiny random Llama, or Qwen3-MoE, config and its checkpoint weights."""
+    from transformers import (
+        LlamaConfig,
+        LlamaForCausalLM,
+        Qwen3MoeConfig,
+        Qwen3MoeForCausalLM,
+    )
+
+    if moe:
+        config = Qwen3MoeConfig(
+            num_hidden_layers=1,
+            moe_intermediate_size=64,
+            num_experts=8,
+            num_experts_per_tok=2,
+            **_TINY_MODEL_CONFIG,
+        )
+        model = Qwen3MoeForCausalLM(config)
+    else:
+        config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
+        model = LlamaForCausalLM(config)
+    config.architectures = [type(model).__name__]
+    weights = {}
+    for name, value in model.to(torch.bfloat16).state_dict().items():
+        # transformers fuses the experts; checkpoints store them per expert.
+        experts = name.removesuffix("gate_up_proj").removesuffix("down_proj")
+        if not experts.endswith(".experts."):
+            weights[name] = value
+        elif name.endswith("gate_up_proj"):
+            for expert, (gate, up) in enumerate(zip(*value.chunk(2, dim=1))):
+                weights[f"{experts}{expert}.gate_proj.weight"] = gate.clone()
+                weights[f"{experts}{expert}.up_proj.weight"] = up.clone()
+        else:
+            for expert, down in enumerate(value):
+                weights[f"{experts}{expert}.down_proj.weight"] = down.clone()
+    # Uneven magnitudes per 16 input weights, as in trained experts, so a scale
+    # applied to the wrong group or expert moves the logprobs.
+    for name, value in weights.items():
+        if ".experts." in name:
+            groups = value.unflatten(-1, (-1, 16))
+            spread = torch.empty(*groups.shape[:-1], 1).uniform_(-1.4, 1.4).exp()
+            weights[name] = (groups * spread).flatten(-2).to(value.dtype)
+    return config, weights
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="WNA16 kernels are CUDA")
 @pytest.mark.parametrize(
-    ("quant_algo", "dtype"),
+    ("quant_algo", "dtype", "moe"),
     [
-        ("INT8_PB_WO", "float16"),
-        ("MIXED_PRECISION", "bfloat16"),
+        ("INT8_PB_WO", "float16", False),
+        ("MIXED_PRECISION", "bfloat16", False),
+        ("INT8_PB_WO", "bfloat16", True),
+        ("MIXED_PRECISION", "bfloat16", True),
     ],
 )
-def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype):
-    """INT8_PB_WO layers (group 16 and 32, fused or not) next to FP8 and
-    unquantized layers match the checkpoint holding their dequantized weights."""
-    from transformers import LlamaConfig, LlamaForCausalLM
+def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype, moe):
+    """INT8_PB_WO layers (group 16 and 32, fused or not, dense or routed
+    experts) next to FP8 and unquantized layers match the checkpoint holding
+    their dequantized weights."""
+    from safetensors.torch import save_file
 
     from vllm import SamplingParams
 
-    config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        model = LlamaForCausalLM(config).to(torch.bfloat16)
+        config, weights = _tiny_checkpoint(moe)
         prompt = torch.randint(config.vocab_size, (48,)).tolist()
     attn, mlp = "model.layers.0.self_attn", "model.layers.0.mlp"
-    weights = model.state_dict()
+    experts = [name.removesuffix(".weight") for name in weights if ".experts." in name]
     if quant_algo == "INT8_PB_WO":
         group_sizes = dict.fromkeys(
             (
@@ -942,6 +995,11 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
         )
         quantization: dict[str, Any] = {"quant_algo": "INT8_PB_WO", "group_size": 32}
         reference_quantization: dict[str, Any] | None = None
+    elif moe:
+        # Group-16 experts beside group-32 q/k/v; the router stays unquantized.
+        group_sizes = dict.fromkeys(experts, 16) | {
+            f"{attn}.{proj}": 32 for proj in ("q_proj", "k_proj", "v_proj")
+        }
     else:
         # q/k/v and lm_head stay unquantized.
         group_sizes = {
@@ -949,6 +1007,7 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
             f"{mlp}.up_proj": 16,
             f"{mlp}.down_proj": 32,
         }
+    if quant_algo == "MIXED_PRECISION":
         fp8_layers = {f"{attn}.o_proj": {"quant_algo": "FP8"}}
         _pack_fp8_weight(weights, f"{attn}.o_proj", "FP8")
         quantization = {
@@ -978,15 +1037,16 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
         ("reference", reference, reference_quantization),
     ):
         model_path = tmp_path / name
-        model.config.__dict__.pop("quantization_config", None)
+        config.__dict__.pop("quantization_config", None)
         if quant is not None:
-            model.config.quantization_config = {
+            config.quantization_config = {
                 "quant_method": "modelopt",
                 "kv_cache_quant_algo": None,
-                "exclude_modules": ["lm_head"],
+                "exclude_modules": ["lm_head", "*.mlp.gate"],
                 **quant,
             }
-        model.save_pretrained(model_path, state_dict=state_dict)
+        config.save_pretrained(model_path)
+        save_file(state_dict, model_path / "model.safetensors", {"format": "pt"})
         with vllm_runner(
             str(model_path),
             dtype=dtype,
