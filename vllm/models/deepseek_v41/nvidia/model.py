@@ -1032,6 +1032,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             else None
         )
         streams: torch.Tensor | None = None
+        hash_engram = (
+            self.engram_hash is not None
+            and input_ids is not None
+            and is_forward_context_available()
+        )
+        if hash_engram and self.engram_batch is not None:
+            # Its fetch starts below: the embedding and hashes hide the wakeup.
+            self.engram_batch.wake()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1052,11 +1060,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
-        if (
-            self.engram_hash is not None
-            and input_ids is not None
-            and is_forward_context_available()
-        ):
+        if hash_engram:
+            assert self.engram_hash is not None and input_ids is not None
             attn_metadata = get_forward_context().attn_metadata
             if isinstance(attn_metadata, list):
                 attn_metadata = attn_metadata[dbo_current_ubatch_id()]

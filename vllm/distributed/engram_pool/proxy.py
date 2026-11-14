@@ -10,16 +10,17 @@ process sends commands over a socket (fds by SCM_RIGHTS); fetches run through
 memory shared with the GPU. For a GPU fetching rows (requester) from GPUs
 holding them (owners):
 
-1. The requester's GPU writes, per owner, chained RDMA WRITEs whose SGEs gather
-   that owner's rows, a packet's worth each, into the requester's landing
-   buffer, with the owner proxy's pointers. Each QP's last chain links a READ
-   of the requester's memory, which returns only once the rows before it have
-   landed, then a fenced inline WRITE of `seq` into that QP's flag. Then the
-   GPU raises `go = seq` and posts a semaphore from a CUDA host function.
-2. The requester process, asleep on that semaphore, posts the WRITE_WITH_IMM
-   the GPU wrote for each owner, which copies its WRs and SGEs into that
-   owner's mailbox. The GPU also posts the semaphore as the fetch starts, so
-   the process is often awake by the time go is up.
+1. The requester's GPU writes, per owner and table, chained RDMA WRITEs whose
+   SGEs gather that owner's rows, a packet's worth each, into the requester's
+   landing buffer, with the owner proxy's pointers. Each QP's last chain links
+   a READ of the requester's memory, which returns only once the rows before
+   it have landed, then a fenced inline WRITE of `seq` into that QP's flag for
+   the table. Then the GPU raises `go = seq` (if any row is remote) and
+   `issued`. A CUDA host function launched as the fetch starts posts a
+   semaphore.
+2. The requester process, asleep on that semaphore, waits for `issued` if
+   woken before it, then posts the WRITE_WITH_IMM the GPU wrote for each owner
+   and table, which copies its WRs and SGEs into that owner's mailbox.
 3. The owner process, asleep on its receive CQ's completion channel, posts the
    WRs as they are: its NIC gathers the rows, then writes the flags. Rows in
    host memory of the requester's node are gathered the same way by the
@@ -42,6 +43,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import traceback
 
 if __package__:
@@ -50,10 +52,12 @@ else:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import verbs  # type: ignore[no-redef]
 
-# Shared control block, in int64 words: go, done (`-seq` if the requester
-# failed), then per gatherer its first slot and first WR (world + 1 each), its
-# WRs that gather rows, and the request the GPU wrote for it (REQUEST_WORDS).
-GO, DONE, STARTS, WR_STARTS, NUM_WRS, REQUESTS = 0, 16, 32, 544, 1056, 1568
+# Shared control block, in int64 words: go, issued (fetches started), done
+# (`-seq` if the requester failed), then per (table, gatherer) its first slot
+# and first WR (one more each), its WRs that gather rows, and the request the
+# GPU wrote for it (REQUEST_WORDS).
+GO, ISSUED, DONE, STARTS, WR_STARTS = 0, 8, 16, 32, 544
+NUM_WRS, REQUESTS = 1056, 1568
 REQUEST_WORDS = 24
 # The GPU's process-shared semaphore follows the words.
 SEM_OFFSET = (REQUESTS + 512 * REQUEST_WORDS) * 8
@@ -133,7 +137,7 @@ class _Proxy:
 class Requester(_Proxy):
     """Hands each gatherer its WRs of every fetch."""
 
-    def init(self, device, world, rank, fds):
+    def init(self, device, world, rank, max_tables, fds):
         dev = self._open(device, world, rank)
         self.ctrl = mmap.mmap(fds[0], CTRL_BYTES, flags=mmap.MAP_SHARED)
         os.close(fds[0])
@@ -144,11 +148,14 @@ class Requester(_Proxy):
             p: dev.create_qp(self.cq, self.cq, REQUEST_DEPTH, 2) for p in self.gatherers
         }
         self.qps = {p: qp for p, (qp, _) in made.items()}
-        # Remote owners first: their requests have further to go.
+        # The first table first, and remote owners first: their requests have
+        # further to go.
         requests = ctypes.addressof(ctypes.c_char.from_buffer(self.ctrl))
         requests += REQUESTS * 8
+        order = [t * world + p for t in range(max_tables) for p in self.gatherers]
         self.posts = [
-            (p, self.qps[p], requests + p * REQUEST_WORDS * 8) for p in self.gatherers
+            (vg, self.qps[vg % world], requests + vg * REQUEST_WORDS * 8)
+            for vg in order
         ]
         return {"qpns": [made[p][1] for p in range(world)], "requests": requests}
 
@@ -167,8 +174,9 @@ class Requester(_Proxy):
 
     def run(self) -> None:
         """Once the GPU raises go, post the request it wrote for each gatherer
-        with rows of the fetch."""
+        and table with rows of the fetch."""
         libc = ctypes.CDLL(None, use_errno=True)
+        sched_yield, monotonic = libc.sched_yield, time.monotonic
         sem_wait, sem = libc.sem_wait, ctypes.c_void_p(self.sem)
         lock, unlock = libc.pthread_mutex_lock, libc.pthread_mutex_unlock
         mutex = ctypes.create_string_buffer(64)
@@ -177,11 +185,18 @@ class Requester(_Proxy):
         words, device = self.words, self.device
         bad = ctypes.byref(ctypes.c_void_p())
         wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
-        seq = 0
+        seq = issued = 0
         while True:
-            # Fetches with no remote rows leave go as it was, and a wakeup as
-            # the fetch starts may come before go.
-            if sem_wait(sem) or words[GO] == seq:
+            if sem_wait(sem):
+                continue
+            # The wakeup was launched as the fetch started: wait out its few
+            # kernels if they are still running (napping if that takes long).
+            deadline = monotonic() + 2e-4
+            while words[ISSUED] == issued:
+                sched_yield() if monotonic() < deadline else time.sleep(5e-4)
+            issued = words[ISSUED]
+            # Fetches with no remote rows leave go as it was.
+            if words[GO] == seq:
                 continue
             seq = words[GO]
             # Release then acquire: read what go publishes only after go.
@@ -250,10 +265,11 @@ class Owner(_Proxy):
             "device": dev.describe(),
         }
 
-    def connect(self, peers, requesters, max_wrs, max_items):
+    def connect(self, peers, requesters, max_wrs, max_items, max_tables):
         """Connect each peer's QPs (`peers` lists the peer, its owner's address
         and QPs for this GPU) and each requester's (its address and QP for
-        this GPU); returns this GPU's mailboxes and their rkey and lkey."""
+        this GPU); returns this GPU's mailboxes (per requester and table) and
+        their rkey and lkey."""
         dev = self.device
         for peer, (gid, lid), theirs in peers:
             for qp, remote in zip(self.qps[peer], theirs):
@@ -270,7 +286,8 @@ class Owner(_Proxy):
             for _ in range(RECV_DEPTH):
                 dev.post_recv(by_peer[peer], ctypes.addressof(self.recv_wr))
         self.box_bytes = mailbox_bytes(max_wrs, max_items)
-        boxes = mmap.mmap(-1, self.world * self.box_bytes)
+        self.max_tables = max_tables
+        boxes = mmap.mmap(-1, self.world * max_tables * self.box_bytes)
         self.keep.append(boxes)
         self.boxes = ctypes.addressof(ctypes.c_char.from_buffer(boxes))
         _, lkey, rkey = dev.reg_host(self.boxes, len(boxes), verbs.FLAGS)
@@ -314,9 +331,10 @@ class Owner(_Proxy):
                 continue
             self.retire(block=False)
             for i in range(count):
-                status, _, _, _, num_wrs, qpn = struct.unpack_from(
+                status, _, _, _, imm, qpn = struct.unpack_from(
                     "<IIIIII", wc, i * verbs.WC_BYTES + 8
                 )
+                num_wrs, table = imm & 0xFFFFFF, imm >> 24
                 peer, qp = self.receivers[qpn]
                 try:
                     device.post_recv(qp, recv_wr)
@@ -328,7 +346,8 @@ class Owner(_Proxy):
                             flush=True,
                         )
                         continue
-                    box = self.boxes + peer * self.box_bytes
+                    box = self.boxes
+                    box += (peer * self.max_tables + table) * self.box_bytes
                     qps = self.qps[peer]
                     chain = chain_length(num_wrs, len(qps))
                     for j, head in enumerate(range(0, num_wrs, chain)):

@@ -58,30 +58,33 @@ class EngramTable:
 
 
 class EngramFetch:
-    """A fetch running on the pool's stream; `wait()` returns its rows."""
+    """A started fetch: `wait(i)` returns table i's rows once they landed."""
 
-    def __init__(self, rows: torch.Tensor, done: torch.cuda.Event) -> None:
-        self.rows, self.done = rows, done
+    def __init__(self, transport, rows: torch.Tensor) -> None:
+        self.transport, self.rows = transport, rows
 
-    def wait(self) -> torch.Tensor:
-        torch.cuda.current_stream().wait_event(self.done)
-        return self.rows
+    def wait(self, index: int) -> torch.Tensor:
+        """Rows `[..., K, row_bytes]` of table `index`; the current stream
+        waits for them."""
+        self.transport.wait(index)
+        return self.rows[index]
 
 
 class EngramPool:
     """Tables shared by a peer group, and the buffers fetches land in.
 
     Every GPU of the group creates the same pool and tables in the same order
-    (each call is collective). A fetch's rows stay valid until the next fetch
-    on the pool starts; fetches start on the pool stream after all work
-    already queued on the caller's stream.
+    (each call is collective). Fetches run on the caller's stream; over RDMA,
+    rows move without SMs between `start` and each table's `wait`. A fetch's
+    rows stay valid until the next starts, which must follow every wait.
 
     Args:
         group: The peer group splitting the tables.
         transport: "nvlink" or "rdma".
         host_shards: Keep shards in host memory (RDMA only).
-        max_items: Most rows one fetch gathers on this GPU.
+        max_items: Most rows of one table one fetch gathers on this GPU.
         max_row_bytes: Largest row of any table.
+        max_tables: Most tables one fetch reads.
 
     """
 
@@ -92,6 +95,7 @@ class EngramPool:
         host_shards: bool,
         max_items: int,
         max_row_bytes: int,
+        max_tables: int = 1,
     ) -> None:
         if transport not in ("nvlink", "rdma"):
             raise ValueError(f"Unknown Engram pool transport {transport!r}")
@@ -110,13 +114,13 @@ class EngramPool:
         else:
             from vllm.distributed.engram_pool.rdma import RdmaTransport
 
-            self.transport = RdmaTransport(group, max_items, max_row_bytes)
+            self.transport = RdmaTransport(group, max_items, max_row_bytes, max_tables)
         self.kind = transport
         self.output = torch.empty(
-            max_items * max_row_bytes, dtype=torch.uint8, device=self.device
+            max_items * max_tables * max_row_bytes,
+            dtype=torch.uint8,
+            device=self.device,
         )
-        # High priority: a fetch's few short kernels go ahead of queued compute.
-        self.stream = torch.cuda.Stream(device=self.device, priority=-1)
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
     @staticmethod
@@ -212,28 +216,31 @@ class EngramPool:
             self._metas[key] = meta
         return meta
 
-    def lookup(self, tables: list[EngramTable], ids: torch.Tensor) -> torch.Tensor:
-        """Rows `[*ids.shape, row_bytes]` (uint8) of `ids` (`[..., L, K]`, row
-        L of table L); ids < 0 or past a table give zero rows."""
+    def wake(self) -> None:
+        """Ready the transport for the next `start` on the current stream; work
+        queued in between hides its latency (RDMA: ~45 us)."""
+        self.transport.wake()  # type: ignore[attr-defined]
+
+    def start(self, tables: list[EngramTable], ids: torch.Tensor) -> EngramFetch:
+        """Start fetching `ids` (`[..., L, K]`, row L of table L) on the
+        current stream; ids < 0 or past a table give zero rows."""
         if ids.shape[-2] != len(tables):
             raise ValueError(
                 f"ids {tuple(ids.shape)} do not match {len(tables)} tables"
             )
         meta = self._meta(tables)
         row_bytes = tables[0].row_bytes
-        rows = self.output[: ids.numel() * row_bytes].view(*ids.shape, row_bytes)
-        self.transport.fetch(meta, ids.contiguous(), rows, row_bytes // 8)  # type: ignore[attr-defined]
-        return rows
+        shape = (len(tables), *ids.shape[:-2], ids.shape[-1], row_bytes)
+        rows = self.output[: ids.numel() * row_bytes].view(shape)
+        self.transport.start(meta, ids.contiguous(), rows, row_bytes // 8)  # type: ignore[attr-defined]
+        return EngramFetch(self.transport, rows)
 
-    def prefetch(self, tables: list[EngramTable], ids: torch.Tensor) -> EngramFetch:
-        """Run `lookup` on the pool stream, overlapping the caller's work."""
-        self.stream.wait_stream(torch.cuda.current_stream())
-        ids.record_stream(self.stream)
-        with torch.cuda.stream(self.stream):
-            rows = self.lookup(tables, ids)
-        done = torch.cuda.Event()
-        done.record(self.stream)
-        return EngramFetch(rows, done)
+    def lookup(self, tables: list[EngramTable], ids: torch.Tensor) -> torch.Tensor:
+        """Rows `[L, ..., K, row_bytes]` (uint8) of `ids`, as `start` takes."""
+        fetch = self.start(tables, ids)
+        for index in range(len(tables)):
+            fetch.wait(index)
+        return fetch.rows
 
     def close(self) -> None:
         if hasattr(self.transport, "close"):

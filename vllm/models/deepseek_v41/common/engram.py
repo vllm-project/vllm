@@ -787,10 +787,16 @@ def get_engram_pool(
     host_shards: bool,
     max_items: int,
     row_bytes: int,
+    max_tables: int,
 ) -> EngramPool:
     """This GPU's pool of Engram tables split over a peer group of engines."""
     return EngramPool(
-        join_peer_group(size, store), transport, host_shards, max_items, row_bytes
+        join_peer_group(size, store),
+        transport,
+        host_shards,
+        max_items,
+        row_bytes,
+        max_tables,
     )
 
 
@@ -1665,14 +1671,13 @@ class EngramBatch:
                 "Engram pool fetches stage the MXFP8 WKV input of %d layers.",
                 len(layers),
             )
-        # The pool fetches and unpacks on its stream while layers run, unless
-        # fetches are sync.
-        self._pool_done = [torch.cuda.Event() for _ in layers]
         vllm_config = get_current_vllm_config_or_none()
         config = vllm_config.engram_config if vllm_config is not None else None
-        fetch = config.peer_group_fetch if config is not None else "auto"
-        rdma = self.pool is not None and self.pool.kind == "rdma"
-        self._async = fetch == "async" or (fetch == "auto" and rdma)
+        self._async = config is not None and config.peer_group_fetch == "async"
+        if self._async:
+            # The pool fetches and unpacks on this stream while layers run.
+            self._stream = torch.cuda.Stream(priority=-1)
+            self._pool_done = [torch.cuda.Event() for _ in layers]
         if self.pool is None:
             self.packed_rows = torch.empty(
                 max_tokens * table.dp_size,
@@ -1727,14 +1732,26 @@ class EngramBatch:
             return None
         return cls(layers, max_tokens)
 
+    def wake(self) -> None:
+        """Ready the pool for this step's fetch, ahead of its hashes."""
+        if self.pool is not None and not self._async:
+            self.pool.wake()
+
     def prepare_embeddings(self, hashes: torch.Tensor) -> None:
         """Stage every layer's WKV input before the decoder layers.
 
         DP-sharded tables decide on the group's slot, so every rank agrees.
         """
         if self.pool is not None:
-            # Sync fetches are captured; async ones join in a later segment.
-            (self._fetch if self._async else self._fetch_rows)(hashes)
+            first, count = self.layers[0].layer_hash_index, len(self.tables)
+            if self._async:
+                # Its stream joins in a later CUDA graph segment.
+                self._fetch(hashes)
+            else:
+                self._started = self.pool.start(
+                    self.tables, hashes[:, first : first + count]
+                )
+                self._num_tokens = hashes.shape[0]
             return
         slot = engram_gathered_num_tokens()
         peer = self.peer_exchange is not None and slot < ENGRAM_A2A_MIN_SLOT
@@ -1742,22 +1759,21 @@ class EngramBatch:
 
     @eager_break_during_capture
     def _fetch(self, hashes: torch.Tensor) -> None:
-        self._fetch_rows(hashes)
-
-    def _fetch_rows(self, hashes: torch.Tensor) -> None:
-        """Fetch and unpack each layer's rows, one layer at a time; if async, on
-        the pool stream, and a layer waits only for its own rows."""
+        """Fetch and unpack every layer's rows on the side stream; a layer
+        waits only for its own."""
         assert self.pool is not None
-        stream = self.pool.stream if self._async else torch.cuda.current_stream()
+        stream = self._stream
         stream.wait_stream(torch.cuda.current_stream())
         hashes.record_stream(stream)
         first, num_tokens = self.layers[0].layer_hash_index, hashes.shape[0]
-        for index, table in enumerate(self.tables):
-            with torch.cuda.stream(stream):
-                column = first + index
-                rows = self.pool.lookup([table], hashes[:, column : column + 1])
+        with torch.cuda.stream(stream):
+            fetch = self.pool.start(
+                self.tables, hashes[:, first : first + len(self.tables)]
+            )
+            for index in range(len(self.tables)):
+                rows = fetch.wait(index)[:, None]
                 self._unpack(rows, num_tokens, 0, False, index, index + 1)
-            self._pool_done[index].record(stream)
+                self._pool_done[index].record(stream)
 
     @eager_break_during_capture
     def _wait_fetch(self, index: int) -> None:
@@ -1819,6 +1835,9 @@ class EngramBatch:
         index = layer.layer_hash_index - self.layers[0].layer_hash_index
         if self.pool is not None and self._async:
             self._wait_fetch(index)
+        elif self.pool is not None:
+            rows = self._started.wait(index)[:, None]
+            self._unpack(rows, self._num_tokens, 0, False, index, index + 1)
         values = self.fp8_values[index, :num_tokens].view(torch.float8_e4m3fn)
         return QuantizedActivation(
             values,
@@ -1914,9 +1933,10 @@ class Engram(nn.Module):
                 engram_config.peer_group_store,
                 engram_config.peer_group_transport,
                 engram_config.cpu_offload,
-                # Fetches go one layer at a time.
                 vllm_config.scheduler_config.max_num_batched_tokens * n_hash_cols,
                 pool_row_bytes(layout.row_bytes, layout.head_dim, 32),
+                # One fetch reads every Engram layer's table.
+                len(layout.num_embeddings),
             )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
@@ -1938,10 +1958,8 @@ class Engram(nn.Module):
             head_dim,
             dtype=torch.bfloat16,
         )
-        if (pool := self.embed_tokens._pool) is not None:
-            # Fetches share the pool's buffers, so every layer uses its stream.
-            self._prefetch_stream = pool.stream
-        elif not self.embed_tokens.cpu_offload:
+        # Pool fetches run on the compute stream (EngramBatch overlaps them).
+        if self.embed_tokens._pool is not None or not self.embed_tokens.cpu_offload:
             self._prefetch_stream = None
             return
         elif self._prefetch_stream is None:
@@ -1969,11 +1987,7 @@ class Engram(nn.Module):
         current = stream = torch.cuda.current_stream()
         # Big lookups stall persistent main-stream kernels anyway: run them inline.
         _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
-        if (
-            self.embed_tokens._pool is None
-            and inline_min_tokens is not None
-            and num_tokens >= inline_min_tokens
-        ):
+        if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
             self.embed_tokens.lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream

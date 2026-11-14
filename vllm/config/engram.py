@@ -73,11 +73,12 @@ class EngramConfig:
     of the GPUs holding them gather them from HBM, or from host memory with
     cpu_offload."""
 
-    peer_group_fetch: Literal["auto", "async", "sync"] = "auto"
-    """Where a peer group's fetches run: `async` beside the decoder layers
-    before each Engram layer, `sync` on the compute stream. RDMA moves rows
-    without SMs and suits `async`; NVLink moves them with SMs, which compute
-    then shares, and suits `sync`. `auto` picks by transport."""
+    peer_group_fetch: Literal["sync", "async"] = "sync"
+    """Where a peer group's fetch kernels run. `sync`: on the compute stream,
+    started before the decoder layers, each Engram layer waiting for its own
+    rows; over RDMA the rows move without SMs in between. `async`: on a side
+    stream beside the layers, so their SM work (all of NVLink's gather)
+    overlaps compute, at a CUDA graph break per fetch."""
 
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required

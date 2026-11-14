@@ -21,9 +21,9 @@ def _gather_kernel(
     BLOCK_W: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Load `[..., TABLES, K]` rows from their owners; dead ids give zeros.
-    `meta` rows hold rows per shard, rows and a device array of shard
-    addresses (words 1, 2, 3)."""
+    """Load `[..., TABLES, K]` rows from their owners into `[TABLES, ..., K]`
+    rows; dead ids give zeros. `meta` rows hold rows per shard, rows and a
+    device array of shard addresses (words 1, 2, 3)."""
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = item < num_items
     table = meta + (item // K % TABLES) * 8
@@ -41,7 +41,9 @@ def _gather_kernel(
         mask=live[:, None] & in_row,
         other=0,
     )
-    dst = out.to(tl.pointer_type(tl.uint64)) + item[:, None] * WORDS + words[None, :]
+    index = item // K % TABLES
+    place = index * (num_items // TABLES) + item // (TABLES * K) * K + item % K
+    dst = out.to(tl.pointer_type(tl.uint64)) + place[:, None] * WORDS + words[None, :]
     tl.store(dst, data, mask=valid[:, None] & in_row)
 
 
@@ -67,7 +69,13 @@ class NvlinkTransport:
         own = addresses[self.group.rank_in_group]
         return device_view(own, num_bytes, memory), addresses
 
-    def fetch(
+    def wake(self) -> None:
+        """Nothing to wake: SMs move rows."""
+
+    def wait(self, table: int) -> None:
+        """Rows are in place once `start` returns: SMs moved them."""
+
+    def start(
         self, meta: torch.Tensor, ids: torch.Tensor, out: torch.Tensor, words: int
     ) -> None:
         if n := ids.numel():
