@@ -27,9 +27,10 @@ Every layer on a device shares one workspace: calls are ordered on the
 forward stream, and the experts kernel resets its counters when it ends, so
 CUDA graph replays need no reset.
 
-The TMA descriptors are built once from the weights' addresses (packed UE8M0
-scales are converted to FP32 then), so weights replaced by new tensors after
-the layer is built are not seen.
+The TMA descriptors are built once from the weights' addresses, and packed
+UE8M0 scales are converted to an FP32 copy then. So a weight reload after the
+layer is built, whether it replaces those tensors or updates the packed scales
+in place, isn't guaranteed to reach this layer: rebuild it instead.
 """
 
 from typing import NamedTuple
