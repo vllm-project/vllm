@@ -87,6 +87,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
+    k2sync,
     pair_layout,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ranks import sum_partials
@@ -564,6 +565,29 @@ def batch_on(c):
     return c.get("batch", False)
 
 
+RANK_UNROLL = 8  # (``plan.k2sync``) candidates compared a round
+
+
+@traced
+def _rank_bounded(mki, mk, me, n_c):
+    """(``plan.k2sync``) ``stage_route``'s candidate rank, the candidates read
+    lane by lane RANK_UNROLL a round only as far as there are candidates (n_c,
+    wave-uniform, <= 64): the same count as the 64 unrolled readlanes, whose
+    lanes past n_c add nothing."""
+    nc = uniform(n_c)
+    rank = fx.Int32(0)
+    j0 = fx.Int32(0)
+    while j0 < nc:
+        for u in range_constexpr(RANK_UNROLL):
+            j = j0 + u
+            ok = fx.Uint32(readlane(mki, j))
+            oe = readlane(me, j)
+            before = ((ok > mk) | ((ok == mk) & (oe < me))) & (j < nc)
+            rank = rank + before.select(fx.Int32(1), fx.Int32(0))
+        j0 = uniform(j0 + RANK_UNROLL)
+    return rank
+
+
 @traced
 def stage_route(c, t):
     """Token t (wave 0): 896 logits, 14 a lane (expert lane + 64 i) -> sigmoid
@@ -687,12 +711,15 @@ def stage_route(c, t):
             mk = fx.Uint32(mki)
             me = fx.ptr_load(red + (64 + q)).bitcast(fx.Int32)
             ms = fx.ptr_load(red + (128 + q))
-            rank = fx.Int32(0)
-            for j in range_constexpr(64):
-                ok = fx.Uint32(readlane(mki, j))
-                oe = readlane(me, j)
-                before = ((ok > mk) | ((ok == mk) & (oe < me))) & (j < n_c)
-                rank = rank + before.select(fx.Int32(1), fx.Int32(0))
+            if const_expr(k2sync()):
+                rank = _rank_bounded(mki, mk, me, n_c)
+            else:
+                rank = fx.Int32(0)
+                for j in range_constexpr(64):
+                    ok = fx.Uint32(readlane(mki, j))
+                    oe = readlane(me, j)
+                    before = ((ok > mk) | ((ok == mk) & (oe < me))) & (j < n_c)
+                    rank = rank + before.select(fx.Int32(1), fx.Int32(0))
             _route_out(c, t, red, (lane < n_c) & (rank < TOPK), rank, me, ms)
     gpu.barrier()
 
