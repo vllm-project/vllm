@@ -145,13 +145,29 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 self._advance_stored_idx(req_status, num_offloadable_tokens)
                 continue
 
+            # Offer only the leading chunks that fit. Each group's range ends
+            # at its first withheld chunk, which is offered on a later step.
+            max_chunks = sink.max_storable_chunks()
+            if max_chunks is not None:
+                if max_chunks == 0 and not req.is_finished():
+                    continue
+                num_offered = max(max_chunks, 1)
+                for group_pos, chunk_idx in reversed(
+                    candidates.key_chunks[num_offered:]
+                ):
+                    start_chunk_idx, _ = group_store_ranges[group_pos]
+                    group_store_ranges[group_pos] = (start_chunk_idx, chunk_idx)
+                del new_offload_keys[num_offered:]
+
+            next_idxs = self._next_idxs(req_status)
             store_output = sink.prepare_store(new_offload_keys, req_status.req_context)
             if store_output is None:
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
             if not store_output.keys_to_store:
-                self._advance_stored_idx(req_status, num_offloadable_tokens)
+                for config_idx, (_, num_chunks) in enumerate(group_store_ranges):
+                    next_idxs[config_idx] = max(next_idxs[config_idx], num_chunks)
                 continue
 
             ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))
@@ -207,7 +223,6 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
 
-            next_idxs = self._next_idxs(req_status)
             for config_idx, (_, num_chunks) in enumerate(group_store_ranges):
                 next_idxs[config_idx] = max(next_idxs[config_idx], num_chunks)
 

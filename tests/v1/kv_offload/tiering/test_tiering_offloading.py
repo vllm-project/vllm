@@ -998,6 +998,19 @@ class TestTieringOffloadingManager:
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
+    def test_max_storable_chunks_counts_chunks_of_finished_cascades(
+        self, manager_setup
+    ):
+        """Finished cascades unpin primary chunks before the bound is taken."""
+        chunks = to_keys(range(5))
+        self._start_request()
+        trigger = StoreTrigger.ON_COMPUTE
+        assert self.manager.prepare_store(chunks, _CTX, trigger=trigger) is not None
+        self.manager.complete_store(chunks, _CTX, trigger=trigger)
+        assert self.primary_tier.max_storable_chunks() == 0
+
+        assert self.manager.max_storable_chunks() == 5
+
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
         chunks = to_keys(range(5))

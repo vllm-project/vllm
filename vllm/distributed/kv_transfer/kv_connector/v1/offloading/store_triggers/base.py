@@ -39,6 +39,10 @@ class StoreJobSink(Protocol):
         """Offer keys to the manager, with the trigger of this handler."""
         ...
 
+    def max_storable_chunks(self) -> int | None:
+        """The most keys the manager can allocate in one offer, if bounded."""
+        ...
+
     def add_job(
         self,
         req_id: ReqId,

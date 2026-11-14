@@ -19,6 +19,8 @@ class StoreCandidates(NamedTuple):
 
     num_offloadable_tokens: int
     keys: list[OffloadKey]
+    # (index into group_ranges, chunk index) of each key
+    key_chunks: list[tuple[int, int]]
     # (start_chunk_idx, end_chunk_idx) of each group
     group_ranges: list[tuple[int, int]]
 
@@ -68,6 +70,7 @@ def select_store_candidates(
     # Filter out chunks skipped due to sliding window attention / SSM
     # or unreachable by the load path's alignment constraints.
     new_offload_keys: list[OffloadKey] = []
+    new_offload_key_chunks: list[tuple[int, int]] = []
     group_store_ranges: list[tuple[int, int]] = []
 
     apply_eagle_drop = not config.num_hash_lookahead_tokens
@@ -79,8 +82,8 @@ def select_store_candidates(
         if req.shared_prefix_boundary:
             reachable_boundaries += (req.shared_prefix_boundary,)
 
-    for group_config, group_state, stored_chunk_idx in zip(
-        config.kv_group_configs, req_status.group_states, start_chunk_idxs
+    for group_pos, (group_config, group_state, stored_chunk_idx) in enumerate(
+        zip(config.kv_group_configs, req_status.group_states, start_chunk_idxs)
     ):
         num_chunks = req_status.storable_chunks(
             group_config, group_state, num_offloadable_tokens, apply_eagle_drop
@@ -196,8 +199,14 @@ def select_store_candidates(
             ):
                 continue
             new_offload_keys.append(offload_key)
+            new_offload_key_chunks.append((group_pos, abs_chunk_idx))
 
-    return StoreCandidates(num_offloadable_tokens, new_offload_keys, group_store_ranges)
+    return StoreCandidates(
+        num_offloadable_tokens,
+        new_offload_keys,
+        new_offload_key_chunks,
+        group_store_ranges,
+    )
 
 
 def _reachable_store_block_mask(

@@ -196,6 +196,9 @@ class _StoreJobSink:
             )
         return output
 
+    def max_storable_chunks(self) -> int | None:
+        return self._scheduler.manager.max_storable_chunks()
+
     def add_job(
         self,
         req_id: ReqId,

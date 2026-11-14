@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import partial
 
 import numpy as np
 import pytest
@@ -402,6 +403,25 @@ def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     reduced = stats.reduce()
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
+def test_cpu_manager_max_storable_chunks_is_the_largest_accepted_store():
+    """Write-pending and pinned chunks cannot make room for a store."""
+    manager = make_cpu_manager(num_chunks=5, cache_policy="lru")
+    assert manager.max_storable_chunks() == 5
+
+    store = partial(manager.prepare_store, trigger=StoreTrigger.ON_COMPUTE)
+    store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # 2 free chunks and the evictable key 2; key 1 is pinned, key 3 pending.
+    assert manager.max_storable_chunks() == 3
+
+    assert store(to_keys(range(4, 8)), _EMPTY_REQ_CTX) is None
+    assert store(to_keys(range(4, 7)), _EMPTY_REQ_CTX) is not None
+    assert manager.max_storable_chunks() == 0
 
 
 def test_cpu_manager_reports_cache_write_and_read_usage_gauges():

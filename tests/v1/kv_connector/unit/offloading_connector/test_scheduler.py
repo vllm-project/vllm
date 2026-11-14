@@ -3,6 +3,7 @@
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import chain, repeat
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
@@ -2540,6 +2541,45 @@ def test_scheduler_reports_allocation_failure(request_runner):
     # Two attempts: once while running (block becomes full during prefill),
     # once from finished_req_ids on the next step.
     assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 2
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_beyond_manager_capacity_continues_on_later_steps(
+    request_runner, async_scheduling: bool
+):
+    """A request with more unstored chunks than the manager can hold is still
+    offloaded: each step offers what fits and later steps offer the rest.
+
+    Offering everything at once is rejected as a whole, on every step. A step
+    on which nothing fits defers the store instead of failing it.
+    """
+    capacities = chain([2, 0], repeat(2))
+    capacity = 0
+
+    def max_storable_chunks():
+        nonlocal capacity
+        capacity = next(capacities)
+        return capacity
+
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (6 * block_size))
+    runner.manager.max_storable_chunks.side_effect = max_storable_chunks
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys) if len(keys) <= capacity else None
+    )
+
+    runner.run(
+        decoded_tokens=[0, 0, 0, EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+    )
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert not reduced.get(_ConnectorMetricName.ALLOCATION_FAILURE)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
