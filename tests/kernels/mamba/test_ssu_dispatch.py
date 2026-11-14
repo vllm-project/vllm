@@ -25,9 +25,10 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheLayout,
     MambaSpec,
 )
@@ -69,7 +70,9 @@ def _kv_cache_config_with_ssu(
     return KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers({"l0": MambaManager.layer_config(spec)})
+        ],
     )
 
 
@@ -86,6 +89,7 @@ def _replayssm_mixer(kv_cache, ring_start, committed, A, enable_prefix_caching=T
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        use_flashinfer_replayssm=True,
     )
 
 
@@ -149,7 +153,15 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     ]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(names, spec) for names in layer_names],
+        [
+            KVCacheGroup.from_layers(
+                {
+                    name: MambaManager.layer_config(spec, enable_prefix_caching=True)
+                    for name in names
+                }
+            )
+            for names in layer_names
+        ],
         slots * (2 * spec.page_size_bytes + 24),
     )
     pages = allocate_kv_cache(config, torch.device("cuda"), layout)
@@ -210,7 +222,9 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             _replayssm_mixer(caches[name], starts, committed, A) for name in names
         ]
         grouped.append((mixers, spec, _cuda_ints(table)))
-    context = ReplaySSMModelContext.create(grouped, max_num_reqs=6)
+    context = ReplaySSMModelContext.create(
+        grouped, max_num_reqs=6, materialize_prefixes=True
+    )
     # Row 0 crosses token 16, but only later groups have a destination.
     # Row 1 rejects all drafts and stops at 15.
     # Row 2 uses in-place replay; row 3 has null slots in every group.
@@ -343,7 +357,9 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
             [NULL_BLOCK_ID] * 3,
         ]
     )
-    context = ReplaySSMModelContext.create([([mixer], spec, table)], max_num_reqs=4)
+    context = ReplaySSMModelContext.create(
+        [([mixer], spec, table)], max_num_reqs=4, materialize_prefixes=True
+    )
     # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
     # padded slot; padded request.
     _postprocess_replayssm_kernel[(4, 1)](
@@ -594,7 +610,9 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
             enable_prefix_caching=False,
         )
         grouped.append(([mixer], spec, table))
-    context = ReplaySSMModelContext.create(grouped, max_num_reqs=1)
+    context = ReplaySSMModelContext.create(
+        grouped, max_num_reqs=1, materialize_prefixes=False
+    )
     computed = 50_000
     history_tokens = checkpoint_tokens = 0
     # Reset a later prefill chunk, then reject, partially accept, and fully accept.
@@ -666,7 +684,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.ssm_state_size = 8
     mixer.num_spec = 3
     mixer.use_replayssm = True
-    mixer.use_flashinfer_replayssm = True
+    mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(
@@ -680,6 +698,8 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.D = torch.empty(2)
     mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_rand_seed = None
+    mixer._replayssm_rand_seeds = None
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),

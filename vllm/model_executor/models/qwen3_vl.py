@@ -1031,11 +1031,11 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int = DUMMY_VIDEO_NUM_FRAMES,
     ) -> int:
         return super().get_num_frames_with_most_features(
-            seq_len, mm_counts, max_frames_per_video=max_frames_per_video
+            seq_len, num_videos, max_frames_per_video=max_frames_per_video
         )
 
     def get_max_video_tokens(
@@ -2186,7 +2186,7 @@ class Qwen3VLForConditionalGeneration(
         assert isinstance(info, Qwen3VLProcessingInfo)
         max_frames_per_video = info.get_num_frames_with_most_features(
             seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+            num_videos=self.multimodal_config.get_limit_per_prompt("video"),
         )
         return max_frames_per_video
 

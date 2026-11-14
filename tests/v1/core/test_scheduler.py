@@ -57,17 +57,19 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
+from vllm.v1.engine import CheckpointState, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
@@ -87,7 +89,8 @@ from .utils import (
     create_requests,
     create_scheduler,
     mock_kv,
-    new_sliding_window_spec,
+    new_kv_cache_group,
+    new_sliding_window_layer,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -113,10 +116,9 @@ def test_mamba_decode_checkpoint_publication(
         num_speculative_tokens=num_speculative_tokens or None,
         speculative_method="ngram_gpu",
         block_size=block_size,
-        kv_cache_spec=MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
+            enable_prefix_caching=True,
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
     )
@@ -188,8 +190,11 @@ def test_mamba_decode_checkpoint_publication(
     assert cached_tokens == (block_size if outcome in ("accepted", "finished") else 0)
 
 
-def test_make_scheduled_encoder_input_stats_output_embeddings():
+def test_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.max_num_encoder_input_tokens = 441
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=441)
     mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -210,13 +215,15 @@ def test_make_scheduled_encoder_input_stats_output_embeddings():
             mm_position=PlaceholderRange(offset=400, length=49),
         ),
     ]
-    scheduler.requests["req"] = Mock(mm_features=mm_features)
+    (request,) = create_requests(num_requests=1, num_tokens=449)
+    request.mm_features = mm_features
+    scheduler.add_request(request)
 
-    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+    stats = scheduler.schedule().iteration_details
 
     assert stats is not None
-    assert stats.num_inputs == 3
-    assert stats.output_tokens == 441
+    assert stats.num_encoder_inputs == 3
+    assert stats.num_encoder_output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
@@ -224,12 +231,12 @@ def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
 ):
     scheduler = create_scheduler()
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_scheduled_encoder_input_stats_disabled_without_log_stats(
@@ -239,12 +246,64 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     scheduler.log_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
+
+
+def test_iteration_details_count_recomputation_as_prefill():
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        max_model_len=128,
+    )
+    scheduler.observability_config.enable_logging_iteration_details = True
+    # Keep this test's prefill-to-decode setup self-contained.
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=100)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_output_tokens == 1
+    assert scheduler.running == [request]
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    for num_tokens in (8, 1):
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None
+        assert details.num_prefill_requests == 1
+        assert details.num_prefill_tokens == num_tokens
+        assert details.num_decode_requests == details.num_decode_tokens == 0
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                sampled_token_ids=[[] if num_tokens == 8 else [0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    details = scheduler.schedule().iteration_details
+    assert details is not None
+    assert details.num_decode_requests == details.num_decode_tokens == 1
+    assert details.num_prefill_requests == details.num_prefill_tokens == 0
 
 
 def test_add_requests():
@@ -366,12 +425,11 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
 ):
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        kv_cache_spec=(
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=1,
-                dtype=torch.float32,
+        kv_cache_layer_config=(
+            SlidingWindowManager.layer_config(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
                 sliding_window=sliding_window,
             )
             if sliding_window
@@ -1153,247 +1211,6 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
-def _decode_one(scheduler, output, req_ids: list[str]) -> None:
-    """Feed back one sampled token per request, so they keep decoding."""
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=req_ids,
-            sampled_token_ids=[[0] for _ in req_ids],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-
-
-def _start_decoding(scheduler, req_id: str = "run0"):
-    """Prefill one request and take it into the decode state."""
-    (request,) = create_requests(
-        num_requests=1, num_tokens=8, max_tokens=100, req_ids=[req_id]
-    )
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-    assert req_id in output.num_scheduled_tokens
-    _decode_one(scheduler, output, [req_id])
-    assert len(scheduler.running) == 1
-    return output
-
-
-@pytest.mark.parametrize("interval", [2, 4])
-def test_local_prefill_interval_holds_prefill_between_bursts(interval: int):
-    """A single engine applies `prefill_schedule_interval` in the scheduler,
-    timed from the last prefill-carrying step: a waiting prefill is held for the
-    remainder of the interval while running requests keep decoding, then
-    admitted once the interval has elapsed.
-    """
-    scheduler = create_scheduler(prefill_schedule_interval=interval)
-    # This prefill starts the interval.
-    _start_decoding(scheduler)
-    assert scheduler.last_prefill_step == scheduler.num_executed_steps
-
-    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
-    scheduler.add_request(new_req)
-
-    # Steps inside the interval decode alone; the waiting prefill is held.
-    for _ in range(interval - 1):
-        output = scheduler.schedule()
-        assert "new0" not in output.num_scheduled_tokens
-        assert "run0" in output.num_scheduled_tokens
-        assert new_req.status == RequestStatus.WAITING
-        _decode_one(scheduler, output, ["run0"])
-
-    # The interval has now elapsed, so prefill is admitted again.
-    output = scheduler.schedule()
-    assert "new0" in output.num_scheduled_tokens
-    assert scheduler.last_prefill_step == scheduler.num_executed_steps
-
-
-def test_empty_schedule_does_not_advance_the_prefill_cadence():
-    """An empty schedule() must not consume interval budget.
-
-    `current_step` counts every schedule() call. With async scheduling,
-    step_with_batch_queue() calls schedule() again whenever the batch queue has
-    room and has_requests() is true -- so a call lands while the previous batch
-    is still in flight and nothing new can be scheduled. An async KV connector
-    makes this common, since requests sit in lookup or WAITING_FOR_REMOTE_KVS.
-    Timing the cadence on current_step lets those empty calls expire the hold
-    early. Reported on #54627 against the LMCache MP connector.
-    """
-    scheduler = create_scheduler(prefill_schedule_interval=4)
-    _start_decoding(scheduler)
-
-    # One real decode step, left in flight (no update_from_output yet).
-    output = scheduler.schedule()
-    assert output.total_num_scheduled_tokens > 0
-    executed_before = scheduler.num_executed_steps
-    step_before = scheduler.current_step
-
-    # Re-entering schedule() while that batch is still unaccounted for
-    # schedules nothing -- this is the async-scheduling shape.
-    for _ in range(3):
-        empty = scheduler.schedule()
-        assert empty.total_num_scheduled_tokens == 0
-
-    assert scheduler.current_step == step_before + 3, "current_step should advance"
-    assert scheduler.num_executed_steps == executed_before, (
-        "an empty schedule() must not count as an executed step"
-    )
-
-
-def test_prefill_cadence_counts_executed_steps_not_schedule_calls():
-    """The hold spans `interval` EXECUTED steps, however many empty schedule()
-    calls are interleaved.
-
-    Counting schedule() calls instead lets each empty call eat interval budget,
-    so with an async KV connector prefill lands on nearly every step and the
-    feature stops doing anything.
-    """
-    interval = 4
-    scheduler = create_scheduler(prefill_schedule_interval=interval)
-    _start_decoding(scheduler)
-    prefill_at = scheduler.num_executed_steps
-
-    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
-    scheduler.add_request(new_req)
-
-    empty_calls = 0
-    admitted_at = None
-    for _ in range(50):
-        output = scheduler.schedule()
-        if "new0" in output.num_scheduled_tokens:
-            admitted_at = scheduler.num_executed_steps
-            break
-        if output.total_num_scheduled_tokens == 0:
-            empty_calls += 1
-            continue
-        # A real decode step. Leave it in flight and re-enter schedule() twice,
-        # as async scheduling does while the batch queue has room.
-        for _ in range(2):
-            extra = scheduler.schedule()
-            if "new0" in extra.num_scheduled_tokens:
-                admitted_at = scheduler.num_executed_steps
-                break
-            empty_calls += 1
-        if admitted_at is not None:
-            break
-        _decode_one(scheduler, output, ["run0"])
-
-    assert admitted_at is not None, "prefill was never admitted"
-    assert empty_calls > 0, "test never exercised an empty schedule() call"
-    # The hold is measured in executed steps. Counting schedule() calls would
-    # admit after far fewer, because the empty re-entries above would count.
-    assert admitted_at - prefill_at == interval, (
-        f"hold lasted {admitted_at - prefill_at} executed steps, expected "
-        f"{interval}; empty schedule() calls were counted against the cadence"
-    )
-    assert scheduler.current_step > scheduler.num_executed_steps
-
-
-def test_local_prefill_interval_defaults_to_no_gating():
-    """The default interval of 1 leaves admission exactly as it was: a waiting
-    prefill is admitted on the very next step.
-    """
-    scheduler = create_scheduler()
-    assert scheduler.local_prefill_interval == 1
-    _start_decoding(scheduler)
-
-    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
-    scheduler.add_request(new_req)
-    output = scheduler.schedule()
-    assert "new0" in output.num_scheduled_tokens
-
-
-def test_local_prefill_interval_left_to_engine_under_dp():
-    """Under data parallelism the cadence must stay aligned across ranks, so the
-    DP engine core drives it and the scheduler must not gate on its own.
-    """
-    scheduler = create_scheduler(prefill_schedule_interval=4, data_parallel_size=2)
-    assert scheduler.local_prefill_interval == 1
-    _start_decoding(scheduler)
-
-    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
-    scheduler.add_request(new_req)
-    output = scheduler.schedule()
-    assert "new0" in output.num_scheduled_tokens
-
-
-def test_local_prefill_interval_never_idles_the_model():
-    """With nothing running to decode in prefill's place, the interval must not
-    hold prefill back, or the step would be wasted entirely.
-    """
-    scheduler = create_scheduler(prefill_schedule_interval=8)
-    _start_decoding(scheduler)
-
-    # Finish the only running request, leaving nothing to decode.
-    scheduler.finish_requests("run0", RequestStatus.FINISHED_ABORTED)
-    assert not scheduler.running
-
-    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
-    scheduler.add_request(new_req)
-    output = scheduler.schedule()
-    assert "new0" in output.num_scheduled_tokens
-
-
-@pytest.mark.parametrize("interval", [2, 3])
-def test_local_prefill_interval_defers_inflight_prefill_chunk(interval: int):
-    """The single-engine interval gates prefill WORK, not just new admissions.
-
-    A request that is already partially prefilled is held for the remainder of
-    the interval too, exactly as `throttle_prefills` does for DP. That is the
-    point of the cadence -- a held step must carry no prefill at all, or decode
-    does not get the uninterrupted stretch the interval exists to give it.
-    """
-    scheduler = create_scheduler(
-        max_num_seqs=16,
-        max_num_batched_tokens=50,
-        enable_chunked_prefill=True,
-        prefill_schedule_interval=interval,
-    )
-
-    # A short request that finishes prefill in one step -> a running decode.
-    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["dec0"])
-    scheduler.add_request(decode_req)
-    output = scheduler.schedule()
-    _decode_one(scheduler, output, ["dec0"])
-    assert decode_req in scheduler.running and not decode_req.is_prefill_chunk
-
-    # A long request (80 tokens, budget 50) -> prefilled in chunks. That first
-    # prefill closed the interval, so walk to the next step that opens it.
-    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
-    scheduler.add_request(chunk_req)
-    for _ in range(interval - 1):
-        output = scheduler.schedule()
-        assert "chk0" not in output.num_scheduled_tokens
-        _decode_one(scheduler, output, ["dec0"])
-
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens["chk0"] > 0
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=["dec0", "chk0"],
-            sampled_token_ids=[[0], []],  # no token sampled for partial prefill
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-    assert chunk_req.is_prefill_chunk  # still mid-prefill, in running
-
-    # Held steps: the in-flight chunk is deferred along with new admissions,
-    # while the decode keeps running.
-    for _ in range(interval - 1):
-        output = scheduler.schedule()
-        assert "chk0" not in output.num_scheduled_tokens
-        assert "dec0" in output.num_scheduled_tokens
-        _decode_one(scheduler, output, ["dec0"])
-
-    # Once the interval has elapsed the chunk resumes.
-    output = scheduler.schedule()
-    assert "chk0" in output.num_scheduled_tokens
-
-
 def _setup_cache_aware(num_tokens: int = 48, **kwargs):
     """A scheduler where `warm`'s prompt is already cached and `cold`'s is not.
 
@@ -1563,10 +1380,9 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         enable_prefix_caching=True,
         cache_aware_admission_window=4,
         cache_aware_admission_threshold=0.0,
-        kv_cache_spec=MambaSpec(
-            block_size=16,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
+            enable_prefix_caching=True,
         ),
     )
     assert scheduler.cache_aware_window == 4
@@ -2886,6 +2702,8 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     assert scheduler.kv_cache_manager.get_block_ids(running.request_id)[0]
 
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.scheduler = scheduler
     core.model_executor = Mock(is_sleeping=False)
     core.mm_receiver_cache = None
@@ -2922,6 +2740,8 @@ def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible
     from types import SimpleNamespace
 
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.scheduler = create_scheduler()
     core.mm_receiver_cache = None
     core.batch_queue = None
@@ -3166,45 +2986,60 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
-def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
+def _run_spec_verify_steps(
+    scheduler, rounds, num_drafted_per_round=None, num_verified_per_round=None
+):
     """Drive prefill + one draft/verify step per round for a single request.
 
     `rounds` is a list of `(spec_token_ids, output_token_ids)` -- one verify
-    step each. `num_invalid_per_round` optionally injects the grammar-invalid
-    draft count structured-output decoding would set on the verify output.
+    step each. `num_drafted_per_round` and `num_verified_per_round`
+    optionally set the drafted and verified draft counts the model runner
+    reports.
     Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
     scheduler.add_request(req)
     rid = req.request_id
 
-    def _mk_output(sampled):
+    def _mk_output(sampled, num_drafted=None, num_verified=None):
         return ModelRunnerOutput(
             req_ids=[rid],
             sampled_token_ids=sampled,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            num_drafted_tokens_per_req=None if num_drafted is None else [num_drafted],
+            num_verified_tokens_per_req=(
+                None if num_verified is None else [num_verified]
+            ),
         )
 
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
-    for i, (spec, out) in enumerate(rounds):
+    drafted = num_drafted_per_round or [None] * len(rounds)
+    verified = num_verified_per_round or [None] * len(rounds)
+    for (spec, out), num_drafted, num_verified in zip(rounds, drafted, verified):
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
         output = scheduler.schedule()
-        if num_invalid_per_round is not None and num_invalid_per_round[i]:
-            output.num_invalid_spec_tokens = {rid: num_invalid_per_round[i]}
-        scheduler.update_from_output(output, _mk_output([out]))
+        model_output = _mk_output([out], num_drafted, num_verified)
+        scheduler.update_from_output(output, model_output)
     return req
 
 
-def test_per_request_spec_decode_detailed_records_per_step():
+@pytest.mark.parametrize(
+    "drafted_per_step, verified_per_step", [(None, None), ([3, 3, 2], [3, 2, 1])]
+)
+def test_per_request_spec_decode_detailed_records_per_step(
+    drafted_per_step, verified_per_step
+):
     scheduler = create_scheduler(
         num_speculative_tokens=3,
         per_request_spec_decode_metrics="detailed",
     )
     # Three verify steps for one request; num_accepted = len(output) - 1, so the
-    # outputs below accept 3, 1, then 0 drafts across the steps.
+    # outputs below accept 3, 1, then 0 drafts across the steps. The model
+    # runner reports how many draft tokens the drafter proposed and how many
+    # of them it verified.
     req = _run_spec_verify_steps(
         scheduler,
         [
@@ -3212,30 +3047,46 @@ def test_per_request_spec_decode_detailed_records_per_step():
             ([5, 6, 7], [5, 8]),  # accept 1
             ([9, 10, 11], [12]),  # accept 0
         ],
+        num_drafted_per_round=drafted_per_step,
+        num_verified_per_round=verified_per_step,
     )
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
-    assert payload["per_step_drafted"] == [3, 3, 3]
+    assert payload["per_step_drafted"] == (drafted_per_step or [3, 3, 3])
+    assert payload["per_step_verified"] == (verified_per_step or [3, 3, 3])
     assert payload["num_spec_steps"] == 3
 
 
-def test_per_request_spec_decode_subtracts_invalid_drafts():
-    # Grammar-invalidated drafts (num_invalid_spec_tokens, set by structured
-    # output) are excluded from the proposed count, mirroring the aggregate.
+def test_spec_decode_stats_keep_batch_after_empty_draft():
+    # A request whose drafter proposed no draft tokens (e.g. ngram_gpu without
+    # a match) must not reset the stats of other requests in the batch.
     scheduler = create_scheduler(
-        num_speculative_tokens=3,
-        per_request_spec_decode_metrics="summary",
+        async_scheduling=True, num_speculative_tokens=2, speculative_method="ngram_gpu"
     )
-    # One verify step: 3 drafted, 1 grammar-invalid, output accepts 2.
-    req = _run_spec_verify_steps(
-        scheduler,
-        [([1, 2, 3], [1, 2, 5])],
-        num_invalid_per_round=[1],
-    )
-    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
-    assert payload["num_draft_tokens"] == 2  # 3 drafted - 1 invalid
-    assert payload["num_accepted_draft_tokens"] == 2  # len([1,2,5]) - 1
-    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
+    requests = create_requests(num_requests=2, num_tokens=1)
+    req_ids = [req.request_id for req in requests]
+    for req in requests:
+        scheduler.add_request(req)
+
+    def _mk_output(sampled, num_drafted=None):
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            sampled_token_ids=sampled,
+            num_drafted_tokens_per_req=num_drafted,
+            num_verified_tokens_per_req=num_drafted,
+        )
+
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
+    # Async scheduling schedules placeholder draft slots for both requests.
+    output = scheduler.schedule()
+    model_output = _mk_output([[1, 9], [5]], num_drafted=[2, 0])
+    engine_outputs = scheduler.update_from_output(output, model_output)
+
+    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 2
+    assert stats.num_draft_tokens == 2
+    assert stats.num_verified_tokens == 2
+    assert stats.num_accepted_tokens == 1
 
 
 def test_per_request_spec_decode_acceptance_disabled_by_default():
@@ -4619,9 +4470,9 @@ def create_scheduler_with_priority(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -7031,12 +6882,11 @@ def _create_encoder_decoder_scheduler(
     """Create a scheduler configured for encoder-decoder cross-attention
     block allocation testing.
 
-    Constructs a scheduler with both FullAttentionSpec (self-attention) and
-    CrossAttentionSpec (cross-attention) KV cache groups, then patches it
+    Constructs a scheduler with both FullAttentionManager (self-attention) and
+    CrossAttentionManager (cross-attention) KV cache groups, then patches it
     to behave as an encoder-decoder model.
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
-    from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
     model_config = ModelConfig(
         model="facebook/opt-125m",
@@ -7071,23 +6921,24 @@ def _create_encoder_decoder_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["self_attn_layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["cross_attn_layer"],
-                CrossAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CrossAttentionManager.config(),
             ),
         ],
     )
@@ -8305,7 +8156,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     s = create_scheduler(
         num_blocks=64,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=True),
-        kv_cache_spec=spec,
+        kv_cache_layer_config=spec,
         num_speculative_tokens=num_spec_tokens,
     )
     s.recompute_kv_load_failures = True
@@ -8382,7 +8233,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     [
         (None, None),
         (None, 2),
-        (new_sliding_window_spec(sliding_window=64), None),
+        (new_sliding_window_layer(sliding_window=64), None),
     ],
     ids=["full", "full_spec_decode", "sliding_window"],
 )
@@ -8446,26 +8297,26 @@ def _create_hybrid_mamba_connector_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["fa"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                 ),
+                MambaManager.config(enable_prefix_caching=True),
             ),
         ],
     )
-    register_all_kvcache_specs(vllm_config)
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
