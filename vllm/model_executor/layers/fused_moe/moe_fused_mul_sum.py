@@ -6,6 +6,29 @@ from torch._subclasses.fake_tensor import FakeTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+_TRAP_WITH_PTX = tl.constexpr(current_platform.is_cuda())
+
+
+@triton.jit
+def trap_if(cond):
+    """Abort the kernel where `cond` is true.
+
+    Unlike tl.device_assert this also fires outside Triton debug mode, so a
+    broken invariant fails loudly instead of being skipped. Platforms without
+    a PTX trap fall back to tl.device_assert.
+    """
+    if _TRAP_WITH_PTX:
+        tl.inline_asm_elementwise(
+            "{ .reg .pred p; setp.ne.s32 p, $1, 0; @p trap; mov.u32 $0, $1; }",
+            "=r,r",
+            [cond.to(tl.int32)],
+            dtype=tl.int32,
+            is_pure=False,
+            pack=1,
+        )
+    else:
+        tl.device_assert(cond == 0, "trap_if condition is true")
+
 
 @triton.jit
 def moe_fused_mul_sum_kernel(
@@ -14,6 +37,7 @@ def moe_fused_mul_sum_kernel(
     outputs_ptr,
     top_ids_ptr,
     expert_map_ptr,
+    num_experts,
     num_valid_tokens_ptr,
     stride_m,
     has_topk_ids: tl.constexpr,
@@ -46,8 +70,17 @@ def moe_fused_mul_sum_kernel(
             any_valid += valid.to(tl.int32)
             take = valid
             if has_expert_map:
-                local_id = tl.load(expert_map_ptr + tl.where(valid, id_val, 0))
-                take = valid & (local_id >= 0)
+                # -1 marks an unrouted slot; any other id must index expert_map.
+                # A larger one is a producer bug, so fail loudly. The load stays
+                # masked so it never reads past the map.
+                trap_if(id_val >= num_experts)
+                in_map = valid & (id_val < num_experts)
+                local_id = tl.load(
+                    expert_map_ptr + tl.where(in_map, id_val, 0),
+                    mask=in_map,
+                    other=-1,
+                )
+                take = in_map & (local_id >= 0)
             takes += (take,)  # type: ignore[assignment]
             weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
         # All-padding rows early-return untouched (decode contract past num_recv).
@@ -166,6 +199,7 @@ def moe_fused_mul_sum(
             outputs,
             topk_ids,
             expert_map,
+            expert_map.numel() if expert_map is not None else 0,
             num_valid_tokens,
             top_k * hidden_size,
             topk_ids is not None,

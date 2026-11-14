@@ -8,6 +8,7 @@ Run `pytest tests/kernels/moe/test_moe_fused_mul_sum.py`.
 import pytest
 import torch
 
+from tests.kernels.utils import assert_kernel_traps
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
     moe_fused_mul_sum,
 )
@@ -406,3 +407,24 @@ def test_num_valid_tokens_bounds_stale_padding(dtype: torch.dtype):
         topk_ids=topk_ids,
     )
     assert unbounded[num_recv:].isnan().any(), "num_valid_tokens bound is load-bearing"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("bad_id", [NUM_EXPERTS, 0x3F988A43])
+def test_expert_id_outside_map_traps(bad_id: int):
+    """-1 marks an unrouted slot; an id outside expert_map is a producer bug."""
+    assert_kernel_traps(f"""
+        from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
+            moe_fused_mul_sum,
+        )
+        inputs = torch.randn((2, 2, {HIDDEN_SIZE}), device="cuda", dtype=torch.bfloat16)
+        weights = torch.ones((2, 2), device="cuda", dtype=torch.float32)
+        ids = torch.zeros((2, 2), device="cuda", dtype=torch.int32)
+        ids[1, 0] = {bad_id}
+        expert_map = torch.arange({NUM_EXPERTS}, device="cuda", dtype=torch.int32)
+        outputs = torch.zeros((2, {HIDDEN_SIZE}), device="cuda", dtype=torch.bfloat16)
+        moe_fused_mul_sum(
+            inputs=inputs, topk_weights=weights, outputs=outputs,
+            topk_ids=ids, expert_map=expert_map,
+        )
+    """)
