@@ -3,21 +3,34 @@
 """Tests for HF3FS KV Connector high-level components:
 - TestHf3fsMockClient      : file-backed mock client I/O correctness
 - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+- Pipeline parallelism     : KV stored and loaded back end to end
 """
 
 import os
+import socket
+import subprocess
+import sys
+import time
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
+from tests.utils import multi_gpu_test
+from vllm import RequestOutput, SamplingParams
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs import hf3fs_metadata_server
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
     HF3FSKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
 )
+
+# The connector's metadata client uses its default URL, http://localhost:18000.
+METADATA_SERVER_PORT = 18000
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -231,3 +244,102 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# Pipeline parallelism
+# ===========================================================================
+
+
+@pytest.fixture
+def metadata_server(tmp_path):
+    with open(tmp_path / "metadata_server.log", "w") as log:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                hf3fs_metadata_server.__name__,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(METADATA_SERVER_PORT),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    socket.create_connection(
+                        ("127.0.0.1", METADATA_SERVER_PORT), timeout=1
+                    ).close()
+                    break
+                except OSError:
+                    assert process.poll() is None, "metadata server exited"
+                    assert time.monotonic() < deadline, "metadata server not up"
+                    time.sleep(0.5)
+            yield
+        finally:
+            process.terminate()
+            process.wait(30)
+
+
+def _tokens_text_logprobs(outputs: list[RequestOutput]):
+    return [
+        (
+            list(output.outputs[0].token_ids),
+            output.outputs[0].text,
+            output.outputs[0].logprobs,
+        )
+        for output in outputs
+    ]
+
+
+@multi_gpu_test(num_gpus=2)
+def test_pipeline_parallel_reloads_each_stage_kv(
+    vllm_runner, tmp_path, metadata_server
+):
+    """KV loaded back from HF3FS reproduces the outputs computed from scratch.
+
+    Pipeline stages hold different layers, so they must not share storage.
+    """
+    prompts = [
+        " ".join(
+            f"Note {j}: the {topic} record lists value {(i + 3) * (j + 7) % 1009}."
+            for j in range(40)
+        )
+        + f"\nSummarize the notes about {topic}."
+        for i, topic in enumerate(["rivers", "compilers", "volcanoes", "orchestras"])
+    ]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=5)
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="HF3FSKVConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "hf3fs_storage_path": str(tmp_path / "storage"),
+            "hf3fs_file_size": 1 << 30,
+        },
+    )
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        pipeline_parallel_size=2,
+        max_model_len=2048,
+        enforce_eager=True,
+        kv_transfer_config=kv_transfer_config,
+    ) as runner:
+        computed = runner.llm.generate(prompts, sampling_params)
+        # Saved blocks stay allocated until every stage has written them.
+        deadline = time.monotonic() + 60
+        while not runner.llm.reset_prefix_cache():
+            assert time.monotonic() < deadline, "HF3FS saves did not finish"
+            time.sleep(0.5)
+        loaded = runner.llm.generate(prompts, sampling_params)
+
+    assert all(output.num_cached_tokens > 0 for output in loaded)
+    check_logprobs_close(
+        outputs_0_lst=_tokens_text_logprobs(computed),
+        outputs_1_lst=_tokens_text_logprobs(loaded),
+        name_0="computed",
+        name_1="loaded",
+    )
