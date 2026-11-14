@@ -85,7 +85,6 @@ logger = init_logger(__name__)
 _WINDOW_OFFSET = 1  # HF masks |q-k| <= W; vLLM ENCODER_ONLY masks <= W-1.
 _VIDEO_FRAME_WIDTH = 672
 _VIDEO_FRAME_HEIGHT = 480
-_VIDEO_MAX_FRAMES = 32
 _VIDEO_MAX_SOFT_TOKENS = 140
 
 
@@ -443,6 +442,31 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
             "videos_kwargs", {}
         )
+        max_frames = self.get_max_video_frames()
+
+        video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
+        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
+            raise ValueError(
+                f"Unsupported max_soft_tokens={video_max_soft} for video. "
+                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
+            )
+        if not isinstance(video_max_soft, int):
+            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
+
+        # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
+        # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
+        #   Total = num_soft_tokens + 2
+        # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
+        #   Total = num_soft_tokens + 2 + 7
+        add_ts = video_kwargs.get("add_timestamps", False)
+        ts_slack = 7 if add_ts else 0
+        tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
+        return tokens
+
+    def get_max_video_frames(self) -> int:
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
         mm_config = self.ctx.model_config.get_multimodal_config()
 
         # The loader's max_frames cap is 128 when media_io_kwargs can raise it
@@ -464,25 +488,7 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
             num_frames_opt = getattr(video_opts, "num_frames", None)
             if isinstance(num_frames_opt, int):
                 max_frames = min(max_frames, num_frames_opt)
-
-        video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
-        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
-            raise ValueError(
-                f"Unsupported max_soft_tokens={video_max_soft} for video. "
-                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
-            )
-        if not isinstance(video_max_soft, int):
-            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
-
-        # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
-        # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
-        #   Total = num_soft_tokens + 2
-        # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
-        #   Total = num_soft_tokens + 2 + 7
-        add_ts = video_kwargs.get("add_timestamps", False)
-        ts_slack = 7 if add_ts else 0
-        tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
-        return tokens
+        return max_frames
 
     def get_image_repl(  # type: ignore[override]
         self,
@@ -599,7 +605,7 @@ class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
         num_videos: int,
         overrides=None,
     ) -> list[VideoItem]:
-        num_frames = _VIDEO_MAX_FRAMES
+        num_frames = self.info.get_max_video_frames()
         width = _VIDEO_FRAME_WIDTH
         height = _VIDEO_FRAME_HEIGHT
         videos = super(Gemma4DummyInputsBuilder, self)._get_dummy_videos(

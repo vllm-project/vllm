@@ -56,10 +56,30 @@ def test_video_budget_covers_processor_frames():
     assert _video_budget({"max_frames": 8}, loader_cap) < _video_budget(None)
 
 
-def _video_budget(
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "video_media_io_kwargs"),
+    [
+        (None, None),
+        ({"videos_kwargs": {"max_frames": 64}}, None),
+        (None, {"max_frames": 64}),
+    ],
+)
+def test_dummy_video_fills_video_budget(
+    mm_processor_kwargs: dict[str, object] | None,
+    video_media_io_kwargs: dict[str, object] | None,
+):
+    processor = _processor(mm_processor_kwargs, video_media_io_kwargs)
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+
+    assert dummy["mm_placeholders"]["video"][0].length == _video_budget(
+        mm_processor_kwargs, video_media_io_kwargs
+    )
+
+
+def _processor(
     mm_processor_kwargs: dict[str, object] | None,
     video_media_io_kwargs: dict[str, object] | None = None,
-) -> int:
+):
     ctx = build_model_context(
         MODEL_ID,
         model_config_kwargs=(
@@ -70,9 +90,16 @@ def _video_budget(
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt={"image": 0, "audio": 0, "video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    return MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+
+def _video_budget(
+    mm_processor_kwargs: dict[str, object] | None,
+    video_media_io_kwargs: dict[str, object] | None = None,
+) -> int:
+    processor = _processor(mm_processor_kwargs, video_media_io_kwargs)
     tokens = processor.info.get_mm_max_tokens_per_item(
-        seq_len=ctx.model_config.max_model_len,
+        seq_len=processor.info.ctx.model_config.max_model_len,
         mm_counts={"video": 1},
     )
     assert tokens is not None
