@@ -277,6 +277,33 @@ def test_handle_preemptions_non_writer_acks_flushed_store():
     assert meta.completed_jobs == {10: 1}
 
 
+@pytest.mark.parametrize("done_by_get_finished", [True, False])
+def test_flush_time_is_reported_once_the_window_ends(done_by_get_finished: bool):
+    """A window that is not done at get_finished() is read at the next flush,
+    before its events are recorded again."""
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.worker.get_finished.return_value = []
+    start, end = MagicMock(), MagicMock()
+    start.elapsed_time.return_value = 2.0
+    end.query.return_value = done_by_get_finished
+    worker._flush_events = (start, end)
+
+    metadata = _store_metadata(10)
+    metadata.jobs_to_flush = {10}
+    worker.handle_preemptions(metadata)
+    worker.get_finished(set())
+    expected = [0.002] if done_by_get_finished else []
+    assert worker._connector_worker_meta.transfer_stats.flush_times == expected
+
+    metadata = _store_metadata(11)
+    metadata.jobs_to_flush = {11}
+    worker.handle_preemptions(metadata)
+    assert worker._connector_worker_meta.transfer_stats.flush_times == [0.002]
+    assert end.synchronize.call_count == (0 if done_by_get_finished else 1)
+
+
 def test_start_kv_transfers_non_writer_still_submits_load():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),

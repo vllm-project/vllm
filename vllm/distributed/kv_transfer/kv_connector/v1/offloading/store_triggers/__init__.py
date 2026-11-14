@@ -9,9 +9,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_c
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_handoff import (  # noqa: E501
     OnHandoffStoreHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_overwrite import (  # noqa: E501
+    OnOverwriteStoreHandler,
+)
 
 __all__ = [
     "OnHandoffStoreHandler",
     "OnComputeStoreHandler",
+    "OnOverwriteStoreHandler",
     "StoreTriggerHandler",
 ]

@@ -123,6 +123,7 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
+| `store_mode` | no | `eager` | single-tier | When blocks are offloaded. `eager` offloads each block when it is computed. `lazy` offloads a block only when the GPU gives the block to a new request. `lazy` is rejected with `store_threshold` ≥ 2, with `self_describing_kv_events: true`, and for multi-tier. It is rejected for a KV cache that needs zeroing (more than one dtype, or a Mamba hybrid layout), and for a Mamba `align` group whose prefix-cache hits end inside a block. The runner zeroes new blocks, and applies the copy-on-write copies, before it flushes a store, so the store would save the wrong data. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
@@ -187,6 +188,16 @@ The gauge holds one series for each configuration that the manager reports. A ma
 The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. For a worked example, the `example` secondary tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
+
+## Flush Time Metric
+
+A flush is a store that must finish before the GPU writes its source blocks again. The next forward waits for the flush. With `store_mode: lazy`, every store is a flush.
+
+The histogram `vllm:kv_offload_flush_time_seconds` records the time of each flush. CUDA events on the compute stream measure it, from before the copy launch to after the wait. The value includes the host launch and the wake-up after the wait, which `vllm:kv_offload_store_time` does not include.
+
+Each worker that writes stores records its own window. One flush therefore gives one sample for each writing worker. With tensor parallelism and KV heads split across ranks, every rank writes. When the KV cache is replicated across ranks and `canonical_layout` is off, only rank 0 writes.
+
+The rate of `vllm:kv_offload_flush_time_seconds_sum` gives seconds of flush per second, summed over the writing workers. The workers wait at the same time, so divide the rate by the number of writing workers to get the share of wall time. When the GPU is still busy with the previous forward, the window starts only after that forward ends. To confirm the cost, compare the time per output token with an `eager` run at the same load.
 
 ## Custom Eviction Policies
 

@@ -33,10 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
     resolve_mamba_align_size,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
-    OnComputeStoreHandler,
-    OnHandoffStoreHandler,
-    StoreTriggerHandler,
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.factory import (  # noqa: E501
+    StoreHandlerFactory,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
@@ -185,7 +183,7 @@ class _StoreJobSink:
         self.jobs: dict[int, TransferJob] = {}
 
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self, keys: Collection[OffloadKey], req_context: ReqContext | None
     ) -> PrepareStoreOutput | None:
         output = self._scheduler.manager.prepare_store(
             keys, req_context, trigger=self._trigger
@@ -198,7 +196,7 @@ class _StoreJobSink:
 
     def add_job(
         self,
-        req_id: ReqId,
+        req_id: ReqId | None,
         keys: Collection[OffloadKey],
         src_spec: GPULoadStoreSpec,
         dst_spec: LoadStoreSpec,
@@ -307,14 +305,14 @@ class OffloadingConnectorScheduler:
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
 
-        handler_classes: list[type[StoreTriggerHandler]] = []
-        if self.config.supports_handoff:
-            handler_classes.append(OnHandoffStoreHandler)
-        handler_classes.append(OnComputeStoreHandler)
-        self._store_handlers: dict[StoreTrigger, StoreTriggerHandler] = {
-            handler_cls.trigger: handler_cls(self.config, self._events_tracker)
-            for handler_cls in handler_classes
-        }
+        self._store_handlers = StoreHandlerFactory.create_handlers(
+            self.config,
+            self.manager.store_triggers,
+            self._events_tracker,
+            vllm_config,
+            kv_cache_config,
+            spec.extra_config,
+        )
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
@@ -1058,16 +1056,46 @@ class OffloadingConnectorScheduler:
             position = boundary
         return sources
 
+    def _add_allocated_blocks(
+        self,
+        req_status: RequestOffloadState,
+        block_id_groups: Sequence[Sequence[int]],
+        start_block_idxs: Sequence[int],
+    ) -> None:
+        """Record the blocks of all groups, and give the blocks of the
+        offloaded groups to the store handlers.
+
+        Args:
+            req_status: the request that gets the blocks.
+            block_id_groups: per KV cache group, the allocated block ids.
+            start_block_idxs: per offloaded group, the position of the first
+                allocated block in the request.
+
+        """
+        for block_ids in block_id_groups:
+            self._current_batch_allocated_block_ids.update(
+                bid for bid in block_ids if bid != 0
+            )
+        offloaded_block_ids = [
+            block_id_groups[group_config.group_idx]
+            for group_config in self.config.kv_group_configs
+        ]
+        for handler in self._store_handlers.values():
+            handler.on_request_blocks_allocated(
+                req_status, offloaded_block_ids, start_block_idxs
+            )
+
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        req_status = self._req_status[request.request_id]
         # Track allocated block IDs regardless of num_external_tokens so
         # re-allocation flush detection sees blocks allocated by other
-        # connectors in a MultiConnector setup.
-        for group_blocks in blocks.blocks:
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
-            )
+        # connectors in a MultiConnector setup. An async load request is not
+        # in the scheduler output of this step, so record from block 0.
+        self._add_allocated_blocks(
+            req_status, blocks.get_block_ids(), [0] * len(req_status.group_states)
+        )
 
         if num_external_tokens == 0:
             return
@@ -1092,6 +1120,8 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
+        load_chunk_ranges: list[tuple[int, int]] = []
+        load_block_ids: list[list[int]] = []
         for config_idx, (group_config, group_state) in enumerate(
             zip(self.config.kv_group_configs, req_status.group_states)
         ):
@@ -1130,11 +1160,14 @@ class OffloadingConnectorScheduler:
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
+            load_block_ids.append([block.block_id for block in group_blocks])
+            load_chunk_ranges.append((0, 0))
             if num_pending_gpu_blocks:
                 start_chunk_idx = (
                     load_start_gpu_block_idx // self.config.blocks_per_chunk
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
+                load_chunk_ranges[-1] = (start_chunk_idx, end_chunk_idx)
                 assert len(offload_keys) >= end_chunk_idx
                 group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
@@ -1173,7 +1206,9 @@ class OffloadingConnectorScheduler:
             block_indices.append(load_start_gpu_block_idx)
 
         for handler in self._store_handlers.values():
-            handler.on_load_scheduled(req_status, num_cached_tokens)
+            handler.on_load_scheduled(
+                req_status, num_cached_tokens, load_chunk_ranges, load_block_ids
+            )
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
@@ -1224,12 +1259,14 @@ class OffloadingConnectorScheduler:
                         len(req_status.group_states[grp_idx].block_ids)
                         for grp_idx in self._sliding_window_groups
                     )
+                start_block_idxs = [
+                    len(group_state.block_ids)
+                    for group_state in req_status.group_states
+                ]
                 req_status.update_block_id_groups(block_id_groups)
-                for group_config in self.config.kv_group_configs:
-                    new_blocks = block_id_groups[group_config.group_idx]
-                    for bid in new_blocks:
-                        if bid != 0:
-                            self._current_batch_allocated_block_ids.add(bid)
+                self._add_allocated_blocks(
+                    req_status, block_id_groups, start_block_idxs
+                )
 
         for copy in scheduler_output.kv_cache_block_copies or ():
             self._current_batch_allocated_block_ids.add(copy.dst_block_id)
@@ -1268,7 +1305,7 @@ class OffloadingConnectorScheduler:
 
     def _track_store_job(
         self,
-        req_id: ReqId,
+        req_id: ReqId | None,
         keys: Collection[OffloadKey],
         *,
         trigger: StoreTrigger,
@@ -1286,6 +1323,14 @@ class OffloadingConnectorScheduler:
             trigger=trigger,
         )
         job_id = self._generate_job_id()
+        if req_id is None:
+            # A job that belongs to no request: its source blocks already
+            # hold new data, so flush it in this step. It carries no fences:
+            # it is waited for before the next forward pass, so no block can
+            # be reallocated under it.
+            self._current_batch_jobs_to_flush.add(job_id)
+            self._job_statuses[job_id] = job_status
+            return job_id
         req_status = self._req_status[req_id]
         # a store can only be issued when no load is pending.
         if req_status.transfer_jobs:
@@ -1377,6 +1422,11 @@ class OffloadingConnectorScheduler:
                 for bid in self._current_batch_allocated_block_ids
                 if bid in self._block_id_to_pending_jobs
                 for jid in self._block_id_to_pending_jobs[bid]
+            )
+
+        for handler in self._store_handlers.values():
+            handler.on_blocks_allocated(
+                frozenset(self._current_batch_allocated_block_ids)
             )
 
         store_jobs: dict[int, TransferJob] = {}
@@ -1477,6 +1527,10 @@ class OffloadingConnectorScheduler:
                     transfer_stats.observe_histogram(
                         _TransferMetricName.STORE_SIZE, size
                     )
+            for flush_time in meta.transfer_stats.flush_times:
+                transfer_stats.observe_histogram(
+                    _TransferMetricName.FLUSH_TIME, flush_time
+                )
             self._connector_stats.aggregate(transfer_stats)
 
         for job_id, count in meta.completed_jobs.items():
@@ -1506,7 +1560,13 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
-            req_status = self._req_status[job_status.req_id]
+            # A job without a request is a store.
+            req_status = (
+                None
+                if job_status.req_id is None
+                else self._req_status[job_status.req_id]
+            )
+            req_context = None if req_status is None else req_status.req_context
             if job_status.is_store:
                 if job_status.failed:
                     logger.warning(
@@ -1518,11 +1578,15 @@ class OffloadingConnectorScheduler:
                 assert job_status.trigger is not None
                 self.manager.complete_store(
                     job_status.keys,
-                    req_status.req_context,
+                    req_context,
                     trigger=job_status.trigger,
                     success=not job_status.failed,
                 )
+                if req_status is None:
+                    del self._job_statuses[job_id]
+                    continue
             else:
+                assert req_status is not None and req_context is not None
                 if job_status.failed:
                     logger.warning(
                         "KV offload load job %d failed; request %s will not "
@@ -1531,7 +1595,9 @@ class OffloadingConnectorScheduler:
                         job_status.req_id,
                     )
                     req_status.load_failed = True
-                self.manager.complete_load(job_status.keys, req_status.req_context)
+                self.manager.complete_load(job_status.keys, req_context)
+                for handler in self._store_handlers.values():
+                    handler.on_load_complete(job_status)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
             if self._block_id_to_pending_jobs:
@@ -1548,7 +1614,7 @@ class OffloadingConnectorScheduler:
             del self._job_statuses[job_id]
             req_status.transfer_jobs.remove(job_id)
             if req_status.finished_signaled and not req_status.transfer_jobs:
-                self._remove_request(job_status.req_id)
+                self._remove_request(req_status.req.request_id)
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats: OffloadingConnectorStats | None = None
@@ -1702,7 +1768,7 @@ class OffloadingConnectorScheduler:
         self._job_statuses.clear()
         self._block_id_to_pending_jobs.clear()
         for handler in self._store_handlers.values():
-            handler.reset()
+            handler.reset(self._req_status)
 
         # The manager pool is empty; pending event payloads and announced
         # reference counts are stale.
