@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers import utils as layer_utils
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import is_flashinfer_cutedsl_bf16_gemm_supported
 
 
@@ -47,5 +50,42 @@ def test_flashinfer_bf16_cutedsl_correctness(
         x, weight, bias, pdl, "flashinfer_cutedsl"
     )
     expected = F.linear(x, weight, bias)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-1)
+
+
+@pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (1, 1024, 1024),
+        (64, 2048, 3072),
+        (512, 1024, 1000),
+        # N not a multiple of 8 (MoE shared_expert_gate, in_proj_ba at TP8) must
+        # fall back to F.linear instead of aborting FlashInfer's autotuning.
+        (64, 1, 2048),
+        (64, 12, 2048),
+    ],
+)
+@pytest.mark.parametrize("tune", [False, True])
+def test_flashinfer_bf16_auto_correctness(m: int, n: int, k: int, tune: bool) -> None:
+    """--linear-backend=flashinfer dispatches to mm_bf16(backend="auto") with
+    an explicit pdl, with and without autotuning across FlashInfer's BF16 backends."""
+    from flashinfer import autotune
+
+    gemm = layer_utils.dispatch_unquantized_gemm("flashinfer")
+    # A plain function here means the F.linear fallback.
+    assert isinstance(gemm, functools.partial)
+    assert gemm.keywords == {
+        "vllm_backend": "flashinfer",
+        "pdl": current_platform.is_arch_support_pdl(),
+    }
+
+    torch.manual_seed(0)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.1
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
+
+    with autotune(tune):
+        actual = gemm(None, x, weight)
+    expected = F.linear(x, weight)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-1)

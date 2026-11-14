@@ -248,6 +248,7 @@ def validate_flashinfer_moe_ep_model(
 LinearBackend = Literal[
     "auto",
     "cutlass",
+    "flashinfer",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_trtllm",
@@ -404,6 +405,9 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
+    - "flashinfer": Use FlashInfer with `backend="auto"`, letting its autotuner
+      choose among the backends that share one weight layout: BF16 (SM10x),
+      FP8 per-tensor and NVFP4
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels
       (BF16, NVFP4, MXFP8, W4A16_NVFP4)
