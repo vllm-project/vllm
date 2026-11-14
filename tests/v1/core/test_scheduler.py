@@ -1165,14 +1165,17 @@ def test_encoder_only_prompt_longer_than_budget_is_chunked():
 
 
 @pytest.mark.parametrize("has_running", [True, False])
-def test_schedule_prefills_gating(has_running: bool):
-    """DP prefill-balancing gate: when `throttle_prefills` is True, a new
-    WAITING (prefill) request is deferred ONLY if this rank has running work to
-    protect. With no running requests, the prefill is admitted regardless (so a
-    throttled step is never wasted as a dummy), and running/decode requests are
-    unaffected. Once the cadence allows prefills again, the request is admitted.
-    """
-    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+@pytest.mark.parametrize(("dp_size", "use_ep"), [(1, False), (2, False), (2, True)])
+def test_schedule_prefills_gating(has_running: bool, dp_size: int, use_ep: bool):
+    """EP peers protect decode even when this rank has only new prefills."""
+    scheduler = create_scheduler(
+        model="deepseek-ai/DeepSeek-V2-Lite-Chat" if use_ep else "facebook/opt-125m",
+        skip_tokenizer_init=True,
+        max_num_seqs=16,
+        max_num_batched_tokens=8192,
+        data_parallel_size=dp_size,
+        enable_expert_parallel=use_ep,
+    )
 
     if has_running:
         # Establish a running (decode) request via a prefill + output step.
@@ -1197,18 +1200,50 @@ def test_schedule_prefills_gating(has_running: bool):
     scheduler.add_request(new_req)
     output = scheduler.schedule(throttle_prefills=True)
 
-    if has_running:
-        # There is running work to protect, so the new prefill is deferred...
+    if has_running or use_ep:
+        # Protect local decode or an EP peer's decode.
         assert "new0" not in output.num_scheduled_tokens
         assert new_req.status == RequestStatus.WAITING
         # ...while the running/decode request keeps being scheduled.
-        assert "run0" in output.num_scheduled_tokens
+        assert ("run0" in output.num_scheduled_tokens) == has_running
         # When the cadence allows prefills again, the request is admitted.
         output = scheduler.schedule()
 
     # No running work to protect (or cadence now open): the prefill is admitted.
     assert "new0" in output.num_scheduled_tokens
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
+
+
+@pytest.mark.parametrize("has_decode", [False, True])
+def test_ep_prefill_cadence_with_queued_and_chunked_prompts(has_decode: bool):
+    """A local prefill backlog must not stall a peer's decode-only step."""
+    scheduler = create_scheduler(
+        model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        skip_tokenizer_init=True,
+        max_num_batched_tokens=16,
+        data_parallel_size=2,
+        enable_expert_parallel=True,
+    )
+    if has_decode:
+        (decode,) = create_requests(num_requests=1, num_tokens=8, req_ids=["decode"])
+        scheduler.add_request(decode)
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output, ModelRunnerOutput(req_ids=["decode"], sampled_token_ids=[[0]])
+        )
+    for request in create_requests(num_requests=2, num_tokens=64):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    ids = list(output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=ids,
+            sampled_token_ids=[[0] if req_id == "decode" else [] for req_id in ids],
+        ),
+    )
+    output = scheduler.schedule(throttle_prefills=True)
+    assert set(output.num_scheduled_tokens) == ({"decode"} if has_decode else set())
 
 
 def _setup_cache_aware(num_tokens: int = 48, **kwargs):
