@@ -649,13 +649,13 @@ def test_bench_speculative_mamba_blocks():
 @pytest.mark.parametrize("capacity", [0, 2])
 def test_bench_forward_rejects_oversized_verify(capacity):
     """Reject drafts beyond the runner's buffer before launching CUDA kernels."""
-    runner = SimpleNamespace(num_speculative_steps=capacity)
+    runner = SimpleNamespace(num_speculative_steps=capacity, dp_rank=0, dp_size=1)
     case = parse_case("verify=2*4@64:3")
     with pytest.raises(
         ValueError,
         match=rf"Case 'verify' needs 3 draft tokens.*supports {capacity}",
     ):
-        run_case(runner, case, SimpleNamespace(), SamplingParams())
+        run_case(runner, case, SimpleNamespace(), SamplingParams(), ("real", None))
 
 
 def test_profile_summary():

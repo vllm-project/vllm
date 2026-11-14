@@ -157,16 +157,19 @@ def _sampling_params(runner) -> SamplingParams:
     return SamplingParams()
 
 
-def _load_without_graphs(engine_args):
+def _load_without_graphs(engine_args, args: argparse.Namespace):
     """Build the engine with serving's CUDA graph dispatch but no graphs.
 
     The runner resolves its CUDA graph mode and capture sizes as in serving,
     so each case is padded as serving would pad it; the bench captures its
-    own one-shot graph per case instead of the runner's.
+    own one-shot graph per case instead of the runner's. Graphs the model
+    dispatches inside a step (e.g. DeepSeek-V4.1's decoder replay layers) are
+    captured as in serving, after the routing fixture is installed.
     """
     from unittest.mock import patch
 
     from vllm import LLM
+    from vllm.benchmarks.forward.routing import install_routing
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     with patch.object(GPUModelRunner, "capture_model", return_value=0):
@@ -175,7 +178,22 @@ def _load_without_graphs(engine_args):
     if runner.cudagraph_manager is not None:
         # Dispatch to the graphs serving would have captured.
         runner.cudagraph_manager._graphs_captured = True
-    return llm, runner
+    routing = install_routing(
+        runner,
+        args.routing,
+        args.load_format == "dummy",
+        runner.scheduler_config.max_num_batched_tokens,
+        args.seed,
+    )
+    if runner.cudagraph_manager is not None:
+        with torch.inference_mode():
+            runner.model_state.capture_inner_cudagraphs(
+                runner.input_buffers,
+                runner.block_tables,
+                runner.attn_groups,
+                runner.kv_cache_config,
+            )
+    return llm, runner, routing
 
 
 def run_case(
@@ -183,6 +201,7 @@ def run_case(
     case: BenchCase,
     args: argparse.Namespace,
     sampling_params: SamplingParams,
+    routing: tuple[str, Any],
 ) -> dict[str, Any]:
     case = case.for_dp_rank(runner.dp_rank, runner.dp_size)
     required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
@@ -197,7 +216,6 @@ def run_case(
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
     from vllm.benchmarks.forward.pipeline import PipelineBench
-    from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
     kv_caches = {
@@ -258,9 +276,9 @@ def run_case(
         include_drafter=include_drafter,
         include_sampler=not args.exclude_sampler,
     )
-    routing, fixture = install_routing(
-        runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
-    )
+    mode, fixture = routing
+    if fixture is not None:
+        fixture.begin_case()
     try:
         result = bench.run()
         if fixture is not None:
@@ -268,12 +286,10 @@ def run_case(
             result["routing_check"] = fixture.stats()
     finally:
         runner.execute_model(batch.finish())
-        if fixture is not None:
-            fixture.remove()
     return {
         "num_tokens": batch.num_tokens,
         "kv_blocks": batch.num_blocks,
-        "routing": routing,
+        "routing": mode,
         **result,
     }
 
@@ -291,7 +307,7 @@ def main(args: argparse.Namespace) -> None:
     from vllm.config import set_current_vllm_config
     from vllm.distributed.parallel_state import get_world_group
 
-    llm, runner = _load_without_graphs(_make_engine_args(args, cases))
+    llm, runner, routing = _load_without_graphs(_make_engine_args(args, cases), args)
     # Same draw on every rank: shapes are balanced across DP ranks.
     max_kv_len = runner.model_config.max_model_len
     cases = [
@@ -312,7 +328,7 @@ def main(args: argparse.Namespace) -> None:
     results = []
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
         for case in cases:
-            result = run_case(runner, case, args, sampling_params)
+            result = run_case(runner, case, args, sampling_params, routing)
             # Each case's graph pool and captured state go with it.
             gc.collect()
             torch.accelerator.empty_cache()

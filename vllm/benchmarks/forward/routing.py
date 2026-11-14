@@ -111,7 +111,8 @@ def _top_k(module: torch.nn.Module) -> int | None:
 
 
 class RoutingFixture:
-    """Installs synthetic routing for one case; `remove()` restores the model."""
+    """Installs synthetic routing; `remove()` restores the model. Installed once,
+    before graphs the model captures at load, so they replay the fixture too."""
 
     def __init__(
         self,
@@ -183,7 +184,8 @@ class RoutingFixture:
 
     def _build(self, num_tokens: int) -> None:
         """Generate per-rank rows with headroom for padding; every rank
-        generates the same global fixture and takes its slice."""
+        generates the same global fixture and takes its slice. Logits are
+        built from the ids on first use (only gate hooks read them)."""
         rows = -(-num_tokens // 256) * 256 + 256
         for (num_experts, top_k, layer_seed), tables in zip(self._specs, self._tables):
             rng = np.random.default_rng(layer_seed)
@@ -193,14 +195,21 @@ class RoutingFixture:
             else:
                 ids = balanced_topk_ids(total, num_experts, top_k, self._ep_size, rng)
             ids = ids[self._dp_rank * rows : (self._dp_rank + 1) * rows]
-            logits = torch.full((rows, num_experts), _OTHER_LOGIT, dtype=torch.float32)
-            logits.scatter_(1, torch.from_numpy(ids), _CHOSEN_LOGIT)
-            # Distinct values: no ties for any top-k implementation.
-            logits += torch.from_numpy(rng.uniform(0, 0.5, logits.shape)).float()
             tables.clear()
-            tables["logits"] = logits.to(self._device)
             tables["ids"] = torch.from_numpy(ids).to(self._device)
         self._rows = rows
+
+    def _logits(self, layer: int) -> torch.Tensor:
+        num_experts, _, layer_seed = self._specs[layer]
+        ids = self._tables[layer]["ids"]
+        logits = torch.full(
+            (ids.shape[0], num_experts), _OTHER_LOGIT, device=self._device
+        )
+        logits.scatter_(1, ids.long(), _CHOSEN_LOGIT)
+        # Distinct values: no ties for any top-k implementation.
+        gen = torch.Generator(self._device).manual_seed(hash(tuple(layer_seed)))
+        logits += torch.rand(logits.shape, generator=gen, device=self._device) * 0.5
+        return logits
 
     def _rows_for(
         self, layer: int, name: str, num_tokens: int, dtype: torch.dtype
@@ -211,6 +220,9 @@ class RoutingFixture:
             assert not torch.cuda.is_current_stream_capturing()
             self._build(num_tokens)
         tables = self._tables[layer]
+        if name not in tables:
+            assert not torch.cuda.is_current_stream_capturing()
+            tables[name] = self._logits(layer)
         if tables[name].dtype != dtype:
             tables[name] = tables[name].to(dtype)  # Once, at warmup.
         return _fixture_rows(tables[name], num_tokens)
@@ -267,8 +279,13 @@ class RoutingFixture:
 
         return hook
 
+    def begin_case(self) -> None:
+        """Observe the next case's routing afresh."""
+        self._observed = [None] * len(self._layers)
+
     def stats(self) -> dict[str, Any] | None:
-        """Routing the experts received in the last eager pass (real rows)."""
+        """Routing the experts received in the case's first eager pass (real rows).
+        Layers that only run inside graphs captured at load are not observed."""
         observed = [o for o in self._observed if o is not None]
         if not observed:
             return None
