@@ -167,6 +167,8 @@ To enable either of these resolvers, you must `set VLLM_ALLOW_RUNTIME_LORA_UPDAT
 it will first look in the local directory for a directory `foobar`, and attempt to load the contents of that directory as a LoRA adapter. If successful, the request will complete as normal and that adapter will then be available for normal use on the server.
 - To leverage repositories on Hugging Face Hub, set `VLLM_PLUGINS` to include `lora_hf_hub_resolver` and set `VLLM_LORA_RESOLVER_HF_REPO_LIST` to a comma separated list of repository IDs on Hugging Face Hub. When vLLM receives a request for the LoRA adapter `my/repo/subpath`, it will download the adapter at the `subpath` of `my/repo` if it exists and contains an `adapter_config.json`, then build a request to the cached dir for the adapter, similar to the `lora_filesystem_resolver`. Please note that enabling remote downloads is insecure and not intended for use in production environments.
 
+After a resolver successfully loads an adapter, vLLM clears `load_inplace` before caching the `LoRARequest`. Later generation requests reuse the resident adapter. Cache eviction can still require loading the adapter files again.
+
 Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
