@@ -7,6 +7,17 @@ run `pre-commit run --all-files` after changing source requirements. These
 hooks preserve existing version pins unless a source change requires a new
 resolution.
 
+Each hook is wrapped by `tools/pre_commit/pip_compile_blessed.py`, which
+compares a sha256 over the hook's inputs and current lockfile against a
+committed store (`requirements/.pip-compile-blessed.json`). On a match the
+hook passes without touching the network. When a resolve rewrites a lockfile,
+the hook fails and you commit the rewritten lockfile together with the store
+update it wrote. If the package index is unreachable, the hook warns and
+passes; the daily drift check workflow re-resolves in strict mode
+(`PIP_COMPILE_BLESSED=strict`, which fails closed on network-class errors),
+so an index outage or a permanently broken index URL reds that workflow
+instead of passing silently.
+
 uv checks supplied hashes when downloading packages. Read the Docs additionally
 passes `--require-hashes`, so missing hashes also fail its install. A hash
 mismatch requires investigation; do not disable verification to complete an
