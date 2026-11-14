@@ -97,6 +97,8 @@ _TEXT_GENERATION_MODELS = {
         "DeepseekV32ForCausalLM",
     ),
     "DeepseekV4ForCausalLM": ("vllm.models.deepseek_v4", "DeepseekV4ForCausalLM"),
+    "DhirForCausalLM": ("dhir", "DhirForCausalLM"),
+    "DhirMoeForCausalLM": ("dhir_moe", "DhirMoeForCausalLM"),
     "DomynEdgeForCausalLM": ("domyn_edge", "DomynEdgeForCausalLM"),
     "DoryForCausalLM": ("dory", "DoryForCausalLM"),
     "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
