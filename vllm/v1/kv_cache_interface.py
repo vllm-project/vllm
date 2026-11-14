@@ -481,6 +481,13 @@ class AttentionSpec(KVCacheSpec):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.tokens_per_state > self.block_size:
+            raise ValueError(
+                f"block_size ({self.block_size}) is smaller than "
+                f"tokens_per_state ({self.tokens_per_state}), so a block would "
+                "hold no state. Use a larger --block-size, or omit it to let "
+                "vLLM choose one."
+            )
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
