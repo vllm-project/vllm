@@ -14,10 +14,16 @@ from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    awq_to_marlin_zero_points,
     get_marlin_workspace,
     marlin_make_empty,
     marlin_make_workspace_new,
+    marlin_moe_permute_scales,
     marlin_permute_bias,
+    marlin_permute_scales,
+    marlin_zero_points,
+    moe_awq_to_marlin_zero_points,
+    moe_packed_to_marlin_zero_points,
     query_marlin_supported_quant_types,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -38,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack,
     gptq_quantize_weights,
     quantize_weights,
+    unpack_cols,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -198,6 +205,65 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, nk_factors):
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
+
+
+@pytest.mark.parametrize("num_bits", [4, 8])
+@pytest.mark.parametrize("group_size", [-1, 32, 128])
+# The wide layer is converted in chunks of experts, the narrow one in one go.
+@pytest.mark.parametrize("size_n", [192, 1 << 17])
+def test_marlin_moe_postprocess_matches_per_expert(num_bits, group_size, size_n):
+    """The batched MoE scale and zero-point conversions give the same tensors as
+    the dense per-expert functions."""
+    num_experts = 3
+    num_groups = 16 if group_size > 0 else 1
+    size_k = num_groups * group_size if group_size > 0 else 2048
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    scales = torch.randn(num_experts, num_groups, size_n, device=device).half()
+    ref = torch.stack(
+        [
+            marlin_permute_scales(scales[e], size_k, size_n, group_size)
+            for e in range(num_experts)
+        ]
+    )
+    out = marlin_moe_permute_scales(scales, size_k, size_n, group_size)
+    assert out.is_contiguous()
+    assert torch.equal(out, ref)
+
+    if group_size < 0:
+        return
+
+    # Random words cover every bit pattern, including a set sign bit.
+    pack_factor = 32 // num_bits
+    qzeros = torch.randint(
+        -(2**31),
+        2**31 - 1,
+        (num_experts, num_groups, size_n // pack_factor),
+        device=device,
+        dtype=torch.int32,
+    )
+    ref = torch.stack(
+        [
+            awq_to_marlin_zero_points(qzeros[e], num_groups, size_n, num_bits)
+            for e in range(num_experts)
+        ]
+    )
+    out = moe_awq_to_marlin_zero_points(qzeros, num_groups, size_n, num_bits)
+    assert torch.equal(out, ref)
+
+    ref = torch.stack(
+        [
+            marlin_zero_points(
+                unpack_cols(qzeros[e], num_bits, num_groups, size_n),
+                num_groups,
+                size_n,
+                num_bits,
+            )
+            for e in range(num_experts)
+        ]
+    )
+    out = moe_packed_to_marlin_zero_points(qzeros, num_groups, size_n, num_bits)
+    assert torch.equal(out, ref)
 
 
 def marlin_generate_valid_test_cases():
