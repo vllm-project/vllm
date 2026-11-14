@@ -262,15 +262,13 @@ class Qwen3_5RMSNorm(nn.Module):
             scale = linear.input_scale
         if allreduce:
             assert residual is not None
-            if scale is not None:
-                out = fused_allreduce_gemma_rms_norm_quant(
-                    x, residual, self.weight, self.variance_epsilon, scale, key
-                )
-                if out is not None:
-                    return out
-            # No FlashInfer AR+norm+quant (unavailable, above its workspace
-            # budget, or per-token FP8): explicit all-reduce, then the Triton
-            # norm-quant.
+            out = fused_allreduce_gemma_rms_norm_quant(
+                x, residual, self.weight, self.variance_epsilon, scale, key
+            )
+            if out is not None:
+                return out
+            # No FlashInfer AR+norm (unavailable or above its workspace
+            # budget): explicit all-reduce, then the Triton norm-quant.
             x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
             x, residual, self.weight, self.variance_epsilon, scale, key, write_y

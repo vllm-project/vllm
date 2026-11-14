@@ -66,10 +66,10 @@ def _worker(local_rank, world_size, port):
     get_current_vllm_config().model_config = ModelConfig()
     dtype = torch.bfloat16
 
-    def make_linear(quant):
+    def make_linear(key):
         """A loaded linear whose input quant the norm can fuse."""
         input_scale = None
-        if quant == "fp8_token":
+        if key == kFp8DynamicTokenSym:
             # llm-compressor FP8_DYNAMIC: per-channel weights, per-token inputs.
             fp8 = {"num_bits": 8, "type": "float", "symmetric": True}
             quant_config = CompressedTensorsConfig.from_config(
@@ -86,7 +86,7 @@ def _worker(local_rank, world_size, port):
                     },
                 }
             )
-        elif quant == "nvfp4":
+        elif key == kNvfp4Dynamic:
             quant_config = ModelOptNvFp4Config(
                 is_checkpoint_nvfp4_serialized=True,
                 kv_cache_quant_algo=None,
@@ -119,11 +119,11 @@ def _worker(local_rank, world_size, port):
             linear.quant_method.process_weights_after_loading(linear)
         return linear
 
-    quants = ("fp8", "fp8_token", "nvfp4")
-    linears = {quant: make_linear(quant) for quant in quants}
+    keys = (kFp8StaticTensorSym, kFp8DynamicTokenSym, kNvfp4Dynamic)
+    linears = {key: make_linear(key) for key in keys}
 
-    def run_one(quant, allreduce, num_tokens):
-        linear = None if quant is None else linears[quant]
+    def run_one(key, allreduce, num_tokens):
+        linear = None if key is None else linears[key]
         set_random_seed(42)
         norm = Qwen3_5RMSNorm(HIDDEN_SIZE, eps=1e-6, reduce_inputs=allreduce).cuda()
         with torch.no_grad():
@@ -155,20 +155,19 @@ def _worker(local_rank, world_size, port):
             return
 
         assert linear is not None and qa is not None and y is not None
-        # FlashInfer's AR+norm+quant kernel matches its AR+norm bitwise; the
-        # Triton norm-quant (no all-reduce, above the workspace budget, or
-        # per-token FP8) reduces the sum of squares in a different order than
-        # FlashInfer's norm, so off-by-one codes appear where the normed
-        # values differ.
-        exact = allreduce and num_tokens < FALLBACK_TOKENS and quant != "fp8_token"
+        assert qa.quant_key == key
+        # FlashInfer's AR+norm(+quant) matches its AR+norm bitwise; the Triton
+        # norm-quant (no all-reduce, or above the workspace budget) reduces the
+        # sum of squares in a different order than FlashInfer's norm, so
+        # off-by-one codes appear where the normed values differ.
+        exact = allreduce and num_tokens < FALLBACK_TOKENS
         if exact:
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
         else:
             assert (y != ref_y).float().mean().item() <= 1e-4
             torch.testing.assert_close(y, ref_y, rtol=2**-7, atol=0)
 
-        if quant == "nvfp4":
-            assert qa.quant_key == kNvfp4Dynamic
+        if key == kNvfp4Dynamic:
             ref_q, ref_sf = ops.scaled_fp4_quant(
                 ref_y, linear.input_global_scale_inv, True, backend="flashinfer-cutedsl"
             )
@@ -176,14 +175,11 @@ def _worker(local_rank, world_size, port):
             sf = _swizzled_sf_rows(qa.scale, num_tokens, HIDDEN_SIZE)
             ref_sf = _swizzled_sf_rows(ref_sf, num_tokens, HIDDEN_SIZE)
             sf_mismatch = (sf != ref_sf).float().mean().item()
-        elif quant == "fp8_token":
-            assert qa.quant_key == kFp8DynamicTokenSym
+        elif key == kFp8DynamicTokenSym:
             ref_q, ref_sf = ops.scaled_fp8_quant(ref_y, use_per_token_if_dynamic=True)
             dist = (_fp8_codes(qa.data) - _fp8_codes(ref_q)).abs()
             sf_mismatch = (qa.scale != ref_sf).float().mean().item()
-            torch.testing.assert_close(qa.scale, ref_sf, rtol=2**-7, atol=0)
         else:
-            assert qa.quant_key == kFp8StaticTensorSym
             ref_q, _ = ops.scaled_fp8_quant(
                 ref_y, linear.input_scale, group_shape=(-1, -1)
             )
@@ -197,10 +193,10 @@ def _worker(local_rank, world_size, port):
             assert (dist > 0).float().mean().item() <= 1e-4
             assert sf_mismatch <= 1e-4
 
-    for quant in quants:
+    for key in keys:
         for num_tokens in (1, 17, 333, FALLBACK_TOKENS):
-            run_one(quant, True, num_tokens)
-        run_one(quant, False, 17)
+            run_one(key, True, num_tokens)
+        run_one(key, False, 17)
     for allreduce in (False, True):
         run_one(None, allreduce, 17)
     cleanup_dist_env_and_memory()

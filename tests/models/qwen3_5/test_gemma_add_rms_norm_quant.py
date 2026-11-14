@@ -10,6 +10,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -56,11 +57,15 @@ def _swizzled_sf_rows(sf: torch.Tensor, m: int, h: int) -> torch.Tensor:
     not current_platform.has_device_capability(100),
     reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
 )
-@pytest.mark.parametrize("quant", ["fp8", "fp8_token", "nvfp4"])
+@pytest.mark.parametrize(
+    "key",
+    [kFp8StaticTensorSym, kFp8DynamicTokenSym, kNvfp4Dynamic],
+    ids=["fp8", "fp8_token", "nvfp4"],
+)
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()
 def test_gemma_add_rms_norm_quant_matches_chain(
-    H: int, num_tokens: int, quant: str, has_residual: bool
+    H: int, num_tokens: int, key: QuantKey, has_residual: bool
 ):
     from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
@@ -68,12 +73,8 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         gemma_add_rms_norm_quant,
     )
 
-    nvfp4 = quant == "nvfp4"
-    key = {
-        "fp8": kFp8StaticTensorSym,
-        "fp8_token": kFp8DynamicTokenSym,
-        "nvfp4": kNvfp4Dynamic,
-    }[quant]
+    nvfp4 = key == kNvfp4Dynamic
+    per_token = key == kFp8DynamicTokenSym
     g = torch.Generator(device="cuda").manual_seed(num_tokens)
     # Checkpoint-like Gemma weights: (1 + w) from ~0 (w near -1) to 3.5.
     w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
@@ -84,7 +85,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     # FP8: static input scale, or None for per-token. NVFP4: global scale
     # (input_global_scale_inv).
     scale = None
-    if quant != "fp8_token":
+    if not per_token:
         scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
 
     ref_res = residual.clone()
@@ -97,7 +98,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         ref_q, ref_sf = ops.scaled_fp4_quant(
             ref_y, scale, True, backend="flashinfer-cutedsl"
         )
-    elif quant == "fp8_token":
+    elif per_token:
         ref_q, ref_sf = ops.scaled_fp8_quant(ref_y, use_per_token_if_dynamic=True)
     else:
         ref_q, _ = ops.scaled_fp8_quant(ref_y, scale, group_shape=(-1, -1))
@@ -121,7 +122,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
             ref_sf, num_tokens, H
         )
         assert sf_mismatch.float().mean().item() <= 1e-4
-    elif quant == "fp8_token":
+    elif per_token:
         assert sf.shape == (num_tokens, 1) and sf.dtype == torch.float32
         # Rows whose normed values match the chain bitwise get the same token
         # scale and codes; a 1-ulp difference can only move them slightly.
