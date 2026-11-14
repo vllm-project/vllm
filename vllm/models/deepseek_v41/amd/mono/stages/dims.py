@@ -20,7 +20,7 @@ ROWS = 16  # GEMV rows a task
 UG_PART = 32  # intermediate columns an ug task part: one FP4 group
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dims:
     tp: int
 

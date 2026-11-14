@@ -881,7 +881,7 @@ class Moondream3TextModel(nn.Module):
         return hidden_states
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Moondream3ImageInput:
     """Container holding per-image inputs for embedding."""
 

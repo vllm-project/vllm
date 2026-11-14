@@ -28,7 +28,7 @@ BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMBuildCase:
     seq_lens: list[int]
     query_lens: list[int]
@@ -39,7 +39,6 @@ def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "none",
 ) -> MambaSpec:
     shapes = MambaStateShapeCalculator.append_replayssm_ring(
         ((1, 1), (1, 1, 1)),
@@ -53,7 +52,6 @@ def _make_mamba_spec(
         block_size=BLOCK_SIZE,
         shapes=shapes,
         dtypes=(torch.float32,) * 5,
-        mamba_cache_mode=mamba_cache_mode,
     )
 
 
@@ -80,12 +78,7 @@ def _create_replayssm_builder(
             num_speculative_tokens=num_speculative_tokens,
         )
     return MockMambaBuilder(
-        _make_mamba_spec(
-            buffer_len,
-            mamba_backend,
-            num_speculative_tokens,
-            mamba_cache_mode,
-        ),
+        _make_mamba_spec(buffer_len, mamba_backend, num_speculative_tokens),
         ["layer0"],
         vllm_config,
         DEVICE,

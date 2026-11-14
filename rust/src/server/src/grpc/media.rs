@@ -46,11 +46,7 @@ pub(super) fn from_proto(
         };
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
     }
-    if encoded_bytes > MAX_INLINE_MM_BYTES {
-        return Err(Status::resource_exhausted(format!(
-            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
-        )));
-    }
+    check_inline_kwargs_size(encoded_bytes)?;
     let features = media
         .into_iter()
         .enumerate()
@@ -144,6 +140,51 @@ fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64
         )));
     }
     Ok(fps)
+}
+
+/// Convert one prepared feature into the preprocessed-media form accepted by
+/// [`from_proto`]. Without `include_kwargs`, the processed tensors are left
+/// out and only the hash and placeholder range remain.
+pub(super) fn feature_to_proto(
+    feature: MmFeatureSpec,
+    include_kwargs: bool,
+) -> Result<pb::MediaItem, Status> {
+    let kwargs = match feature.data.filter(|_| include_kwargs) {
+        Some(data) => Some(crate::mm_wire::encode_kwargs(&data).map_err(Status::internal)?),
+        None => None,
+    };
+    let is_embed = match &feature.mm_position.is_embed {
+        Some(mask) => crate::mm_wire::mask_to_bools(mask).map_err(Status::internal)?,
+        None => Vec::new(),
+    };
+    Ok(pb::MediaItem {
+        modality: match feature.modality {
+            MmModality::Image => pb::Modality::Image,
+            MmModality::Video => pb::Modality::Video,
+            MmModality::Audio => pb::Modality::Audio,
+        } as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs,
+                identifier: feature.identifier,
+                offset: feature.mm_position.offset as u64,
+                length: feature.mm_position.length as u64,
+                mm_hash: feature.mm_hash,
+                is_embed,
+            },
+        )),
+        ..Default::default()
+    })
+}
+
+/// Reject inline kwargs totalling more than one gRPC request may carry.
+pub(super) fn check_inline_kwargs_size(encoded_bytes: usize) -> Result<(), Status> {
+    if encoded_bytes > MAX_INLINE_MM_BYTES {
+        return Err(Status::resource_exhausted(format!(
+            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn mixed_media_error() -> Status {

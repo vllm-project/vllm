@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingInput:
     """Input data for a streaming generation request.
 

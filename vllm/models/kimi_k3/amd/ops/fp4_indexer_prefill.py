@@ -14,7 +14,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from .fp4_indexer import quantize_queries
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FP4QueryPlan:
     start: int
     end: int
@@ -25,7 +25,7 @@ class FP4QueryPlan:
     num_ctas: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FP4ChunkPlan:
     all_cu: torch.Tensor
     page_table: torch.Tensor
@@ -34,7 +34,7 @@ class FP4ChunkPlan:
     queries: list[FP4QueryPlan]
 
 
-@dataclass
+@dataclass(slots=True)
 class FP4PrefillMetadata(DeepseekV32IndexerPrefillMetadata):
     plans: list[FP4ChunkPlan] = field(default_factory=list)
 
