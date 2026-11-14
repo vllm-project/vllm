@@ -45,9 +45,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
-from vllm.v1.attention.backends.mla.flashinfer_mla import FlashInferMLABackend
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
@@ -2129,10 +2130,17 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
     from vllm.distributed.kv_transfer.kv_connector import utils as kv_utils
     from vllm.v1.worker.utils import select_common_block_size
 
+    class _DraftBackend(TritonAttentionBackend):
+        @staticmethod
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec=None,
+        ) -> list[int | MultipleOf]:
+            return [32, 64]
+
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.uint8
     )
-    layer = SimpleNamespace(get_attn_backend=lambda: FlashInferMLABackend)
+    layer = SimpleNamespace(get_attn_backend=lambda: _DraftBackend)
     monkeypatch.setattr(
         kv_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
     )
@@ -2144,7 +2152,7 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
     )
 
     backends, specs, _ = kv_utils.get_current_attn_backends_and_specs(
-        vllm_config, kv_cache_config, [FlashInferMLABackend]
+        vllm_config, kv_cache_config, [_DraftBackend]
     )
 
     assert select_common_block_size(1024, backends, specs) == transfer_block_size
