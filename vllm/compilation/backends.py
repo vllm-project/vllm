@@ -10,7 +10,7 @@ import pprint
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from typing import Any
 
@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
+from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -237,8 +238,15 @@ class CompilerManager:
             return
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
-        with open(self.cache_file_path, "w") as f:
-            f.write(data)
+        tmp_file = f"{self.cache_file_path}.{random_uuid()}.tmp"
+        try:
+            with open(tmp_file, "w") as f:
+                f.write(data)
+            os.replace(tmp_file, self.cache_file_path)
+        except BaseException:
+            with suppress(OSError):
+                os.remove(tmp_file)
+            raise
 
     def load(
         self,
