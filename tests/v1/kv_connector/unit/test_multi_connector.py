@@ -11,6 +11,8 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import (
+    create_request,
+    create_scheduler,
     create_vllm_config,
     maybe_update_block_size,
     set_mtp_config,
@@ -40,7 +42,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_offload.base import ReqContext, make_offload_key
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
@@ -1077,6 +1083,56 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("layout", "empty_tier", "held_tier"),
+    [
+        (("offloading",), 0, 64),
+        (("offloading", "example"), None, 64),
+        (("example", "offloading"), None, None),
+    ],
+)
+def test_multi_connector_peek_counts_the_first_connector_with_a_hit(
+    layout: tuple[str, ...], empty_tier, held_tier, tmp_path: Path
+):
+    """The peek counts what the lookup would load: the hit of the first
+    connector that has one, or 0 when every connector holds nothing. A
+    connector before it that cannot tell, here the `ExampleConnector`, leaves
+    the count unknown."""
+    configs = {
+        "offloading": {
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 20},
+        },
+        "example": {
+            "kv_connector": "ExampleConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+    }
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": [configs[c] for c in layout]},
+    )
+    scheduler = create_scheduler(vllm_config)
+    connector = scheduler.connector
+    assert isinstance(connector, MultiConnector)
+    request = create_request(num_tokens=64)
+    scheduler.add_request(request)
+    assert connector.peek_num_new_matched_tokens(request, 0) == empty_tier
+
+    tier = next(
+        c for c in connector.sub_connectors if isinstance(c, OffloadingConnector)
+    )
+    keys = [make_offload_key(block_hash, 0) for block_hash in request.block_hashes]
+    earlier_turn = ReqContext(req_id="earlier-turn")
+    assert tier.scheduler.manager.prepare_store(keys, earlier_turn) is not None
+    tier.scheduler.manager.complete_store(keys, earlier_turn)
+    assert connector.peek_num_new_matched_tokens(request, 0) == held_tier
 
 
 @pytest.mark.cpu_test
