@@ -291,8 +291,9 @@ def persistent_masked_m_silu_mul_quant(
             # y_s has shape (E, T, G//4) with stride (T*G//4, 1, T)
             packed = y_s_u8.view(torch.int32)
             # Copy with matching strides
+            tokens_per_expert_cpu = tokens_per_expert.tolist()
             for e_idx in range(E_dim):
-                nt = tokens_per_expert[e_idx].item()
+                nt = tokens_per_expert_cpu[e_idx]
                 if nt > 0:
                     y_s[e_idx, :nt].copy_(packed[e_idx, :nt])
 
