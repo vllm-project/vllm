@@ -18,9 +18,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty,
     marlin_make_workspace_new,
     marlin_permute_bias,
+    marlin_permute_scales,
     query_marlin_supported_quant_types,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    nvfp4_marlin_process_global_scale,
+    nvfp4_marlin_process_scales,
     rand_marlin_weight_mxfp4_like,
     rand_marlin_weight_nvfp4_like,
 )
@@ -490,3 +493,72 @@ def test_marlin_gemm_with_bias(size_m):
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_marlin_gemm_nvfp4_small_block_scales(dtype):
+    # Block scales near 448 and E4M3 subnormals (below 2^-6) in one tensor, as
+    # in ModelOpt NVFP4 checkpoints. Half activations decode the subnormals
+    # exactly; bfloat16 activations drop their blocks.
+    size_n, size_k, group_size = 256, 1024, 16
+    e2m1 = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
+    )
+    codes = torch.randint(0, 16, (size_n, size_k), dtype=torch.uint8)
+    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+
+    # Half of the output channels use scale 448, the other half the seven
+    # E4M3 subnormals and the smallest normal value, 2^-6.
+    small = torch.tensor([i * 2**-9 for i in range(1, 8)] + [2**-6])
+    scales = torch.full((size_n, size_k // group_size), 448.0)
+    scales[size_n // 2 :] = small.repeat(size_k // group_size // len(small))
+    scales = scales.to(torch.float8_e4m3fn)
+    global_scale = torch.tensor(2.0**-6)
+
+    marlin_q_w = ops.gptq_marlin_repack(
+        b_q_weight=packed.view(torch.int32).T.contiguous().cuda(),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=4,
+    )
+    marlin_s = marlin_permute_scales(
+        s=scales.T.to(dtype).cuda(),
+        size_k=size_k,
+        size_n=size_n,
+        group_size=group_size,
+    )
+    marlin_s, scale_factor = nvfp4_marlin_process_scales(marlin_s, a_dtype=dtype)
+    marlin_s2 = nvfp4_marlin_process_global_scale(global_scale.cuda(), dtype)
+    marlin_s2 = marlin_s2 / scale_factor
+
+    # Rows of the identity: the output is the dequantized weight, exactly.
+    a_input = torch.eye(size_k, dtype=dtype, device="cuda")
+    output = ops.marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        None,
+        marlin_s,
+        marlin_s2,
+        None,
+        marlin_make_workspace_new(a_input.device),
+        scalar_types.float4_e2m1f,
+        size_k,
+        size_n,
+        size_k,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+
+    block_scales = scales.float()
+    if dtype == torch.bfloat16:
+        block_scales[block_scales < 2**-6] = 0
+    w_ref = e2m1[codes.long()] * block_scales.repeat_interleave(group_size, 1)
+    torch.testing.assert_close(
+        output.float().cpu(), (w_ref * global_scale).T, rtol=0, atol=0
+    )
