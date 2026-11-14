@@ -563,6 +563,35 @@ def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
         processor.info.parse_mm_data(mm_data)
 
 
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        None,
+        {"videos_kwargs": {"cap_pixels_per_frame": False}},
+        {"videos_kwargs": {"max_video_tokens": 256}},
+    ],
+)
+def test_dummy_video_reaches_budget_with_processor_frame_cap(
+    mm_processor_kwargs: dict[str, Any] | None,
+) -> None:
+    ctx = build_model_context(
+        "vllm-sr/d3-edge",
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert budget is not None
+    assert num_embeds == budget["video"]
+
+
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> None:
     """Regression test for memory profiling with `cap_pixels_per_frame`.

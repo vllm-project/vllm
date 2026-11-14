@@ -163,39 +163,40 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        processor = self.get_hf_processor()
-        image_processor = processor.image_processor
-        video_processor = processor.video_processor
+        mm_kwargs = self._get_effective_mm_processor_kwargs({})
+        image_kwargs = mm_kwargs["images_kwargs"]
+        video_kwargs = mm_kwargs["videos_kwargs"]
         num_frames = self.get_num_frames_with_most_features(
             seq_len, mm_counts.get("video", 0)
         )
         return {
-            "image": int(image_processor.max_image_tokens),
+            "image": int(image_kwargs["max_image_tokens"]),
             "video": (
                 num_frames
-                // int(video_processor.temporal_patch_size)
-                * int(video_processor.max_video_frame_tokens)
+                // int(video_kwargs["temporal_patch_size"])
+                * int(video_kwargs["max_video_frame_tokens"])
             ),
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_hf_processor().image_processor
-        grid_size = math.isqrt(int(image_processor.max_image_tokens))
+        image_kwargs = self._get_effective_mm_processor_kwargs({})["images_kwargs"]
+        grid_size = math.isqrt(int(image_kwargs["max_image_tokens"]))
         side = (
-            int(image_processor.patch_size)
-            * int(image_processor.merge_size)
+            int(image_kwargs["patch_size"])
+            * int(image_kwargs["merge_size"])
             * grid_size
         )
         return ImageSize(width=side, height=side)
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
         num_videos = max(num_videos, 1)
         groups = max(
             1,
-            seq_len // num_videos // int(video_processor.max_video_frame_tokens),
+            seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
-        temporal_patch_size = int(video_processor.temporal_patch_size)
+        temporal_patch_size = int(video_kwargs["temporal_patch_size"])
         max_groups = max(1, int(video_processor.num_frames) // temporal_patch_size)
         return min(groups, max_groups) * temporal_patch_size
 
@@ -212,13 +213,13 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        processor = self.info.get_hf_processor()
-        video_processor = processor.video_processor
+        mm_kwargs = self.info._get_effective_mm_processor_kwargs({})
+        video_kwargs = mm_kwargs["videos_kwargs"]
         image_width, image_height = self.info.get_image_size_with_most_features()
-        video_grid = math.isqrt(int(video_processor.max_video_frame_tokens))
+        video_grid = math.isqrt(int(video_kwargs["max_video_frame_tokens"]))
         video_size = (
-            int(video_processor.patch_size)
-            * int(video_processor.merge_size)
+            int(video_kwargs["patch_size"])
+            * int(video_kwargs["merge_size"])
             * video_grid
         )
         return {

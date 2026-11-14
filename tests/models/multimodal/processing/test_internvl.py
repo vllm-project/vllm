@@ -136,3 +136,21 @@ def test_processor_override(
         max_num,
         hf_processor_mm_kwargs,
     )
+
+
+@pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL3-1B-hf"])
+def test_hf_format_image_dummy_uses_processor_defaults(model_id: str):
+    def dummy_image_tokens(mm_processor_kwargs: dict[str, object] | None) -> int:
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=mm_processor_kwargs,
+            limit_mm_per_prompt={"image": 1, "video": 0},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        dummy = processor.get_dummy_mm_inputs({"image": 1})
+        return dummy["mm_placeholders"]["image"][0].get_num_embeds()
+
+    default = dummy_image_tokens(None)
+
+    assert default == dummy_image_tokens({"crop_to_patches": True})
+    assert default > dummy_image_tokens({"crop_to_patches": False})
