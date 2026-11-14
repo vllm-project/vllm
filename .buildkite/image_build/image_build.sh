@@ -108,9 +108,9 @@ export_kernel_symbol_map_from_cache() {
 }
 
 export_kernel_symbol_map() {
-    # Only when the build asked for it (nightly/post-merge). The map was
-    # produced inside the csrc-build stage during the main bake; this second
-    # bake of the scratch stage is a cache hit that just writes the file out.
+    # Only when the build asked for it (nightly/post-merge). The map has its
+    # own stages on top of csrc-build, which the main bake just built or
+    # fetched, so this second bake runs only the map step and writes the file out.
     if [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" != "1" ]]; then
         return 0
     fi
