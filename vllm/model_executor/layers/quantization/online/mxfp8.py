@@ -99,6 +99,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(weight.contiguous())
 
         layer.input_scale = None
+        layer.weight_block_size = None
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 

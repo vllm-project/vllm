@@ -280,9 +280,10 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         # Transposed to (K, N); the param keeps its checkpoint dims.
         layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
+        layer.weight_block_size = None
+        self.release_requantization_source_weights(layer)
 
         self.fp8_linear.process_weights_after_loading(layer)
-        self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -538,10 +539,11 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
+        layer.weight_block_size = None
+        self.release_requantization_source_weights(layer)
 
         self.fp8_linear.process_weights_after_loading(layer)
         expose_input_quant_key(layer, self.fp8_linear)
-        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
