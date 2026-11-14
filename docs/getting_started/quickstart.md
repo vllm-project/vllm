@@ -142,10 +142,10 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
+The [LLM][vllm.LLM] class initializes vLLM's engine and the [Qwen3-0.6B model](https://huggingface.co/Qwen/Qwen3-0.6B) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
 ```python
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 ```
 
 !!! note

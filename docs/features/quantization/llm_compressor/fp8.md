@@ -150,8 +150,8 @@ In this mode, all Linear modules (except for the final `lm_head`) have their wei
 ```python
 from vllm import LLM
 
-llm = LLM("facebook/opt-125m", quantization="fp8_per_tensor")
-# INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
+llm = LLM("Qwen/Qwen3-0.6B", quantization="fp8_per_tensor")
+# INFO 10-20 18:57:58 [model_runner.py:431] Model loading took 0.71 GiB memory and 4.069862 seconds
 result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
