@@ -50,8 +50,8 @@ other loggers.
 
 `--log-level` is a shortcut for `--logging-config.log_level` and takes
 precedence if both are supplied. It sets the level of vLLM's built-in logging
-configuration. `--log-config-file` is deprecated and will be removed in
-v0.33.0; use `--logging-config.pylogging_config_file` in new commands.
+configuration. The former `--log-config-file` flag was removed in v0.34.0;
+use `--logging-config.pylogging_config_file` instead.
 
 If `configure_logging` is `false`, vLLM does not apply a logging
 configuration. It cannot be combined with `pylogging_config_file`. This has
