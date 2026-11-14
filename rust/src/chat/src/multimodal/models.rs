@@ -12,12 +12,14 @@ use std::sync::LazyLock;
 
 use llm_multimodal::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 
+mod gemma4;
 mod muse_spark;
 mod step3_vl;
 
 /// Specs for models that `llm-multimodal` does not have yet, one model per
 /// submodule.
 static SPECS: &[&dyn ModelProcessorSpec] = &[
+    &gemma4::Gemma4Spec,          // Gemma 4 (image)
     &step3_vl::Step3VLVisionSpec, // Step3-VL, Step5-VL
     &muse_spark::MuseSparkSpec,   // MuseSpark (image + video + audio)
 ];
