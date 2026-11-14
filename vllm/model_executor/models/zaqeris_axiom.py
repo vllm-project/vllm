@@ -82,7 +82,7 @@ class ZaqerisAxiomM3Weight(nn.Module):
     """Container for a ZAQERIS-M3 quantized weight tensor.
 
     The buffers are populated directly from the safetensors checkpoint by
-    :class:`ZaqerisAxiomM3QuantMethod`; no ``weight`` parameter is created.
+    `ZaqerisAxiomM3QuantMethod`; no `weight` parameter is created.
     """
 
     def __init__(self, out_features: int, in_features: int, block_size: int = 8):
@@ -147,9 +147,9 @@ class ZaqerisAxiomM3Weight(nn.Module):
 class ZaqerisAxiomM3QuantMethod(QuantizeMethodBase):
     """Linear quantization method for ZAQERIS-M3.
 
-    Instead of creating a ``weight`` parameter, this method registers the M3
-    compact buffers directly on the layer. The layer's ``weight`` property
-    dequantizes on demand, so ``apply`` is a plain matmul.
+    Instead of creating a `weight` parameter, this method registers the M3
+    compact buffers directly on the layer. The layer's `weight` property
+    dequantizes on demand, so `apply` is a plain matmul.
     """
 
     requires_device_loading = True
@@ -255,7 +255,7 @@ class ZaqerisAxiomLinear(LinearBase):
     """A linear layer backed by a ZAQERIS-M3 quantized weight bundle.
 
     TP is intentionally disabled: M3 codebooks are not sharded across ranks in
-    this first implementation. Use ``tp_size == 1`` (the default for single-GPU
+    this first implementation. Use `tp_size == 1` (the default for single-GPU
     or CPU-offloaded serving).
     """
 
@@ -461,7 +461,7 @@ class ZaqerisAxiomSparseMoeBlock(nn.Module):
     AXIOM uses 16 routed experts with top-2 routing and no shared expert. This
     first implementation uses a plain per-expert loop (no expert parallelism,
     no EPLB) so that the M3 compact buffers can be loaded directly; the fused
-    ``FusedMoEFactory`` path can be adopted once an M3 fused-MoE method exists.
+    `FusedMoEFactory` path can be adopted once an M3 fused-MoE method exists.
     """
 
     def __init__(
@@ -664,7 +664,7 @@ class ZaqerisAxiomModel(nn.Module):
                 num_experts=config.num_experts,
                 num_experts_per_tok=config.num_experts_per_tok,
                 hidden_act=config.hidden_act,
-                rope_parameters=config.rope_scaling,
+                rope_parameters=config.rope_parameters,
                 max_position_embeddings=config.max_position_embeddings,
                 rms_norm_eps=config.rms_norm_eps,
                 cache_config=vllm_config.cache_config,

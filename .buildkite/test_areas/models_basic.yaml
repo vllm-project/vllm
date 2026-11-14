@@ -564,6 +564,7 @@ steps:
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
+      models/test_zaqeris_axiom.py
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
   key: dsv41-nvidia-kernels-4xb200

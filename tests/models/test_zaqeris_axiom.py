@@ -4,7 +4,7 @@
 
 These are component-level tests (no 29 GiB checkpoint required). They exercise
 the M3 weight container, the quant method, the linear/embedding/attention/MoE
-modules and the full ``ZaqerisAxiomForCausalLM`` forward path with synthetic
+modules and the full `ZaqerisAxiomForCausalLM` forward path with synthetic
 buffers.
 """
 
@@ -34,7 +34,7 @@ me_models.ModelRegistry.register_model(
 )
 
 ROPE = {
-    "type": "yarn",
+    "rope_type": "yarn",
     "factor": 1.0,
     "original_max_position_embeddings": 64,
     "extended_max_position_embeddings": 64,
@@ -58,7 +58,7 @@ def _synthetic_config(**overrides):
         "max_position_embeddings": 64,
         "rms_norm_eps": 1e-6,
         "rope_theta": 10000.0,
-        "rope_scaling": ROPE,
+        "rope_parameters": ROPE,
         "tie_word_embeddings": False,
     }
     cfg.update(overrides)
@@ -66,7 +66,7 @@ def _synthetic_config(**overrides):
 
 
 def _fill_m3(mod, *, block_size=8):
-    """Populate every M3 bundle in ``mod`` with random codebooks/indices."""
+    """Populate every M3 bundle in `mod` with random codebooks/indices."""
     for parent in mod.modules():
         mw = getattr(parent, "m3_weight", None)
         if not isinstance(mw, ZaqerisAxiomM3Weight):
