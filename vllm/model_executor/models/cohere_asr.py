@@ -72,9 +72,67 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+class CohereASRBucketingSpec(EncoderBucketingSpec):
+    """Bucketing semantics for Cohere-ASR's Conformer encoder.
+
+    `input_features` is `[B][mel][T]` (time on dim 2); `length` carries the true
+    mel-frame count. The conv subsampling downsamples by 8, so rungs are aligned
+    to 8 to keep the length bookkeeping exact. The encoder is mask-aware
+    (pad_mask + att_mask with `-inf`), so the crop is bit-exact.
+    """
+
+    frames_per_second = 100  # hop_length=160 @ 16 kHz
+    context_margin = 8  # conv subsampling receptive field
+    align_to = 8  # subsampling_factor
+
+    def item_lengths(
+        self, mm_kwargs_batch: Mapping[str, object]
+    ) -> list[int] | None:
+        length = mm_kwargs_batch.get("length")
+        return length.tolist() if length is not None else None
+
+    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+        input_features = mm_kwargs_batch.get("input_features")
+        if input_features is None:
+            return 0
+        if is_list_of(input_features, torch.Tensor):
+            return max(int(f.shape[-1]) for f in input_features)
+        return int(input_features.shape[-1])  # [B, mel, T]
+
+    def crop(
+        self,
+        mm_kwargs_batch: Mapping[str, object],
+        indices: list[int],
+        rung: int,
+    ) -> dict[str, object]:
+        input_features = mm_kwargs_batch["input_features"]
+        length = mm_kwargs_batch["length"]
+        if is_list_of(input_features, torch.Tensor):
+            # pad-up-in-crop: select rows and zero-pad the time axis to the rung,
+            # so the model takes its tensor path on a fixed [n, mel, rung] batch
+            # (CUDA-graph friendly). The pad value matches the encoder's own
+            # pad_sequence(padding_value=0.0).
+            feats = []
+            for i in indices:
+                f = input_features[i]  # [mel, T_i]
+                pad = rung - f.shape[-1]
+                if pad > 0:
+                    f = F.pad(f, (0, pad))
+                feats.append(f[..., :rung])
+            feats = torch.stack(feats, dim=0)  # [n, mel, rung]
+        else:
+            rows = torch.tensor(indices, dtype=torch.long, device=input_features.device)
+            feats = input_features[rows, :, :rung]
+        return {
+            "input_features": feats,
+            "length": length[torch.tensor(indices, dtype=torch.long, device=length.device)],
+        }
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 
@@ -2214,6 +2272,13 @@ class CohereAsrForConditionalGeneration(
             tower_targets={"audio": (ConformerEncoder, CohereASRProjector)},
         ):
             self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
+        install_encoder_bucketing(
+            self,
+            {"audio": self.model.encoder},
+            CohereASRBucketingSpec(),
+            model_type=config.model_type,
+            additional_config=getattr(vllm_config, "additional_config", None),
+        )
 
         head_config = config.head
 
