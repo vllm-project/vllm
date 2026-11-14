@@ -27,6 +27,13 @@ from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 logger = init_logger(__name__)
 
 
+def _frame_to_hwc(frame: MediaWithBytes[Image.Image | torch.Tensor]) -> npt.NDArray:
+    """Convert a frame loaded by `ImageMediaIO` to an HWC array."""
+    if isinstance(frame.media, torch.Tensor):
+        return frame.media.permute(1, 2, 0).numpy()
+    return np.asarray(frame)
+
+
 class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
@@ -153,7 +160,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 frame_parts = data.split(",")
 
             frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
+                [_frame_to_hwc(load_frame(frame_data)) for frame_data in frame_parts]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
