@@ -346,7 +346,9 @@ def _create_decode_vllm_config(
         max_num_seqs=max_num_seqs
     )
     vllm_config.parallel_config = ParallelConfig()
-    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
+    vllm_config.cache_config = SimpleNamespace(
+        use_kda_recoverssm=use_kda_recoverssm, use_gdn_recoverssm=False
+    )
     vllm_config.num_speculative_tokens = num_speculative_tokens
     if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
