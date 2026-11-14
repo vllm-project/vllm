@@ -112,7 +112,10 @@ class UVAOffloader(BaseOffloader):
                     continue
 
             cpu_data = p.data.to(device="cpu")
-            if self.pin_memory:
+            # Only pin memory when UVA offloading is disabled.
+            # With UVA, GPU accesses CPU memory directly via zero-copy,
+            # so pinned memory is unnecessary and causes overallocation.
+            if self.pin_memory and not self.uva_offloading:
                 cpu_data = cpu_data.pin_memory()
 
             if not self.uva_offloading:
