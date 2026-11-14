@@ -79,9 +79,9 @@ def k2sync() -> bool:
     """``VLLM_K31_BEAT_K2SYNC``: the cheap spin-wait polls (``sync._spin``) and
     the router's bounded candidate ranking (``moe.stage_route``). Read at trace
     time; in every build's key (``key_tuple``) when on."""
-    from vllm import envs
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import K2SYNC, lever_on
 
-    return bool(envs.VLLM_K31_BEAT_K2SYNC)
+    return lever_on(K2SYNC)
 
 
 # The execution model every mono kernel is written for.

@@ -301,12 +301,15 @@ def indexer_prep_on(w) -> bool:
     """D1a runs the MXFP4 indexer's prep (``VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER``
     with ``VLLM_K3_FUSED_INDEXER_PREP``): a layer that runs its own 2048-wide top-k
     with 32 x 128 heads."""
-    import vllm.envs as envs
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import (
+        PROLOGUE_INDEXER,
+        lever_on,
+    )
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import dsa_pre
 
     ind = w.indexer
     return (
-        envs.VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER
+        lever_on(PROLOGUE_INDEXER)
         and getattr(ind, "fused_prep", False)
         and not w.skip_topk
         and ind.index_num_heads == dsa_pre.IVN

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The closed-form bs=1 MLA planner (VLLM_K31_BEAT_DRAFTMETA) against aiter's
-serial planner: identical schedules, identical attention output, and a
-graph-captured plan that follows the KV length on replay. Plus the CPU-only
-parts of VLLM_K31_BEAT_DRAFTMETA: when the builder uses the planner, and which
-attention groups the target step drops."""
+"""The closed-form bs=1 MLA planner (VLLM_K31_BEAT_DRAFTMETA,
+``levers.mla_bs1_meta``) against aiter's serial planner: identical schedules,
+identical attention output, and a graph-captured plan that follows the KV length
+on replay. Plus the CPU-only parts of VLLM_K31_BEAT_DRAFTMETA: when the wrapped
+planner takes the call (``levers.mla``), and which attention groups the target
+step drops (``KimiK3ModelState``)."""
 
 from types import SimpleNamespace
 
@@ -68,7 +69,9 @@ def _aiter_plan(bufs, kv_indptr, qlen, causal, dtype):
 def test_bs1_planner_matches_aiter(qlen, causal):
     from aiter import dtypes
 
-    from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import AiterMlaBs1Planner
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla_bs1_meta import (
+        AiterMlaBs1Planner,
+    )
 
     fp8 = dtypes.fp8
     planner = AiterMlaBs1Planner(*_bufs(fp8))
@@ -89,7 +92,9 @@ def test_bs1_planner_verifies_on_builder_sized_buffers(max_num_seqs, qlen, causa
     the closed-form plan has to as well or verify turns the planner off."""
     from aiter import dtypes
 
-    from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import AiterMlaBs1Planner
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla_bs1_meta import (
+        AiterMlaBs1Planner,
+    )
 
     fp8 = dtypes.fp8
     planner = AiterMlaBs1Planner(*_bufs(fp8, max_num_seqs))
@@ -102,7 +107,9 @@ def test_bs1_planner_attention_output_identical(kv_len):
     from aiter import dtypes
     from aiter.mla import mla_decode_fwd
 
-    from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import AiterMlaBs1Planner
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla_bs1_meta import (
+        AiterMlaBs1Planner,
+    )
 
     torch.manual_seed(0)
     fp8, qlen = dtypes.fp8, 7
@@ -149,7 +156,9 @@ def test_bs1_planner_attention_output_identical(kv_len):
 def test_bs1_planner_graph_replay_tracks_kv_len():
     from aiter import dtypes
 
-    from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import AiterMlaBs1Planner
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla_bs1_meta import (
+        AiterMlaBs1Planner,
+    )
 
     fp8, qlen = dtypes.fp8, 7
     planner = AiterMlaBs1Planner(*_bufs(fp8))
@@ -182,32 +191,56 @@ def test_bs1_planner_graph_replay_tracks_kv_len():
         ]
 
 
-def test_drop_draft_only_attn_groups():
+def _group(names, mamba=False):
     from vllm.v1.kv_cache_interface import MambaSpec
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
-    spec = object.__new__(DFlashSpeculator)
-    spec.draft_attn_layer_names = {"draft.0.attn", "draft.1.attn"}
-    runner = SimpleNamespace(speculator=spec)
+    kv_spec = object.__new__(MambaSpec) if mamba else object()
+    return SimpleNamespace(layer_names=names, kv_cache_spec=kv_spec)
 
-    def group(names, mamba=False):
-        kv_spec = object.__new__(MambaSpec) if mamba else object()
-        return SimpleNamespace(layer_names=names, kv_cache_spec=kv_spec)
 
-    target = group(["model.0.attn", "model.3.attn"])
-    draft = group(["draft.0.attn", "draft.1.attn"])
-    mamba = group(["model.1.kda"], mamba=True)
-    mixed = group(["model.5.attn", "draft.1.attn"])
+def test_drop_draft_only_attn_groups(monkeypatch):
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import runner
+    from vllm.models.kimi_k3.amd.specialized_decode.model_state import (
+        KimiK3ModelState,
+        drop_draft_only_attn_groups,
+    )
+
+    draft_layers = {"draft.0.attn", "draft.1.attn"}
+    target = _group(["model.0.attn", "model.3.attn"])
+    draft = _group(["draft.0.attn", "draft.1.attn"])
+    mamba = _group(["model.1.kda"], mamba=True)
+    mixed = _group(["model.5.attn", "draft.1.attn"])
     groups = [[target], [draft], [mamba], [mixed, draft]]
+    dropped = [[target], [], [mamba], [mixed]]
 
-    out = GPUModelRunner._drop_draft_only_attn_groups(runner, groups)
     # Positions kept (block tables index by group id); only draft-only gone.
-    assert out == [[target], [], [mamba], [mixed]]
+    assert drop_draft_only_attn_groups(groups, draft_layers) == dropped
 
-    # Other speculators keep every group (they may reuse target metadata).
-    runner.speculator = SimpleNamespace(draft_attn_layer_names={"draft.0.attn"})
-    assert GPUModelRunner._drop_draft_only_attn_groups(runner, groups) is groups
+    state = object.__new__(KimiK3ModelState)
+    state._draft_layers = set()
+    state._target_groups = None
+    state.note_draft_attn_layers(draft_layers)
+    # Gate off (no latency_specialized): every group.
+    with runner.target_step():
+        assert state.target_attn_groups(groups) is groups
+    monkeypatch.setattr(levers, "_active", True)
+    # Outside the runner's target step (CUDA-graph capture, the drafter's own
+    # calls): every group.
+    assert state.target_attn_groups(groups) is groups
+    with runner.target_step():
+        assert state.target_attn_groups(groups) == dropped
+        # Filtered once.
+        assert state.target_attn_groups(groups) is state.target_attn_groups(groups)
+        # The profile run's Mamba-less copy: filtered too.
+        profile = [[g for g in gs if g is not mamba] for gs in groups]
+        assert state.target_attn_groups(profile) == [[target], [], [], [mixed]]
+        monkeypatch.setenv("VLLM_K31_BEAT_DRAFTMETA", "0")
+        assert state.target_attn_groups(groups) is groups
+        monkeypatch.setenv("VLLM_K31_BEAT_DRAFTMETA", "1")
+        # A drafter without draft-only layers: every group.
+        state.note_draft_attn_layers(set())
+        assert state.target_attn_groups(groups) is groups
 
 
 class _MockPlanner:
@@ -227,43 +260,63 @@ class _MockPlanner:
 
 
 def test_use_bs1_planner_gating(monkeypatch):
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-        AiterMLAMetadataBuilder,
-        _DCPDecodeRoute,
-    )
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla import use_bs1_planner
 
     capturing = [False]
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing[0])
     q_dtype, kv_dtype = torch.float8_e4m3fn, torch.float8_e4m3fn
     planner = _MockPlanner()
+    bufs = [torch.empty(1) for _ in range(6)]
     builder = SimpleNamespace(
-        _bs1_planner=planner, _mla_q_dtype=q_dtype, _mla_kv_dtype=kv_dtype
+        _sd_bs1_planner=planner,
+        _mla_work_meta_data=bufs[0],
+        _mla_work_info_set=bufs[1],
+        _mla_work_indptr=bufs[2],
+        _mla_reduce_indptr=bufs[3],
+        _mla_reduce_final_map=bufs[4],
+        _mla_reduce_partial_map=bufs[5],
     )
-    ok = dict(
-        num_kernel_reqs=1,
-        max_qo_len=8,
-        uni_qo_len=8,
-        num_heads=H,
-        is_causal=False,
-        dcp_route=_DCPDecodeRoute.PLAIN,
-        cprr_kwargs={},
+    ok_args = (
+        torch.tensor([0, 8]),
+        torch.tensor([0, 1000]),
+        torch.ones(1),
+        H,
+        1,
+        False,
+        *bufs,
+    )
+    ok_kwargs = dict(
+        page_size=1,
+        kv_granularity=16,
+        max_seqlen_qo=8,
+        uni_seqlen_qo=8,
+        fast_mode=True,
+        dtype_q=q_dtype,
+        dtype_kv=kv_dtype,
     )
 
-    def use(**kw):
-        return AiterMLAMetadataBuilder._use_bs1_planner(builder, **{**ok, **kw})
+    def use(args=None, **kw):
+        return use_bs1_planner(builder, args or ok_args, {**ok_kwargs, **kw})
 
-    # Anything but one uniform-qo multi-token request on the plain route keeps
-    # aiter's planner, without running the verify.
-    for kw in (
-        dict(num_kernel_reqs=2),
-        dict(max_qo_len=1, uni_qo_len=1),
-        dict(uni_qo_len=-1),
-        dict(is_causal=torch.tensor(True)),
-        dict(dcp_route=_DCPDecodeRoute.CPRR),
-        dict(dcp_route=_DCPDecodeRoute.SEGMENTED),
-        dict(cprr_kwargs=dict(max_split_per_batch=4)),
+    def with_arg(i, value):
+        return ok_args[:i] + (value,) + ok_args[i + 1 :]
+
+    # Anything but one uniform-qo multi-token request on the plain schedule
+    # into the builder's own buffers keeps aiter's planner, without running
+    # the verify.
+    for args, kw in (
+        (with_arg(0, torch.tensor([0, 8, 16])), {}),
+        (with_arg(1, torch.tensor([0, 10, 20])), {}),
+        (with_arg(4, 2), {}),
+        (with_arg(5, torch.tensor(True)), {}),
+        (with_arg(6, torch.empty(1)), {}),
+        (None, dict(max_seqlen_qo=1, uni_seqlen_qo=1)),
+        (None, dict(uni_seqlen_qo=-1)),
+        (None, dict(page_size=16)),
+        (None, dict(is_cp_round_robin=True)),
+        (None, dict(max_split_per_batch=4, intra_batch_mode=False)),
     ):
-        assert not use(**kw), kw
+        assert not use(args, **kw), (args, kw)
     assert planner.verify_calls == []
 
     # An unverified shape is never verified inside graph capture.
@@ -280,13 +333,44 @@ def test_use_bs1_planner_gating(monkeypatch):
     assert planner.verify_calls == [(8, H, False, q_dtype, kv_dtype)]
     # A new shape (causal) is its own verify.
     capturing[0] = False
-    assert use(is_causal=True)
+    assert use(with_arg(5, True))
     assert len(planner.verify_calls) == 2
 
     # A failed verify keeps aiter's planner.
-    builder._bs1_planner = _MockPlanner(verify_ok=False)
+    builder._sd_bs1_planner = _MockPlanner(verify_ok=False)
     assert not use()
 
-    # Flag off: the builder has no planner.
-    builder._bs1_planner = None
-    assert not use()
+
+def test_planner_hook_only_inside_build_decode(monkeypatch):
+    """The wrapped AITER planner takes the call only inside a wrapped
+    ``_build_decode`` with the gate and the flag on; otherwise AITER's runs."""
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import mla
+
+    calls = []
+    planned = []
+    monkeypatch.setattr(mla, "use_bs1_planner", lambda b, a, k: True)
+    monkeypatch.setattr(
+        mla,
+        "bs1_planner",
+        lambda b: SimpleNamespace(plan=lambda kv, q: planned.append(q)),
+    )
+    planner = mla._wrap_planner(lambda *a, **k: calls.append(k["max_seqlen_qo"]))
+    assert planner.aiter_planner is not planner
+    builder = SimpleNamespace(_asm_dcp_verify=False)
+    build = mla._wrap_build_decode(lambda self: planner(0, 0, max_seqlen_qo=7))
+
+    planner(0, 0, max_seqlen_qo=1)  # outside _build_decode
+    build(builder)  # gate off
+    monkeypatch.setattr(levers, "_active", True)
+    monkeypatch.setenv("VLLM_K31_BEAT_DRAFTMETA", "0")
+    build(builder)  # flag off
+    monkeypatch.setenv("VLLM_K31_BEAT_DRAFTMETA", "1")
+    builder._asm_dcp_verify = True
+    build(builder)  # asm DCP verify
+    assert planned == [] and calls == [1, 7, 7, 7]
+    builder._asm_dcp_verify = False
+    build(builder)
+    assert planned == [7] and calls == [1, 7, 7, 7]
+    planner(0, 0, max_seqlen_qo=2)  # the builder is unset after the call
+    assert calls == [1, 7, 7, 7, 2]

@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""VLLM_K31_BEAT_EAGERPREP's identity logits slice (``logits_indices_is_identity``,
-``select_logits_rows``): for spec-decode batches the sampler's hidden rows, and
-so the logits, are the gather's bit for bit with the flag on or off; the slice
-is taken exactly when logits_indices is the identity, every other batch keeps
-the gather."""
+"""VLLM_K31_BEAT_EAGERPREP's identity logits slice (``levers.runner``:
+``logits_indices_is_identity``, ``select_logits_rows``): for spec-decode batches
+the sampler's hidden rows, and so the logits, are the gather's bit for bit with
+the flag on or off; the slice is taken exactly when logits_indices is the
+identity, every other batch keeps the gather; the runner patches only take it
+under latency_specialized."""
+
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.input_batch import (
-    combine_sampled_and_draft_tokens,
+from vllm.models.kimi_k3.amd.specialized_decode.levers.runner import (
     logits_indices_is_identity,
     select_logits_rows,
 )
+from vllm.v1.worker.gpu.input_batch import combine_sampled_and_draft_tokens
 
 MAX_NUM_REQS = 8
 HIDDEN = 64
@@ -123,3 +126,40 @@ def test_ref_indices_match_combine_kernel(case):
         num_bonus,
     )
     assert torch.equal(indices.cpu(), _ref_logits_indices(cu, qsl, num_reqs))
+
+
+def test_runner_patches_mark_only_under_the_gate(monkeypatch):
+    """``prepare_inputs`` marks an identity batch only with the gate and the
+    flag on; ``sample`` takes the slice path only for a marked batch."""
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import runner
+
+    cu, qsl, num_reqs = _host_batch([8], [7], 1, None)
+    batch = SimpleNamespace(
+        cu_num_logits_np=cu,
+        query_start_loc_np=qsl,
+        num_reqs=num_reqs,
+        num_draft_tokens_per_req=np.array([7], dtype=np.int32),
+    )
+    model_runner = SimpleNamespace(
+        adaptive_verification=None, pcp_manager=None, batch_sharder=None
+    )
+    prepare = runner._wrap_prepare_inputs(lambda self, *a: batch)
+    stock_calls = []
+    sample = runner._wrap_sample(lambda self, *a: stock_calls.append(a) or "stock")
+    monkeypatch.setattr(runner, "_sample_identity", lambda *a: "identity")
+    so = SimpleNamespace(scheduled_spec_decode_tokens={})
+
+    def step():
+        prepare(model_runner, so, None, None, 0)
+        return sample(model_runner, None, batch, None)
+
+    assert step() == "stock" and getattr(batch, runner.IDENTITY) is False
+    monkeypatch.setattr(levers, "_active", True)
+    assert step() == "identity" and getattr(batch, runner.IDENTITY) is True
+    monkeypatch.setenv("VLLM_K31_BEAT_EAGERPREP", "0")
+    assert step() == "stock" and getattr(batch, runner.IDENTITY) is False
+    monkeypatch.setenv("VLLM_K31_BEAT_EAGERPREP", "1")
+    model_runner.batch_sharder = object()
+    assert step() == "stock"
+    assert len(stock_calls) == 3

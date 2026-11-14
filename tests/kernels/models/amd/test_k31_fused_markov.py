@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""VLLM_K31_BEAT_MARKOV's fused Markov launches (kimi_k3/amd/ops/markov_sample)
+"""VLLM_K31_BEAT_MARKOV's fused Markov launches (kimi_k3/amd/ops/markov_sample,
+taken through specialized_decode/levers/dspark under latency_specialized)
 against vLLM's DSparkSpeculator._sample_sequential loop, at Kimi-K3.1 DSpark's
 shapes (vocabulary 163840, Markov rank 512, 7 draft steps).
 
@@ -135,15 +136,31 @@ def _speculator(temp: float, seed: int, row_mapped: bool):
     return s
 
 
-def _run(monkeypatch, s, num_reqs, fused: bool):
-    import vllm.envs as envs
+def _sample_sequential(s, num_reqs, hidden):
+    """``DSparkSpeculator._sample_sequential`` as ``levers.dspark`` patches it
+    under latency_specialized."""
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import dspark
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-    monkeypatch.setattr(envs, "VLLM_K31_BEAT_MARKOV", fused, raising=False)
+    dspark._wrap_sample_sequential(DSparkSpeculator._sample_sequential)(
+        s, num_reqs, hidden
+    )
+
+
+def _set_markov(monkeypatch, on: bool):
+    import vllm.envs as envs
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+
+    monkeypatch.setattr(levers, "_active", True)
+    monkeypatch.setattr(envs, "VLLM_K31_BEAT_MARKOV", on, raising=False)
+
+
+def _run(monkeypatch, s, num_reqs, fused: bool):
+    _set_markov(monkeypatch, fused)
     s.draft_tokens.zero_()
     s.draft_logits.values.zero_()
     hidden = torch.zeros(MAX_REQS * N_SPEC, 8, device="cuda")
-    DSparkSpeculator._sample_sequential(s, num_reqs, hidden)
+    _sample_sequential(s, num_reqs, hidden)
     torch.accelerator.synchronize()
     return s.draft_tokens.clone(), s.draft_logits.values.clone()
 
@@ -184,6 +201,7 @@ def _cache_rows(s, num_reqs):
 @pytest.mark.parametrize("num_reqs", [1, 2, 5])
 def test_k31_fused_markov_matches_vllm_loop(monkeypatch, num_reqs, temp, row_mapped):
     from vllm.models.kimi_k3.amd.ops import markov_sample
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import dspark
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
     # The server takes the fused launches for 1 request only (MAX_ROWS); they
@@ -198,7 +216,7 @@ def test_k31_fused_markov_matches_vllm_loop(monkeypatch, num_reqs, temp, row_map
     # The fused launches ran (no silent fallback to vLLM's loop), and left
     # their slots cleared for the next call (or graph replay).
     assert ran == [True]
-    assert DSparkSpeculator._fused_markov_ok(s, num_reqs)
+    assert dspark.fused_markov_ok(s, num_reqs)
     _assert_slots_clear()
 
     rows = _cache_rows(s, num_reqs)
@@ -299,22 +317,19 @@ def test_k31_fused_markov_graph_replay(monkeypatch, row_mapped):
     graph, and replayed with new base logits, seeds and anchors: each replay
     matches an eager call, keeps the tokens in the vocabulary and leaves the
     slots cleared for the next replay (the last launch clears what it read)."""
-    import vllm.envs as envs
-    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
-
     s = _speculator(1.0, seed=7, row_mapped=row_mapped)
-    monkeypatch.setattr(envs, "VLLM_K31_BEAT_MARKOV", True, raising=False)
+    _set_markov(monkeypatch, True)
     ran = _spy_run(monkeypatch)
     hidden = torch.zeros(MAX_REQS * N_SPEC, 8, device="cuda")
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         for _ in range(2):
-            DSparkSpeculator._sample_sequential(s, 1, hidden)
+            _sample_sequential(s, 1, hidden)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        DSparkSpeculator._sample_sequential(s, 1, hidden)
+        _sample_sequential(s, 1, hidden)
     assert ran == [True] * 3
 
     g = torch.Generator(device="cuda").manual_seed(1234)
@@ -336,7 +351,7 @@ def test_k31_fused_markov_graph_replay(monkeypatch, row_mapped):
         g_cache = s.draft_logits.values.clone()
         assert bool(((g_tok >= 0) & (g_tok < VOCAB)).all()), (i, g_tok.tolist())
         _assert_slots_clear()
-        DSparkSpeculator._sample_sequential(s, 1, hidden)
+        _sample_sequential(s, 1, hidden)
         torch.accelerator.synchronize()
         assert torch.equal(s.draft_tokens[0], g_tok), (
             i,

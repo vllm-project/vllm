@@ -124,12 +124,10 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
-    logits_indices_is_identity,
     post_update,
     post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
-    select_logits_rows,
     set_dummy_context,
 )
 from vllm.v1.worker.gpu.kv_connector import (
@@ -190,7 +188,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
-    AttentionGroup,
     KVBlockZeroer,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
@@ -330,9 +327,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Speculative decoding.
         self.speculator = None
-        # (attn_groups, draft layer names, filtered groups); see
-        # _drop_draft_only_attn_groups.
-        self._target_attn_groups: tuple | None = None
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -1147,34 +1141,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.cudagraph_manager.needs_capture()
         )
 
-    def _drop_draft_only_attn_groups(
-        self, attn_groups: list[list[AttentionGroup]]
-    ) -> list[list[AttentionGroup]]:
-        """Attention groups the target step has to build metadata for.
-
-        DFlash-family drafters (DFlash, DSpark) rebuild their own attention
-        metadata from their own builders and never read the target step's, so
-        groups holding only draft layers are dead work there. Group positions
-        are kept (an emptied group is skipped by build_attn_metadata)."""
-        from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-            DFlashSpeculator,
-        )
-
-        if not isinstance(self.speculator, DFlashSpeculator):
-            return attn_groups
-        draft = self.speculator.draft_attn_layer_names
-        if not draft:
-            return attn_groups
-        return [
-            [
-                g
-                for g in groups
-                if isinstance(g.kv_cache_spec, MambaSpec)
-                or not set(g.layer_names) <= draft
-            ]
-            for groups in attn_groups
-        ]
-
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
@@ -1693,17 +1659,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
-        if (
-            envs.VLLM_K31_BEAT_EAGERPREP
-            and adaptive_verification is None
-            and num_draft_tokens_per_req is not None
-            and self.pcp_manager is None
-        ):
-            # Adaptive verification reallocates the drafts on the GPU only (the
-            # host cumsums no longer describe logits_indices); PCP repartitions.
-            input_batch.logits_indices_is_identity = logits_indices_is_identity(
-                cu_num_logits_np, query_start_loc_np, num_reqs
-            )
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
         return input_batch
@@ -1768,11 +1723,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = select_logits_rows(
-                hidden_states,
-                input_batch.logits_indices,
-                input_batch.logits_indices_is_identity,
-            )
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
         invalid_drafts = None
@@ -2077,22 +2028,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             assert block_tables is not None
             attn_groups = self.attn_groups
-            if envs.VLLM_K31_BEAT_DRAFTMETA:
-                # Both inputs are fixed once the KV cache is set up; filter once.
-                draft = getattr(self.speculator, "draft_attn_layer_names", None)
-                cached = self._target_attn_groups
-                if (
-                    cached is None
-                    or cached[0] is not attn_groups
-                    or cached[1] is not draft
-                ):
-                    cached = (
-                        attn_groups,
-                        draft,
-                        self._drop_draft_only_attn_groups(attn_groups),
-                    )
-                    self._target_attn_groups = cached
-                attn_groups = cached[2]
             if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
                 # attention metadata is still built so those kernels tune.

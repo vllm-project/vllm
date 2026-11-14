@@ -27,11 +27,9 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
@@ -168,19 +166,6 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
-    def _fused_markov_ok(self, num_reqs: int) -> bool:
-        """Whether VLLM_K31_BEAT_MARKOV's fused Markov launches (ROCm) take
-        this draft step's loop."""
-        if not (envs.VLLM_K31_BEAT_MARKOV and current_platform.is_rocm()):
-            return False
-        from vllm.models.kimi_k3.amd.ops import markov_sample
-
-        why = markov_sample.why_not(self, num_reqs)
-        if why is not None:
-            logger.info_once("DSpark fused Markov sampling off: %s", why)
-            return False
-        return True
-
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
@@ -203,12 +188,6 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits = self.model.compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
-
-        if self._fused_markov_ok(num_reqs):
-            from vllm.models.kimi_k3.amd.ops import markov_sample
-
-            if markov_sample.run(self, num_reqs, base_logits):
-                return
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)

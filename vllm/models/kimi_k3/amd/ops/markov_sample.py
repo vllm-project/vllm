@@ -30,13 +30,15 @@ bias dot product differs from the GEMV's (as with any GEMM tiling), so a bias
 value can differ in its last bf16 bit. Graph capturable: fixed launches, slots
 allocated (zeroed) once and cleared by the launches themselves.
 
-Enabled by VLLM_K31_BEAT_MARKOV=1, for Kimi-K3 DSpark drafts only.
+Enabled by VLLM_K31_BEAT_MARKOV (default 1) under
+decode_backend=latency_specialized only, for Kimi-K3 DSpark drafts only.
 tests/kernels/models/amd/test_k31_fused_markov.py compares it with vLLM's loop.
 deepseek_v41/amd/ops/fused_markov.py is the same scheme for DeepSeek-V4.1 on
 gfx942, reached through the draft model's ``sample_sequential``. That hook
 would turn off the batch-sharded draft logits cache
 (``supports_batch_sharded_draft_logits``), which these launches honour
-(``row_mapping``), so the speculator calls them directly instead.
+(``row_mapping``), so the speculator's ``_sample_sequential`` is patched to call
+them instead (``specialized_decode/levers/dspark.py``).
 """
 
 import torch

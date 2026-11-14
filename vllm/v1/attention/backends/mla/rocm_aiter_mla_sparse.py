@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -608,97 +607,6 @@ def generate_sparse_seqlen_triton(
     return out
 
 
-@triton.jit(do_not_specialize=["num_reqs", "num_tokens", "indptr_len"])
-def _sparse_indptr_fused_kernel(
-    seq_len_ptr,
-    cu_query_lens_ptr,
-    indptr_ptr,
-    num_reqs,
-    num_tokens,
-    indptr_len,
-    topk_token,
-    BLOCK_T: tl.constexpr,
-    BLOCK_TAIL: tl.constexpr,
-):
-    """VLLM_K31_BEAT_EAGERPREP: generate_sparse_seqlen + cumsum into
-    indptr[1:num_tokens+1] + tail fill with indptr[num_tokens], one launch.
-    Every program recomputes the (tiny) prefix sum; program 0 writes the
-    head, every program writes one BLOCK_TAIL chunk of the tail."""
-    pid = tl.program_id(0)
-    tok = tl.arange(0, BLOCK_T)
-    tmask = tok < num_tokens
-    # Request owning each token (tokens are all inside query_start_loc).
-    lo = tl.zeros([BLOCK_T], dtype=tl.int32)
-    hi = tl.zeros([BLOCK_T], dtype=tl.int32) + num_reqs
-    while tl.sum((lo < hi).to(tl.int32), 0) > 0:
-        mid = (lo + hi) // 2
-        end = tl.load(
-            cu_query_lens_ptr + mid + 1, mask=mid < num_reqs, other=0x7FFFFFFF
-        )
-        right = (lo < hi) & (end <= tok)
-        lo = tl.where(right, mid + 1, lo)
-        hi = tl.where((lo < hi) & ~right, mid, hi)
-    req = tl.minimum(lo, num_reqs - 1)
-    qs = tl.load(cu_query_lens_ptr + req, mask=tmask, other=0)
-    qe = tl.load(cu_query_lens_ptr + req + 1, mask=tmask, other=0)
-    seq_len = tl.load(seq_len_ptr + req, mask=tmask, other=0)
-    sparse = seq_len - (qe - qs) + (tok - qs)
-    val = tl.where(sparse + 1 < topk_token, sparse + 1, topk_token)
-    val = tl.where(tmask & (seq_len != 0), val, 0)
-    csum = tl.cumsum(val, 0)
-    total = tl.sum(val, 0)
-    if pid == 0:
-        tl.store(indptr_ptr + 1 + tok, csum, mask=tmask)
-    tail = num_tokens + 1 + pid * BLOCK_TAIL + tl.arange(0, BLOCK_TAIL)
-    tl.store(
-        indptr_ptr + tail,
-        tl.zeros([BLOCK_TAIL], dtype=tl.int32) + total,
-        mask=tail < indptr_len,
-    )
-
-
-_SPARSE_INDPTR_BLOCK_T = 256
-_SPARSE_INDPTR_BLOCK_TAIL = 2048
-
-
-def sparse_indptr_fused(
-    seq_lens: torch.Tensor,
-    cu_query_lens: torch.Tensor,
-    indptr: torch.Tensor,
-    topk_token: int,
-    num_tokens: int,
-) -> bool:
-    """Exact one-launch replacement of generate_sparse_seqlen_triton + cumsum
-    + tail copy. Returns False (nothing launched) when it does not apply."""
-    num_reqs = cu_query_lens.size(0) - 1
-    if (
-        num_tokens <= 0
-        or num_reqs <= 0
-        or num_tokens > _SPARSE_INDPTR_BLOCK_T
-        or indptr.dtype != torch.int32
-        or not indptr.is_contiguous()
-        or seq_lens.dtype != torch.int32
-        or cu_query_lens.dtype != torch.int32
-    ):
-        return False
-    indptr_len = indptr.numel()
-    tail_len = max(indptr_len - num_tokens - 1, 0)
-    grid = (max(1, triton.cdiv(tail_len, _SPARSE_INDPTR_BLOCK_TAIL)),)
-    _sparse_indptr_fused_kernel[grid](
-        seq_lens,
-        cu_query_lens,
-        indptr,
-        num_reqs,
-        num_tokens,
-        indptr_len,
-        topk_token,
-        BLOCK_T=_SPARSE_INDPTR_BLOCK_T,
-        BLOCK_TAIL=_SPARSE_INDPTR_BLOCK_TAIL,
-        num_warps=4,
-    )
-    return True
-
-
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -992,33 +900,20 @@ class ROCMAiterMLASparseMetadataBuilder(
         if not dcp:
             query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
             seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-            if not (
-                envs.VLLM_K31_BEAT_EAGERPREP
-                and sparse_indptr_fused(
-                    seq_lens,
-                    query_start_loc,
-                    self.paged_kv_indptr,
-                    self.topk_tokens,
-                    num_tokens,
-                )
-            ):
-                sparse_seqlen = generate_sparse_seqlen_triton(
-                    seq_lens,
-                    query_start_loc,
-                    self.topk_tokens,
-                    num_tokens,
-                    common_attn_metadata.max_query_len,
-                )
+            sparse_seqlen = generate_sparse_seqlen_triton(
+                seq_lens,
+                query_start_loc,
+                self.topk_tokens,
+                num_tokens,
+                common_attn_metadata.max_query_len,
+            )
 
-                torch.cumsum(
-                    sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
-                )
-                # fill_() with a value that aliases the destination clones it
-                # first.
-                indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
-                indptr_tail.copy_(
-                    self.paged_kv_indptr[num_tokens].expand_as(indptr_tail)
-                )
+            torch.cumsum(
+                sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
+            )
+            # fill_() with a value that aliases the destination clones it first.
+            indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+            indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
         qo_indptr = self.qo_indptr[: num_tokens + 1]

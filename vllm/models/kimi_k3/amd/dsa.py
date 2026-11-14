@@ -280,11 +280,16 @@ def _sampled_serves(rows, width, k, device_index):
 
 
 def _select(logits, lengths, out, values=None):
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import (
+        SAMPLED_TOPK,
+        lever_on,
+    )
+
     rows, width = logits.shape
     k = out.shape[1]
     if (
         values is None
-        and envs.VLLM_K3_INDEXER_SAMPLED_TOPK
+        and lever_on(SAMPLED_TOPK)
         and logits.stride(1) == 1
         and _sampled_serves(rows, logits.stride(0), k, logits.get_device())
     ):

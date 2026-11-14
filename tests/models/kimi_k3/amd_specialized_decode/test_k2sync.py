@@ -66,8 +66,10 @@ def _clear_builds() -> None:
 
 
 def _set_flag(on: bool) -> None:
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import k2sync
 
+    levers.activate(install_patches=False)  # latency_specialized's gate
     os.environ[FLAG] = "1" if on else "0"
     _clear_builds()  # the flag is in no build dataclass, only in the disk key
     assert k2sync() == on
@@ -77,6 +79,9 @@ def _set_flag(on: bool) -> None:
 def _fresh_builds():
     """No launch traced under one flag value outlives its test."""
     yield
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+
+    levers.deactivate()
     if any(f"{MONO_PKG}.{m}" in sys.modules for m in MONO):
         _clear_builds()
 

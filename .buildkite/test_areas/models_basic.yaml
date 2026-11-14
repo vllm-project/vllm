@@ -531,5 +531,14 @@ steps:
   source_file_dependencies:
   - vllm/models/kimi_k3/amd/
   - tests/models/kimi_k3/amd_specialized_decode/
+  - tests/models/kimi_k3/test_amd_kda_eagerprep.py
+  # The v1 code the levers (specialized_decode/levers/) wrap or copy.
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/spec_decode/dflash/
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
   commands:
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode
+  - pytest -v -s tests/models/kimi_k3/test_amd_kda_eagerprep.py

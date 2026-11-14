@@ -7,7 +7,9 @@ ops then K2 on Kimi-K3.1's DSA layers), inside the stock layer loop. Enabled by
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
 ``hooks.py`` holds the model-side hooks (``SpecializedDecodeMixin``) and
-``model_state.py`` the model runner state that builds the executor. ``runtime/`` is
+``model_state.py`` the model runner state that builds the executor. ``levers/``
+holds the extra c1 / c4 levers (env flags, on by default, off without
+``latency_specialized``) and their patches of vLLM's v1 code. ``runtime/`` is
 the host side: the config check (``runtime/__init__.py``), the executor
 (``runtime/decode.py``), the layer kernels, the per-rank launch state and the later
 refusals. ``mono/`` is the kernel source. Tests live in

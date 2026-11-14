@@ -13,6 +13,9 @@ and a tail shorter than ``tail_done_threshold`` (== ``max_seqlen_qo``) is
 folded into the last split. This kernel writes that plan with one program and
 matches aiter's output entry for entry; ``AiterMlaBs1Planner`` verifies that
 against aiter on the live device before it is ever used.
+
+``VLLM_K31_BEAT_DRAFTMETA`` under ``decode_backend=latency_specialized``: the
+builder side is ``levers.mla``.
 """
 
 import torch
@@ -216,6 +219,10 @@ class AiterMlaBs1Planner:
             return False
         from aiter import get_mla_metadata_v1
 
+        # ``mla.install`` wraps aiter's planner; check against aiter's own.
+        get_mla_metadata_v1 = getattr(
+            get_mla_metadata_v1, "aiter_planner", get_mla_metadata_v1
+        )
         dev = self.work_indptr.device
         if kv_lens is None:
             kv_lens = default_verify_kv_lens()

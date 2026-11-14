@@ -1111,22 +1111,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             dtype=reduce_partial_map_type,
             device=device,
         )
-        # Closed-form planner for one uniform-qo request (the bs=1 draft);
-        # verified against aiter lazily, outside graph capture.
-        self._bs1_planner = None
-        if envs.VLLM_K31_BEAT_DRAFTMETA and not self._asm_dcp_verify:
-            from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import (
-                AiterMlaBs1Planner,
-            )
-
-            self._bs1_planner = AiterMlaBs1Planner(
-                self._mla_work_meta_data,
-                self._mla_work_indptr,
-                self._mla_work_info_set,
-                self._mla_reduce_indptr,
-                self._mla_reduce_final_map,
-                self._mla_reduce_partial_map,
-            )
 
         # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
@@ -1607,36 +1591,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._flat_index_steps = _flat_mla_index_steps(cache)
         return self._flat_index_steps
 
-    def _use_bs1_planner(
-        self,
-        num_kernel_reqs: int,
-        max_qo_len: int,
-        uni_qo_len: int,
-        num_heads: int,
-        is_causal: bool | torch.Tensor,
-        dcp_route: _DCPDecodeRoute,
-        cprr_kwargs: dict,
-    ) -> bool:
-        """Whether this persistent schedule is the single uniform-qo request
-        the closed-form planner reproduces bit-exactly."""
-        planner = self._bs1_planner
-        if (
-            planner is None
-            or num_kernel_reqs != 1
-            or max_qo_len < 2
-            or uni_qo_len != max_qo_len
-            or not isinstance(is_causal, bool)
-            or dcp_route is not _DCPDecodeRoute.PLAIN
-            or cprr_kwargs
-        ):
-            return False
-        key = (max_qo_len, num_heads, is_causal, self._mla_q_dtype, self._mla_kv_dtype)
-        if planner.is_verified(*key):
-            return True
-        if torch.cuda.is_current_stream_capturing():
-            return False
-        return planner.verify(*key)
-
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
@@ -1896,40 +1850,28 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 if dcp_route is _DCPDecodeRoute.CPRR
                 else AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
             )
-            if self._use_bs1_planner(
-                num_kernel_reqs,
-                int(max_qo_len),
-                uni_qo_len,
+            get_mla_metadata_v1(
+                qo_indptr,
+                paged_kv_indptr,
+                paged_kv_last_page_len,
                 metadata_num_heads,
+                1,
                 is_causal,
-                dcp_route,
-                cprr_kwargs,
-            ):
-                assert self._bs1_planner is not None
-                self._bs1_planner.plan(paged_kv_indptr, int(max_qo_len))
-            else:
-                get_mla_metadata_v1(
-                    qo_indptr,
-                    paged_kv_indptr,
-                    paged_kv_last_page_len,
-                    metadata_num_heads,
-                    1,
-                    is_causal,
-                    self._mla_work_meta_data,
-                    self._mla_work_info_set,
-                    self._mla_work_indptr,
-                    self._mla_reduce_indptr,
-                    self._mla_reduce_final_map,
-                    self._mla_reduce_partial_map,
-                    page_size=1,
-                    kv_granularity=16,
-                    max_seqlen_qo=max_qo_len,
-                    uni_seqlen_qo=uni_qo_len,
-                    fast_mode=True,
-                    dtype_q=self._mla_q_dtype,
-                    dtype_kv=self._mla_kv_dtype,
-                    **cprr_kwargs,
-                )
+                self._mla_work_meta_data,
+                self._mla_work_info_set,
+                self._mla_work_indptr,
+                self._mla_reduce_indptr,
+                self._mla_reduce_final_map,
+                self._mla_reduce_partial_map,
+                page_size=1,
+                kv_granularity=16,
+                max_seqlen_qo=max_qo_len,
+                uni_seqlen_qo=uni_qo_len,
+                fast_mode=True,
+                dtype_q=self._mla_q_dtype,
+                dtype_kv=self._mla_kv_dtype,
+                **cprr_kwargs,
+            )
             has_persistent_metadata = True
 
         # Small-head multi-token verify uses mla_gluon's 4-D MTP entry over the

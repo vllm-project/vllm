@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""VLLM_K31_BEAT_EAGERPREP: the fused one-launch KDA spec-decode staging and
-the one-launch num_accepted gather must produce exactly what the reference
+"""VLLM_K31_BEAT_EAGERPREP (under decode_backend=latency_specialized): the fused
+one-launch KDA spec-decode staging, the one-launch num_accepted gather and the
+one-launch sparse MLA indptr must produce exactly what the reference
 (multi-launch) paths produce."""
 
 import dataclasses
@@ -17,6 +18,7 @@ from tests.v1.attention.utils import (
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
+from vllm.models.kimi_k3.amd.specialized_decode import levers
 from vllm.v1.kv_cache_interface import MambaSpec
 
 if not torch.cuda.is_available():
@@ -172,6 +174,10 @@ def test_fused_spec_staging_matches_reference(
 
     monkeypatch.setattr(new_b, "_build_spec_decode_fused", spy)
     monkeypatch.setenv("VLLM_K31_BEAT_EAGERPREP", "1")
+    # Default 1, but only under latency_specialized's gate.
+    new_b.build(0, m, accepted.clone(), draft_cpu.clone())
+    assert took == []
+    monkeypatch.setattr(levers, "_active", True)
     new = new_b.build(0, m, accepted.clone(), draft_cpu.clone())
     torch.accelerator.synchronize()
     assert took == [expect_fused]
@@ -195,7 +201,9 @@ def test_fused_spec_staging_matches_reference(
 
 @pytest.mark.parametrize("num_real,num_padded", [(1, 1), (1, 4), (3, 3), (5, 300)])
 def test_gather_num_accepted(num_real, num_padded):
-    from vllm.v1.worker.gpu.model_states.mamba_hybrid import gather_num_accepted
+    from vllm.models.kimi_k3.amd.specialized_decode.model_state import (
+        gather_num_accepted,
+    )
 
     src = torch.randint(1, 9, (512,), dtype=torch.int32, device=DEVICE)
     idx = torch.randperm(512, device=DEVICE)[:num_real].to(torch.int64)
@@ -222,9 +230,11 @@ def test_gather_num_accepted(num_real, num_padded):
 )
 @pytest.mark.parametrize("indptr_len", [257, 16385, 7])
 def test_sparse_indptr_fused_matches_reference(query_lens, seq_lens, indptr_len):
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla import (
+        sparse_indptr_fused,
+    )
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         generate_sparse_seqlen_triton,
-        sparse_indptr_fused,
     )
 
     topk = 2048
@@ -247,7 +257,7 @@ def test_sparse_indptr_fused_matches_reference(query_lens, seq_lens, indptr_len)
 
 
 def test_sparse_indptr_fused_falls_back_past_one_block():
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    from vllm.models.kimi_k3.amd.specialized_decode.levers.mla import (
         _SPARSE_INDPTR_BLOCK_T,
         sparse_indptr_fused,
     )

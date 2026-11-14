@@ -242,13 +242,16 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
 @pytest.mark.parametrize("tied", [False, True])
 @pytest.mark.parametrize("pitched", [False, True])
 def test_sampled_select_matches_decode(monkeypatch, width, length, rows, tied, pitched):
-    """VLLM_K3_INDEXER_SAMPLED_TOPK: AITER's sampled select under a graph
-    picks the decode kernel's set, including rows shorter than k. ``tied``:
-    coarse logits (as MXFP4 scores are) with ties at the k-th value, where
-    either select may keep a different tied index: the same values then.
-    ``pitched``: the logits a column slice of a wider row pitch."""
+    """VLLM_K3_INDEXER_SAMPLED_TOPK (under latency_specialized): AITER's
+    sampled select under a graph picks the decode kernel's set, including rows
+    shorter than k. ``tied``: coarse logits (as MXFP4 scores are) with ties at
+    the k-th value, where either select may keep a different tied index: the
+    same values then. ``pitched``: the logits a column slice of a wider row
+    pitch."""
     from vllm.models.kimi_k3.amd.dsa import _sampled_serves, _select
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
 
+    monkeypatch.setattr(levers, "_active", True)  # latency_specialized's gate
     cols = width // 2 if pitched else width
     length = min(length, cols)
     if not _sampled_serves(rows, width, TOPK, torch.accelerator.current_device_index()):

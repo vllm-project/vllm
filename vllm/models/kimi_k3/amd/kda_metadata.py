@@ -11,12 +11,12 @@ from dataclasses import replace
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.levers import EAGERPREP, lever_on
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -227,7 +227,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
-        if envs.VLLM_K31_BEAT_EAGERPREP:
+        if lever_on(EAGERPREP):
             fused = self._build_spec_decode_fused(
                 common_attn_metadata, num_accepted_tokens, num_decode_draft_tokens_cpu
             )

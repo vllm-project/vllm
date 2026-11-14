@@ -229,12 +229,12 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
-    VLLM_K3_INDEXER_SAMPLED_TOPK: bool = False
-    VLLM_K31_BEAT_MARKOV: bool = False
-    VLLM_K31_BEAT_DRAFTMETA: bool = False
-    VLLM_K31_BEAT_K2SYNC: bool = False
-    VLLM_K31_BEAT_EAGERPREP: bool = False
-    VLLM_K31_BEAT_KDAK1: bool = False
+    VLLM_K3_INDEXER_SAMPLED_TOPK: bool = True
+    VLLM_K31_BEAT_MARKOV: bool = True
+    VLLM_K31_BEAT_DRAFTMETA: bool = True
+    VLLM_K31_BEAT_K2SYNC: bool = True
+    VLLM_K31_BEAT_EAGERPREP: bool = True
+    VLLM_K31_BEAT_KDAK1: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
     VLLM_KIMI_SD_DSA_FOLD: bool = True
@@ -242,7 +242,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_SD_DSA_VERIFY: bool = False
     VLLM_K3_KDA_FB_STRIDED: bool = True
     VLLM_KIMI_SD_DSA_PROLOGUE: bool = False
-    VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER: bool = False
+    VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER: bool = True
     VLLM_K3_DSA_FUSED_NORM_GATE: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
@@ -1807,40 +1807,44 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Kimi-K3.1 indexer decode top-k on ROCm: AITER's sampled select (three
     # launches whose cost follows the row pitch, ~21 us at 8 rows of 1M on
     # MI355X) instead of the per-row decode kernel, which follows the live
-    # length (~7 us at 2k, ~40 us at 360k). Wins on long contexts.
+    # length (~7 us at 2k, ~40 us at 360k). Wins on long contexts. Under
+    # decode_backend=latency_specialized only.
     "VLLM_K3_INDEXER_SAMPLED_TOPK": lambda: bool(
-        int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0"))
+        int(os.getenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "1"))
     ),
     # Kimi-K3.1 DSpark drafting on ROCm, one request: each sequential Markov
     # draft step (bias GEMV, bf16 add, Gumbel sample, token copy) as one fused
-    # launch over the vocabulary instead of ~9 launches.
-    "VLLM_K31_BEAT_MARKOV": lambda: bool(int(os.getenv("VLLM_K31_BEAT_MARKOV", "0"))),
+    # launch over the vocabulary instead of ~9 launches. Under
+    # decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_MARKOV": lambda: bool(int(os.getenv("VLLM_K31_BEAT_MARKOV", "1"))),
     # Kimi-K3.1 DSpark on ROCm: the target step skips the attention metadata of
     # groups that only hold drafter layers (the drafter builds its own), and a
     # single uniform-qo request's AITER MLA work plan comes from a closed-form
     # kernel (checked against get_mla_metadata_v1 once per shape) instead of
-    # AITER's one-wavefront serial planner. Both halves are not K3.1-specific:
-    # the first applies to any DFlash-family drafter, the second to any
-    # ROCM_AITER_MLA single-request uniform-qo decode.
+    # AITER's one-wavefront serial planner. Under
+    # decode_backend=latency_specialized only.
     "VLLM_K31_BEAT_DRAFTMETA": lambda: bool(
-        int(os.getenv("VLLM_K31_BEAT_DRAFTMETA", "0"))
+        int(os.getenv("VLLM_K31_BEAT_DRAFTMETA", "1"))
     ),
     # Kimi-K3.1 specialized decode on MI355X: mono spin waits check the health
     # word and their deadline every 64 polls instead of every poll, a
     # single-word sentinel poll loads its word once, and the MoE router ranks
-    # its live candidates only instead of all 64 lanes.
-    "VLLM_K31_BEAT_K2SYNC": lambda: bool(int(os.getenv("VLLM_K31_BEAT_K2SYNC", "0"))),
+    # its live candidates only instead of all 64 lanes. Under
+    # decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_K2SYNC": lambda: bool(int(os.getenv("VLLM_K31_BEAT_K2SYNC", "1"))),
     # Kimi-K3.1 on ROCm: fewer launches in the eager per-step prep: the KDA
     # spec-decode staging, the sparse-MLA indptr, the num_accepted gather each
     # as one launch, and a slice for the logits rows when logits_indices is
-    # the identity (a pure verify batch).
+    # the identity (a pure verify batch). Under
+    # decode_backend=latency_specialized only.
     "VLLM_K31_BEAT_EAGERPREP": lambda: bool(
-        int(os.getenv("VLLM_K31_BEAT_EAGERPREP", "0"))
+        int(os.getenv("VLLM_K31_BEAT_EAGERPREP", "1"))
     ),
     # Kimi-K3.1 specialized decode on MI355X: KDA's per-token recurrent-state
     # snapshots (K1) stored non-temporal at device scope so they stream out
-    # instead of draining from L2 at kernel end. Bit-exact.
-    "VLLM_K31_BEAT_KDAK1": lambda: bool(int(os.getenv("VLLM_K31_BEAT_KDAK1", "0"))),
+    # instead of draining from L2 at kernel end. Bit-exact. Under
+    # decode_backend=latency_specialized only.
+    "VLLM_K31_BEAT_KDAK1": lambda: bool(int(os.getenv("VLLM_K31_BEAT_KDAK1", "1"))),
     # Kimi-K3.1 specialized decode on MI355X: how the DSA layers' sparse
     # attention runs. "off" keeps vLLM's attention ops then K2; "split" runs
     # it as a split-K launch whose partials K2 combines (with W_UV and the
@@ -1878,8 +1882,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # With VLLM_KIMI_SD_DSA_PROLOGUE: D1a also runs the MXFP4 indexer's prep
     # (key store, top-k reset, query quantize, head weights), leaving
     # kimi_fp4_indexer its scoring and top-k. Needs VLLM_K3_FUSED_INDEXER_PREP.
+    # Under decode_backend=latency_specialized only.
     "VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER": lambda: bool(
-        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER", "0"))
+        int(os.getenv("VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER", "1"))
     ),
     # Kimi-K3.1 DSA layers on ROCm: run the q_a/kv_a RMSNorms as one Triton
     # launch and the output gate (attn_out * sigmoid(g_proj)) as one fused
