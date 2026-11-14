@@ -149,6 +149,25 @@ def test_flashinfer_bf16_query_with_checkpoint_q_scale(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="TRITON_ATTN runs on CUDA and ROCm."
+)
+def test_triton_attn_rejects_fp8_e5m2_kv_cache(vllm_runner, monkeypatch) -> None:
+    """TRITON_ATTN stores an e4m3 cache, so an fp8_e5m2 request must fail at startup."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        pytest.raises(ValueError, match="kv_cache_dtype not supported"),
+        vllm_runner(
+            "facebook/opt-125m",
+            max_model_len=1024,
+            enforce_eager=True,
+            kv_cache_dtype="fp8_e5m2",
+            attention_config={"backend": "TRITON_ATTN"},
+        ),
+    ):
+        pass
+
+
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
 @pytest.mark.parametrize(

@@ -504,22 +504,9 @@ _AUTO_KV = dict(
         # HIP paged-attention decode kernel (head 128, block 16, bf16, `auto` KV).
         ("gfx1201", {}, None, AttentionBackendEnum.TRITON_ATTN),
         ("gfx1100", {}, None, AttentionBackendEnum.TRITON_ATTN),
-        # An fp8 cache is swapped too; fp8_e5m2 keeps ROCM_ATTN (see
-        # get_valid_backends()).
+        # An fp8 cache is swapped too.
         ("gfx1201", {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.TRITON_ATTN),
         ("gfx1100", {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.TRITON_ATTN),
-        (
-            "gfx1201",
-            {"kv_cache_dtype": "fp8_e5m2"},
-            None,
-            AttentionBackendEnum.ROCM_ATTN,
-        ),
-        (
-            "gfx1100",
-            {"kv_cache_dtype": "fp8_e5m2"},
-            None,
-            AttentionBackendEnum.ROCM_ATTN,
-        ),
         # An explicitly selected backend is unchanged.
         (
             "gfx1201",
@@ -551,6 +538,21 @@ def test_rdna_prefers_triton_attn(
         selected_backend=selected_backend, attn_selector_config=config
     )
     assert backend_path == expected_backend.get_path()
+
+
+@pytest.mark.parametrize("arch", ["gfx1201", "gfx1100"])
+def test_rdna_rejects_fp8_e5m2_kv_cache(
+    arch, mock_get_cdna_version, cleared_attention_selector_cache, monkeypatch
+):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx1201", lambda: arch == "gfx1201")
+    monkeypatch.setattr(rocm, "on_gfx1100", lambda: arch == "gfx1100")
+    config = AttentionSelectorConfig(**{**_AUTO_KV, "kv_cache_dtype": "fp8_e5m2"})
+    with pytest.raises(ValueError, match="No valid attention backend"):
+        rocm.RocmPlatform.get_attn_backend_cls(
+            selected_backend=None, attn_selector_config=config
+        )
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
