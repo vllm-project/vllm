@@ -370,6 +370,13 @@ def _fp4_indexer(
     prepped = q_payload is not None
     if prepped:
         assert q_scales is not None and q_weights is not None
+        # pure decode, every key and decode row the caller's; padding rows
+        # past them still get the reset
+        rows = q_payload.shape[0]
+        assert not m.num_prefills and m.num_decode_tokens == rows
+        assert m.slot_mapping.numel() == rows <= q.shape[0]
+        if q.shape[0] > rows:
+            out[rows : q.shape[0]].fill_(-1)
     elif fused_prep:
         # k is the raw projection when k_norm_weight is set.
         store_keys_and_reset(

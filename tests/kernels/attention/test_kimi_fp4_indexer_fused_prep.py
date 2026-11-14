@@ -170,8 +170,9 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
     def run(fused, cache, out, scores):
         prep = {}
         if fused and prepped:
-            # D1a's part, here with the Triton kernels it matches bit for bit
-            store_keys_and_reset(knorm(k)[:tokens], cache, slots, out[:padded])
+            # D1a's part, here with the Triton kernels it matches bit for bit;
+            # the op resets the padding rows past it
+            store_keys_and_reset(knorm(k)[:tokens], cache, slots, out[:tokens])
             payload, q_scales, q_weights, _ = quantize_queries_and_weights(
                 q[:tokens], weights[:tokens], scale, starts, 0, tokens
             )
