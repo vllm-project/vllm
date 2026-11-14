@@ -3,7 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass, replace
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import torch
 
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_num_attention_heads_from_layers,
@@ -57,6 +58,17 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+
+
+class PrefixLMFASegments(NamedTuple):
+    """Non-causal FlashAttention (FA2 or FA3) view of a PrefixLM prefill batch."""
+
+    cu_seqlens_q: torch.Tensor
+    seqused_k: torch.Tensor
+    block_table: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_k: int
+    fa_version: int = 2
 
 
 @dataclass
@@ -91,6 +103,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    prefix_lm_fa: PrefixLMFASegments | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -208,6 +221,26 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
+        # PrefixLM prefill on FlashAttention: FA2 on Ampere and Ada, FA3 on
+        # Hopper. Newer GPUs stay on the Triton kernel here: vLLM's FA2/FA3
+        # builds have no SM 12.x code, and on SM 10.x FA4 and FlashInfer apply
+        # the PrefixLM mask natively in their own backends.
+        self.prefix_lm_fa_version: int | None = None
+        if (
+            current_platform.is_cuda()
+            and getattr(kv_cache_spec, "sliding_window", None) is None
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and kv_cache_spec.head_size <= 256
+        ):
+            if current_platform.is_device_capability_family(
+                80
+            ) and is_fa_version_supported(2):
+                self.prefix_lm_fa_version = 2
+            elif current_platform.is_device_capability_family(
+                90
+            ) and is_fa_version_supported(3):
+                self.prefix_lm_fa_version = 3
+        self.prefix_lm_fa = self.prefix_lm_fa_version is not None
         self.rswa_window = model_config.rswa_window
         # R-SWA restages prefix lengths in build(), which the no-op
         # update_draft_decode_metadata() does not refresh.
@@ -282,6 +315,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
             attn_metadata.mm_prefix_range = mm_ranges
+            if self.prefix_lm_fa:
+                attn_metadata.prefix_lm_fa = self._build_prefix_lm_fa(
+                    common_attn_metadata, mm_ranges
+                )
             attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
                 mm_ranges, num_reqs, seq_lens.device
             )
@@ -298,6 +335,54 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             attn_metadata.rswa_window = self.rswa_window
 
         return attn_metadata
+
+    def _build_prefix_lm_fa(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        mm_ranges: dict[int, list[tuple[int, int]]],
+    ) -> PrefixLMFASegments | None:
+        """Split each request's queries by bidirectional range.
+
+        A query in range ``[start, end]`` attends to keys ``0..end``, which is
+        plain non-causal attention over ``end + 1`` keys, so every
+        (request, range) piece is one FlashAttention-2 sequence. Returns None
+        unless every query token lies in a range, as in a PrefixLM prefill.
+        """
+        seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens is None:
+            return None
+        query_start_loc = common_attn_metadata.query_start_loc_cpu.tolist()
+        cu_seqlens_q = [0]
+        seqused_k: list[int] = []
+        rows: list[int] = []
+        for req_idx in range(common_attn_metadata.num_reqs):
+            query_len = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
+            seq_len = int(seq_lens[req_idx])
+            context_len = seq_len - query_len
+            covered = 0
+            for start, end in sorted(mm_ranges.get(req_idx, ())):
+                first, last = max(start, context_len), min(end + 1, seq_len)
+                if start >= end or first >= last:
+                    continue
+                cu_seqlens_q.append(cu_seqlens_q[-1] + last - first)
+                seqused_k.append(last)
+                rows.append(req_idx)
+                covered += last - first
+            if covered != query_len:
+                return None
+        device = common_attn_metadata.query_start_loc.device
+        return PrefixLMFASegments(
+            cu_seqlens_q=async_tensor_h2d(
+                cu_seqlens_q, dtype=torch.int32, device=device
+            ),
+            seqused_k=async_tensor_h2d(seqused_k, dtype=torch.int32, device=device),
+            block_table=common_attn_metadata.block_table_tensor.index_select(
+                0, async_tensor_h2d(rows, dtype=torch.int64, device=device)
+            ),
+            max_seqlen_q=max(b - a for a, b in zip(cu_seqlens_q, cu_seqlens_q[1:])),
+            max_seqlen_k=max(seqused_k),
+            fa_version=self.prefix_lm_fa_version or 2,
+        )
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
         pass
@@ -588,6 +673,12 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.use_td = td_override
         self._set_kv_ptr_range = current_platform.is_rocm()
+        self.prefix_lm_fa = (
+            alibi_slopes is None
+            and not logits_soft_cap
+            and sinks is None
+            and attn_type == AttentionType.DECODER
+        )
 
     def forward(
         self,
@@ -692,6 +783,31 @@ class TritonAttentionImpl(AttentionImpl):
             v_descale = layer._v_scale.expand(descale_shape)
             k_scale_cache = None
             v_scale_cache = None
+
+        segments = attn_metadata.prefix_lm_fa
+        if (
+            segments is not None
+            and self.prefix_lm_fa
+            and output_scale is None
+            and query.dtype in (torch.bfloat16, torch.float16)
+        ):
+            from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+            flash_attn_varlen_func(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=segments.cu_seqlens_q,
+                max_seqlen_q=segments.max_seqlen_q,
+                seqused_k=segments.seqused_k,
+                max_seqlen_k=segments.max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=False,
+                block_table=segments.block_table,
+                fa_version=segments.fa_version,
+            )
+            return output
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
