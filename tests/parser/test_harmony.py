@@ -286,6 +286,21 @@ class TestParse:
             ("get_current_weather", json.dumps({"location": "Tokyo"}))
         ]
 
+    @pytest.mark.parametrize("stray_text", ["<|end|>", "<|start|>assistant"])
+    def test_tool_name_drops_special_token_text(
+        self, harmony_parser, chat_request, stray_text
+    ):
+        _, _, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                f" to=functions.get_weather{stray_text}<|channel|>commentary json"
+                '<|message|>{"city": "Paris"}<|call|>'
+            ),
+        )
+
+        assert tool_call_tuples(tool_calls) == [("get_weather", '{"city": "Paris"}')]
+
     def test_multiple_tool_calls_varied_formats(self, harmony_parser, chat_request):
         response = [
             tool_call("functions.get_current_weather", '{"location": "Tokyo"}'),
@@ -725,6 +740,21 @@ class TestParseDelta:
         assert delta.reasoning == "Reasoning about query..."
         assert delta.content == "Done"
         assert tool_call_entries(delta) == [(0, "search", '{"query": "vllm"}')]
+
+    def test_tool_name_drops_special_token_text(self, gpt_oss_tokenizer, chat_request):
+        parser = HarmonyParser(gpt_oss_tokenizer)
+
+        delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(
+                " to=functions.get_weather<|end|><|channel|>commentary json"
+                '<|message|>{"city": "Paris"}<|call|>'
+            ),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert tool_call_entries(delta) == [(0, "get_weather", '{"city": "Paris"}')]
 
     def test_tool_index_across_calls(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
