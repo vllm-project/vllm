@@ -212,6 +212,13 @@ Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
 settings rendering decides (structured-output constraint, reasoning gate,
 preprocessed media), which the client copies into its `vllm.GenerateRequest`
 for `Inference.Generate`. See [`render.proto`](proto/render.proto).
+The gRPC port also serves `grpc.health.v1.Health`: `vllm.Render`, `""`,
+`liveness` and `readiness` report `SERVING`, and on shutdown all but `liveness`
+switch to `NOT_SERVING` before the listener closes.
+
+As with `vllm-rs serve`, `--shutdown-timeout` sets how long in-flight requests
+may drain on shutdown (default `0`, which aborts them), and
+`--http-timeout-keep-alive` sets the HTTP keep-alive timeout.
 
 ### Example Request
 

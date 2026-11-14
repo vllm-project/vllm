@@ -439,7 +439,7 @@ The Rust frontend is a separate server from `--grpc` above. Start it with `VLLM_
 | --- | --- |
 | `liveness` | The engine has failed. Pause, sleep, weight updates, and orderly shutdown do not affect it until the listener closes. |
 | `readiness` and `vllm.Inference` | The engine has failed, shutdown has started, the engine is paused (including for a process checkpoint), asleep, or partially awake, or a weight update has not finished successfully. |
-| `vllm.Control` and `""` | The engine has failed or shutdown has started. |
+| `vllm.Control`, `vllm.Render`, and `""` | The engine has failed or shutdown has started. |
 
 Point the startup and liveness probes at `liveness` and the readiness probe at `readiness`. A liveness probe on `readiness` or `vllm.Inference` restarts an engine that stays paused longer than the probe's failure threshold. The listener stops accepting connections when shutdown starts, so probes see the endpoint as unavailable while `--shutdown-timeout` drains in-flight requests.
 

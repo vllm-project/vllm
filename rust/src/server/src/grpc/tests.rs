@@ -63,7 +63,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
-use super::health::{EngineHealth, HealthMonitor};
+use super::health::{EngineHealth, HealthMonitor, HealthSource};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::render_server::Render as _;
@@ -497,7 +497,8 @@ async fn start_grpc_test_server(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
+    let health_monitor =
+        HealthMonitor::register(health_reporter, HealthSource::Engines(engine_health)).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
@@ -3618,14 +3619,19 @@ async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
 /// status, so the render gRPC server's drain finishes.
 #[tokio::test]
 async fn render_grpc_server_shutdown_ends_health_watches() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
-    let addr = listener.local_addr().expect("local addr");
+    let listener = crate::serving::BoundListener::bind(
+        &crate::HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+        },
+        None,
+    )
+    .await
+    .expect("bind grpc listener");
+    let addr = listener.address().to_string();
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let server = tokio::spawn(crate::render::serve_render_grpc(
-        Arc::new(render_state()),
-        MaybeTlsListener::plain(Listener::Tcp(listener)),
-        shutdown.clone(),
-    ));
+    let grpc = crate::render::render_grpc_server(Arc::new(render_state()), listener).await;
+    let server = tokio::spawn(grpc.run(shutdown.clone(), std::future::pending()));
     let channel = Endpoint::from_shared(format!("http://{addr}"))
         .expect("grpc endpoint")
         .connect()
@@ -3650,6 +3656,7 @@ async fn render_grpc_server_shutdown_ends_health_watches() {
         .await
         .expect("server drains")
         .expect("server task")
+        .expect("not aborted")
         .expect("server result");
     drop(client);
 }
