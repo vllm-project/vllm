@@ -145,6 +145,54 @@ def test_hash_routing_backend_selection(
     assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing
 
 
+@pytest.mark.parametrize(
+    ("capability", "ep_config", "expected"),
+    [
+        (120, {}, "HUMMING"),
+        (120, {"use_ep": True, "ep_size": 4}, "HUMMING"),
+        (120, {"use_ep": True, "dp_size": 2}, "DEEPGEMM_MXFP4"),
+        (121, {}, "DEEPGEMM_MXFP4"),
+        (100, {}, "DEEPGEMM_MXFP4"),
+    ],
+    ids=["sm120", "sm120_ep", "sm120_all2all", "sm121", "sm100"],
+)
+def test_deepseek_v4_auto_backend_prefers_humming_on_sm120(
+    dist_init, default_vllm_config, monkeypatch, capability, ep_config, expected
+):
+    """With DeepGEMM and Humming both available, DeepSeek-V4's auto MXFP4 MoE
+    selection takes Humming on SM120 unless EP uses all-to-all."""
+    from dataclasses import replace
+
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+
+    _, config = _dsv4_moe_config(monkeypatch, default_vllm_config, False, "auto")
+    config = replace(
+        config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
+    )
+    platform = mxfp4_oracle.current_platform
+    monkeypatch.setattr(platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        platform, "is_device_capability", lambda cap, device_id=0: cap == capability
+    )
+    monkeypatch.setattr(
+        platform, "is_device_capability_family", lambda cap, device_id=0: False
+    )
+    for experts in (DeepGemmFP4Experts, HummingExpertsBase):
+        monkeypatch.setattr(experts, "_supports_current_device", lambda: True)
+
+    backend, _ = mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(config)
+    assert backend.name == expected
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
 def test_hash_routing_rejects_monolithic_without_support(
     dist_init, default_vllm_config, monkeypatch
