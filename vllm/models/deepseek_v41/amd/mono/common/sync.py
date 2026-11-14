@@ -41,7 +41,7 @@ class Space(Enum):
     PEER = "peer"  # a peer-symmetric region: system-scope hand-off between GPUs
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Addr:
     """A mailbox region's address: the region's name and space, and the traced
     address. The space sets the hand-off's scope: device for SCRATCH, system for

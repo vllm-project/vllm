@@ -1486,6 +1486,13 @@ def test_varlen_with_paged_kv_dynamic_causal(
     ("seq_lens", "num_heads", "head_size", "num_blocks"),
     [
         pytest.param(
+            [(1, 4096)] * 6,
+            (32, 4),
+            128,
+            128,
+            id="decode_final_partition_remainder",
+        ),
+        pytest.param(
             [(5, 513), (1, 193), (4, 4097)],
             (32, 4),
             128,

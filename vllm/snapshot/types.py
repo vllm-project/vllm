@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Oracle:
     token_ids: tuple[int, ...]
     text: str

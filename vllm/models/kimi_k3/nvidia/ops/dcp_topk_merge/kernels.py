@@ -182,9 +182,7 @@ class DCPTopkPackKernel(VllmCuTeDSLJitKernel["DCPTopkPackKernel.CompileKey"]):
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self, *, local_topk: int, has_row_ends: bool = False
-    ) -> CompileKey:
+    def dispatch(self, *, local_topk: int, has_row_ends: bool = False) -> CompileKey:
         return self.CompileKey(local_topk=local_topk, has_row_ends=has_row_ends)
 
     def get_warmup_keys(
@@ -971,7 +969,7 @@ class DCPTopkSelectKernel(VllmCuTeDSLJitKernel["DCPTopkSelectKernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk: int,
@@ -1127,7 +1125,7 @@ def _dummy_table(device: torch.device) -> torch.Tensor:
     return _dummy(device, "table", (1, 1), torch.int32)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ExactArgs:
     """Rescue state for one exact merge call (one ubatch of a workspace)."""
 
@@ -1175,7 +1173,7 @@ class DCPTopkRescueKernel(VllmCuTeDSLJitKernel["DCPTopkRescueKernel.CompileKey"]
 
     tb_size = _TB_SIZE
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         topk: int
         local_topk: int
@@ -1390,7 +1388,7 @@ class DCPTopkRescueKernel(VllmCuTeDSLJitKernel["DCPTopkRescueKernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk: int,
@@ -1455,7 +1453,7 @@ def _num_sms(device: torch.device) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _RowsOutput:
     req_id: torch.Tensor
     block_table: torch.Tensor
