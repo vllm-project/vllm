@@ -142,6 +142,79 @@ def init_softmax_M(
     return M
 
 
+# ===========================================================================
+# PrefixLM / multimodal range lookup
+# ===========================================================================
+#
+# ``mm_prefix_range`` holds, per sequence, ``MAX_MM_RANGES`` inclusive
+# ``(start, end)`` spans sorted by position, pairwise disjoint, with
+# ``(0, 0)`` padding at the tail (see ``compute_mm_prefix_range_tensor``).
+# A video prompt can carry thousands of spans (one per frame), so the
+# helpers below locate the few spans that matter with a binary search
+# instead of scanning every span for every query block and KV tile.
+
+_MM_SPAN_NONE = tl.constexpr(1073741823)  # 2**30 - 1, sorts padding last
+
+
+@triton.jit
+def mm_span_at(mm_prefix_range_ptr, base, i, MAX_MM_RANGES: tl.constexpr):
+    """``(start, end, valid)`` of span ``i`` of the sequence whose spans
+    start at ``mm_prefix_range_ptr + base``.
+
+    Out-of-range ``i`` and padding entries yield ``(_MM_SPAN_NONE, -1,
+    False)`` so that starts stay ascending and ends stay ascending across
+    the whole padded row. ``i`` may be a scalar or a tensor.
+    """
+    ok = (i >= 0) & (i < MAX_MM_RANGES)
+    start = tl.load(mm_prefix_range_ptr + base + i * 2, mask=ok, other=0)
+    end = tl.load(mm_prefix_range_ptr + base + i * 2 + 1, mask=ok, other=0)
+    valid = ok & (start < end)
+    start = tl.where(valid, start, _MM_SPAN_NONE)
+    end = tl.where(valid, end, -1)
+    return start, end, valid
+
+
+@triton.jit
+def mm_last_span_starting_le(
+    mm_prefix_range_ptr, base, pos, MAX_MM_RANGES: tl.constexpr
+):
+    """Index of the last span with ``start <= pos``, or ``-1`` if none.
+
+    Padding entries sort after every real span, so the answer is the
+    number of real spans starting at or before ``pos``, minus one.
+    """
+    lo = pos - pos
+    hi = lo + MAX_MM_RANGES
+    # ceil(log2(MAX_MM_RANGES + 1)) halvings; the bound is a compile-time
+    # constant so the loop count is resolved at trace time.
+    for it in tl.static_range(31):
+        if (1 << it) <= MAX_MM_RANGES:
+            mid = (lo + hi) // 2
+            start, _, _ = mm_span_at(mm_prefix_range_ptr, base, mid, MAX_MM_RANGES)
+            go_right = start <= pos
+            lo = tl.where(go_right, mid + 1, lo)
+            hi = tl.where(go_right, hi, mid)
+    return lo - 1
+
+
+@triton.jit
+def mm_first_span_ending_ge(
+    mm_prefix_range_ptr, base, pos, MAX_MM_RANGES: tl.constexpr
+):
+    """Index of the first span with ``end >= pos``, or ``MAX_MM_RANGES``."""
+    lo = pos - pos
+    hi = lo + MAX_MM_RANGES
+    for it in tl.static_range(31):
+        if (1 << it) <= MAX_MM_RANGES:
+            mid = (lo + hi) // 2
+            _, end, valid = mm_span_at(mm_prefix_range_ptr, base, mid, MAX_MM_RANGES)
+            end = tl.where(valid, end, _MM_SPAN_NONE)
+            go_right = end < pos
+            lo = tl.where(go_right, mid + 1, lo)
+            hi = tl.where(go_right, hi, mid)
+    return lo
+
+
 @triton.jit
 def compute_tile_loop_bounds(
     context_len,
@@ -240,33 +313,38 @@ def compute_tile_loop_bounds(
         if USE_MM_PREFIX and MM_PREFIX_CLAMP_SW:
             query_abs_lo = context_len + qpos_lo
             query_abs_hi = context_len + qpos_hi
-            for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
-                intersects_query_block = (
-                    (range_start < range_end)
-                    & (range_start <= query_abs_hi)
-                    & (range_end >= query_abs_lo)
-                )
-                mm_first_allowed_key = tl.maximum(
-                    range_start, query_abs_lo - SLIDING_WINDOW + 1
-                )
-                first_allowed_key = tl.minimum(
+            # Spans are sorted and disjoint, so those intersecting
+            # [query_abs_lo, query_abs_hi] form one contiguous run
+            # [first, last]; only its two ends bound the allowed keys.
+            base = seq_idx * MAX_MM_RANGES * 2
+            first = mm_first_span_ending_ge(
+                mm_prefix_range_ptr, base, query_abs_lo, MAX_MM_RANGES
+            )
+            last = mm_last_span_starting_le(
+                mm_prefix_range_ptr, base, query_abs_hi, MAX_MM_RANGES
+            )
+            first_start, _, first_valid = mm_span_at(
+                mm_prefix_range_ptr, base, first, MAX_MM_RANGES
+            )
+            _, last_end, last_valid = mm_span_at(
+                mm_prefix_range_ptr, base, last, MAX_MM_RANGES
+            )
+            intersects_query_block = first_valid & last_valid & (first <= last)
+            mm_first_allowed_key = tl.maximum(
+                first_start, query_abs_lo - SLIDING_WINDOW + 1
+            )
+            first_allowed_key = tl.minimum(
+                first_allowed_key,
+                tl.where(
+                    intersects_query_block,
+                    mm_first_allowed_key,
                     first_allowed_key,
-                    tl.where(
-                        intersects_query_block,
-                        mm_first_allowed_key,
-                        first_allowed_key,
-                    ),
-                )
-                last_allowed_key = tl.maximum(
-                    last_allowed_key,
-                    tl.where(intersects_query_block, range_end, last_allowed_key),
-                )
+                ),
+            )
+            last_allowed_key = tl.maximum(
+                last_allowed_key,
+                tl.where(intersects_query_block, last_end, last_allowed_key),
+            )
         last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -396,26 +474,29 @@ def compute_kv_seq_mask(
     # kv > q - sw; future kv passes trivially). Inert for full-attention layers
     # (SLIDING_WINDOW <= 0).
     if USE_MM_PREFIX:
-        for i in range(MAX_MM_RANGES):
-            range_start = tl.load(
-                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-            )
-            range_end = tl.load(
-                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-            )
-            is_valid = range_start < range_end
-            q_in_range = (
-                (query_abs_pos >= range_start) & (query_abs_pos <= range_end) & is_valid
-            )
-            k_in_range = (
-                (seq_offset[None, :] >= range_start)
-                & (seq_offset[None, :] <= range_end)
-                & is_valid
-            )
-            mm_mask = q_in_range & k_in_range
-            if MM_PREFIX_CLAMP_SW and SLIDING_WINDOW > 0:
-                mm_mask = mm_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
-            seq_mask |= mm_mask
+        # Spans are sorted and disjoint, so a query lies in at most the
+        # last span starting at or before it, or in the span just before
+        # that one when the two touch (prev.end == this.start == query;
+        # ends are inclusive). No other span can contain the query.
+        base = seq_idx * MAX_MM_RANGES * 2
+        last = mm_last_span_starting_le(
+            mm_prefix_range_ptr, base, query_abs_pos, MAX_MM_RANGES
+        )
+        start_1, end_1, valid_1 = mm_span_at(
+            mm_prefix_range_ptr, base, last, MAX_MM_RANGES
+        )
+        start_0, end_0, valid_0 = mm_span_at(
+            mm_prefix_range_ptr, base, last - 1, MAX_MM_RANGES
+        )
+        q_in_1 = valid_1 & (query_abs_pos <= end_1)
+        q_in_0 = valid_0 & (query_abs_pos <= end_0)
+        key = seq_offset[None, :]
+        mm_mask = (q_in_1 & (key >= start_1) & (key <= end_1)) | (
+            q_in_0 & (key >= start_0) & (key <= end_0)
+        )
+        if MM_PREFIX_CLAMP_SW and SLIDING_WINDOW > 0:
+            mm_mask = mm_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+        seq_mask |= mm_mask
     return seq_mask
 
 

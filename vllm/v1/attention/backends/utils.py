@@ -116,12 +116,19 @@ def compute_mm_prefix_range_tensor(
 
     Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
     Empty ranges have start==end==0, which kernel skips via is_valid check.
+
+    Each row keeps the input order, which is ascending by position and
+    pairwise disjoint (features are sorted by offset and a feature's ranges
+    never overlap), and holds only ranges with ``start < end``, with the
+    padding at the tail: the Triton helpers binary-search the row under
+    that layout, so a degenerate range must not break the ordering.
     """
     if mm_prefix_range is None:
         return None
 
     range_lists = [
-        mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
+        [r for r in mm_prefix_range.get(i, []) if r[0] < r[1]] or [(0, 0)]
+        for i in range(num_seqs)
     ]
 
     if all(r == [(0, 0)] for r in range_lists):
