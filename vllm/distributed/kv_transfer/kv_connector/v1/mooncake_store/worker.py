@@ -73,6 +73,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     group_compact_kernel_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
+    LOOKUP_FROM_MSG,
     LOOKUP_MSG,
     RESET_MSG,
     RESP_ERR,
@@ -94,6 +95,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -2505,7 +2507,10 @@ class MooncakeStoreWorker:
         return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
     def lookup(
-        self, num_tokens: int, block_hashes: Sequence[BlockHash]
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        start_tokens: int = 0,
     ) -> MooncakeLookupResult:
         """Check how many prefix tokens exist in the store.
 
@@ -2519,6 +2524,16 @@ class MooncakeStoreWorker:
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
+
+        local_end = max(0, min(start_tokens, token_len))
+        local_end = local_end // self.coord.lcm_block_size * self.coord.lcm_block_size
+        full_group_ids = {
+            group_id
+            for group in self.coord.attention_groups
+            if group.manager_cls is FullAttentionManager
+            for group_id in group.group_ids
+        }
+        local_exists: set[tuple[int, bytes]] = set()
 
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
@@ -2544,6 +2559,9 @@ class MooncakeStoreWorker:
                     continue
                 end_token = (unit_id + 1) * unit_size
                 h = block_hashes[end_token // self.hash_block_size - 1]
+                if g_idx in full_group_ids and end_token <= local_end:
+                    local_exists.add((g_idx, bytes(h)))
+                    continue
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:
                     candidate_keys.append(
@@ -2551,7 +2569,7 @@ class MooncakeStoreWorker:
                     )
                 candidate_meta.append((g_idx, bytes(h), end_token))
 
-        if not candidate_keys:
+        if not candidate_keys and not local_exists:
             return MooncakeLookupResult(0)
 
         exists_fn = (
@@ -2559,29 +2577,31 @@ class MooncakeStoreWorker:
             if self._selective_lease is None
             else self._selective_lease.probe
         )
-        lookup_start = time.perf_counter()
-        try:
-            res = exists_fn(candidate_keys)
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-            )
-        except Exception as e:
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-                status="error",
-                num_failed_keys=len(candidate_keys),
-            )
-            logger.error("Remote connection failed in lookup: %s", e)
-            return MooncakeLookupResult(0)
+        res: list[int] = []
+        if candidate_keys:
+            lookup_start = time.perf_counter()
+            try:
+                res = exists_fn(candidate_keys)
+                self._record_kv_connector_operation(
+                    "lookup_exists",
+                    time.perf_counter() - lookup_start,
+                    len(candidate_keys),
+                )
+            except Exception as e:
+                self._record_kv_connector_operation(
+                    "lookup_exists",
+                    time.perf_counter() - lookup_start,
+                    len(candidate_keys),
+                    status="error",
+                    num_failed_keys=len(candidate_keys),
+                )
+                logger.error("Remote connection failed in lookup: %s", e)
+                return MooncakeLookupResult(0)
 
         # A (group, hash) is "present" only when every namespace that will be
         # loaded has it (per-group count: sharded groups need every rank's
         # shard, replicated groups one namespace per unique KV head).
-        exists_set = set()
+        exists_set = local_exists
         pos = 0
         previous_page = None
         preceding_chunks_present = True
@@ -2601,7 +2621,7 @@ class MooncakeStoreWorker:
             pos += count
 
         hit, load_masks = self._longest_hit(
-            num_tokens, token_len, block_hashes, exists_set
+            num_tokens, token_len, block_hashes, exists_set, start_tokens
         )
         if self._selective_lease is None:
             return hit
@@ -2610,7 +2630,13 @@ class MooncakeStoreWorker:
             hit,
             load_masks,
             exists_set,
-            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+            functools.partial(
+                self._longest_hit,
+                num_tokens,
+                token_len,
+                block_hashes,
+                start_tokens=start_tokens,
+            ),
         )
 
     def _longest_hit(
@@ -2619,6 +2645,7 @@ class MooncakeStoreWorker:
         token_len: int,
         block_hashes: Sequence[BlockHash],
         exists_set: set[tuple[int, bytes]],
+        start_tokens: int = 0,
     ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
         """Longest prefix hit and its load masks over the stored group/hash pairs."""
         cached_block_pool = ExternalCachedBlockPool(
@@ -2639,6 +2666,21 @@ class MooncakeStoreWorker:
                 usable_length,
                 cached_block_pool,
             )
+        if hit_length <= start_tokens:
+            return MooncakeLookupResult(0), ()
+        if start_tokens:
+            local_end = (
+                start_tokens // self.coord.lcm_block_size * self.coord.lcm_block_size
+            )
+            # Lease only Store blocks that the receiver will actually load.
+            for group in self.coord.attention_groups:
+                if group.manager_cls is not FullAttentionManager:
+                    continue
+                for group_id in group.group_ids:
+                    mask = load_masks[group_id]
+                    block_size = self.token_dbs[group_id].store_layout.block_size
+                    for index in range(min(local_end // block_size, len(mask))):
+                        mask[index] = False
         return (
             MooncakeLookupResult(
                 hit_length,
@@ -2780,12 +2822,25 @@ class LookupKeyServer:
                 all_frames = self.socket.recv_multipart(copy=False)
                 msg_type = bytes(all_frames[0])
 
-                if msg_type == LOOKUP_MSG:
+                if msg_type in (LOOKUP_MSG, LOOKUP_FROM_MSG):
+                    expected_frames = 5 if msg_type == LOOKUP_FROM_MSG else 4
+                    if len(all_frames) != expected_frames:
+                        self.socket.send(RESP_ERR)
+                        continue
                     num_tokens = int.from_bytes(all_frames[1], byteorder="big")
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(num_tokens, block_hashes)
+                    if msg_type == LOOKUP_FROM_MSG:
+                        if len(all_frames[4]) != 4:
+                            self.socket.send(RESP_ERR)
+                            continue
+                        start_tokens = int.from_bytes(all_frames[4], byteorder="big")
+                        result = self.store_worker.lookup(
+                            num_tokens, block_hashes, start_tokens=start_tokens
+                        )
+                    else:
+                        result = self.store_worker.lookup(num_tokens, block_hashes)
                     self.socket.send(encode_lookup_response(result))
 
                 elif msg_type == RESET_MSG:
@@ -2834,7 +2889,7 @@ RESET_TIMEOUT_S = 60.0
 @dataclasses.dataclass(slots=True)
 class LookupState:
     future: Future[MooncakeLookupResult]
-    signature: tuple[int, int, bytes]
+    signature: tuple[int, int, int, bytes]
     deadline: float
     # Freshness runs from when the RPC returned, not when it was queued.
     completed_at: float | None = None
@@ -2849,11 +2904,12 @@ class LookupState:
 
 
 def _lookup_signature(
-    num_tokens: int, block_hashes: list[BlockHash]
-) -> tuple[int, int, bytes]:
+    num_tokens: int, block_hashes: list[BlockHash], start_tokens: int = 0
+) -> tuple[int, int, int, bytes]:
     # Block hashes form a cumulative chain; its last hash identifies it.
     return (
         num_tokens,
+        start_tokens,
         len(block_hashes),
         bytes(block_hashes[-1]) if block_hashes else b"",
     )
@@ -2918,18 +2974,27 @@ class LookupKeyClient:
         return self.socket.recv(flags=zmq.NOBLOCK)
 
     def _lookup(
-        self, num_tokens: int, block_hashes: list[BlockHash], deadline: float
+        self,
+        num_tokens: int,
+        block_hashes: list[BlockHash],
+        deadline: float,
+        start_tokens: int = 0,
     ) -> MooncakeLookupResult:
         if time.monotonic() >= deadline:
             raise self._LookupExpired("Mooncake lookup expired while queued")
         hash_len = len(block_hashes[0]) if block_hashes else 0
-        all_frames = (
-            LOOKUP_MSG,
+        all_frames: tuple[bytes, ...] = (
+            LOOKUP_FROM_MSG if start_tokens else LOOKUP_MSG,
             num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
-        return decode_lookup_response(self._request(all_frames, deadline))
+        if start_tokens:
+            all_frames += (start_tokens.to_bytes(4, byteorder="big"),)
+        response = self._request(all_frames, deadline)
+        if response == RESP_ERR:
+            return MooncakeLookupResult(0)
+        return decode_lookup_response(response)
 
     def lookup(
         self,
@@ -2937,11 +3002,12 @@ class LookupKeyClient:
         num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
+        start_tokens: int = 0,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
         then cache it until expiry or discard()."""
         now = time.monotonic()
-        signature = _lookup_signature(num_tokens, block_hashes)
+        signature = _lookup_signature(num_tokens, block_hashes, start_tokens)
         state = self._lookups.get(req_id)
         if state is not None and (
             state.signature != signature
@@ -2959,7 +3025,7 @@ class LookupKeyClient:
             deadline = now + self._lookup_timeout_s
             state = LookupState(
                 future=self.executor.submit(
-                    self._lookup, num_tokens, list(block_hashes), deadline
+                    self._lookup, num_tokens, list(block_hashes), deadline, start_tokens
                 ),
                 signature=signature,
                 deadline=deadline,
