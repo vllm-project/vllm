@@ -489,6 +489,48 @@ def test_fp8_softmax_preserves_small_probabilities() -> None:
     torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
 
 
+@torch.inference_mode()
+def test_fp32_dot_products_are_not_tf32() -> None:
+    """Float32 attention matches a float64 reference to IEEE float32 accuracy."""
+    device = torch.device(DEVICE_TYPE)
+    set_random_seed(0)
+    seq_len, num_heads, head_size, block_size = 256, 4, 128, 16
+    num_blocks = seq_len // block_size
+    query = torch.randn(seq_len, num_heads, head_size, device=device)
+    key_cache = torch.randn(num_blocks, block_size, num_heads, head_size, device=device)
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    scale = head_size**-0.5
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.tensor([0, seq_len], dtype=torch.int32, device=device),
+        max_seqlen_q=seq_len,
+        seqused_k=torch.tensor([seq_len], dtype=torch.int32, device=device),
+        max_seqlen_k=seq_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device)[None],
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+    )
+
+    key = key_cache.reshape(seq_len, num_heads, head_size).double()
+    value = value_cache.reshape(seq_len, num_heads, head_size).double()
+    scores = torch.einsum("qhd,khd->hqk", query.double(), key) * scale
+    causal = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device).tril()
+    probs = torch.softmax(scores.masked_fill(~causal, float("-inf")), dim=-1)
+    expected = torch.einsum("hqk,khd->qhd", probs, value)
+
+    torch.testing.assert_close(output.double(), expected, atol=1e-4, rtol=1e-4)
+
+
 def ref_paged_clamped_mm_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
