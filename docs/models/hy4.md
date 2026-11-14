@@ -6,10 +6,12 @@ vLLM supports `tencent/Hy4-preview` and `tencent/Hy4-preview-FP8` through
 ## NVIDIA sparse MLA prefill
 
 HY4 enables ShardQ token-sharded prefill by default with the FlashMLA sparse
-backend, `fp8_ds_mla` KV cache, TP size greater than one, and fewer than 32 query
-heads per TP rank. The existing ShardQ token threshold, graph-mode and
-context-parallelism checks apply. The target backbone can enable ShardQ with
-MTP configured.
+backend, `fp8_ds_mla` or `nvfp4_ds_mla` KV cache, TP size greater than one,
+and fewer than 32 query heads per TP rank. The existing ShardQ token threshold,
+graph-mode and context-parallelism checks apply. The target backbone can enable
+ShardQ with MTP configured.
+
+The `nvfp4_ds_mla` KV cache format requires Blackwell (SM100-family) GPUs.
 
 Use `--attention-config '{"sparse_mla_shard_q": false}'` to disable ShardQ.
 
