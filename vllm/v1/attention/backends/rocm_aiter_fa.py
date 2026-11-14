@@ -1688,6 +1688,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
     def fused_qk_norm_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
+    def fused_qk_norm_mrope_gated_kvcache_supported(self) -> bool:
+        return (
+            rocm_aiter_ops.is_enabled()
+            and rocm_aiter_ops.is_triton_qk_norm_mrope_cache_supported()
+            and not is_quantized_kv_cache(self.kv_cache_dtype)
+        )
+
     def do_qk_norm_rope_kvcache_update(
         self,
         layer: AttentionLayer,
@@ -1725,6 +1732,47 @@ class AiterFlashAttentionImpl(AttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
             return_kv=True,
+        )
+
+    def do_qk_norm_mrope_gated_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+        rotary_dim: int,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_mrope_gated_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            mrope_section=list(mrope_section),
+            is_interleaved=is_interleaved,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            rotary_dim=rotary_dim,
+            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
         )
 
     def do_rope_and_kv_cache_update(
