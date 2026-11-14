@@ -38,8 +38,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.lfm3 import Lfm3Config
 
 from .interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
@@ -265,7 +267,9 @@ class Lfm3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Lfm3Model(nn.Module):
+class Lfm3Model(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child, see Lfm2Model.
     hf_to_vllm_mapper = WeightsMapper(
@@ -341,14 +345,34 @@ class Lfm3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
+        aux_hidden_states = remote_aux + aux_hidden_states
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -374,7 +398,13 @@ def _short_conv_state_dtype(vllm_config: VllmConfig) -> tuple[torch.dtype, ...]:
 
 
 class Lfm3ForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
