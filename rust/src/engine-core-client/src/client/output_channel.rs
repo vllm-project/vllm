@@ -158,7 +158,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
-    use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
+    use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput, PrefillProgress};
 
     fn output(token_ids: &[u32]) -> EngineCoreStreamOutput {
         EngineCoreStreamOutput {
@@ -186,7 +186,7 @@ mod tests {
     /// An output that carries prefill progress and nothing else.
     fn progress(remaining: u64) -> EngineCoreStreamOutput {
         let mut output = output(&[]);
-        output.output.prefill_progress = Some(Box::new(crate::protocol::output::PrefillProgress {
+        output.output.prefill_progress = Some(Box::new(PrefillProgress {
             request_id: "req".to_string(),
             remaining_prefill_tokens: remaining,
         }));
