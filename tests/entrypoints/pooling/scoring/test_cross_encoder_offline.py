@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import weakref
 
 import pytest
@@ -42,6 +43,57 @@ def llm(vllm_runner):
 @pytest.fixture(scope="module")
 def hf_model(hf_runner):
     return hf_runner(MODEL_NAME, is_cross_encoder=True)
+
+
+@pytest.fixture(scope="module")
+def bert_cross_encoder(vllm_runner):
+    revision = "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc"
+    with vllm_runner(
+        "cross-encoder/ms-marco-TinyBERT-L2-v2",
+        revision=revision,
+        tokenizer_revision=revision,
+        runner="pooling",
+        dtype="float32",
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        renderer_num_workers=1,
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        seed=0,
+    ) as runner:
+        yield weakref.proxy(runner.llm)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("side", [None, "left", "right"])
+def test_pair_truncation_keeps_boundaries(bert_cross_encoder: LLM, side):
+    """Explicit truncation keeps BERT pair delimiters on the real score path."""
+    tokenizer = bert_cross_encoder.get_tokenizer()
+    cls_id, sep_id = tokenizer.convert_tokens_to_ids(["[CLS]", "[SEP]"])
+    query, document = TEXTS_1[0] * 5, TEXTS_2[0] * 8
+    kwargs = {"truncate_prompt_tokens": 16}
+    if side is None:
+        expected = tokenizer(query, document, truncation=True, max_length=16)[
+            "input_ids"
+        ]
+    elif side == "left":
+        kwargs["truncation_side"] = side
+        expected = [cls_id, sep_id]
+        expected += tokenizer.encode(document, add_special_tokens=False)[-13:]
+        expected += [sep_id]
+    else:
+        kwargs["truncation_side"] = side
+        expected = [cls_id]
+        expected += tokenizer.encode(query, add_special_tokens=False)[:13]
+        expected += [sep_id, sep_id]
+
+    (output,) = bert_cross_encoder.score(
+        query, document, use_tqdm=False, tokenization_kwargs=kwargs
+    )
+    assert output.finished and output.error is None
+    assert math.isfinite(output.outputs.score)
+    assert output.prompt_token_ids == expected
 
 
 @pytest.mark.skip_global_cleanup

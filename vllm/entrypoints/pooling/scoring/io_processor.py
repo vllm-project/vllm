@@ -662,6 +662,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
             if prompt_extras
             else None,
+            tok_params=tok_params,
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -713,6 +714,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
+        tok_params: TokenizeParams | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -773,9 +775,45 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                             local_kwargs["truncation"] = "only_second"
                             local_kwargs["max_length"] = effective_max_length
 
+                    pair_limit = None
+                    pair_side = None
+                    if (
+                        tok_params is not None
+                        and tok_params.truncation_side is not None
+                    ):
+                        pair_side = tok_params.truncation_side
+                        pair_limit = tok_params.truncate_prompt_tokens
+                        if pair_limit is not None and pair_limit < 0:
+                            pair_limit = tok_params.max_truncation_tokens
+                        if pair_limit is not None and pair_limit > 0:
+                            local_kwargs["return_special_tokens_mask"] = True
+
                     prompt_inputs = tokenizer(
                         text=prompt_1, text_pair=prompt_2, **local_kwargs
                     )
+                    mask = prompt_inputs.pop("special_tokens_mask", None)
+                    if mask and pair_limit is not None and len(mask) > pair_limit:
+                        num_special = sum(mask)
+                        if 0 < num_special <= pair_limit:
+                            content = [
+                                i for i, special in enumerate(mask) if not special
+                            ]
+                            budget = pair_limit - num_special
+                            # Apply the requested side to content only, retaining
+                            # the tokenizer's pair delimiters and segment ids.
+                            if pair_side == "left" and budget:
+                                content = content[-budget:]
+                            else:
+                                content = content[:budget]
+                            indices = sorted(
+                                [i for i, special in enumerate(mask) if special]
+                                + content
+                            )
+                            for key in ("input_ids", "token_type_ids"):
+                                if key in prompt_inputs:
+                                    prompt_inputs[key] = [
+                                        prompt_inputs[key][i] for i in indices
+                                    ]
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
