@@ -661,6 +661,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
         kv_b_proj._cpu_skip_gemm_dispatch = True
+        # Selects the LoRA wrapper that adds adapters to the absorbed BMMs.
+        kv_b_proj.is_mla_kv_b_proj = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -1173,6 +1175,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
+            has_mla_lora = hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
+            use_fused_v_up_proj = self.W_UV_dcp is not None and not has_mla_lora
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
@@ -1227,7 +1231,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Under PCP+DCP the prefill rows attended over the gathered KV,
                 # so only the decode rows carry an LSE and take part in the merge.
                 num_merge_rows = lse.shape[0]
-                if self.W_UV_dcp is not None:
+                if use_fused_v_up_proj:
                     assert self.dcp_manager.v_up_proj_combine is not None
                     self.dcp_manager.v_up_proj_combine(
                         attn_out,
@@ -1255,7 +1259,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if self.W_UV_dcp is None:
+            if not use_fused_v_up_proj:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1345,7 +1349,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _fused_decode_query_heads(self, attn_metadata: Any) -> int | None:
         # The impl picks the decode path per batch, so this stays per step.
-        if not self.is_aiter_fused_decode_query_enabled:
+        # The fused query kernel cannot add kv_b_proj adapters.
+        if not self.is_aiter_fused_decode_query_enabled or hasattr(
+            self.kv_b_proj, "apply_mla_absorbed_kv_b_lora"
+        ):
             return None
         return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
 
@@ -1444,6 +1451,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
         if fused_q_heads is None:
+            self._apply_lora_projection(
+                mqa_q_nope, mqa_ql_nope[..., : self.kv_lora_rank], is_query=True
+            )
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -1671,9 +1681,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         return FullAttentionManager.layer_config(spec)
 
+    def _apply_lora_projection(
+        self, x: torch.Tensor, out: torch.Tensor, *, is_query: bool
+    ) -> None:
+        """Add kv_b_proj adapters to the absorbed, head-major MLA projection."""
+        apply_lora = getattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora", None)
+        if apply_lora is not None:
+            apply_lora(
+                x,
+                out,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                is_query=is_query,
+                gather_dcp=is_query and self.dcp_q_replicate,
+            )
+
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        lora_input = x
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1704,6 +1729,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        self._apply_lora_projection(lora_input, out, is_query=False)
 
 
 def unified_mla_kv_cache_update(
