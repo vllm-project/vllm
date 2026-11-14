@@ -253,7 +253,7 @@ def mori_has_umbp() -> bool:
     return True
 
 
-@dataclass
+@dataclass(slots=True)
 class StandaloneServer:
     address: str
     process: subprocess.Popen

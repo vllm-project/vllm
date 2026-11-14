@@ -64,7 +64,7 @@ from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamState:
     """Mutable state for `Parser.parse_delta()`. One per stream."""
 

@@ -11,7 +11,7 @@ from vllm.v1.worker.workspace import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MoEPermuteScratch:
     """Reused metadata buffers for repeated grouped-MoE permutes.
 

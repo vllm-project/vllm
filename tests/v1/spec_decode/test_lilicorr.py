@@ -716,6 +716,7 @@ def owned_head_model(monkeypatch):
                 draft_load_config=None,
                 attention_backend=None,
                 kv_cache_dtype=None,
+                apply_draft_eplb_overrides=lambda draft_config: draft_config,
             ),
             model_config=SimpleNamespace(
                 get_total_num_hidden_layers=lambda: 0,

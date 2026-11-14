@@ -10,12 +10,12 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class CudaGraphBenchParams:
     num_ops_in_cuda_graph: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ArgPool:
     """When some argument of the benchmarking function is annotated with this type,
     the benchmarking class (BenchMM) will collapse the argument to a pick a

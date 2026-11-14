@@ -17,7 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchSequence:
     """A sequence for beam search.
     It keeps track of the tokens and the log probability of the sequence.
@@ -101,7 +101,7 @@ class BeamSearchSequence:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchOutput:
     """The output of beam search.
     It contains the list of the best beam search sequences.

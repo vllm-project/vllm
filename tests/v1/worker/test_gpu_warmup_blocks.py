@@ -8,6 +8,7 @@ writes KV past the token range the target model was scheduled for. The warmup
 hand-builds its `SchedulerOutput`s, so it has to reserve the same blocks.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -210,6 +211,26 @@ def test_mixed_warmup_reserves_lookahead_blocks():
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
     assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
+
+
+def test_mixed_warmup_decode_verifies_drafts():
+    """Some decode backends allocate their largest workspace only to verify
+    drafts, so the measured step must verify a full set of them."""
+    outputs: list[SchedulerOutput] = []
+
+    assert run_mixed_prefill_decode_warmup(
+        _make_runner([_attention_group()], NUM_SPEC_STEPS),
+        worker_execute_model=outputs.append,
+        worker_sample_tokens=lambda grammar_output: None,
+        num_tokens=128,
+    )
+
+    mixed_output = outputs[1]
+    (decode_req_id,) = mixed_output.scheduled_cached_reqs.req_ids
+    assert mixed_output.num_scheduled_tokens[decode_req_id] == NUM_SPEC_STEPS + 1
+    assert mixed_output.scheduled_spec_decode_tokens == {
+        decode_req_id: [0] * NUM_SPEC_STEPS
+    }
 
 
 def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
@@ -660,18 +681,23 @@ def test_sizing_warmup_waits_for_each_step(monkeypatch):
     ],
 )
 def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
-    max_num_reqs, committable_blocks, expected_prefill_lens
+    monkeypatch, max_num_reqs, committable_blocks, expected_prefill_lens
 ):
     """max_num_batched_tokens can exceed max_model_len, so the scheduler can
     pack several prompts into one step. The sizing step must reach that
     budget, splitting it across requests the runner and KV cache can hold."""
-    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner = _make_runner(
+        [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
+    )
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
     )
     runner.max_num_reqs = max_num_reqs
     if committable_blocks is not None:
         runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+        monkeypatch.setattr(
+            warmup, "_measure_sizing_step", lambda runner: contextlib.nullcontext()
+        )
     outputs: list[SchedulerOutput] = []
 
     warmup.run_kv_cache_sizing_warmup(

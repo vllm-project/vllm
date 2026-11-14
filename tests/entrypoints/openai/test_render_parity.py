@@ -60,12 +60,12 @@ _RESPONSES_WEATHER_TOOL = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "llama"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -98,7 +98,7 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CapturedRenderInputs:
     """Args observed at `render_chat_async` (HF render boundary)."""
 

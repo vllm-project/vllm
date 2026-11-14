@@ -430,7 +430,7 @@ def resolve_kv_cache_layout(
     return layout
 
 
-@dataclass
+@dataclass(slots=True)
 class PerLayerParameters:
     """Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters. Should not be used for

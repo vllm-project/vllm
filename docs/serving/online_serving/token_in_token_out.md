@@ -175,7 +175,7 @@ turn2 = httpx.post(url, json={
         turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
     ),
     "features": {
-        "mm_hashes": {"image": ["img-a"]},
+        "mm_hashes": {"image": ["uuid:img-a"]},
         "mm_placeholders": turn1["mm_placeholders"],
     },
     "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
@@ -184,7 +184,7 @@ turn2 = httpx.post(url, json={
 }).json()
 ```
 
-Here `"img-a"` finds image A in the processor cache because turn 1 sent it with that `uuid`. Two cases need a different approach:
+Here `"uuid:img-a"` finds image A in the processor cache because turn 1 sent it with `uuid` `"img-a"`. The cache key of an item sent with a `uuid` is that `uuid` prefixed with `uuid:`, which keeps it apart from the content hashes vLLM computes. Two cases need a different approach:
 
 - If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
 - If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.

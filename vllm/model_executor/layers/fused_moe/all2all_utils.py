@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlashInferOneSidedDispatchLayout:
     dispatch_format: "QuantFormat"
     extra_payload_bytes_per_token: int = 0

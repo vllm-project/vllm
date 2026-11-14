@@ -135,6 +135,9 @@ def test_dspark_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                 max_model_len=2048,
                 max_num_seqs=len(test_prompts),
                 enable_flashinfer_autotune=False,
+                # Under torch.compile, Inductor benchmarks reduction block sizes
+                # per boot, so the two boots could otherwise sum in different orders.
+                compilation_config={"inductor_compile_config": {"deterministic": True}},
             )
             try:
                 states = llm.llm_engine.collective_rpc(_dspark_sharding_state)

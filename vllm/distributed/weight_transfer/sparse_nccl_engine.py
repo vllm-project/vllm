@@ -7,7 +7,8 @@ weight loader maps them to rank-local runtime parameters, including TP shards an
 packed parameters.
 """
 
-from collections.abc import Iterable
+import traceback
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -50,6 +51,8 @@ __all__ = [
     "SparseNCCLTrainerWeightTransferEngine",
 ]
 
+_WIRE_BATCH_BYTES = 512 << 20
+
 
 @dataclass
 class SparseWeightPatch:
@@ -67,8 +70,8 @@ class SparseNCCLTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for the sparse NCCL weight transfer backend.
 
     Same rendezvous shape as the dense NCCL backend (the sender opens its
-    endpoint as NCCL rank 0), but with no packed wire params: sparse transfers
-    are never packed. `backend` is the factory dispatch key."""
+    endpoint as NCCL rank 0), but with no packed wire params: each update carries
+    its own batch size. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "sparse_nccl"
 
@@ -86,6 +89,8 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     shapes: list[list[int]]
     num_updates_list: list[int]
     """Number of sparse entries to receive for each parameter in `names`."""
+    wire_batch_bytes: int
+    """Set by the trainer, so both ends cut the update at the same patches."""
 
     def __post_init__(self) -> None:
         num_params = len(self.names)
@@ -108,6 +113,26 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
             )
         if any(num_updates < 0 for num_updates in self.num_updates_list):
             raise ValueError("Sparse `num_updates_list` entries must be non-negative")
+
+    def batches(self) -> Iterator[slice]:
+        """Split the patches into consecutive batches of at most `wire_batch_bytes`.
+
+        A patch larger than the limit is a batch by itself.
+        """
+        start = 0
+        batch_bytes = 0
+        for i, (dtype_name, num_updates) in enumerate(
+            zip(self.dtype_names, self.num_updates_list, strict=True)
+        ):
+            patch_bytes = num_updates * (
+                torch.int32.itemsize + getattr(torch, dtype_name).itemsize
+            )
+            if i > start and batch_bytes + patch_bytes > self.wire_batch_bytes:
+                yield slice(start, i)
+                start = i
+                batch_bytes = 0
+            batch_bytes += patch_bytes
+        yield slice(start, len(self.names))
 
 
 class SparseNCCLWeightTransferEngine(
@@ -165,34 +190,59 @@ class SparseNCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
+        failure: Exception | None = None
         # Receive on the communicator's device rather than relying on the
         # ambient current device in the RPC thread.
         device = self.model_update_group.device
         with torch.accelerator.device_index(device.index):
             stream = torch.cuda.current_stream(device=device)
-            patches = []
-            for name, dtype_name, shape, num_updates in zip(
-                update_info.names,
-                update_info.dtype_names,
-                update_info.shapes,
-                update_info.num_updates_list,
-                strict=True,
-            ):
-                dtype = getattr(torch, dtype_name)
-                indices = torch.empty(num_updates, dtype=torch.int32, device=device)
-                values = torch.empty(num_updates, dtype=dtype, device=device)
+            for batch in update_info.batches():
+                dtypes = [
+                    getattr(torch, name) for name in update_info.dtype_names[batch]
+                ]
+                counts = update_info.num_updates_list[batch]
+                indices = torch.empty(sum(counts), dtype=torch.int32, device=device)
                 self.model_update_group.broadcast(indices, src=0, stream=stream)
-                self.model_update_group.broadcast(values, src=0, stream=stream)
-                patches.append(
-                    CheckpointWeightPatch(
-                        name=name,
-                        shape=tuple(shape),
-                        dtype=dtype,
-                        values=values,
-                        indices=indices,
+                # One run of values per dtype, in order of first appearance.
+                values_by_dtype: dict[torch.dtype, Iterator[torch.Tensor]] = {}
+                for dtype in dict.fromkeys(dtypes):
+                    sizes = [
+                        count
+                        for count, patch_dtype in zip(counts, dtypes, strict=True)
+                        if patch_dtype == dtype
+                    ]
+                    values = torch.empty(sum(sizes), dtype=dtype, device=device)
+                    self.model_update_group.broadcast(values, src=0, stream=stream)
+                    values_by_dtype[dtype] = iter(values.split(sizes))
+                # After a failure, keep receiving so every broadcast is matched.
+                if failure is not None:
+                    continue
+                try:
+                    load_checkpoint_weight_patches(
+                        self.model,
+                        [
+                            CheckpointWeightPatch(
+                                name=name,
+                                shape=tuple(shape),
+                                dtype=dtype,
+                                values=next(values_by_dtype[dtype]),
+                                indices=patch_indices,
+                            )
+                            for name, shape, dtype, patch_indices in zip(
+                                update_info.names[batch],
+                                update_info.shapes[batch],
+                                dtypes,
+                                indices.split(counts),
+                                strict=True,
+                            )
+                        ],
                     )
-                )
-            load_checkpoint_weight_patches(self.model, patches)
+                except Exception as e:
+                    # Otherwise the traceback keeps the batch's tensors alive.
+                    traceback.clear_frames(e.__traceback__)
+                    failure = e
+        if failure is not None:
+            raise failure
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -319,6 +369,7 @@ class SparseNCCLTrainerWeightTransferEngine(
                 ],
                 shapes=[list(patch.full_shape) for patch in patches],
                 num_updates_list=[patch.indices.numel() for patch in patches],
+                wire_batch_bytes=_WIRE_BATCH_BYTES,
             )
 
             # update_weights (workers receive) must run concurrently with the
@@ -333,13 +384,25 @@ class SparseNCCLTrainerWeightTransferEngine(
                 if future.done():
                     future.result()
                 stream = torch.cuda.current_stream()
-                for patch in patches:
+                for batch in update_info.batches():
                     self.model_update_group.broadcast(
-                        patch.indices, src=0, stream=stream
+                        torch.cat([patch.indices for patch in patches[batch]]),
+                        src=0,
+                        stream=stream,
                     )
-                    self.model_update_group.broadcast(
-                        patch.values, src=0, stream=stream
-                    )
+                    dtypes = (patch.values.dtype for patch in patches[batch])
+                    for dtype in dict.fromkeys(dtypes):
+                        self.model_update_group.broadcast(
+                            torch.cat(
+                                [
+                                    patch.values
+                                    for patch in patches[batch]
+                                    if patch.values.dtype == dtype
+                                ]
+                            ),
+                            src=0,
+                            stream=stream,
+                        )
                 future.result()  # surface inference-side errors
             finally:
                 # A failed broadcast can leave the RPC blocked in the matching

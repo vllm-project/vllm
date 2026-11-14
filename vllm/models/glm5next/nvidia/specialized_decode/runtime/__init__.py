@@ -7,7 +7,7 @@ GB300 TP4, enabled by default; `decode_backend=stock` disables it.
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     max_context: int
     # Tokens per request in a verify step (1 + draft tokens; 1 without speculation).

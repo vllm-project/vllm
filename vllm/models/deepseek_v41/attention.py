@@ -403,6 +403,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         is_backbone = layer_id < config.num_hidden_layers
         self.is_kv_source = is_backbone and layer_id in self.kv_source_layers
+        self.always_gathers_compressed_kv = self.is_kv_source
         self.is_index_source = is_backbone and layer_id in self.index_source_layers
         if self.compress_ratio > 0:
             if not self.kv_source_layers or not self.index_source_layers:
@@ -1261,11 +1262,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # DeepseekV4SWACache.
         if not self.is_kv_source:
             return None
+        return FullAttentionManager.layer_config(
+            self.get_compressed_kv_cache_spec(vllm_config)
+        )
+
+    def get_compressed_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-        spec = MLAAttentionSpec(
+        return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -1281,7 +1287,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 self.compressed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
         )
-        return FullAttentionManager.layer_config(spec)
 
     def _compressed_kv_cache(self) -> torch.Tensor:
         """The compressed-KV cache tensor of this layer's kv source (own

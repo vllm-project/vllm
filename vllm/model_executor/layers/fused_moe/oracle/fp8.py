@@ -54,6 +54,10 @@ logger = init_logger(__name__)
 
 
 class Fp8MoeBackend(Enum):
+    # No kernel backend. Used for:
+    # - out-of-tree platforms (OOT/TPU), where no backend is registered;
+    # - requantization sources (checkpoint methods that only dequantize weights
+    #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "NONE"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
@@ -378,12 +382,16 @@ def resolve_fp8_moe_weight_block_shape(
     refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
     if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
         kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
-        can_refine = refined_shape is not None and any(
+        refined_key = (
+            None
+            if refined_shape is None
+            else create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*refined_shape)
+            )
+        )
+        can_refine = refined_key is not None and any(
             k_cls._supports_quant_scheme(
-                create_fp8_quant_key(
-                    static=True, group_shape=GroupShape(*refined_shape)
-                ),
-                activation_key,
+                refined_key, k_cls.executed_activation_key(refined_key, activation_key)
             )
             for k_cls in kernel_classes
         )
@@ -414,6 +422,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """FP8 MoE backend selection for one deployment configuration."""
 
     name = "Fp8"
+    placeholder_backend = Fp8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -429,7 +438,13 @@ def select_fp8_moe_backend(
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
+    # TODO: migrate to oracle base method.
+    source = Fp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 

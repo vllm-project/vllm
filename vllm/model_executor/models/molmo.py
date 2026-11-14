@@ -111,7 +111,7 @@ class MolmoImageInputs(TensorSchema):
     num_crops: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-@dataclass
+@dataclass(slots=True)
 class VisionBackboneConfig:
     image_default_input_size: tuple[int, int] = (336, 336)
     image_patch_size: int = 14

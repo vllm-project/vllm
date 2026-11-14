@@ -146,6 +146,10 @@ pub struct SpecDecodingStats {
     /// Drafted tokens counted by draft position.
     #[serde(default)]
     pub num_draft_tokens_per_pos: Vec<u64>,
+    /// Number of draft tokens the target model ran a forward pass on.
+    pub num_verified_tokens: u64,
+    /// Verified draft tokens counted by draft position.
+    pub num_verified_tokens_per_pos: Vec<u64>,
 }
 
 /// Breakdown of a scheduled prefill computation.

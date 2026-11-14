@@ -149,6 +149,41 @@ def test_block_tables_apply_staged_writes_single_group():
     )
 
 
+@pytest.mark.parametrize("max_num_batched_tokens", [509, 1500])
+def test_slot_mapping_rows_are_aligned(max_num_batched_tokens: int):
+    """Each group's row is passed to attention as its own tensor; DeepSeek-V4's
+    CuTe DSL compressor rejects int64 inputs that are not 64-byte aligned."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16, 64, 8],
+        max_num_reqs=1,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_blocks_per_group=[4, 4, 4],
+        device=device,
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([1], [2], [3]),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    slot_mappings = block_tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        torch.tensor([0, 3], dtype=torch.int32, device=device),
+        torch.tensor([0, 1, 2], dtype=torch.int64, device=device),
+        num_tokens_padded=4,
+    )
+    torch.accelerator.synchronize()
+
+    assert all(row.data_ptr() % 64 == 0 for row in slot_mappings)
+    assert slot_mappings.tolist() == [
+        [16, 17, 18, PAD_SLOT_ID],
+        [128, 129, 130, PAD_SLOT_ID],
+        [24, 25, 26, PAD_SLOT_ID],
+    ]
+
+
 def test_block_tables_skip_custom_slot_mapping_groups():
     device = torch.device("cuda")
     block_tables = BlockTables(
