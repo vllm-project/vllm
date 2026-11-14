@@ -466,9 +466,13 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
         assert err_reqs == []
         assert err_msg is None
-        assert src_ptrs == expected_by_pp_rank[pp_rank]["src_ptrs"]
-        assert dst_ptrs == expected_by_pp_rank[pp_rank]["dst_ptrs"]
-        assert lengths == [2 * block_len, 2 * block_len]
+        np.testing.assert_array_equal(
+            src_ptrs, expected_by_pp_rank[pp_rank]["src_ptrs"]
+        )
+        np.testing.assert_array_equal(
+            dst_ptrs, expected_by_pp_rank[pp_rank]["dst_ptrs"]
+        )
+        np.testing.assert_array_equal(lengths, [2 * block_len, 2 * block_len])
 
 
 @pytest.mark.asyncio
@@ -540,9 +544,9 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
         src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-        assert src_ptrs == [0x1000 + 10 * block_len]
-        assert dst_ptrs == [0xB000 + 20 * block_len]
-        assert lengths == [block_len]
+        np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+        np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
+        np.testing.assert_array_equal(lengths, [block_len])
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
@@ -1276,6 +1280,86 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
             worker.engine, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("array_api", ["available", "missing", "not_callable"])
+@pytest.mark.parametrize("base_addr", [0x1000, 0xFF00000000200000])
+async def test_transfer_arrays_and_legacy_list_fallback(
+    monkeypatch, array_api, base_addr
+):
+    """Both engine generations receive exact descriptors, including high pointers."""
+    calls = []
+
+    def transfer(api, session, src, dst, lengths):
+        calls.append((api, session, src, dst, lengths))
+        expected_type = np.ndarray if array_api == "available" else list
+        for values in (src, dst, lengths):
+            assert isinstance(values, expected_type)
+            if isinstance(values, np.ndarray):
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            else:
+                assert all(type(value) is int for value in values)
+        return 0
+
+    monkeypatch.setattr(
+        FakeMooncakeWrapper,
+        "batch_transfer_sync_write",
+        lambda engine, *args: transfer("list", *args),
+    )
+    if array_api != "missing":
+        monkeypatch.setattr(
+            FakeMooncakeWrapper,
+            "batch_transfer_sync_write_arrays",
+            (lambda engine, *args: transfer("arrays", *args))
+            if array_api == "available"
+            else None,
+            raising=False,
+        )
+
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        try:
+            local_regions = [_region(base_addr + i * 0x10000) for i in range(2)]
+            remote_regions = [
+                _region(base_addr + i * 0x10000 + 0x8000) for i in range(2)
+            ]
+            meta = SendBlockMeta(
+                p_req_id="p-array",
+                transfer_id="xfer-array",
+                local_block_ids=[[2, 5]],
+                ready=asyncio.Event(),
+            )
+            xfer = _xfer_meta(remote_regions, {"d-array": ("xfer-array", [[7, 9]])})
+            src, dst, lengths, errors, error = await worker._build_transfer_params(
+                [("d-array", meta)], xfer, local_regions, remote_regions
+            )
+            assert errors == [] and error is None
+            for values in (src, dst, lengths):
+                assert isinstance(values, np.ndarray)
+                assert values.dtype == np.uint64
+                assert values.ndim == 1 and values.flags.c_contiguous
+            assert worker._send_blocks("peer:1234", src, dst, lengths) == 0
+            assert len(calls) == 1
+            api, session, got_src, got_dst, got_lengths = calls[0]
+            assert api == ("arrays" if array_api == "available" else "list")
+            assert session == "peer:1234"
+            np.testing.assert_array_equal(
+                got_src, [r.base_addr + b * 256 for r in local_regions for b in (2, 5)]
+            )
+            np.testing.assert_array_equal(
+                got_dst, [r.base_addr + b * 256 for r in remote_regions for b in (7, 9)]
+            )
+            np.testing.assert_array_equal(got_lengths, [256] * 4)
+            stats = worker.xfer_stats.clone_and_reset().data
+            assert stats["bytes_transferred"] == [1024]
+            assert type(stats["bytes_transferred"][0]) is int
+            assert stats["num_descriptors"] == [4]
+            empty = await worker._build_transfer_params([], xfer, [], [])
+            for values in empty[:3]:
+                assert values.shape == (0,) and values.dtype == np.uint64
+        finally:
+            worker.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2565,9 +2649,9 @@ async def test_build_transfer_params_sends_packed_region_once(
 
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [0x1000 + 10 * block_len]
-    assert dst_ptrs == [0xA000 + 20 * block_len]
-    assert lengths == [n_blocks * block_len]
+    np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+    np.testing.assert_array_equal(dst_ptrs, [0xA000 + 20 * block_len])
+    np.testing.assert_array_equal(lengths, [n_blocks * block_len])
 
 
 @pytest.mark.parametrize(
@@ -2654,13 +2738,15 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
         local_ids, remote_ids, sizes = [3, 4, 9, 6], [7, 8, 2, 5], [128] * 4
     assert err_reqs == []
     assert err_msg is None
-    assert src_ptrs == [
-        r.base_addr + b * block_len for r in local_regions for b in local_ids
-    ]
-    assert dst_ptrs == [
-        r.base_addr + b * block_len for r in remote_regions for b in remote_ids
-    ]
-    assert lengths == sizes * len(local_regions)
+    np.testing.assert_array_equal(
+        src_ptrs,
+        [r.base_addr + b * block_len for r in local_regions for b in local_ids],
+    )
+    np.testing.assert_array_equal(
+        dst_ptrs,
+        [r.base_addr + b * block_len for r in remote_regions for b in remote_ids],
+    )
+    np.testing.assert_array_equal(lengths, sizes * len(local_regions))
 
 
 def test_coalesce_promotes_padding_only_for_a_full_row():
@@ -3279,15 +3365,21 @@ async def test_packed_hetero_pp_keeps_shared_layers():
     assert copied.coalesced_d[0].base_addr == copied.d_base + 2 * page
     assert copied.err_reqs == []
     assert copied.err_msg is None
-    assert copied.lengths == [2 * page, 2 * page]
-    assert copied.src == [
-        copied.p_base + 10 * (2 * page),
-        copied.p_base + 11 * (2 * page),
-    ]
-    assert copied.dst == [
-        copied.d_base + 2 * page + 10 * (4 * page),
-        copied.d_base + 2 * page + 11 * (4 * page),
-    ]
+    np.testing.assert_array_equal(copied.lengths, [2 * page, 2 * page])
+    np.testing.assert_array_equal(
+        copied.src,
+        [
+            copied.p_base + 10 * (2 * page),
+            copied.p_base + 11 * (2 * page),
+        ],
+    )
+    np.testing.assert_array_equal(
+        copied.dst,
+        [
+            copied.d_base + 2 * page + 10 * (4 * page),
+            copied.d_base + 2 * page + 11 * (4 * page),
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -3307,9 +3399,9 @@ async def test_packed_matching_layers_coalesce_to_one_copy():
     assert len(copied.coalesced_p) == 1
     assert copied.coalesced_p[0].kv_block_len == copied.coalesced_p[0].block_len
     block_len = 2 * page
-    assert copied.src == [copied.p_base + 10 * block_len]
-    assert copied.dst == [copied.d_base + 20 * block_len]
-    assert copied.lengths == [2 * block_len]
+    np.testing.assert_array_equal(copied.src, [copied.p_base + 10 * block_len])
+    np.testing.assert_array_equal(copied.dst, [copied.d_base + 20 * block_len])
+    np.testing.assert_array_equal(copied.lengths, [2 * block_len])
 
 
 @pytest.mark.asyncio
