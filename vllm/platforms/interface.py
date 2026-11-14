@@ -1373,7 +1373,17 @@ class Platform:
         processed_inputs: "EngineInput",
         params: "SamplingParams | PoolingParams",
     ) -> None:
-        """Raises if this request is unsupported on this platform."""
+        """Raises if this request is unsupported on this platform.
+
+        Called by the Python `InputProcessor` and again by the engine core for
+        every request, so that it also covers frontends that send requests to
+        the engine directly (e.g. the Rust frontend). At the engine core,
+        `processed_inputs` is rebuilt from the `EngineCoreRequest`: it has
+        `type`, `prompt_token_ids`, `prompt_embeds`, the `mm_*` fields and
+        `cache_salt`, but not frontend-only fields such as `prompt`. Raise
+        `VLLMValidationError` (or `ValueError`) to reject the request with a
+        client error.
+        """
 
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None
