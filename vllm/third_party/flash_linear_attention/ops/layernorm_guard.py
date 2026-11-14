@@ -209,7 +209,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
 
     kernel = staticmethod(layer_norm_fwd_kernel)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         x_dtype: torch.dtype,
