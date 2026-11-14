@@ -107,6 +107,7 @@ impl Error {
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
             | Self::Llm(LlmError::Unsupported { .. })
             | Self::Llm(LlmError::RemoteInvalidRequest { .. })
+            | Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens)
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
@@ -126,6 +127,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens) => Some("kv_transfer_params"),
             _ => None,
         }
     }

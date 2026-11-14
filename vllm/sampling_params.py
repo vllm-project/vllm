@@ -751,6 +751,21 @@ class SamplingParams(
             )
 
     def _verify_extra_args(self) -> None:
+        kv_params = (
+            self.extra_args.get("kv_transfer_params")
+            if isinstance(self.extra_args, dict)
+            else None
+        )
+        if (
+            isinstance(kv_params, dict)
+            and "remote_prefill_cached_tokens" in kv_params
+            and not envs.VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS
+        ):
+            raise VLLMValidationError(
+                "remote_prefill_cached_tokens requires "
+                "VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS=1 on a trusted P/D backend.",
+                parameter="kv_transfer_params",
+            )
         # JSON accepts arbitrary integers, but the engine's MessagePack
         # transport only supports signed/unsigned 64-bit integers.
         pending: list[Any] = [self.extra_args]
