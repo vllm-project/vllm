@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -145,7 +146,7 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
     them (requires_unquantized_input).
     """
     key = get_input_quant_key(linear)
-    if key == kFp8StaticTensorSym:
+    if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
         return key
     # The norm writes block scales for exactly K = hidden_size, in whole
     # 4-column scale tiles (weights only require K % 32 == 0).
@@ -253,8 +254,12 @@ class Qwen3_5RMSNorm(nn.Module):
             return None, *self(x, residual)
 
         assert linear is not None
-        nvfp4 = key == kNvfp4Dynamic
-        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        if key == kFp8DynamicTokenSym:
+            scale = None
+        elif key == kNvfp4Dynamic:
+            scale = linear.input_global_scale_inv
+        else:
+            scale = linear.input_scale
         if allreduce:
             assert residual is not None
             out = fused_allreduce_gemma_rms_norm_quant(
@@ -262,11 +267,11 @@ class Qwen3_5RMSNorm(nn.Module):
             )
             if out is not None:
                 return out
-            # Above the FlashInfer workspace budget: explicit all-reduce, then
-            # the Triton norm-quant.
+            # No FlashInfer AR+norm (unavailable or above its workspace
+            # budget): explicit all-reduce, then the Triton norm-quant.
             x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
-            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+            x, residual, self.weight, self.variance_epsilon, scale, key, write_y
         )
         qa = QuantizedActivation(
             data=q,
