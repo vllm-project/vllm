@@ -167,6 +167,15 @@ def _fused_marlin_moe(
     if output is None:
         output = intermediate_cache3
 
+    # moe_wna16_marlin_gemm's internal mul_topk_weights=True path applies the
+    # wrong per-row topk weight at some MoE shapes (another row's weight, or
+    # garbage from clobbered shared memory) -- see
+    # https://github.com/vllm-project/vllm/issues/48895. Always disable the
+    # kernel-internal multiply and, when the caller asked for it, apply
+    # topk_weights externally below instead.
+    apply_topk_weights_externally = (
+        mul_topk_weights_in_gemm2 and not apply_router_weight_on_input
+    )
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
         output,
@@ -182,7 +191,7 @@ def _fused_marlin_moe(
         topk_weights,
         moe_block_size=block_size_m,
         top_k=1,
-        mul_topk_weights=mul_topk_weights_in_gemm2 and not apply_router_weight_on_input,
+        mul_topk_weights=False,
         b_q_type=quant_type,
         size_m=M * num_topk,
         size_n=K,
@@ -191,6 +200,8 @@ def _fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+    if apply_topk_weights_externally:
+        output = output * topk_weights.reshape(-1, 1).to(output.dtype)
 
     return output
 
