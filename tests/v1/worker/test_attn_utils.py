@@ -366,6 +366,7 @@ def test_no_attn_metadata_layers_keep_their_layout_without_builders(monkeypatch)
             __name__=name,
             full_cls_name=lambda: name,
             get_supported_kernel_block_sizes=lambda _spec=None: kernel_block_sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_: kernel_block_sizes,
             get_builder_cls=lambda: Builder,
         )
 
