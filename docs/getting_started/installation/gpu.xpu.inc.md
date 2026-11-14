@@ -118,7 +118,8 @@ checkout and default working directory.
 --8<-- [start:build-image-from-source]
 
 ```bash
-docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+docker buildx bake -f docker/docker-bake-xpu.hcl --load \
+    --set '*.shm-size=4g' vllm-openai
 docker run -it \
              --rm \
              --network=host \
