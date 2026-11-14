@@ -14,6 +14,7 @@ from vllm.envs import (
     env_set_with_choices,
     env_with_choices,
     environment_variables,
+    parse_bool_env_value,
 )
 from vllm.exceptions import VLLMValidationError
 
@@ -571,7 +572,13 @@ class TestVllmConfigureLogging:
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
 
-            with pytest.raises(ValueError, match="invalid literal for int"):
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "Invalid value 'invalid' for "
+                    "environment variable VLLM_CONFIGURE_LOGGING"
+                ),
+            ):
                 _ = envs.VLLM_CONFIGURE_LOGGING
 
 
@@ -625,3 +632,95 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+def test_parse_bool_env_value_accepts_common_spellings():
+    """All standard boolean spellings parse regardless of case or whitespace."""
+    for value, expected in [
+        ("true", True),
+        ("TRUE", True),
+        ("True", True),
+        ("  yes ", True),
+        ("1", True),
+        ("false", False),
+        ("FALSE", False),
+        ("0", False),
+        ("no", False),
+        (" Off ", False),
+    ]:
+        assert parse_bool_env_value("VLLM_TEST_VAR", value) is expected, value
+
+
+def test_parse_bool_env_value_error_names_the_variable():
+    """An invalid value fails loudly and names the offending variable."""
+    with pytest.raises(
+        ValueError, match="Invalid value 'bogus' for environment variable VLLM_TEST_VAR"
+    ):
+        parse_bool_env_value("VLLM_TEST_VAR", "bogus")
+
+
+def test_boolean_env_vars_accept_common_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The same user input must behave identically for every boolean var."""
+    # Regression for https://github.com/vllm-project/vllm/issues/66493:
+    # 'true' used to crash some vars (bool(int(...))) and was silently
+    # ignored by others (== "1").
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "true")
+    monkeypatch.setenv("VLLM_NO_USAGE_STATS", "TRUE")
+    monkeypatch.setenv("VLLM_DO_NOT_TRACK", "Yes")
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    assert envs.VLLM_BATCH_INVARIANT is True
+    assert envs.VLLM_NO_USAGE_STATS is True
+    assert envs.VLLM_DO_NOT_TRACK is True
+    assert envs.VLLM_USE_FLASHINFER_SAMPLER is False
+
+
+def test_boolean_env_vars_invalid_value_names_the_variable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "2")
+    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT"):
+        _ = envs.VLLM_BATCH_INVARIANT
+
+
+def test_booleans_unset_and_empty_resolve_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tri-state vars honor None defaults; empty string counts as unset."""
+    monkeypatch.delenv("VLLM_USE_DIRECT_DCP_A2A", raising=False)
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    assert envs.VLLM_BATCH_INVARIANT is False
+    assert envs.VLLM_USE_DIRECT_DCP_A2A is None
+
+    monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "")
+    assert envs.VLLM_USE_DIRECT_DCP_A2A is None
+
+    monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
+    assert envs.VLLM_USE_DIRECT_DCP_A2A is True
+
+
+def test_no_color_and_force_color_never_raise(monkeypatch: pytest.MonkeyPatch):
+    """NO_COLOR/FORCE_COLOR accept spec values and never raise.
+
+    They are read during logger initialization, where raising would block
+    startup (e.g. FORCE_COLOR=2 is a level value, not a boolean). Any
+    non-"0" value activates the flag, matching the historical behavior of
+    these de-facto standard variables.
+    """
+    for value in ("1", "2", "true", "false", "yes"):
+        for name in ("NO_COLOR", "FORCE_COLOR"):
+            monkeypatch.setenv(name, value)
+            assert getattr(envs, name) is True, (name, value)
+
+    for name in ("NO_COLOR", "FORCE_COLOR"):
+        monkeypatch.setenv(name, "0")
+        assert getattr(envs, name) is False, name
+
+        monkeypatch.setenv(name, "yess")
+        assert getattr(envs, name) is True, name
+
+    # unset -> not active
+    for name in ("NO_COLOR", "FORCE_COLOR"):
+        monkeypatch.delenv(name, raising=False)
+        assert getattr(envs, name) is False
