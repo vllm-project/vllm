@@ -68,6 +68,16 @@ MoE), gpt-oss, Gemma 4, and MiniMax-M3. DeepSeek-V4 and Kimi-K3 are also
 supported on NVIDIA GPUs. Other targets are rejected at startup with
 `<architecture> does not support <method> with pipeline parallelism`.
 
+!!! note "Qwen4Exp target-side auxiliary states"
+    On NVIDIA GPUs, Qwen4Exp (Qwen3.8-Flash-Next) can capture the decoder
+    states requested by a drafter and forward them across pipeline stages,
+    including a state captured at a stage boundary. When needed, the last
+    pipeline stage also retains the target input embedding for the drafter.
+    This target-side support does not by itself enable DFlash or DSpark
+    serving. The Qwen4Exp method gate is addressed separately in
+    [#56295](https://github.com/vllm-project/vllm/pull/56295); additional
+    drafter integration and end-to-end validation are still needed.
+
 For example, to run gpt-oss with an EAGLE3 draft model across two pipeline
 stages:
 
