@@ -39,6 +39,7 @@ def _set_gate(monkeypatch, on: bool):
     # model, so they set the recorded flag themselves.
     monkeypatch.setattr(ops, "_monokernel", on)
     ops.enabled.cache_clear()
+    ops.monokernel_cdna3_or_4.cache_clear()
 
 
 class _MarkovW2(torch.nn.Module):
@@ -97,6 +98,7 @@ def _speculator(temp: float, seed: int):
     s.acceptance_estimator = None
     s.draft_watermarker = None
     s._d2t_scatter_index = None
+    s._fuse_markov_bias = False
     s._draft_scatter_buf = None
     s.use_fp64_gumbel = False
     s.draft_logits = DraftLogitsCache(

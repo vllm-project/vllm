@@ -31,7 +31,7 @@ def architecture(device):
 
 
 def fake(shape, stride=None, dtype=torch.bfloat16, align=16):
-    """Row-major unless ``stride`` is given."""
+    """Row-major unless `stride` is given."""
     stride = stride or tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
     dtype = _DTYPES.get(dtype, dtype)
     return make_fake_tensor(dtype, shape, stride, assumed_align=align)
@@ -100,8 +100,8 @@ def resolve_kernel(compiled, device):
 
 def check_residency(compiled, device_index: int, grid: int, threads: int, what: str):
     """Persistent grids whose CTAs wait on one another (not only within a cluster) must
-    all be resident at once: raise when the device cannot hold ``grid`` CTAs of
-    ``compiled`` (``threads`` per CTA, its dynamic shared memory) at the same time."""
+    all be resident at once: raise when the device cannot hold `grid` CTAs of
+    `compiled` (`threads` per CTA, its dynamic shared memory) at the same time."""
     _, function = resolve_kernel(compiled, device_index)
     attribute = cuda.CUfunction_attribute
     max_dynamic = attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
@@ -117,7 +117,7 @@ def check_residency(compiled, device_index: int, grid: int, threads: int, what: 
 
 
 def prepare_shared_carveout(compiled, device_index: int, value: int):
-    """Restore ``value`` (CuTe's launcher drops preferred_smem_carveout) as a driver
+    """Restore `value` (CuTe's launcher drops preferred_smem_carveout) as a driver
     function attribute; call once before capture."""
     executor, function = resolve_kernel(compiled, device_index)
     attribute = cuda.CUfunction_attribute

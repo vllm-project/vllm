@@ -76,7 +76,7 @@ def _apply_heartbeat(sock: zmq.Socket) -> None:
     sock.setsockopt(zmq.HEARTBEAT_TTL, _HEARTBEAT_TTL_MS)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Sockets:
     dealer: zmq.Socket
     monitor: zmq.Socket

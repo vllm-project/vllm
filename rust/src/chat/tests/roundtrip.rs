@@ -33,6 +33,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::output_grammar::BuiltOutputGrammar;
+use vllm_parser::tool::JsonStyle;
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
 
@@ -54,9 +55,10 @@ struct RoundtripCase {
     reasoning_parser: ParserSelection,
     /// How this model's chat template handles thinking mode.
     thinking_behavior: ThinkingBehavior,
-    /// JSON formatting expected after this model's template has materialized
-    /// tool-call arguments.
-    json_fmt: JsonFmt,
+    /// JSON style this model's template renders tool-call argument values in
+    /// (`Spaced` when it renders no JSON), which the parsed arguments must
+    /// match byte for byte.
+    json_style: JsonStyle,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
     /// Which tool-call fixture variants with a JSON schema this case runs;
@@ -223,7 +225,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: spaced_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -237,7 +239,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -251,7 +253,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -265,7 +267,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -279,7 +281,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             // The MiniMax M3 tool parser builds no tool grammar, so the schema
             // excludes the calls.
@@ -298,7 +300,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -312,7 +314,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -326,7 +328,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -340,7 +342,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             // The GLM-4.5 tool parser builds no tool grammar, so the schema
             // excludes the calls.
@@ -359,7 +361,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -373,7 +375,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -387,7 +389,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: true,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
@@ -410,7 +412,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: spaced_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
@@ -428,7 +430,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Compact,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -448,7 +450,7 @@ impl RoundtripCase {
             // minimal/low/medium/high only tunes the strength hint while
             // reasoning stays enabled.
             thinking_behavior: ThinkingBehavior::DisableReasoning { default: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             // The Muse parser builds no tool grammar, so the schema excludes the
             // calls.
@@ -470,7 +472,7 @@ impl RoundtripCase {
             // The template has no thinking switch; `reasoning_strength` only
             // tunes the hint.
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             // The Muse parser builds no tool grammar, so the schema excludes the
             // calls.
@@ -493,7 +495,7 @@ impl RoundtripCase {
                 enabled: "high",
                 disabled: "no_think",
             },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
@@ -507,7 +509,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             // The Seed-OSS tool parser builds no tool grammar, so the schema
             // excludes the calls.
@@ -526,7 +528,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -540,7 +542,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -554,7 +556,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -568,7 +570,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Compact,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
@@ -582,7 +584,7 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
-            json_fmt: compact_json_fmt(),
+            json_style: JsonStyle::Compact,
             sort_json_keys: true,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
@@ -824,7 +826,12 @@ fn expected_arguments(case: &RoundtripCase, raw_json: &str) -> Result<String> {
         sort_json_value(&mut value);
     }
 
-    case.json_fmt
+    // Format with `serde_json_fmt`, independently of the parsers' `JsonStyle`.
+    let json_fmt = match case.json_style {
+        JsonStyle::Compact => compact_json_fmt(),
+        JsonStyle::Spaced => spaced_json_fmt(),
+    };
+    json_fmt
         .format_to_string(&value)
         .context("failed to format expected tool-call arguments")
 }
@@ -1075,6 +1082,7 @@ fn decoded_completion_stream(
     let mut events = vec![DecodedTextEvent::Start {
         prompt_token_ids: Arc::from(prompt_token_ids.clone().into_boxed_slice()),
         prompt_logprobs: None,
+        prompt_token_id_logprobs: None,
     }];
 
     let chunks = match completion_body(tokenizer, completion, assistant_stop_suffix)? {
@@ -1124,9 +1132,9 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 })),
             }
@@ -1139,9 +1147,9 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-                sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {
@@ -1149,6 +1157,7 @@ fn decoded_completion_stream(
                 sampled: vllm_text::SampledDelta {
                     token_ids: chunk.token_ids,
                     logprobs: None,
+                    sampling_mask: None,
                 },
                 finished: finished.map(Box::new),
             });

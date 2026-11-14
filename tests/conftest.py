@@ -240,7 +240,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="gloo" if current_platform.is_cpu() else "nccl",
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield
@@ -251,16 +251,12 @@ def dist_init():
 
 
 @pytest.fixture
-def default_vllm_config(monkeypatch):
+def default_vllm_config():
     """Set a default VllmConfig for tests that directly test CustomOps or pathways
     that use get_current_vllm_config() outside of a full engine context.
     """
     from vllm.config import VllmConfig, set_current_vllm_config
 
-    # Creating a breakable-by-default model config sets
-    # VLLM_USE_BREAKABLE_CUDAGRAPH process-wide; shield the default config
-    # from such leaks (it would flip custom_ops to "all").
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     config = VllmConfig()
     with set_current_vllm_config(config):
         yield config
@@ -528,11 +524,13 @@ class HfRunner:
                 ),
             )
 
-            # in case some unquantized custom models are not in same dtype
+            # In case some unquantized custom models are not in the same dtype.
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
@@ -1036,7 +1034,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
@@ -1862,8 +1860,8 @@ def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
     This forces compilation (and any custom compile passes) to actually run
     instead of being served from a warm cache left behind by previous runs
     (e.g. on persistent CI agents). Use this for tests that inspect what
-    happens during compilation; use ``use_fresh_inductor_cache`` (or
-    ``fresh_vllm_cache``) instead when the vLLM compile cache must stay
+    happens during compilation; use `use_fresh_inductor_cache` (or
+    `fresh_vllm_cache`) instead when the vLLM compile cache must stay
     enabled (e.g. cache save/load tests).
     """
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
@@ -1912,11 +1910,11 @@ def fake_vllm_ir(monkeypatch):
     """
     Pytest fixture to allow isolated IR op registration in tests.
 
-    Replaces IrOp.registry with an empty dict and swaps ``vllm_ir_torch_lib`` for a
-    fresh ``Library`` with a unique namespace per test (see ``Library.ns``).
+    Replaces IrOp.registry with an empty dict and swaps `vllm_ir_torch_lib` for a
+    fresh `Library` with a unique namespace per test (see `Library.ns`).
 
     Torch keeps registrations for the process lifetime; reusing the fragment
-    name ``vllm_ir`` and defining the same op string again can segfault. A
+    name `vllm_ir` and defining the same op string again can segfault. A
     random library name keeps each fixture run on a disjoint namespace.
 
     The test Library is kept alive until after monkeypatch teardown so PyTorch's

@@ -14,7 +14,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -33,6 +33,12 @@ else:
 
 logger = init_logger(__name__)
 _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
+
+
+def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int:
+    """Return the minimum R that makes the expert count divisible by EP size."""
+    return (-num_logical_experts) % ep_size
+
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
@@ -54,6 +60,7 @@ All2AllBackend = Literal[
     "mori",
     "nixl_ep",
     "allgather_reducescatter",
+    "alltoall_batched",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
@@ -73,6 +80,8 @@ class EPLBConfig:
 
     Note that if this is greater than the EPLB window size, only the metrics
     of the last `lb_window_size` steps will be used for rearranging experts.
+    With async EPLB, the interval starts when the previous rearrangement has
+    committed all layers.
     """
 
     num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
@@ -81,6 +90,14 @@ class EPLBConfig:
     based on the number of logical experts and the expert parallel size.
     The value will be rounded up to the nearest multiple of the expert parallel
     size.
+    """
+
+    draft_num_redundant_experts: int | None = Field(default=None, ge=0)
+    """Redundant expert count for an EPLB-backed MoE draft. If unset, the
+    target count is inherited when target and draft routed expert counts match
+    and the target count is valid for the draft; otherwise, the draft's minimum
+    valid count is computed. Explicit values are validated and rejected if they
+    do not satisfy EP divisibility for every draft routed expert count.
     """
 
     log_balancedness: bool = False
@@ -161,7 +178,7 @@ class ParallelConfig:
     externally (see `ParallelConfig.__post_init__`)."""
     data_parallel_rank: int = Field(default=0, ge=0)
     """Rank of the data parallel group. The runtime check at
-    ``__post_init__`` further bounds this by ``data_parallel_size``."""
+    `__post_init__` further bounds this by `data_parallel_size`."""
     data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
@@ -208,9 +225,10 @@ class ParallelConfig:
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
     disk, which can drastically reduce storage I/O for MoE models with
-    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
-    effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
-    models."""
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  With EPLB,
+    each rank also reads the experts its redundant slots replicate in the
+    initial placement; elastic EP loads every expert.  Has no effect on 3D
+    fused-expert checkpoints (e.g. GPT-OSS) or non-MoE models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
@@ -229,6 +247,8 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "alltoall_batched": All2all based on all_to_all_single, routing each
+      token only to the ranks owning its experts, in batched activation format
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
@@ -259,13 +279,13 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     enable_shm_tensor_arena: bool = False
-    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    """Route large CPU tensors (e.g. multimodal `pixel_values`) in the
     engine→worker broadcast through a zero-copy shared-memory arena instead of
     sending a copy to every reader. **Experimental**: may be reconciled with
     vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
     most beneficial for multimodal serving with large images and tensor
     parallelism. Active only when all queue readers are node-local; reserves
-    slots in ``/dev/shm``."""
+    slots in `/dev/shm`."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -392,7 +412,7 @@ class ParallelConfig:
     assigned_physical_gpu_ids: list[int] | None = None
     """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
 
-    For example, ``[2, 3]`` means logical GPU 0 maps to physical GPU 2,
+    For example, `[2, 3]` means logical GPU 0 maps to physical GPU 2,
     and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
     at platform/topology boundaries such as NVML, NIC affinity, P2P
     checks, and final CUDA device selection when needed. When None,
@@ -671,7 +691,7 @@ class ParallelConfig:
             )
             # Ensure (num_logical_experts + num_redundant_experts) is
             # divisible by ep_size, supporting non-standard ep_size values
-            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            min_redundant = get_min_num_redundant_experts(num_logical_experts, ep_size)
             self.eplb_config.num_redundant_experts = min_redundant
             logger.info_once(
                 "EPLB num_redundant_experts not specified, "
@@ -764,11 +784,11 @@ class ParallelConfig:
         return answer
 
     def _pick_stateless_dp_port(self) -> tuple[int, socket.socket | None]:
-        """Return ``(port, listen_socket)`` for DP group init.
+        """Return `(port, listen_socket)` for DP group init.
 
         With a coord store, rank 0 binds a socket and publishes the port;
         others read it.  Without one, pops a pre-allocated port and
-        returns ``listen_socket=None``.
+        returns `listen_socket=None`.
         """
         if not self._coord_store_port:
             return self.get_next_dp_init_port(), None
@@ -885,11 +905,13 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Every backend emitting the batched activation format belongs here.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "alltoall_batched",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1
@@ -903,7 +925,7 @@ class ParallelConfig:
     def nnodes_within_dp(self) -> int:
         """Number of nodes one DP replica spans.
 
-        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        External LB pins `data_parallel_size_local` to 1, so the ratio
         rounds down to 0 once DP replicas outnumber nodes. A replica that
         does not span nodes still occupies exactly one.
         """
@@ -994,7 +1016,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1003,6 +1025,9 @@ class ParallelConfig:
 
         This hash is also used for DP worker configuration validation
         to prevent hangs from mismatched collective communication patterns.
+
+        WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
@@ -1046,10 +1071,7 @@ class ParallelConfig:
             "assigned_physical_gpu_ids",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization

@@ -26,10 +26,10 @@
 # SOFTWARE.
 """Device-side primitives of the Muse Spark monokernel.
 
-Adapted from ATOM's ``atom/mono/device`` (ops.py, sync.py; MIT, AMD). Differences
+Adapted from ATOM's `atom/mono/device` (ops.py, sync.py; MIT, AMD). Differences
 from ATOM that matter:
 
-* Mailbox tags are epoch based (``tag = epoch * 64 + slot + 1`` with the epoch a
+* Mailbox tags are epoch based (`tag = epoch * 64 + slot + 1` with the epoch a
   device word bumped once per forward inside the CUDA graph) instead of ATOM's
   zero-at-step-start discipline: nothing is ever zeroed.
 * Every spin is bounded by a wall-clock timeout (s_memrealtime, 100 MHz) that
@@ -58,7 +58,7 @@ CM_NT = 2  # nontemporal: weights streamed once
 
 
 def traced(fn):
-    """FlyDSL AST rewriting for a helper (``if`` / ``while`` on traced values)."""
+    """FlyDSL AST rewriting for a helper (`if` / `while` on traced values)."""
     return ASTRewriter.transform(fn)
 
 
@@ -194,7 +194,7 @@ def wave_incl_scan(v, lane):
 
 
 def bpermute(v, src_lane):
-    """Lane ``src_lane``'s i32 v (ds_bpermute: the LDS crossbar, no LDS memory)."""
+    """Lane `src_lane`'s i32 v (ds_bpermute: the LDS crossbar, no LDS memory)."""
     return fx.Int32(
         rocdl.ds_bpermute(T.i32, fx.Int32(src_lane) * 4, fx.Int32(v).ir_value())
     )
@@ -225,7 +225,7 @@ def bf_hi(w):
 
 
 def fp4x8_bf16(word, scale_f32):
-    """One dword of 8 E2M1 (low nibble first) times ``scale_f32`` -> bf16x8
+    """One dword of 8 E2M1 (low nibble first) times `scale_f32` -> bf16x8
     (exact: v_cvt_scalef32_pk_bf16_fp4, the aiter Muse a16w4 decode)."""
     parts = []
     for sel in range_constexpr(4):
@@ -266,8 +266,8 @@ OOB_BOUND = 0x80000000  # num_records of a mailbox resource: every real offset i
 
 
 def ld_vec_if(ok, ptr, i, words, nbytes, cm=0):
-    """``words`` dwords at dword ``i``, or zeros without a memory access when not ``ok``
-    (out-of-range buffer offset; ``nbytes`` must bound the buffer)."""
+    """`words` dwords at dword `i`, or zeros without a memory access when not `ok`
+    (out-of-range buffer offset; `nbytes` must bound the buffer)."""
     return fx.Vector(
         bo.buffer_load(
             rsrc(ptr, nbytes),
@@ -298,8 +298,8 @@ TIMEOUT_TICKS = 2 * 100_000_000  # 2 s at 100 MHz
 
 @traced
 def _spin_bounded(load_all, pending, health, region_id, index, tag):
-    """Re-load until ``pending`` clears or TIMEOUT_TICKS pass; on a timeout the
-    CTA's first record goes to ``health`` (word 0 = sticky FAILED, words
+    """Re-load until `pending` clears or TIMEOUT_TICKS pass; on a timeout the
+    CTA's first record goes to `health` (word 0 = sticky FAILED, words
     8 + 8 bid .. = record) and later waits of this launch exit at once."""
     t0 = memrealtime()
     v = load_all()
@@ -362,7 +362,7 @@ def mb_put2(tag, base, i, w0, w1):
 def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
     """[(base, pair index, npairs in {1, 2})] -> value words, all re-loaded
     together until every tag matches (one round trip after the last lands).
-    ``oks`` (optional, one traced bool a spec): a false spec is not loaded (an
+    `oks` (optional, one traced bool a spec): a false spec is not loaded (an
     out-of-range buffer offset, no memory access), returns zeros, and is not
     waited for."""
     if len(specs) == 0:
@@ -414,7 +414,7 @@ def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
 
 def st_if(ok, v, base, i, cm=0):
     """buffer_store of v (i32 or i32 vector) at dword i, dropped (out-of-range offset, no
-    branch) when not ``ok``: keeps the waitcnt pass from draining at a join."""
+    branch) when not `ok`: keeps the waitcnt pass from draining at a join."""
     bo.buffer_store(
         v,
         rsrc(base, OOB_BOUND),
@@ -424,6 +424,6 @@ def st_if(ok, v, base, i, cm=0):
 
 
 def mb_put_if(ok, tag, base, i, v, cm=CM_DEV):
-    """Pair i := (v, tag) when ``ok`` (branch-free, see st_if)."""
+    """Pair i := (v, tag) when `ok` (branch-free, see st_if)."""
     bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
     st_if(ok, fx.Vector.from_elements([bits, tag], fx.Int32), base, fx.Int32(i) * 2, cm)

@@ -46,8 +46,10 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         if c.weight_type != scalar_types.int4:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CUTLASS W4A8, only supported int4",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "CUTLASS W4A8, only supported int4"
+                ),
             )
 
         if c.group_size != 128:

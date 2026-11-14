@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 import torch
 
@@ -29,36 +29,13 @@ LayerKernel = Callable[
 ]
 
 
-class KernelExecutor(Protocol):
-    # whether the launches read the KV caches (bound through ``bind``)
-    uses_caches: bool
-    # the sticky device error word every launch checks and sets
-    fault_word: torch.Tensor
-
-    def layer(self, layer_id: int) -> LayerKernel | None: ...
-
-    def begin_step(self, slots: torch.Tensor) -> None: ...
-
-    def bind(self, layer_id: int, binding: CacheBinding) -> None: ...
-
-    def health(self) -> Any: ...
-
-    def abort(self) -> None: ...
-
-    def after_step(self) -> None: ...
-
-    def output_step(self) -> None: ...
-
-    def close(self) -> None: ...
-
-
 def tp_agree(ok: bool) -> bool:
     from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
 
     return tp_agree(ok, get_tp_group().cpu_group)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Step:
     first_layer: int
     kernels: tuple[LayerKernel | None, ...]
@@ -153,7 +130,7 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
-        """Mono for a plain-decode step of at most ``max_rows`` rows, eager or
+        """Mono for a plain-decode step of at most `max_rows` rows, eager or
         inside a FULL graph capture (padded rows are inert in the kernel);
         stock otherwise. Every predicate reads metadata every TP rank holds
         alike."""
