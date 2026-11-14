@@ -63,8 +63,6 @@ variants:
         extra_args:
           - "--kv-cache-dtype"
           - "fp8"
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--load-format"
           - "fastsafetensors"
           - "--max-num-batched-tokens"
@@ -79,8 +77,6 @@ variants:
           - "--enable-prefix-caching"
           - "--max-num-batched-tokens"
           - "8192"
-          - "--gpu-memory-utilization"
-          - "0.95"
 
 compatible_strategies:
   - single_node_tp

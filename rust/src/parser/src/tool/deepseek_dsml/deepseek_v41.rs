@@ -8,7 +8,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 
 /// Tool parser for DeepSeek V4.1's spaced DSML tags.
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Arguments stream as their parameter values arrive.
 pub struct DeepSeekV41ToolParser(DeepSeekDsmlToolParser);
 
 impl ToolParser for DeepSeekV41ToolParser {

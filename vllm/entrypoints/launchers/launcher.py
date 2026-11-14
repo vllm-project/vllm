@@ -30,6 +30,7 @@ from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 from .utils.constants import (
+    DISABLED_ROUTE_TAG,
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
@@ -194,7 +195,13 @@ async def serve_http(
         if methods is None or path is None:
             continue
 
-        logger.info("Route: %s, Methods: %s", path, ", ".join(methods))
+        disabled = DISABLED_ROUTE_TAG in getattr(route, "tags", ())
+        logger.info(
+            "Route: %s, Methods: %s%s",
+            path,
+            ", ".join(methods),
+            " (disabled)" if disabled else "",
+        )
 
     # other endpoints
     for route in app.routes:
