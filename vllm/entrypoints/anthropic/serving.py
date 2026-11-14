@@ -519,7 +519,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic messages to OpenAI format."""
-        for msg in messages:
+        for msg in cls._merge_consecutive_assistant_turns(messages):
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
             # going through _convert_block / _convert_message_content which
@@ -542,6 +542,23 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             if not (msg.role == "user" and "content" not in openai_msg):
                 openai_messages.append(openai_msg)
+
+    @staticmethod
+    def _merge_consecutive_assistant_turns(messages: list) -> list:
+        """Combine consecutive assistant messages into one turn, as the
+        Anthropic API does, so the chat template renders one assistant turn."""
+        merged: list = []
+        for msg in messages:
+            if not (merged and msg.role == merged[-1].role == "assistant"):
+                merged.append(msg)
+                continue
+            blocks: list[AnthropicContentBlock] = []
+            for content in (merged[-1].content, msg.content):
+                if isinstance(content, str):
+                    content = [AnthropicContentBlock(type="text", text=content)]
+                blocks.extend(content)
+            merged[-1] = merged[-1].model_copy(update={"content": blocks})
+        return merged
 
     @classmethod
     def _convert_message_content(
