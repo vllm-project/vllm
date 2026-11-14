@@ -4,11 +4,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+import uvicorn
 from openai import OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
@@ -61,6 +65,49 @@ async def test_init_tool_server_with_mcp_url(monkeypatch: pytest.MonkeyPatch):
 
     assert result is server
     server.add_tool_server.assert_awaited_once_with("http://mcp.test")
+
+
+@asynccontextmanager
+async def _serve_paged_mcp_server(pages: dict[str | None, tuple[str, str | None]]):
+    """Serve a real MCP SSE server that paginates tools/list and yield its address.
+
+    Args:
+        pages: Maps each request cursor to the tool on that page and the
+            ``next_cursor`` to return with it.
+
+    """
+    pytest.importorskip("mcp")
+    from mcp.server.mcpserver import MCPServer
+    from mcp.types import ListToolsResult
+
+    class PagedMCPServer(MCPServer):
+        # MCPServer has no public pagination API, so override its tools/list handler.
+        async def _handle_list_tools(self, ctx, params):
+            name, next_cursor = pages[params.cursor if params else None]
+            tools = [tool for tool in await self.list_tools() if tool.name == name]
+            return ListToolsResult(tools=tools, next_cursor=next_cursor)
+
+    def handler() -> str:
+        return "ok"
+
+    app = PagedMCPServer("paged")
+    for name, _ in pages.values():
+        app.add_tool(handler, name=name)
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        uvicorn_server = uvicorn.Server(
+            uvicorn.Config(app.sse_app(), log_level="error")
+        )
+        serve_task = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
+        try:
+            async with asyncio.timeout(10):
+                while not uvicorn_server.started:
+                    await asyncio.sleep(0.01)
+            yield f"127.0.0.1:{sock.getsockname()[1]}"
+        finally:
+            uvicorn_server.should_exit = True
+            await serve_task
 
 
 @pytest.mark.skip_global_cleanup
@@ -174,6 +221,45 @@ class TestMCPToolServerUnit:
             f"BUILTIN_TOOL_TO_MCP_SERVER_LABEL values "
             f"{set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())}"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pages", "expected_tools"),
+        [
+            ({None: ("only_page", None)}, ["only_page"]),
+            (
+                {
+                    None: ("first_page", "page2"),
+                    "page2": ("second_page", "page3"),
+                    "page3": ("third_page", None),
+                },
+                ["first_page", "second_page", "third_page"],
+            ),
+        ],
+        ids=["single_page", "multiple_pages"],
+    )
+    async def test_add_tool_server_advertises_tools_from_every_page(
+        self, pages, expected_tools
+    ):
+        async with _serve_paged_mcp_server(pages) as address:
+            server = MCPToolServer()
+            await server.add_tool_server(address)
+
+        description = server.get_tool_description("paged")
+        assert description is not None
+        assert [tool.name for tool in description.tools] == expected_tools
+
+    @pytest.mark.asyncio
+    async def test_add_tool_server_rejects_repeated_cursor(self):
+        pages = {None: ("first_page", "page2"), "page2": ("second_page", "page2")}
+
+        async with asyncio.timeout(30):
+            async with _serve_paged_mcp_server(pages) as address:
+                with pytest.raises(ExceptionGroup) as exc_group:
+                    await MCPToolServer().add_tool_server(address)
+                assert exc_group.group_contains(
+                    ValueError, match="duplicate tools/list"
+                )
 
 
 class TestMCPEnabled:
