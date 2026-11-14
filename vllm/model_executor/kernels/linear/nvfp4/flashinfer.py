@@ -24,9 +24,83 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     has_flashinfer_b12x_gemm,
     has_flashinfer_bf16_fp4,
+    has_flashinfer_sm12x_cutedsl_fp4_gemm,
 )
+from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
+
+# On SM120, FlashInfer cute-dsl beats FlashInfer CUTLASS up to this many tokens
+# and loses above it (RTX PRO 6000, Qwen3.8-27B MLP and lm_head shapes). Its
+# SM12x runner only writes BF16 output; other dtypes use CUTLASS.
+SM120_CUTEDSL_MAX_TOKENS = 64
+
+
+def _use_sm120_cutedsl(num_tokens: int, out_dtype: torch.dtype) -> bool:
+    return out_dtype == torch.bfloat16 and num_tokens <= SM120_CUTEDSL_MAX_TOKENS
+
+
+def _sm120_cutedsl_nvfp4_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    # Both backends take the same swizzled + padded operands. The token count
+    # is only concrete inside the op, so the choice is made here.
+    backend = "cute-dsl" if _use_sm120_cutedsl(a.shape[0], out_dtype) else "cutlass"
+    return flashinfer_scaled_fp4_mm(
+        a, b, block_scale_a, block_scale_b, alpha, out_dtype, backend=backend
+    )
+
+
+def _sm120_cutedsl_nvfp4_mm_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return a.new_empty((a.shape[0], b.shape[0]), dtype=out_dtype)
+
+
+if current_platform.is_cuda():
+    direct_register_custom_op(
+        op_name="sm120_cutedsl_nvfp4_mm",
+        op_func=_sm120_cutedsl_nvfp4_mm,
+        fake_impl=_sm120_cutedsl_nvfp4_mm_fake,
+    )
+    sm120_cutedsl_nvfp4_mm = eager_bypass_custom_op(
+        "sm120_cutedsl_nvfp4_mm", _sm120_cutedsl_nvfp4_mm
+    )
+
+# Packed weight shapes whose SM120 cute-dsl kernels are already compiled.
+_sm120_cutedsl_compiled_shapes: set[tuple[int, ...]] = set()
+
+
+def _compile_sm120_cutedsl(layer: torch.nn.Module) -> None:
+    """Compile the SM120 cute-dsl kernels for every token count they serve.
+
+    cute-dsl compiles a kernel per token-count bucket on first use (0.3-0.5 s
+    each). CUDA graph capture covers layers inside the graph, but layers that
+    run eagerly, such as lm_head on the sampled tokens, would compile while
+    serving requests.
+    """
+    dtype = torch.get_default_dtype()
+    shape = tuple(layer.weight.shape)
+    if dtype != torch.bfloat16 or shape in _sm120_cutedsl_compiled_shapes:
+        return
+    _sm120_cutedsl_compiled_shapes.add(shape)
+    k = layer.weight.shape[1] * 2
+    for m in range(1, SM120_CUTEDSL_MAX_TOKENS + 1):
+        x = torch.zeros(m, k, dtype=dtype, device=layer.weight.device)
+        data, scale = scaled_fp4_quant(x, layer.input_global_scale_inv)
+        _sm120_cutedsl_nvfp4_mm(
+            data, layer.weight, scale, layer.weight_scale, layer.alpha, dtype
+        )
 
 
 class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
@@ -123,8 +197,13 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_device_capability_family(100):
-            return False, "FlashInfer cutedsl requires sm_10x"
+        if current_platform.is_device_capability(120):
+            # Runs cute-dsl for decode-sized inputs and CUTLASS above
+            # SM120_CUTEDSL_MAX_TOKENS. SM121 (GB10) is not measured yet.
+            if not has_flashinfer_sm12x_cutedsl_fp4_gemm():
+                return False, "FlashInfer cutedsl on SM120 requires its SM12x runner"
+        elif not current_platform.is_device_capability_family(100):
+            return False, "FlashInfer cutedsl requires sm_10x or SM120"
         if not has_flashinfer():
             return False, "FlashInfer required"
         return True, None
@@ -142,6 +221,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
+        if current_platform.is_device_capability(120):
+            _compile_sm120_cutedsl(layer)
 
     def apply_weights(
         self,
@@ -152,15 +233,25 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         qa = self.prepare_input(layer, x)
 
-        out = flashinfer_scaled_fp4_mm(
-            qa.data,
-            layer.weight,
-            qa.scale,
-            layer.weight_scale,
-            layer.alpha,
-            qa.orig_dtype,
-            backend="cute-dsl",
-        )
+        if current_platform.is_device_capability(120):
+            out = sm120_cutedsl_nvfp4_mm(
+                qa.data,
+                layer.weight,
+                qa.scale,
+                layer.weight_scale,
+                layer.alpha,
+                qa.orig_dtype,
+            )
+        else:
+            out = flashinfer_scaled_fp4_mm(
+                qa.data,
+                layer.weight,
+                qa.scale,
+                layer.weight_scale,
+                layer.alpha,
+                qa.orig_dtype,
+                backend="cute-dsl",
+            )
 
         out = slice_nvfp4_output(out, output_size)
 

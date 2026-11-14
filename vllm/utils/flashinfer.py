@@ -804,6 +804,19 @@ def has_flashinfer_localized_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sm12x_cutedsl_fp4_gemm() -> bool:
+    """Return `True` if FlashInfer's cute-dsl FP4 GEMM backend has the SM12x
+    runner (flashinfer-ai/flashinfer#5100)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    try:
+        spec = importlib.util.find_spec("flashinfer.gemm.kernels.sm12x_cute")
+    except ModuleNotFoundError:
+        return False
+    return spec is not None
+
+
+@functools.cache
 def has_flashinfer_b12x_gemm() -> bool:
     """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
     if not has_flashinfer_cutedsl():
