@@ -34,6 +34,7 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsPP,
     SupportsQuant,
 )
@@ -343,8 +344,9 @@ class BeamForCausalLM(
     MixtureOfExperts,
     SupportsQuant,
     SupportsEagle3,
+    SupportsLoRA,
 ):
-    """Beam causal LM. LoRA support is deferred to a follow-up change."""
+    """Beam causal LM."""
 
     hf_to_vllm_mapper = BeamModel.hf_to_vllm_mapper
     packed_modules_mapping = {
@@ -355,6 +357,10 @@ class BeamForCausalLM(
     fall_back_to_pt_during_load = False
 
     def process_weights_after_loading(self) -> None:
+        # The low-latency GEMM reads `qkv_gate_proj.weight` directly, which
+        # skips the LoRA wrapper installed after loading.
+        if self.lora_config is not None:
+            return
         for module in self.model.modules():
             if isinstance(module, BeamAttention):
                 module.warmup_projection()
@@ -378,6 +384,7 @@ class BeamForCausalLM(
             )
         self.config = config
         self.quant_config = quant_config
+        self.lora_config = vllm_config.lora_config
 
         self.model = BeamModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")

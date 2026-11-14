@@ -16,7 +16,10 @@ import torch
 from torch import nn
 
 from vllm import LLM, SamplingParams
+from vllm.model_executor.models.interfaces import supports_lora
 from vllm.models.beam import model as beam
+from vllm.models.beam.nvidia import attention as nvidia_attention
+from vllm.models.beam.nvidia import model as nvidia_beam
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -64,16 +67,17 @@ TINY_CONFIG = {
 )
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize(
-    "enforce_eager,tp_size,num_experts,enable_ep",
+    "enforce_eager,tp_size,num_experts,enable_ep,enable_lora",
     [
-        (True, 1, 8, False),
-        (False, 1, 8, False),
-        (True, 4, 2, False),
-        (True, 4, 8, True),
+        (True, 1, 8, False, False),
+        (False, 1, 8, False, False),
+        (True, 4, 2, False, False),
+        (True, 4, 8, True, False),
+        (False, 1, 8, False, True),
     ],
 )
 def test_beam_builds_and_generates(
-    tmp_path, enforce_eager, tp_size, num_experts, enable_ep
+    tmp_path, enforce_eager, tp_size, num_experts, enable_ep, enable_lora
 ):
     """Release-style metadata must load and generate in both execution modes."""
     if torch.accelerator.device_count() < tp_size:
@@ -98,6 +102,7 @@ def test_beam_builds_and_generates(
         enforce_eager=enforce_eager,
         tensor_parallel_size=tp_size,
         enable_expert_parallel=enable_ep,
+        enable_lora=enable_lora,
     )
     outputs = llm.generate(
         {"prompt_token_ids": [5, 6, 7, 8]},
@@ -154,6 +159,7 @@ def test_dense_only_pipeline_stage_initializes(monkeypatch):
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=BeamConfig()),
         quant_config=None,
+        lora_config=None,
         parallel_config=SimpleNamespace(
             enable_eplb=False, use_sequence_parallel_moe=False
         ),
@@ -165,6 +171,34 @@ def test_dense_only_pipeline_stage_initializes(monkeypatch):
     assert model.num_moe_layers == 0
     assert model.num_logical_experts == 0
     assert model.num_local_physical_experts == 0
+
+
+@pytest.mark.cpu_test
+def test_beam_supports_lora():
+    assert supports_lora(beam.BeamForCausalLM)
+    assert beam.BeamForCausalLM.embedding_modules == {}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("lora_config", [None, object()])
+def test_low_latency_projection_is_not_warmed_up_with_lora(monkeypatch, lora_config):
+    """The low-latency `qkv_gate_proj` GEMM reads the base weight directly, so
+    it is only warmed up (and enabled) without LoRA."""
+    warmed_up = []
+    BeamAttention = nvidia_attention.BeamAttention
+    monkeypatch.setattr(
+        BeamAttention, "warmup_projection", lambda self: warmed_up.append(self)
+    )
+    layer = BeamAttention.__new__(BeamAttention)
+    nn.Module.__init__(layer)
+    model = nvidia_beam.BeamForCausalLM.__new__(nvidia_beam.BeamForCausalLM)
+    nn.Module.__init__(model)
+    model.model = nn.ModuleList([layer])
+    model.lora_config = lora_config
+
+    model.process_weights_after_loading()
+
+    assert warmed_up == ([] if lora_config is not None else [layer])
 
 
 class _AddOneLayer(nn.Module):
