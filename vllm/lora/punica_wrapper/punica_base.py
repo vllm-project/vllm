@@ -7,6 +7,7 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING
 
 import torch
@@ -437,6 +438,20 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
+
+    def token_logits_rows(self, start: int, end: int) -> AbstractContextManager:
+        """Map logits rows to batch tokens [start, end) instead of sampled rows.
+
+        `add_lora_logits` assumes one logits row per sampled token (the
+        `prompt_mapping` of the current `LoRAMapping`). Callers that compute
+        logits for other rows, e.g. prompt logprobs, must call
+        `compute_logits(hidden_states[start:end])` inside this context, where
+        [start, end) indexes the flattened batch tokens. The sampled-row
+        mapping is restored on exit.
+        """
+        # TODO: implement for the CPU/XPU wrappers, which index
+        # `sampler_indices` directly in `add_lora_logits`.
+        return nullcontext()
 
     def moe_lora_align_block_size(
         self,
