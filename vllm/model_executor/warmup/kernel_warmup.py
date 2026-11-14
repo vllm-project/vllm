@@ -484,14 +484,28 @@ def _run_flashinfer_autotune_dummy_runs(
         # Round M up to match serving-time bucket selection for non-bucket M.
         # See https://github.com/flashinfer-ai/flashinfer/issues/5450
         with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
-            runner._dummy_run(
+            _, sample_hidden_states = runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
-            autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
+
+            if sample_hidden_states is not None and hasattr(
+                runner, "_dummy_sampler_run"
+            ):
+                runner._dummy_sampler_run(sample_hidden_states)
+            elif sample_hidden_states is not None and hasattr(runner, "model"):
+                runner.model.compute_logits(
+                    sample_hidden_states,
+                    runner.get_metadata(),  # type: ignore[attr-defined]
+                )
+
+            autotune_indexer_wq_b(
+                runner.get_model(),  # type: ignore[attr-defined]
+                max_tuning_tokens,
+            )
 
 
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
