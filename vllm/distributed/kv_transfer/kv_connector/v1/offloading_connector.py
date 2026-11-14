@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -242,6 +242,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    @classmethod
+    def supports_bidirectional_spans(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Offloaded blocks are looked up by the request's block hashes.
+        return True
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:

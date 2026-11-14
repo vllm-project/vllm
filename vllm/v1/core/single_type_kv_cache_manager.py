@@ -1370,9 +1370,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                         mask[i - start_block] = True
 
         # (2) Reachable-boundary tails: the replay boundary (``num_prompt - 1``,
-        # capped by ``get_computed_blocks``) and any shared-prefix junction. Both
-        # land before segments would cover them under sparse retention, so keep
-        # the ``need``-block tail ending on each boundary explicitly.
+        # capped by ``get_computed_blocks``), the ends of bidirectional spans and
+        # any shared-prefix junction. They land before segments would cover them
+        # under sparse retention, so keep the ``need``-block tail ending on each
+        # boundary explicitly.
         if retention_interval is not None:
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens

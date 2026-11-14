@@ -412,6 +412,9 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        # Set while the head of the waiting queue is a request that could not
+        # start a bidirectional span; the queue is then not reordered.
+        self._holding_waiting_span_request = False
         # Cache-aware admission needs a prefix cache to consult, and reorders by
         # position, which only a FCFS queue has.
         self.cache_aware_window = (
@@ -787,6 +790,9 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        # Set when the encoder cache cannot take the items of a running
+        # request's bidirectional span this step; no request is admitted then.
+        holding_span_request = False
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             if input_budget <= draft_slots:
@@ -856,6 +862,11 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
                 )
+            num_tokens_before_spans = num_new_tokens
+            num_new_tokens = request.align_prefill_to_bidirectional_spans(
+                request.num_computed_tokens, num_new_tokens
+            )
+            num_tokens_before_encoder = num_new_tokens
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -897,9 +908,26 @@ class Scheduler(SchedulerInterface):
                 #    models with mamba cache mode \"align\".
                 # 5. Insufficient budget to keep a multi-module MTP prefill
                 #    chunk out of the prefill-lookahead window.
+                # 6. Insufficient budget or encoder space to finish a
+                #    bidirectional span that the prefill has entered, or to
+                #    prefill the next one.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
+                if request.bidirectional_spans and num_tokens_before_spans > 0:
+                    # Stalled span requests must not pin each other out of the
+                    # encoder cache, and when the encoder cut this one, later
+                    # requests must not take the space it needs.
+                    cached = self.encoder_cache_manager.get_cached_input_ids(request)
+                    for input_id in set(cached):
+                        offset = request.mm_features[input_id].mm_position.offset
+                        if offset >= request.num_computed_tokens:
+                            # It takes them again when its span runs.
+                            self.encoder_cache_manager.free_encoder_input(
+                                request, input_id
+                            )
+                    if num_tokens_before_encoder > 0:
+                        holding_span_request = True
                 req_index += 1
                 continue
 
@@ -1048,9 +1076,18 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
-            if self.cache_aware_window and not defer_prefills:
+        if (
+            not preempted_reqs
+            and not holding_span_request
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
+            if (
+                self.cache_aware_window
+                and not defer_prefills
+                and not self._holding_waiting_span_request
+            ):
                 self._reorder_waiting_by_cached_prefix()
+            self._holding_waiting_span_request = False
 
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -1420,6 +1457,9 @@ class Scheduler(SchedulerInterface):
                             # so drop the padding instead of shortening it.
                             num_new_tokens = 1
                             pad_spec_decode = False
+                    num_new_tokens = request.align_prefill_to_bidirectional_spans(
+                        num_computed_tokens, num_new_tokens
+                    )
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -1455,6 +1495,14 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free(request)
                         num_new_tokens = 0
 
+                    if num_new_tokens == 0 and request.bidirectional_spans:
+                        # The request cannot start a span in this step. Hold the
+                        # queue, so that later requests do not keep taking the
+                        # token budget or encoder space the span needs, and keep
+                        # it at the head in the next step.
+                        self.encoder_cache_manager.free(request)
+                        self._holding_waiting_span_request = True
+                        break
                     if num_new_tokens == 0:
                         # The request cannot be scheduled. Requeue it so it does
                         # not stall the requests behind it.
@@ -2102,13 +2150,20 @@ class Scheduler(SchedulerInterface):
 
         If an encoder input cannot be scheduled due to cache or budget
         limitations, the method adjusts `num_new_tokens` to schedule only the
-        decoder tokens up to just before the unschedulable encoder input.
+        decoder tokens up to just before the unschedulable encoder input, or
+        before the bidirectional span that contains it.
 
         Note that num_computed_tokens includes both locally cached
         blocks and externally cached blocks (via KVConnector).
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget, [], []
+        num_new_tokens_before_cut = num_new_tokens
+        cached_before = (
+            set(self.encoder_cache_manager.get_cached_input_ids(request))
+            if request.bidirectional_spans
+            else set()
+        )
         encoder_inputs_to_schedule: list[int] = []
         mm_features = request.mm_features
         assert mm_features is not None
@@ -2160,9 +2215,12 @@ class Scheduler(SchedulerInterface):
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
             # only cover part of the mm input, roll back to before the mm item.
+            # A span request's items lie inside its spans, which chunks never
+            # split, so this does not apply to them.
             if (
                 self.scheduler_config.disable_chunked_mm_input
                 and not self.is_encoder_decoder
+                and not request.bidirectional_spans
                 and (num_computed_tokens + num_new_tokens)
                 < (start_pos + num_encoder_tokens)
             ):
@@ -2267,6 +2325,32 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
+
+        if request.bidirectional_spans and num_new_tokens < num_new_tokens_before_cut:
+            # A cut before an item inside a span moves to the span's start. Drop
+            # the inputs this step no longer reaches.
+            num_new_tokens = request.align_prefill_to_bidirectional_spans(
+                num_computed_tokens, num_new_tokens
+            )
+            window_end = num_computed_tokens + num_new_tokens + shift_computed_tokens
+
+            def reached(i: int) -> bool:
+                return mm_features[i].mm_position.offset < window_end
+
+            for i in encoder_inputs_to_schedule:
+                if not reached(i):
+                    position = mm_features[i].mm_position
+                    encoder_compute_budget += position.get_num_embeds()
+            encoder_inputs_to_schedule = list(
+                filter(reached, encoder_inputs_to_schedule)
+            )
+            external_load_encoder_input = list(
+                filter(reached, external_load_encoder_input)
+            )
+            duplicate_encoder_inputs = list(filter(reached, duplicate_encoder_inputs))
+            for i in set(self.encoder_cache_manager.get_cached_input_ids(request)):
+                if i not in cached_before and not reached(i):
+                    self.encoder_cache_manager.free_encoder_input(request, i)
 
         return (
             encoder_inputs_to_schedule,

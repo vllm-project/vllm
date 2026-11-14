@@ -49,6 +49,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
+    supports_bidirectional_spans,
     supports_hc_sp,
     supports_kv_cache_grouping,
     supports_lora,
@@ -988,6 +989,7 @@ class _ModelInfo:
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
+    supports_bidirectional_spans: bool
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
@@ -1030,6 +1032,7 @@ class _ModelInfo:
             ),
             supports_kv_cache_grouping=supports_kv_cache_grouping(model),
             has_noops=has_noops(model),
+            supports_bidirectional_spans=supports_bidirectional_spans(model),
             supported_video_pruning_methods=getattr(
                 model, "supported_video_pruning_methods", ()
             ),

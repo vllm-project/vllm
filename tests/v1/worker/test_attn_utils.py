@@ -459,15 +459,21 @@ class _MMPrefixRangesRecorder:
         self.mm_req_doc_ranges = common_attn_metadata.mm_req_doc_ranges
         return self
 
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        return self.build(0, common_attn_metadata)
 
-def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them():
+
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them(for_capture):
     """Gemma 4 with use_bidirectional_attention="vision" and the hybrid KV cache
     manager off: its sliding-window and full-attention layers share a KV cache
-    group, but only the sliding-window layers take the image ranges."""
+    group, but only the sliding-window layers take the image ranges. Layers
+    that apply bidirectional spans take the spans and no image ranges."""
     spec = new_kv_cache_spec()
     recorders = {
         "sliding": _MMPrefixRangesRecorder(),
         "full": _MMPrefixRangesRecorder(),
+        "spans": _MMPrefixRangesRecorder(),
     }
     groups = [
         AttentionGroup(
@@ -476,11 +482,13 @@ def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them():
             spec,
             0,
             applies_mm_prefix_ranges=name == "sliding",
+            applies_bidirectional_spans=name == "spans",
             metadata_builders=[recorders[name]],  # type: ignore[list-item]
         )
         for name in recorders
     ]
     ranges = {0: [(1, 2)], 1: []}
+    span_ranges = {1: [(4, 6)]}
     query_start_loc = torch.tensor([0, 3, 4], dtype=torch.int32)
     attn_utils.build_attn_metadata(
         attn_groups=[groups],
@@ -499,10 +507,14 @@ def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them():
             kv_cache_groups=[new_kv_cache_group(list(recorders), spec)],
         ),
         mm_req_doc_ranges=ranges,
+        bidirectional_span_ranges=None if for_capture else span_ranges,
+        for_cudagraph_capture=for_capture,
     )
 
     assert recorders["sliding"].mm_req_doc_ranges is ranges
     assert recorders["full"].mm_req_doc_ranges is None
+    expected_spans = None if for_capture else span_ranges
+    assert recorders["spans"].mm_req_doc_ranges is expected_spans
 
 
 def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():

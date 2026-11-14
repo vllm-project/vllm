@@ -81,6 +81,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsBidirectionalSpans,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
     SupportsLoRA,
@@ -1031,6 +1032,7 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsBidirectionalSpans,
 ):
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
     supports_encoder_tp_data = True

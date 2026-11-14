@@ -8291,3 +8291,41 @@ def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
     assert mask(group, 0) != mask(plain_group, 0)
     # With lookahead the mask matches the non-EAGLE one.
     assert mask(group, 8) == mask(plain_group, 8)
+
+
+@pytest.mark.cpu_test
+def test_span_requests_key_offloaded_kv_on_their_spans():
+    """Offloaded KV is keyed on the block hashes, which carry the bidirectional
+    spans. The same tokens with other span bounds share no key from the chunk
+    that holds the first span on."""
+    scheduler = _make_partial_tail_scheduler()
+    init_none_hash(sha256)
+
+    def offload_keys(request_id: str, spans: list[tuple[int, int]]):
+        request = Request(
+            request_id=request_id,
+            prompt_token_ids=list(range(64)),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(4, sha256),
+            bidirectional_spans=spans,
+        )
+        scheduler.on_new_request(request)
+        state = scheduler._req_status[request_id]
+        state.update_offload_keys()
+        return [list(group.offload_keys) for group in state.group_states]
+
+    causal = offload_keys("causal", [])
+    spans = offload_keys("spans", [(32, 48)])
+    assert offload_keys("same", [(32, 48)]) == spans
+    other = offload_keys("other", [(32, 40), (40, 48)])
+    for config, causal_keys, span_keys, other_keys in zip(
+        scheduler.config.kv_group_configs, causal, spans, other
+    ):
+        num_before = 32 // config.tokens_per_chunk
+        assert span_keys[:num_before] == causal_keys[:num_before]
+        assert span_keys[:num_before] == other_keys[:num_before]
+        assert len(span_keys) > num_before
+        for key in span_keys[num_before:]:
+            assert key not in causal_keys
+            assert key not in other_keys

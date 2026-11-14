@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
@@ -282,6 +283,7 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_sharing_target_layer_name: str | None = None,
         mm_prefix_clamp_sliding_window: bool = False,
         mm_prefix_ranges: bool = True,
+        bidirectional_spans: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         query_pre_quantized: bool = False,
@@ -375,7 +377,9 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
-        self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+        self.use_mm_prefix = bidirectional_spans or (
+            model_config is not None and model_config.is_mm_prefix_lm
+        )
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
@@ -395,6 +399,29 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
+        if bidirectional_spans:
+            # Not every platform's selector checks PrefixLM support.
+            reason = None
+            capability = current_platform.get_device_capability()
+            if not self.attn_backend.supports_mm_prefix():
+                reason = "it does not apply PrefixLM ranges"
+            elif capability is not None:
+                reason = self.attn_backend.supports_combination(
+                    head_size,
+                    dtype,
+                    cast("CacheDType", kv_cache_dtype),
+                    cache_config.block_size if cache_config else None,
+                    use_mla=False,
+                    has_sink=self.has_sink,
+                    use_sparse=False,
+                    use_mm_prefix=True,
+                    device_capability=capability,
+                )
+            if reason is not None:
+                raise ValueError(
+                    f"{self.attn_backend.get_name()} cannot serve bidirectional "
+                    f"attention spans on layer {prefix}: {reason}."
+                )
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:
@@ -495,6 +522,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # Whether this layer applies the multimodal PrefixLM ranges of a
         # PrefixLM model; its attention group's metadata omits them if not.
         self.applies_mm_prefix_ranges = mm_prefix_ranges
+        # Whether this layer applies request-level bidirectional attention
+        # spans; its attention group's metadata then carries the spans, and no
+        # image ranges.
+        self.applies_bidirectional_spans = bidirectional_spans
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache

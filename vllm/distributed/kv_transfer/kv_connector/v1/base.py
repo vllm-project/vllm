@@ -207,6 +207,17 @@ class KVConnectorBase_V1(ABC):
         return True
 
     @classmethod
+    def supports_bidirectional_spans(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector looks external KV up only by vLLM's block
+        hashes, which key each block a bidirectional attention span overlaps on
+        the whole span. vLLM refuses to start a checkpoint that declares spans
+        with a connector that returns False, the default.
+        """
+        return False
+
+    @classmethod
     def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
         """How the connector's workers reach the device KV cache, as
         `KVCacheAccess` flags, which decide how the extensible KV cache

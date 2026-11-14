@@ -107,6 +107,32 @@ def compute_mm_prefix_ranges(
     return req_doc_ranges
 
 
+def compute_bidirectional_span_ranges(
+    spans_per_req: Sequence[Sequence[tuple[int, int]]],
+    chunk_starts: Sequence[int],
+    chunk_ends: Sequence[int],
+) -> dict[int, list[tuple[int, int]]] | None:
+    """Inclusive PrefixLM ranges for the bidirectional spans of each request's
+    scheduled chunk `[chunk_start, chunk_end)`.
+
+    Only a span with a query that sees a later key of the span needs a range:
+    one that overlaps the chunk before its last token. The scheduler never
+    ends a chunk inside a span. Returns None if no request has such a span.
+    """
+    ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, (spans, begin, end) in enumerate(
+        zip(spans_per_req, chunk_starts, chunk_ends)
+    ):
+        req_ranges = []
+        for start, stop in spans:
+            if start < end and max(start, begin) < stop - 1:
+                assert stop <= end, "a prefill chunk ends inside a span"
+                req_ranges.append((start, stop - 1))
+        if req_ranges:
+            ranges[req_idx] = req_ranges
+    return ranges or None
+
+
 def compute_mm_prefix_range_tensor(
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
     num_seqs: int,

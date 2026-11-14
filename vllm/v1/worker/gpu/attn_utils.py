@@ -236,9 +236,9 @@ def init_attn_backend(
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
         group_map: dict[
-            tuple[tuple[str, str], KVCacheSpec, int, bool], AttentionGroup
+            tuple[tuple[str, str], KVCacheSpec, int, bool, bool], AttentionGroup
         ] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int, bool]] = []
+        group_order: list[tuple[tuple[str, str], KVCacheSpec, int, bool, bool]] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -259,17 +259,21 @@ def init_attn_backend(
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders, and on whether they take multimodal PrefixLM
-            # ranges, which are given per metadata.
+            # metadata builders, and on which PrefixLM ranges they take (image
+            # ranges, bidirectional spans), which are given per metadata.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             mm_prefix_ranges = getattr(
                 attn_layers[layer_name], "applies_mm_prefix_ranges", True
+            )
+            spans = getattr(
+                attn_layers[layer_name], "applies_bidirectional_spans", False
             )
             key = (
                 attn_backend.full_cls_name(),
                 layer_kv_cache_spec,
                 num_heads_q,
                 mm_prefix_ranges,
+                spans,
             )
             if key not in group_map:
                 group_map[key] = AttentionGroup(
@@ -278,6 +282,7 @@ def init_attn_backend(
                     layer_kv_cache_spec,
                     kv_cache_group_id,
                     applies_mm_prefix_ranges=mm_prefix_ranges,
+                    applies_bidirectional_spans=spans,
                 )
                 group_order.append(key)
             else:
@@ -494,6 +499,7 @@ def build_attn_metadata(
     positions: torch.Tensor | None = None,
     is_prefilling: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
+    bidirectional_span_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
@@ -600,7 +606,10 @@ def build_attn_metadata(
                     else {}
                 )
                 metadata = attn_group.build_metadata(
-                    common_attn_metadata, ubatch_idx, **attn_metadata_extra_kwargs
+                    common_attn_metadata,
+                    ubatch_idx,
+                    bidirectional_span_ranges=bidirectional_span_ranges,
+                    **attn_metadata_extra_kwargs,
                 )
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata

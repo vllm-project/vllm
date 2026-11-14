@@ -43,6 +43,10 @@ class TokensInput(_InputOptions):
     """Char-level (start, end) offsets per token, propagated from the
     renderer's TokensPrompt when offsets were computed."""
 
+    bidirectional_spans: NotRequired[list[tuple[int, int]]]
+    """Bidirectional attention spans over `prompt_token_ids`; see
+    `TokensPrompt.bidirectional_spans`."""
+
 
 def tokens_input(
     prompt_token_ids: list[int],
@@ -149,6 +153,11 @@ class MultiModalInput(_InputOptions):
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
     """
+
+    bidirectional_spans: NotRequired[list[tuple[int, int]]]
+    """Bidirectional attention spans over the expanded `prompt_token_ids`, set
+    by the server after multimodal processing. Every multimodal item must lie
+    inside one span."""
 
 
 def mm_input(

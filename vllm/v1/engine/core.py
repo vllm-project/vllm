@@ -1268,6 +1268,20 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        model_config = self.vllm_config.model_config
+        if (
+            request.bidirectional_spans is None
+            and not request.abort_immediately
+            and model_config is not None
+            and model_config.declares_bidirectional_spans
+        ):
+            # Also for frontends that build engine requests without
+            # InputProcessor, such as the Rust frontend.
+            raise VLLMValidationError(
+                "This model declares bidirectional attention spans, so every "
+                "request must set bidirectional_spans.",
+                parameter="bidirectional_spans",
+            )
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.

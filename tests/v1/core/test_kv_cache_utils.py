@@ -373,6 +373,7 @@ def make_request(
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
+    bidirectional_spans: list[tuple[int, int]] | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -401,6 +402,7 @@ def make_request(
             block_size, hash_fn, num_hash_lookahead_tokens
         ),
         prompt_embeds=prompt_embeds,
+        bidirectional_spans=bidirectional_spans,
     )
 
 
@@ -1388,6 +1390,171 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn((kv_cache_utils.NONE_HASH, (0, 1, 2), None))
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None))
+
+
+def _span_request(
+    tokens: list[int],
+    spans: list[tuple[int, int]] | None,
+    num_hash_lookahead_tokens: int = 0,
+    hash_fn: Callable = sha256,
+    **kwargs,
+) -> Request:
+    return make_request(
+        "0",
+        tokens,
+        block_size=4,
+        hash_fn=hash_fn,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+        bidirectional_spans=spans,
+        **kwargs,
+    )
+
+
+def _chunks(num_tokens: int, size: int) -> list[tuple[int, int]]:
+    return [(s, min(s + size, num_tokens)) for s in range(0, num_tokens, size)]
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_a_change_inside_a_span_invalidates_it_from_its_start(hash_fn):
+    tokens = list(range(48))
+    spans = _chunks(48, 16)
+    request = _span_request(tokens, spans, hash_fn=hash_fn)
+    assert (
+        request.block_hashes
+        == _span_request(tokens, spans, hash_fn=hash_fn).block_hashes
+    )
+    # Token 27 is in the third block of the span [16, 32).
+    changed = _span_request([*tokens[:27], 999, *tokens[28:]], spans, hash_fn=hash_fn)
+    assert changed.block_hashes[:4] == request.block_hashes[:4]
+    assert all(
+        a != b for a, b in zip(changed.block_hashes[4:], request.block_hashes[4:])
+    )
+
+
+def test_span_bounds_are_part_of_the_key():
+    tokens = list(range(48))
+    request = _span_request(tokens, _chunks(48, 16))
+    other = _span_request(tokens, [(0, 16), (16, 48)])
+    assert other.block_hashes[:4] == request.block_hashes[:4]
+    assert all(a != b for a, b in zip(other.block_hashes[4:], request.block_hashes[4:]))
+
+
+def test_span_keys_are_published_in_kv_events():
+    request = _span_request(list(range(48)), _chunks(48, 16))
+    extra_keys, _ = generate_block_hash_extra_keys(request, 12, 20, 0)
+    (first, second) = extra_keys
+    assert first[:3] == ("bidirectional_span", -12, 4)
+    assert second[:3] == ("bidirectional_span", 4, 20)
+    assert to_event_extra_keys([extra_keys]) == [(first[1:], second[1:])]
+
+
+def test_grown_prompt_reuses_its_complete_spans():
+    tokens = list(range(1000, 1056))
+    # The state grows from 40 to 56 tokens: [0, 16) and [16, 32) are
+    # unchanged, the third span grows from [32, 40) to [32, 48).
+    old = _span_request(tokens[:40], _chunks(40, 16))
+    new = _span_request(tokens, _chunks(56, 16))
+    assert old.block_hashes[:8] == new.block_hashes[:8]
+    assert all(a != b for a, b in zip(old.block_hashes[8:], new.block_hashes[8:]))
+
+
+@pytest.mark.parametrize("spans", [None, []])
+def test_requests_without_spans_hash_as_before(spans):
+    tokens = list(range(32))
+    request = _span_request(tokens, spans)
+    parent = kv_cache_utils.NONE_HASH
+    for i, block_hash in enumerate(request.block_hashes):
+        assert block_hash == sha256((parent, tuple(tokens[4 * i : 4 * i + 4]), None))
+        parent = block_hash
+
+
+def test_spans_change_only_the_blocks_from_the_first_span_on():
+    """Causal tokens after the last span chain on the span keys."""
+    tokens = list(range(40))
+    causal = _span_request(tokens, None)
+    spans = _span_request(tokens, [(12, 24)])
+    assert spans.block_hashes[:3] == causal.block_hashes[:3]
+    assert all(a != b for a, b in zip(spans.block_hashes[3:], causal.block_hashes[3:]))
+
+
+def test_bidirectional_span_keys_cover_multimodal_items():
+    """Spans that hold images of different content differ in every block of
+    the span, including the blocks before the image, which attend to it."""
+    tokens = [7] * 32
+
+    def request(mm_hash: str) -> Request:
+        return _span_request(
+            tokens,
+            [(0, 32)],
+            mm_positions=[PlaceholderRange(offset=20, length=8)],
+            mm_hashes=[mm_hash],
+        )
+
+    a, b = request("content:a"), request("content:b")
+    assert all(x != y for x, y in zip(a.block_hashes, b.block_hashes))
+    assert a.block_hashes == request("content:a").block_hashes
+
+
+def test_each_span_key_covers_only_its_own_multimodal_items():
+    tokens = [7] * 32
+
+    def request(first: str, second: str) -> Request:
+        return _span_request(
+            tokens,
+            [(0, 16), (16, 32)],
+            mm_positions=[
+                PlaceholderRange(offset=2, length=4),
+                PlaceholderRange(offset=20, length=8),
+            ],
+            mm_hashes=[first, second],
+        )
+
+    base = request("content:a", "content:b")
+    other_second = request("content:a", "content:c")
+    assert other_second.block_hashes[:4] == base.block_hashes[:4]
+    assert all(
+        x != y for x, y in zip(other_second.block_hashes[4:], base.block_hashes[4:])
+    )
+    other_first = request("content:c", "content:b")
+    assert all(x != y for x, y in zip(other_first.block_hashes, base.block_hashes))
+
+
+def test_lookahead_hashes_key_spans_in_the_lookahead_tokens():
+    tokens = list(range(17))
+    causal = _span_request(tokens, None, num_hash_lookahead_tokens=1)
+    spans = _span_request(tokens, [(12, 17)], num_hash_lookahead_tokens=1)
+    # The third block's lookahead token 12 starts the span, so its hash
+    # differs from the causal one; the first two blocks are shared.
+    assert spans.block_hashes[:2] == causal.block_hashes[:2]
+    assert spans.block_hashes[2] != causal.block_hashes[2]
+
+
+def test_frontend_block_hashes_are_ignored_for_span_requests():
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
+
+    config = PrefixHashConfig(
+        hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
+    )
+
+    def frontend_hashes(spans: list[tuple[int, int]] | None):
+        request = EngineCoreRequest(
+            request_id="0",
+            prompt_token_ids=np.arange(10, dtype=np.int32),
+            mm_features=None,
+            sampling_params=SamplingParams(),
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            block_hashes=[bytes([i]) * 32 for i in range(3)],
+            bidirectional_spans=spans,
+        )
+        return kv_cache_utils.frontend_block_hashes(request, config)
+
+    assert frontend_hashes(None) is not None
+    assert frontend_hashes([]) is not None
+    assert frontend_hashes([(0, 6)]) is None
 
 
 def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:

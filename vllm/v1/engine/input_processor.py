@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Callable, Mapping
-from typing import Any, Literal
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -11,6 +11,7 @@ from vllm.config.utils import hash_factors
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
+    MultiModalInput,
     PromptType,
     SingletonInput,
     split_enc_dec_input,
@@ -20,6 +21,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.processing.inputs import _MM_HASH_TAG_UUID
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
@@ -425,6 +427,14 @@ class InputProcessor:
 
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
         self._validate_model_inputs(encoder_input, decoder_input)
+        if encoder_input is not None and "bidirectional_spans" in encoder_input:
+            raise VLLMValidationError(
+                "bidirectional_spans is not supported on encoder prompts.",
+                parameter="bidirectional_spans",
+            )
+        bidirectional_spans = self._validate_bidirectional_spans(
+            decoder_input, params, resumable
+        )
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -553,7 +563,142 @@ class InputProcessor:
             resumable=resumable,
             session_id=session_id,
             kv_hints=kv_hints,
+            bidirectional_spans=bidirectional_spans,
         )
+
+    def _validate_bidirectional_spans(
+        self,
+        prompt_input: SingletonInput,
+        params: SamplingParams | PoolingParams,
+        resumable: bool,
+    ) -> list[tuple[int, int]] | None:
+        """Check a request's bidirectional spans and return them as a list of
+        pairs without one-token spans, which attend as causal attention does,
+        so that equivalent lists give the same block hashes."""
+        model_config = self.model_config
+        spans = cast("Sequence[Any] | None", prompt_input.get("bidirectional_spans"))
+
+        def invalid(message: str) -> VLLMValidationError:
+            return VLLMValidationError(message, parameter="bidirectional_spans")
+
+        if spans is None:
+            if model_config.declares_bidirectional_spans:
+                raise invalid(
+                    f"The model {model_config.model!r} declares bidirectional "
+                    "attention spans, so every request must set "
+                    "bidirectional_spans (an empty list for a causal request)."
+                )
+            return None
+        if not model_config.declares_bidirectional_spans:
+            raise invalid(
+                f"The model {model_config.model!r} does not support "
+                "bidirectional_spans: its config declares no "
+                "bidirectional_span_layer_types."
+            )
+        if prompt_input["type"] == "embeds":
+            raise invalid("bidirectional_spans is not supported with prompt embeds.")
+        if resumable:
+            raise invalid(
+                "bidirectional_spans is not supported with streaming input, "
+                "which extends a prompt whose spans are fixed."
+            )
+        if isinstance(params, SamplingParams) and (
+            params.prompt_logprobs is not None
+            or params.prompt_logprob_token_ids is not None
+        ):
+            raise invalid(
+                "bidirectional_spans is not supported with prompt logprobs: "
+                "a token in a span sees the tokens they score."
+            )
+
+        prompt_len = len(prompt_input["prompt_token_ids"])
+        max_length = model_config.bidirectional_span_max_length
+        assert max_length is not None  # checked by ModelConfig
+        # The scheduler prefills the uncomputed rest of a span in one step.
+        scheduler_config = self.scheduler_config
+        max_step_tokens = min(
+            scheduler_config.max_num_scheduled_tokens
+            or scheduler_config.max_num_batched_tokens,
+            scheduler_config.max_num_batched_tokens
+            - (
+                self.speculative_config.max_num_new_slots_for_drafting
+                if self.speculative_config is not None
+                else 0
+            ),
+        )
+        if (
+            scheduler_config.enable_chunked_prefill
+            and scheduler_config.long_prefill_token_threshold > 0
+        ):
+            max_step_tokens = min(
+                max_step_tokens, scheduler_config.long_prefill_token_threshold
+            )
+
+        pairs: list[tuple[int, int]] = []
+        for span in spans:
+            if (
+                not isinstance(span, (list, tuple))
+                or len(span) != 2
+                or not all(isinstance(x, int) and not isinstance(x, bool) for x in span)
+            ):
+                raise invalid(
+                    "Each bidirectional span must be a pair of integers "
+                    f"[start, end), got {span!r}."
+                )
+            start, end = span
+            if not 0 <= start < end <= prompt_len:
+                raise invalid(
+                    f"Bidirectional span [{start}, {end}) must satisfy "
+                    f"0 <= start < end <= prompt length ({prompt_len})."
+                )
+            if pairs and start < pairs[-1][1]:
+                raise invalid("Bidirectional spans must be sorted and disjoint.")
+            if end - start > max_length:
+                raise invalid(
+                    f"Bidirectional span [{start}, {end}) has {end - start} "
+                    f"tokens; the model supports at most {max_length} "
+                    "(bidirectional_span_max_length)."
+                )
+            if end - start > max_step_tokens:
+                raise invalid(
+                    f"Bidirectional span [{start}, {end}) has {end - start} "
+                    f"tokens, more than the {max_step_tokens} tokens the "
+                    "scheduler can prefill in one step. Increase "
+                    "--max-num-batched-tokens (and --max-num-scheduled-tokens "
+                    "or --long-prefill-token-threshold if set)."
+                )
+            pairs.append((start, end))
+
+        canonical = [(start, end) for start, end in pairs if end - start >= 2]
+        if canonical and prompt_input["type"] == "multimodal":
+            self._validate_multimodal_spans(prompt_input, canonical)
+        return canonical
+
+    def _validate_multimodal_spans(
+        self, prompt_input: MultiModalInput, spans: list[tuple[int, int]]
+    ) -> None:
+        """Every multimodal item lies inside one span and is keyed on its
+        content. A span's items fit the encoder budget and cache, which are at
+        least --max-num-batched-tokens, like the span."""
+        for modality, positions in prompt_input["mm_placeholders"].items():
+            for position in positions:
+                start, end = position.offset, position.offset + position.length
+                if not any(s <= start and end <= e for s, e in spans):
+                    raise VLLMValidationError(
+                        f"A(n) {modality} item at tokens [{start}, {end}) does "
+                        "not lie inside one bidirectional span.",
+                        parameter="bidirectional_spans",
+                    )
+        if any(
+            mm_hash.startswith(_MM_HASH_TAG_UUID)
+            for hashes in prompt_input["mm_hashes"].values()
+            for mm_hash in hashes
+        ):
+            # The span keys of the prefix cache identify media by these hashes.
+            raise VLLMValidationError(
+                "multi_modal_uuids are not supported with bidirectional_spans.",
+                parameter="bidirectional_spans",
+            )
 
     def _validate_prompt_len(
         self,
