@@ -573,6 +573,45 @@ class TestSubmitLoad:
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
 
+    @pytest.mark.parametrize("symmetric", [False, True])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_lookup_after_fetch_preserves_only_reusable_supply(
+        self, monkeypatch, symmetric, empty
+    ):
+        """Only a nonempty PD fetch consumes the request's one-time supply."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        if symmetric:
+            monkeypatch.setattr(
+                session, "register_lookup", lambda *_: True, raising=False
+            )
+        mgr._sessions[peer_id] = session
+        params = (
+            _remote_kv_source_kv_params()
+            if symmetric
+            else _remote_prefiller_kv_params()
+        )
+        job = _job_metadata(
+            job_id=1,
+            keys=[] if empty else [OffloadKey(b"prompt")],
+            chunk_ids=[] if empty else [0],
+            kv_params=params,
+        )
+        ctx = job.req_context
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is LookupResult.HIT
+
+        mgr.submit_load(job)
+
+        expected = (
+            LookupResult.MISS if not symmetric and not empty else LookupResult.HIT
+        )
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is expected
+        assert mgr.lookup(OffloadKey(b"generated"), ctx) is expected
+        # A fresh request has its own handoff, even with the same transfer ID.
+        fresh = _req_context(kv_params=params)
+        assert mgr.lookup(OffloadKey(b"prompt"), fresh) is LookupResult.HIT
+
     def test_missing_consumer_flag_fails(self):
         """Peer fields present but neither do_remote_prefill nor
         do_p2p_fetch is set — submit_load fails the job rather than
