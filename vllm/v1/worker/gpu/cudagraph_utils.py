@@ -55,13 +55,13 @@ from vllm.v1.worker.gpu.input_batch import (
     set_dummy_context,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.gpu.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
-    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
+    from vllm.v1.worker.gpu.ubatch_runner import UBatchRunner
 
 logger = init_logger(__name__)
 
