@@ -326,6 +326,11 @@ def pre_weights(w) -> dict:
     nw, nb = getattr(kn, "weight_bf16", None), getattr(kn, "bias_bf16", None)
     if nw is None or nw.dtype != torch.bfloat16:
         nw, nb = kn.weight.to(torch.bfloat16), kn.bias.to(torch.bfloat16)
+        # D1a bypasses the norm's forward, which fills the cache: fill it here
+        # (``prologue_reasons`` runs this at init), else every captured step
+        # replays the two casts. Never from a capture: its pool reuses them.
+        if not torch.cuda.is_current_stream_capturing():
+            kn.weight_bf16, kn.bias_bf16 = nw, nb
     return dict(
         w_qkv=w_qkv,
         w_g=w_g,
