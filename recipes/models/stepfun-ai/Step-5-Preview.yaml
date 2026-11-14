@@ -4,7 +4,7 @@ meta:
   provider: "StepFun"
   description: "Multimodal MoE with hybrid sparse/sliding-window attention, a 1M-token context window, and MTP."
   date_added: 2026-10-15
-  date_updated: 2026-10-15
+  date_updated: 2026-11-13
   tasks:
     - multimodal
   default_hardware: b300
@@ -14,10 +14,14 @@ meta:
     h200: verified
     b300: verified
     gb300: verified
+    mi325x: verified
+    mi355x: verified
 
 model:
   model_id: "stepfun-ai/Step-5-Preview"
-  docker_image: "vllm/vllm-openai:step-5-preview"
+  docker_image:
+    nvidia: "vllm/vllm-openai:step-5-preview"
+    amd: "vllm/vllm-openai-rocm:nightly-rocm100-a2bcb5657a881a002e79d0adab3c6b5e39436121"
   install:
     docker:
       note: "Use the dedicated Step-5 image for these launch commands."
@@ -56,6 +60,30 @@ variants:
   default:
     precision: fp8
     vram_minimum_gb: 773
+    tp:
+      mi325x: 4
+      mi355x: 4
+    hardware_overrides:
+      amd:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+        extra_args:
+          - "--moe-backend"
+          - "triton"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--max-model-len"
+          - "262144"
+          - "--mm-encoder-attn-backend"
+          - "ROCM_AITER_FA"
+          - "--mm-encoder-tp-mode"
+          - "data"
+          - "--mm-processor-cache-type"
+          - "shm"
+          - "--limit-mm-per-prompt"
+          - '{"image":1,"video":0}'
+          - "--safetensors-load-strategy"
+          - "prefetch"
   nvfp4:
     model_id: "stepfun-ai/Step-5-Preview-NVFP4"
     precision: nvfp4
@@ -75,6 +103,10 @@ compatible_strategies:
   - pd_cluster
 
 default_strategy: single_node_tp
+
+hardware_opt_in_features:
+  mi325x: ["spec_decoding"]
+  mi355x: ["spec_decoding"]
 
 # Blackwell runs on 8 GPUs: one B200/B300 node, or two 4-GPU GB200/GB300
 # trays. FP8 does not fit one 8x H100 node, so H100 runs on two nodes.
@@ -154,6 +186,29 @@ guide: |
   input and output; reduce `--max-model-len` or concurrency if KV cache memory
   is insufficient.
 
+  ## AMD ROCm (MI325X and MI355X verified)
+
+  Verified on 4× MI325X and 4× MI355X with TP4, FP8, and context 262144.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+  --group-add video \
+  --privileged --ipc=host -p 8000:8000 \
+  -e VLLM_ROCM_USE_AITER=1 \
+  --volume "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  vllm/vllm-openai-rocm@sha256:03ad7d2c72ee2e7ec95e14dfc53d6f91c98f38503f5bb752874900064d4987f2 \
+  stepfun-ai/Step-5-Preview \
+  --data-parallel-backend mp --distributed-executor-backend mp \
+  --disable-custom-all-reduce --max-num-batched-tokens 16384 \
+  --max-num-seqs 64 --enable-prefix-caching \
+  --tensor-parallel-size 4 --max-model-len 262144 --moe-backend triton \
+  --kv-cache-dtype fp8 --mm-encoder-attn-backend ROCM_AITER_FA \
+  --mm-encoder-tp-mode data --mm-processor-cache-type shm \
+  --limit-mm-per-prompt '{"image":1,"video":0}' \
+  --reasoning-parser step5 --tool-call-parser step5 --enable-auto-tool-choice \
+  --safetensors-load-strategy prefetch
+  ```
+
   ## NVFP4: single node on 4 B300 GPUs
 
   Use [stepfun-ai/Step-5-Preview-NVFP4](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4)
@@ -207,3 +262,11 @@ guide: |
   - [Step-5 Preview NVFP4 model](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4)
   - [Step-5 Preview model](https://huggingface.co/stepfun-ai/Step-5-Preview)
   - [Step-5 Docker image](https://hub.docker.com/r/vllm/vllm-openai/tags?name=step-5-preview)
+
+troubleshooting:
+  - title: "AITER MoE rejects SWIGLUSTEP"
+    when:
+      hardware: ["amd"]
+    body: |
+      The FP8 checkpoint's MoE activation is `SWIGLUSTEP`. The AITER FP8 MoE
+      kernel in the tested nightly rejects it. Keep `--moe-backend triton`.
