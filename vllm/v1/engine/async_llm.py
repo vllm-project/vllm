@@ -1474,3 +1474,6 @@ class AsyncLLM(EngineClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return self.engine_core.get_kv_event_sources()
+
+    def get_kv_identities(self) -> dict[int, dict[str, Any]]:
+        return self.engine_core.get_kv_identities()
