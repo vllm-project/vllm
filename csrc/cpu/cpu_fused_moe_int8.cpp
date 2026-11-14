@@ -121,49 +121,54 @@ void fused_moe_int8_impl(
     return std::max(n_size, gemm_n_tile_size);
   }();
 
-  int32_t common_buffer_offset = 0;
-  const int32_t token_num_per_group_buffer_offset = common_buffer_offset;
+  // Sizes/offsets below are byte counts across the whole (token_num *
+  // topk_num) batch, which for large hidden sizes and batch sizes can
+  // exceed INT32_MAX. Use int64_t throughout to avoid silently wrapping
+  // into a negative size that gets sign-extended into a huge value when
+  // passed to ScratchPadManager::realloc(size_t).
+  int64_t common_buffer_offset = 0;
+  const int64_t token_num_per_group_buffer_offset = common_buffer_offset;
   common_buffer_offset += cpu_utils::round_up<64>(expert_num * sizeof(int32_t));
-  const int32_t cu_token_num_per_group_buffer_offset = common_buffer_offset;
+  const int64_t cu_token_num_per_group_buffer_offset = common_buffer_offset;
   common_buffer_offset +=
       cpu_utils::round_up<64>((expert_num + 1) * sizeof(int32_t));
-  const int32_t expanded_token_num = token_num * topk_num;
-  const int32_t expand_token_id_buffer_offset = common_buffer_offset;
+  const int64_t expanded_token_num = static_cast<int64_t>(token_num) * topk_num;
+  const int64_t expand_token_id_buffer_offset = common_buffer_offset;
   common_buffer_offset +=
       cpu_utils::round_up<64>(expanded_token_num * sizeof(int32_t));
-  const int32_t expand_token_id_index_buffer_offset = common_buffer_offset;
+  const int64_t expand_token_id_index_buffer_offset = common_buffer_offset;
   common_buffer_offset +=
       cpu_utils::round_up<64>(expanded_token_num * sizeof(int32_t));
-  const int32_t input_quant_buffer_offset = common_buffer_offset;
-  common_buffer_offset +=
-      cpu_utils::round_up<64>(token_num * input_size_13 * sizeof(int8_t));
-  const int32_t input_scale_buffer_offset = common_buffer_offset;
+  const int64_t input_quant_buffer_offset = common_buffer_offset;
+  common_buffer_offset += cpu_utils::round_up<64>(
+      static_cast<int64_t>(token_num) * input_size_13 * sizeof(int8_t));
+  const int64_t input_scale_buffer_offset = common_buffer_offset;
   common_buffer_offset += cpu_utils::round_up<64>(token_num * sizeof(float));
-  const int32_t w13_gemm_output_buffer_offset = common_buffer_offset;
+  const int64_t w13_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += cpu_utils::round_up<64>(
       expanded_token_num * input_size_2 * sizeof(scalar_t));
-  const int32_t w13_output_scale_buffer_offset = common_buffer_offset;
+  const int64_t w13_output_scale_buffer_offset = common_buffer_offset;
   common_buffer_offset +=
       cpu_utils::round_up<64>(expanded_token_num * sizeof(float));
-  const int32_t w2_gemm_output_buffer_offset = common_buffer_offset;
+  const int64_t w2_gemm_output_buffer_offset = common_buffer_offset;
   common_buffer_offset += cpu_utils::round_up<64>(
       expanded_token_num * output_size_2 * sizeof(float));
 
-  int32_t gemm_thread_buffer_offset = 0;
-  const int32_t gemm_input_buffer_offset = gemm_thread_buffer_offset;
+  int64_t gemm_thread_buffer_offset = 0;
+  const int64_t gemm_input_buffer_offset = gemm_thread_buffer_offset;
   gemm_thread_buffer_offset +=
       std::max(w13_input_buffer_size, w2_input_buffer_size);
-  const int32_t gemm_output_buffer_offset = gemm_thread_buffer_offset;
+  const int64_t gemm_output_buffer_offset = gemm_thread_buffer_offset;
   gemm_thread_buffer_offset += cpu_utils::round_up<64>(
       gemm_m_tile_size * std::max(w13_n_tile_size, w2_n_tile_size) *
       sizeof(int32_t));
 
-  const int32_t ws_output_buffer_offset = 0;
-  const int32_t ws_thread_buffer_size =
+  const int64_t ws_output_buffer_offset = 0;
+  const int64_t ws_thread_buffer_size =
       cpu_utils::round_up<64>(output_size_2 * sizeof(float));
-  const int32_t thread_buffer_size =
+  const int64_t thread_buffer_size =
       std::max(gemm_thread_buffer_offset, ws_thread_buffer_size);
-  const int32_t buffer_size =
+  const int64_t buffer_size =
       common_buffer_offset + thread_buffer_size * thread_num;
   cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(buffer_size);
   uint8_t* common_buffer_start =
