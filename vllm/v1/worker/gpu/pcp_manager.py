@@ -10,7 +10,6 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -412,27 +411,29 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def get_num_tokens_for_dispatch(
+    def get_dispatch_shape(
         self,
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-    ) -> int:
-        """Return the largest real rank-local batch before graph padding."""
-        return max(
-            sum(
+    ) -> tuple[int, int]:
+        """Return the largest rank-local `(num_reqs, num_tokens)` before padding.
+
+        Request counts only size decode graphs, so a batch with a prefill keeps
+        its global request count.
+        """
+        num_reqs = num_tokens = 0
+        for rank in range(self.pcp_world_size):
+            chunk_lens = [
                 chunk_len
                 for _, _, chunk_len in self._iter_rank_chunks(
                     rank, num_scheduled_tokens, is_prefilling
                 )
-            )
-            for rank in range(self.pcp_world_size)
-        )
-
-    def get_num_reqs_for_dispatch(self, num_reqs: int, has_prefill: bool) -> int:
-        """Match decode graphs to the largest rank-local request count."""
-        if self.shard_decode_requests and not has_prefill:
-            return cdiv(num_reqs, self.pcp_world_size)
-        return num_reqs
+            ]
+            num_reqs = max(num_reqs, len(chunk_lens))
+            num_tokens = max(num_tokens, sum(chunk_lens))
+        if np.any(is_prefilling):
+            num_reqs = len(num_scheduled_tokens)
+        return num_reqs, num_tokens
 
     @staticmethod
     def _resolve_num_reqs_after_padding(

@@ -1914,10 +1914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # A query-length bound alone would admit a short prefill.
                 max_query_len = None
             if self.pcp_manager is not None:
-                dispatch_num_reqs = self.pcp_manager.get_num_reqs_for_dispatch(
-                    num_reqs, batch_req_state.has_prefill
-                )
-                num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
+                dispatch_num_reqs, num_toks = self.pcp_manager.get_dispatch_shape(
                     batch_req_state.num_scheduled_tokens,
                     batch_req_state.is_prefilling_np,
                 )

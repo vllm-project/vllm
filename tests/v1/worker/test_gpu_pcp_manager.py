@@ -150,32 +150,6 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
-@pytest.mark.parametrize(
-    "num_reqs,has_prefill,shard_decode_requests,expected",
-    [
-        (0, False, True, 0),
-        (1, False, True, 1),
-        (3, False, True, 1),
-        (4, False, True, 1),
-        (5, False, True, 2),
-        (8, False, True, 2),
-        (5, True, True, 5),
-        (5, False, False, 5),
-    ],
-)
-def test_decode_graph_dispatch_uses_largest_owner_batch(
-    num_reqs, has_prefill, shard_decode_requests, expected
-):
-    """Only sharded pure decode dispatches graphs by the largest owner batch."""
-    manager = PCPManager(
-        pcp_world_size=4,
-        pcp_rank=0,
-        device=torch.device("cpu"),
-        shard_decode_requests=shard_decode_requests,
-    )
-    assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == expected
-
-
 def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     """Rank 0's draft logits land in each batch request's persistent slot."""
     manager = PCPManager(
@@ -206,26 +180,37 @@ def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("pcp_world_size", "num_scheduled_tokens", "is_prefilling", "expected"),
+    (
+        "pcp_world_size",
+        "shard_decode_requests",
+        "num_scheduled_tokens",
+        "is_prefilling",
+        "expected",
+    ),
     [
-        (2, [8], [True], 4),
-        (2, [7], [True], 4),
-        (2, [3], [False], 3),
-        (2, [3, 8], [False, True], 7),
-        (4, [2, 9], [False, True], 4),
+        (2, True, [8], [True], (1, 4)),
+        (2, True, [7], [True], (1, 4)),
+        (2, True, [3], [False], (1, 3)),
+        (2, True, [3, 8], [False, True], (2, 7)),
+        (4, True, [2, 9], [False, True], (2, 4)),
+        (4, True, [6] * 5, [False] * 5, (2, 12)),
+        (4, True, [6] * 8, [False] * 8, (2, 12)),
+        (4, False, [6] * 5, [False] * 5, (5, 30)),
     ],
 )
-def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
-    pcp_world_size, num_scheduled_tokens, is_prefilling, expected
+def test_dispatch_shape_uses_largest_pcp_rank(
+    pcp_world_size, shard_decode_requests, num_scheduled_tokens, is_prefilling, expected
 ):
+    """Graphs are picked by the largest rank-local batch; request counts stay
+    global when a prefill is scheduled."""
     manager = PCPManager(
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
-        shard_decode_requests=True,
+        shard_decode_requests=shard_decode_requests,
     )
 
-    actual = manager.get_num_tokens_for_dispatch(
+    actual = manager.get_dispatch_shape(
         np.asarray(num_scheduled_tokens, dtype=np.int32),
         np.asarray(is_prefilling, dtype=np.bool_),
     )
