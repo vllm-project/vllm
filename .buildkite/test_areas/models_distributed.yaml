@@ -122,11 +122,11 @@ steps:
   - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s models/test_pp_equivalence.py -m 'distributed(num_gpus=4)'
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI300) [Nightly] PP Equivalence"
       dind: false
       device: mi300_4
-      timeout_in_minutes: 240
+      parallelism: 9
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -137,3 +137,5 @@ steps:
       - tests/models/test_pp_equivalence.py
       - tests/models/registry.py
       - tests/models/utils.py
+      commands:
+      - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s models/test_pp_equivalence.py -m 'distributed(num_gpus=4)' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT

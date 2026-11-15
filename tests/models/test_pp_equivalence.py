@@ -33,7 +33,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
 
-from ..utils import multi_gpu_test
+from ..utils import _SPAWN_CHILD_ENV, multi_gpu_test
 from .registry import _TEXT_GENERATION_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 from .utils import dummy_hf_overrides, skip_unavailable_models
 
@@ -96,7 +96,9 @@ def _sparse_mla_supported() -> bool:
     return current_platform.has_device_capability(90)
 
 
-ModelRegistry.fill_model_info_cache()
+# A spawned test child reads the cache its pytest parent filled.
+if os.environ.get(_SPAWN_CHILD_ENV) != "1":
+    ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
 PP_ARCHS = sorted(
     arch
