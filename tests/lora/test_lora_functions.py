@@ -151,10 +151,12 @@ def test_same_lora_name_with_different_ids(
     assert "Woof Woof Woof" in outputs[1].outputs[0].text
 
 
-@pytest.mark.parametrize("max_loras", [1, 4])
-def test_specialize_active_lora_with_base_requests(max_loras):
-    """CUDA graphs specialized on the active LoRA count must still apply an
-    adapter whose request shares the batch with a base model request."""
+@pytest.mark.parametrize(
+    ("specialize_active_lora", "max_loras"), [(True, 1), (True, 4), (False, 1)]
+)
+def test_lora_cuda_graphs_with_base_requests(specialize_active_lora, max_loras):
+    """CUDA graphs must apply an adapter whether its request runs alone or
+    shares the batch with a base model request."""
     engine_args = EngineArgs(
         model=MODEL_PATH,
         enable_lora=True,
@@ -162,7 +164,8 @@ def test_specialize_active_lora_with_base_requests(max_loras):
         max_lora_rank=LORA_RANK,
         max_model_len=128,
         gpu_memory_utilization=0.8,
-        specialize_active_lora=True,
+        specialize_active_lora=specialize_active_lora,
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
     )
     llm = LLMEngine.from_engine_args(engine_args)
     prompt = llm.get_tokenizer().apply_chat_template(
@@ -172,16 +175,24 @@ def test_specialize_active_lora_with_base_requests(max_loras):
         enable_thinking=False,
     )
     sampling_params = SamplingParams(temperature=0, max_tokens=16)
-    llm.add_request("lora", prompt, sampling_params, lora_request=make_lora_request(1))
-    llm.add_request("base", prompt, sampling_params)
-    texts = {}
-    while llm.has_unfinished_requests():
-        for output in llm.step():
-            assert isinstance(output, RequestOutput)
-            if output.finished:
-                texts[output.request_id] = output.outputs[0].text
-    assert "Alice" in texts["lora"]
-    assert "Alice" not in texts["base"]
+
+    def run(lora_by_request_id: dict[str, LoRARequest | None]) -> dict[str, str]:
+        for request_id, lora_request in lora_by_request_id.items():
+            llm.add_request(
+                request_id, prompt, sampling_params, lora_request=lora_request
+            )
+        texts = {}
+        while llm.has_unfinished_requests():
+            for output in llm.step():
+                assert isinstance(output, RequestOutput)
+                if output.finished:
+                    texts[output.request_id] = output.outputs[0].text
+        return texts
+
+    assert "Alice" in run({"alone": make_lora_request(1)})["alone"]
+    mixed = run({"lora": make_lora_request(1), "base": None})
+    assert "Alice" in mixed["lora"]
+    assert "Alice" not in mixed["base"]
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
