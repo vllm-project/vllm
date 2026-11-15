@@ -269,6 +269,6 @@ class Olmo3ReasoningParser(ReasoningParser):
         The buffer holds a delta back while it can still grow into a
         marker; when generation ends on such a delta the tail can never
         complete, and without a flush it would be dropped. Called by the
-        serving layer from ``parse_delta(finished=True)``.
+        serving layer from `parse_delta(finished=True)`.
         """
         return self.buffer.drain()
