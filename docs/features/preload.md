@@ -584,6 +584,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   Serialized `compressed-tensors` WNA16 linear layers can reuse Marlin-packed
   weights with FP16/BF16 activations. Humming, other WNA16 backends and MoE
   are not enabled by this support.
+  Linear layers of serialized `fp8` checkpoints do not support CUDA IPC with
+  the Humming linear backend, which is the default for block-scaled FP8 on
+  compute capability 8.6 GPUs. Set another backend, such as
+  `--linear-backend marlin`, on both the daemon and engine.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

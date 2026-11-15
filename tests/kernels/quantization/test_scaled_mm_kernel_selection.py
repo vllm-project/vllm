@@ -14,6 +14,7 @@ import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
@@ -23,21 +24,29 @@ from vllm.model_executor.kernels.linear import (
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MarlinFP8ScaledMMLinearKernel,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
+    _prefer_humming_for_fp8_block,
     _resolve_backend_kernels,
+    choose_scaled_mm_linear_kernel,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
+    init_wfp8_a16_linear_kernel,
     register_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import PlatformEnum
+from vllm.platforms import PlatformEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.deep_gemm import is_deep_gemm_fp8_linear_requested
 
 pytestmark = pytest.mark.cpu_test
@@ -112,6 +121,50 @@ def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
                 init_kernel()
         else:
             assert type(init_kernel()) is HummingFP8ScaledMMLinearKernel
+
+
+@pytest.mark.parametrize(
+    "group_shape,weight_shape,expected",
+    [
+        (GroupShape(128, 128), (512, 512), True),
+        (GroupShape(128, 128), (576, 512), False),
+        (GroupShape(128, 128), (512, 576), False),
+        (GroupShape(1, 128), (576, 512), True),
+        (GroupShape(1, 128), (512, 576), False),
+        (GroupShape.PER_CHANNEL, (576, 576), True),
+        (GroupShape.PER_TENSOR, (576, 576), True),
+    ],
+)
+def test_humming_fp8_rejects_partial_scale_groups(group_shape, weight_shape, expected):
+    """Humming sizes group and block scales by floor division, so it cannot load
+    the scale a checkpoint stores for a partial trailing group or block."""
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=create_fp8_quant_key(static=True, group_shape=group_shape),
+        activation_quant_key=kFp8DynamicTensorSym,
+        weight_shape=weight_shape,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+
+    assert HummingFP8ScaledMMLinearKernel.can_implement(config)[0] == expected
+
+
+@patch.object(MarlinFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch.object(HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_wfp8_a16_falls_back_to_marlin_for_partial_blocks(platform_mock, _, __):
+    platform_mock._enum = PlatformEnum.CUDA
+
+    with set_current_vllm_config(VllmConfig()):
+        kernel = init_wfp8_a16_linear_kernel(
+            weight_quant_key=kFp8Static128BlockSym,
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_shape=(576, 512),
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+        )
+
+    assert type(kernel) is MarlinFP8ScaledMMLinearKernel
 
 
 def test_is_supported_is_abstract():
@@ -414,6 +467,78 @@ def test_register_oot_fp8_block_linear_kernel(platform_mock, default_vllm_config
     assert isinstance(kernel, OOTFp8BlockScaledMMLinearKernel), (
         "init_fp8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+def test_humming_priority_fp8_block_sm86():
+    """On SM86, Humming moves directly ahead of Marlin for block-scaled FP8. No
+    other kernel moves, and other devices, other FP8 schemes and a single forced
+    backend are unchanged."""
+    block = "fp8_block_w8a8"
+    kernels = _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
+    humming, marlin = HummingFP8ScaledMMLinearKernel, MarlinFP8ScaledMMLinearKernel
+
+    for capability in (75, 80, 89, 90):
+        assert _prefer_humming_for_fp8_block(kernels, block, capability) == original
+    assert _prefer_humming_for_fp8_block(kernels, "fp8_w8a8", 86) == original
+    for forced in ([marlin], [humming]):
+        assert _prefer_humming_for_fp8_block(forced, block, 86) == forced
+
+    reordered = _prefer_humming_for_fp8_block(kernels, block, 86)
+    assert reordered[reordered.index(humming) + 1] is marlin
+    assert [k for k in reordered if k is not humming] == [
+        k for k in original if k is not humming
+    ]
+    assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "capability,linear_backend,weight_shape,expected_kernel",
+    [
+        (DeviceCapability(8, 6), "auto", (128, 128), HummingFP8ScaledMMLinearKernel),
+        (DeviceCapability(8, 6), "marlin", (128, 128), MarlinFP8ScaledMMLinearKernel),
+        (DeviceCapability(8, 0), "auto", (128, 128), MarlinFP8ScaledMMLinearKernel),
+        # Humming cannot load a partial scale block, so Marlin keeps the layer.
+        (DeviceCapability(8, 6), "auto", (576, 512), MarlinFP8ScaledMMLinearKernel),
+    ],
+)
+def test_choose_fp8_block_kernel_sm86(
+    capability, linear_backend, weight_shape, expected_kernel, monkeypatch
+):
+    """FP8 layers pass no compute capability, so the current device decides."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "0")
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=weight_shape,
+    )
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend=linear_backend))
+    kernels = [MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel]
+
+    with (
+        patch.dict(_POSSIBLE_FP8_BLOCK_KERNELS, {current_platform._enum: kernels}),
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(
+            current_platform, "get_device_capability", return_value=capability
+        ),
+        patch.object(
+            MarlinFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch.object(
+            HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None)
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        chosen = choose_scaled_mm_linear_kernel(
+            config,
+            _POSSIBLE_FP8_BLOCK_KERNELS,
+            quantization="fp8_block_w8a8",
+            activation_quant_key=kFp8Dynamic128Sym,
+        )
+
+    assert chosen is expected_kernel
 
 
 @pytest.mark.parametrize(
