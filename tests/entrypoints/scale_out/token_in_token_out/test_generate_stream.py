@@ -1410,6 +1410,34 @@ async def test_text_mode_rejected_without_tokenizer(no_tokenizer: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("no_tokenizer", ["tokens_only", "skip_tokenizer_init"])
+async def test_bad_words_rejected_without_tokenizer(no_tokenizer: str):
+    """A server without a tokenizer cannot tokenize bad_words strings, so
+    bad_words must fail with a 400 instead of being silently ignored."""
+    engine = _mock_engine()
+    kwargs: dict[str, Any] = {}
+    if no_tokenizer == "tokens_only":
+        kwargs["force_no_detokenize"] = True
+    else:
+        engine.model_config.skip_tokenizer_init = True
+        engine.renderer = _build_renderer(engine.model_config)
+    engine.generate = MagicMock()
+    serving = _build_serving_tokens(engine, **kwargs)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, bad_words=["banned"]),
+        model=MODEL_NAME,
+    )
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "bad_words" in response.error.message
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_text_mode_logprobs_have_decoded_tokens_and_bytes():
     engine = _mock_engine()
 

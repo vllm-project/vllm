@@ -261,6 +261,15 @@ class ServingTokens(GenerateBaseServing):
                 "because detokenization is disabled. Check stop strings on "
                 "the coordinator, or use stop_token_ids."
             )
+        if not self.has_tokenizer and sampling_params.bad_words:
+            # update_from_tokenizer is skipped when the engine runs without a
+            # tokenizer, leaving _bad_words_token_ids unset and silently
+            # dropping bad_words constraints.
+            return self.create_error_response(
+                "bad_words are not supported when running without a "
+                "tokenizer (--tokens-only or --skip-tokenizer-init). "
+                "Send the request to a server that loads a tokenizer."
+            )
         if request.output_mode != "tokens" and not self.has_tokenizer:
             # The no-op detokenizer returns "", so without this check the
             # request would succeed with empty text.

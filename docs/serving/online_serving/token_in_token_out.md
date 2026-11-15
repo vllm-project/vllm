@@ -5,7 +5,7 @@
 ## Enabling the endpoint (`--enable-scale-out`, `--tokens-only`)
 
 - `--enable-scale-out` registers it, with `/render`, `/derender` and `/inference/v1/abort_requests`.
-- `--tokens-only` always registers it, skips loading the tokenizer and forces `detokenize=False`. Stop strings (`sampling_params.stop`) are then rejected with a 400; use `stop_token_ids`.
+- `--tokens-only` always registers it, skips loading the tokenizer and forces `detokenize=False`. Stop strings (`sampling_params.stop`) and `bad_words` (`sampling_params.bad_words`) are then rejected with a 400; use `stop_token_ids`.
 - `VLLM_SERVER_DEV_MODE=1` turns `--enable-scale-out` on unless `--disable-scale-out` is passed.
 - With neither flag, it returns 403 `Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.`
 
@@ -122,6 +122,7 @@ Upgrade generate nodes before using explicit request overrides: older generate n
 
 The server returns a 400 for:
 
+- `sampling_params.bad_words` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
