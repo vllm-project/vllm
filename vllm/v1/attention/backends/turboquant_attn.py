@@ -211,6 +211,10 @@ class TurboQuantMetadata(AttentionMetadata):
     # without per-step D2H syncs.
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
+    # True if any prefill request attends to K/V written by an earlier step
+    # (chunked-prefill continuation or prefix-cache hit). Defaults to True so
+    # that metadata built without this information skips the fast path.
+    prefill_has_context: bool = True
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
@@ -282,6 +286,21 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             cam, decode_threshold=self.reorder_batch_threshold
         )
 
+        # A prefill request has cached context when seq_len > query_len.
+        # CPU tensors only, so no GPU sync.
+        prefill_has_context = False
+        if num_prefills > 0:
+            seq_lens_cpu = cam.seq_lens_cpu_upper_bound
+            if seq_lens_cpu is None:
+                prefill_has_context = True
+            else:
+                qsl_cpu = cam.query_start_loc_cpu
+                rows = slice(num_decodes, cam.num_reqs)
+                query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+                prefill_has_context = bool(
+                    (seq_lens_cpu[rows] > query_lens_cpu[rows]).any()
+                )
+
         return TurboQuantMetadata(
             seq_lens=cam.seq_lens,
             slot_mapping=cam.slot_mapping,
@@ -295,6 +314,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_cpu=cam.query_start_loc_cpu,
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
+            prefill_has_context=prefill_has_context,
         )
 
 
@@ -647,6 +667,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 seq_lens_cpu=attn_metadata.seq_lens_cpu[num_decodes:]
                 if attn_metadata.seq_lens_cpu is not None
                 else None,
+                prefill_has_context=attn_metadata.prefill_has_context,
             )
             k = key[:N].view(N, self.num_kv_heads, self.head_size)
             v = value[:N].view(N, self.num_kv_heads, self.head_size)
@@ -734,9 +755,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         N, Hq, D = query.shape
 
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
-        # max_query_len == max_seq_len means no request has prior cached KV.
-        # Both are Python ints — no GPU sync.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+        # Only valid if no request has prior cached KV: it attends each request
+        # to the current step's K/V only. max_query_len == max_seq_len alone
+        # does not ensure this, since a fresh prompt can set both maxima while
+        # another request is a chunked-prefill continuation.
+        if (
+            _HAS_FLASH_ATTN
+            and not attn_metadata.prefill_has_context
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+        ):
             return self._flash_attn_varlen(
                 q=query,
                 k=key,

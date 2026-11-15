@@ -309,11 +309,13 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
     ) -> torch.Tensor:
         N, Hq, D = query.shape
 
-        # Fast path: flash_attn for first-chunk prefills (all K/V in batch).
+        # Fast path: flash_attn for first-chunk prefills (all K/V in batch),
+        # only if no request has prior cached KV (see TurboQuant backend).
         # CK cannot serve head dims above 256, so those fall through to the
         # per-request unified-attention path below.
         if (
             _HAS_FLASH_ATTN
+            and not attn_metadata.prefill_has_context
             and attn_metadata.max_query_len == attn_metadata.max_seq_len
             and D <= _CK_MAX_HEAD_DIM
         ):
