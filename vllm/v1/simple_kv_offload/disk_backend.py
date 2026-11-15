@@ -56,12 +56,7 @@ class DiskBackend:
     - Separate store/load queues, coordinator threads, and staging pools
     - Overlap GPU DMA on one staging slot with disk I/O on another
     - O_DIRECT by default; page cache is opt-in via `use_page_cache`
-
-    Hybrid retains DRAM copies of eligible SSD-backed blocks. Loads can lease
-    free or unreferenced LRU hot rows as extra staging slots within the existing
-    memory budget. Parallel SSD reads are consumed as they complete, with hot
-    H2D copies filling read gaps. Each slot's DMA finishes before reuse; leased
-    rows and hot-source references are released before reporting job completion.
+    - Support hybrid mode and pure disk mode
 
     Shares the `DmaCopyBackend` task/completion interface; `launch_copy` also
     accepts `hot_blocks` to select stores eligible for a DRAM copy.
@@ -108,7 +103,9 @@ class DiskBackend:
         use_page_cache: bool = False,
         num_hot_slots: int = 0,
         max_load_slots: int | None = None,
+        hybrid_mode: bool = False,
     ) -> None:
+        self._hybrid_mode = hybrid_mode
         self._load_stream = load_stream
         self._store_stream = store_stream
         self._total_block_bytes = total_block_bytes
@@ -184,7 +181,7 @@ class DiskBackend:
                 load_stream,
                 src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
             )
-        if num_hot_slots:
+        if hybrid_mode:
             self._read_executor = ThreadPoolExecutor(
                 max_workers=self._max_load_slots, thread_name_prefix="kv_read"
             )
@@ -319,10 +316,11 @@ class DiskBackend:
 
     def _invalidate_hot(self, disk_block: int) -> None:
         with self._hot_lock:
-            row = self._hot_blocks.pop(disk_block, None)
+            row = self._hot_blocks.get(disk_block)
             if row is not None:
                 # SimpleCPU pins logical disk slots until loads complete.
                 assert not self._hot_refs[row]
+                del self._hot_blocks[disk_block]
                 self._free_hot_rows.append(row)
 
     def _retain_hot(self, buf_slot: int, disk_block: int) -> None:
@@ -341,6 +339,8 @@ class DiskBackend:
         with self._hot_lock:
             self._hot_blocks[disk_block] = row
 
+    # Job dispatch shared by the store and load paths.
+
     def _store_loop(
         self,
         device: torch.device,
@@ -352,6 +352,19 @@ class DiskBackend:
             if item is None:
                 return
             if not self._run_job(item, stream, is_store=True):
+                return
+
+    def _load_loop(
+        self,
+        device: torch.device,
+        stream: torch.cuda.Stream,
+    ) -> None:
+        current_platform.set_device(device)
+        while True:
+            item = self._load_queue.get()
+            if item is None:
+                return
+            if not self._run_job(item, stream, is_store=False):
                 return
 
     def _run_job(
@@ -367,7 +380,7 @@ class DiskBackend:
                 stream.wait_event(fence)
             if is_store:
                 self._do_store(src, dst, stream, set(hot_blocks or ()))
-            elif self._hot_caches:
+            elif self._hybrid_mode:
                 self._do_hybrid_load(src, dst, stream)
             else:
                 self._do_load(src, dst, stream)
@@ -383,37 +396,7 @@ class DiskBackend:
                 self._error = exc
             return False
 
-    def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
-        written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
-        if written < self._total_block_bytes:
-            raise OSError(
-                f"Short write: expected {self._total_block_bytes} bytes, "
-                f"wrote {written}"
-            )
-
-    def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
-        self._read_into(self._load_slot_views[buf_slot], file_offset)
-
-    def _read_into(self, views: list[memoryview], file_offset: int) -> None:
-        bytes_read = os.preadv(self._fd, views, file_offset)
-        if bytes_read < self._total_block_bytes:
-            raise OSError(
-                f"Short read: expected {self._total_block_bytes} bytes, "
-                f"read {bytes_read}"
-            )
-
-    def _load_loop(
-        self,
-        device: torch.device,
-        stream: torch.cuda.Stream,
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = self._load_queue.get()
-            if item is None:
-                return
-            if not self._run_job(item, stream, is_store=False):
-                return
+    # Store path: GPU -> staging -> SSD, with optional hot-copy retention.
 
     def _do_store(
         self,
@@ -451,47 +434,22 @@ class DiskBackend:
             if last is not None:
                 flush(slot, last)
 
-    def _do_load(
-        self,
-        disk_slots: list[int],
-        gpu_blocks: list[int],
-        stream: torch.cuda.Stream,
-        while_read: Callable[[Future[None]], bool] | None = None,
-    ) -> None:
-        """Disk (preadv) -> buffer -> GPU (DMA), interleaved double-buffer."""
-        assert self._load_params is not None
-        n = self._num_buffer_slots
-        prev_dma_events: list[torch.Event | None] = [None] * n
+    def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
+        written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
+        if written < self._total_block_bytes:
+            raise OSError(
+                f"Short write: expected {self._total_block_bytes} bytes, "
+                f"wrote {written}"
+            )
 
-        for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
-            buf_slot = i % n
-            prev = prev_dma_events[buf_slot]
-            if prev is not None:
-                prev.synchronize()
-
-            offset = disk_slot * self._total_block_bytes
-            if while_read is not None:
-                assert self._read_executor is not None
-                if not while_read(
-                    self._read_executor.submit(self._readv_slot, buf_slot, offset)
-                ):
-                    while_read = None
-            else:
-                self._readv_slot(buf_slot, offset)
-
-            copy_blocks([buf_slot], [gpu_blk], self._load_params)
-            ev = torch.Event()
-            ev.record(stream)
-            prev_dma_events[buf_slot] = ev
-
-        for ev in prev_dma_events:
-            if ev is not None:
-                ev.synchronize()
+    # Load path: scheduling, transfer strategies, then file I/O.
 
     def _do_hybrid_load(
         self, disk_blocks: list[int], gpu_blocks: list[int], stream: torch.cuda.Stream
     ) -> None:
+        """Coordinate hot/cold restores and bounded staging leases."""
         hot, cold = [], []
+        # Pin hot sources before borrowing rows; staging has admission priority.
         with self._hot_lock:
             for disk, gpu in zip(disk_blocks, gpu_blocks):
                 row = self._hot_blocks.get(disk)
@@ -527,25 +485,8 @@ class DiskBackend:
             previous_hot.record(stream)
             return True
 
-        def while_read(read: Future[None]) -> bool:
-            try:
-                while not read.done() and hot_batch(read.done):
-                    pass
-            finally:
-                # Even a failed hot copy must drain the read before releasing rows.
-                read.result()
-            return hot_index < len(hot)
-
         try:
-            if leased:
-                self._do_load_parallel(cold, leased, stream, hot_batch)
-            else:
-                self._do_load(
-                    [disk for disk, _ in cold],
-                    [gpu for _, gpu in cold],
-                    stream,
-                    while_read if hot else None,
-                )
+            self._do_load_parallel(cold, leased, stream, hot_batch)
             while hot_batch():
                 pass
         finally:
@@ -562,9 +503,10 @@ class DiskBackend:
         stream: torch.cuda.Stream,
         hot_batch: Callable[[Callable[[], bool]], bool],
     ) -> None:
+        """Prioritize ready SSD reads, filling gaps with hot H2D; leases add slots."""
         assert self._read_executor is not None
         executor = self._read_executor
-        assert self._load_params is not None and self._hot_load_params is not None
+        assert self._load_params is not None
         slots = [
             (views, self._load_params, i)
             for i, views in enumerate(self._load_slot_views)
@@ -605,6 +547,7 @@ class DiskBackend:
                     index, gpu = pending.pop(future)
                     future.result()
                     _, params, row = slots[index]
+                    assert params is not None
                     copy_blocks([row], [gpu], params)
                     if next_block < len(cold):
                         event = torch.Event()
@@ -616,3 +559,43 @@ class DiskBackend:
             for future in pending:
                 future.cancel()
             wait(pending)
+
+    def _do_load(
+        self,
+        disk_slots: list[int],
+        gpu_blocks: list[int],
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """Restore through fixed slots, overlapping SSD reads with preceding H2D."""
+        assert self._load_params is not None
+        n = self._num_buffer_slots
+        prev_dma_events: list[torch.Event | None] = [None] * n
+
+        for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
+            buf_slot = i % n
+            prev = prev_dma_events[buf_slot]
+            if prev is not None:
+                prev.synchronize()
+
+            offset = disk_slot * self._total_block_bytes
+            self._readv_slot(buf_slot, offset)
+
+            copy_blocks([buf_slot], [gpu_blk], self._load_params)
+            ev = torch.Event()
+            ev.record(stream)
+            prev_dma_events[buf_slot] = ev
+
+        for ev in prev_dma_events:
+            if ev is not None:
+                ev.synchronize()
+
+    def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
+        self._read_into(self._load_slot_views[buf_slot], file_offset)
+
+    def _read_into(self, views: list[memoryview], file_offset: int) -> None:
+        bytes_read = os.preadv(self._fd, views, file_offset)
+        if bytes_read < self._total_block_bytes:
+            raise OSError(
+                f"Short read: expected {self._total_block_bytes} bytes, "
+                f"read {bytes_read}"
+            )

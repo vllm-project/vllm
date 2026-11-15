@@ -238,6 +238,7 @@ class SimpleCPUOffloadWorker:
             self.disk_buffer_slots,
             self.use_page_cache,
             num_hot_slots=num_hot_slots,
+            hybrid_mode=self.kv_offload_backend == "hybrid",
             max_load_slots=(
                 self.max_load_slots if self.kv_offload_backend == "hybrid" else None
             ),
