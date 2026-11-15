@@ -21,7 +21,6 @@ import msgspec
 import pydantic
 import zmq
 
-import vllm.distributed.parallel_state as parallel_state
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
@@ -33,6 +32,10 @@ from vllm.distributed import (
 )
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
+)
+from vllm.distributed.parallel_state import (
+    get_world_group_or_none,
+    world_group_superseded,
 )
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
@@ -130,11 +133,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    # Whether this engine is the only one in its process. In-process engines
-    # (InprocClient) are not: a newer one can start while an old one waits
-    # for garbage collection.
-    _owns_process: bool = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -168,9 +166,8 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
-        # The world group this engine set up in this process (None when the
-        # workers run in other processes). See shutdown().
-        self._world_group = parallel_state._WORLD
+        # See shutdown().
+        self._world_group = get_world_group_or_none()
         self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -897,24 +894,20 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
+        # A late-collected in-process engine must not tear down a newer one's state.
+        if world_group_superseded(self._world_group):
+            logger.debug(
+                "[shutdown] EngineCore: superseded by a newer engine; skipping"
+            )
+            return
         # Undo the gc.freeze() from __init__ so that the objects allocated
         # during engine startup (model weights, KV caches, etc.) become
         # visible to the garbage collector again. Without this, deleting
         # the engine in-process (e.g. unit tests) leaks GPU memory.
         gc.unfreeze()
         # Tear down distributed state initialized in this EngineCore process
-        # before it exits and release cached memory. An in-process engine can
-        # be garbage-collected while a newer engine in the same process starts
-        # up; the groups are then the newer engine's, so leave them alone.
-        if self._owns_process or parallel_state._WORLD is getattr(
-            self, "_world_group", None
-        ):
-            cleanup_dist_env_and_memory()
-        else:
-            logger.debug(
-                "[shutdown] EngineCore: distributed state belongs to another "
-                "engine; skipping its teardown"
-            )
+        # before it exits and release cached memory.
+        cleanup_dist_env_and_memory()
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(
@@ -1347,7 +1340,6 @@ _INPUT_SPIN_DURATION_S = 1.0
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
-    _owns_process = True
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
     addresses: EngineZmqAddresses
 
