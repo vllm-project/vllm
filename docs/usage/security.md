@@ -321,6 +321,13 @@ callers. It supports only `video.fps`, and the per-video frame cap still applies
 
 Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
 
+The tier's [`allowed_peers`](../features/kv_offloading_usage.md#p2p-including-pd)
+configuration defaults to loopback only. Cross-host deployments must explicitly
+allow trusted peer IPs, hostnames, or CIDRs. Admission checks cover outbound
+destinations and inbound source IPs before exchanging NIXL metadata. Authorized
+peers can access the entire shared CPU KV region; this is not a tenant isolation
+boundary. Continue to isolate control and RDMA traffic from untrusted networks.
+
 vLLM enforces several configurable limits to prevent this:
 
 | Environment Variable | Default | Description |

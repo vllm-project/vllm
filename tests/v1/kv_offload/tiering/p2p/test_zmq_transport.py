@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqTransport,
     _Sockets,
 )
+from vllm.v1.kv_offload.tiering.p2p.peer_policy import PeerAllowlist
 
 # Transports whose libzmq I/O thread is blocked. Terminating their context
 # blocks forever, and garbage collection would terminate it, so they stay
@@ -124,6 +125,33 @@ class TestZmqConnection:
 
 class TestZmqTransportConnectivity:
     """Integration tests for ZmqTransport with real ZMQ sockets."""
+
+    def test_source_ip_rejected_despite_allowlisted_identity(self):
+        """ZAP must close an untrusted TCP peer before its claimed identity is used."""
+        transport = ZmqTransport(
+            "127.0.0.1:5710",
+            "127.0.0.1",
+            0,
+            peer_allowlist=PeerAllowlist(["10.0.0.0/24"]),
+        )
+        context = zmq.Context()
+        sender = context.socket(zmq.DEALER)
+        sender.identity = b"10.0.0.2:5710"
+        monitor = sender.get_monitor_socket(zmq.EVENT_HANDSHAKE_FAILED_AUTH)
+        try:
+            sender.connect(transport._router.getsockopt(zmq.LAST_ENDPOINT).decode())
+            assert monitor.poll(2000), "untrusted source was not rejected by ZAP"
+            event = zmq.utils.monitor.recv_monitor_message(monitor)
+            assert event["event"] == zmq.EVENT_HANDSHAKE_FAILED_AUTH
+            assert event["value"] == 400
+            assert not transport.poll()
+            assert not transport._connections
+        finally:
+            sender.disable_monitor()
+            monitor.close()
+            sender.close(linger=0)
+            context.destroy(linger=0)
+            transport.close()
 
     def test_connect_and_send_message(self):
         """Two transports can connect and exchange messages."""

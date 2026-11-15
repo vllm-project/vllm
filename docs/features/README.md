@@ -2,6 +2,9 @@
 
 ## KV Cache Offloading
 
+See the [KV Offloading Usage Guide](kv_offloading_usage.md) for secondary tiers,
+including P2P peer sharing and the `allowed_peers` configuration.
+
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
 ## Compatibility Matrix

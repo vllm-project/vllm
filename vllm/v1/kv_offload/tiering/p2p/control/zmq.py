@@ -14,12 +14,14 @@ from dataclasses import dataclass
 import msgspec
 import zmq
 import zmq.utils.monitor
+from zmq.auth.thread import ThreadAuthenticator
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.p2p.control.base import (
     ControlConnection,
     ControlTransport,
 )
+from vllm.v1.kv_offload.tiering.p2p.peer_policy import PeerAllowlist
 
 logger = init_logger(__name__)
 
@@ -67,6 +69,8 @@ for _ev in _FATAL_MONITOR_EVENTS:
 
 
 def _tcp_addr(host: str, port: int | str) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     return f"tcp://{host}:{port}"
 
 
@@ -157,6 +161,23 @@ class ZmqConnection(ControlConnection):
         return self._sockets.monitor
 
 
+class _PeerAuthenticator(ThreadAuthenticator):
+    def __init__(self, context: zmq.Context, allowlist: PeerAllowlist) -> None:
+        super().__init__(context)
+        self._allowlist = allowlist
+
+    async def handle_zap_message(self, msg: list[bytes]) -> None:
+        # ZAP supplies the TCP source address, independent of the peer's
+        # self-declared ROUTER identity. Reject before any message or dial-back.
+        if len(msg) >= 6 and not self._allowlist.allows_address(
+            msg[3].decode("utf-8", "replace")
+        ):
+            logger.warning("P2P: rejecting inbound source address %r", msg[3])
+            self._send_zap_reply(msg[1], b"400", b"Address not allowed")
+            return
+        await super().handle_zap_message(msg)
+
+
 class ZmqTransport(ControlTransport):
     """ZMQ implementation of ControlTransport.
 
@@ -164,9 +185,17 @@ class ZmqTransport(ControlTransport):
     for outbound connections. Message-content agnostic.
     """
 
-    def __init__(self, local_id: str, host: str, port: int) -> None:
+    def __init__(
+        self,
+        local_id: str,
+        host: str,
+        port: int,
+        *,
+        peer_allowlist: PeerAllowlist | None = None,
+    ) -> None:
         self._local_id = local_id
         self._closed = False
+        self._peer_allowlist = peer_allowlist or PeerAllowlist()
 
         self._connections: dict[str, ZmqConnection] = {}
         self._pending_inbound: list[tuple[str, dict]] = []
@@ -175,10 +204,19 @@ class ZmqTransport(ControlTransport):
         self._monitor_seq = 0
 
         self._zmq_ctx = zmq.Context()
+        self._auth = _PeerAuthenticator(self._zmq_ctx, self._peer_allowlist)
+        self._auth.start()
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
+        self._router.setsockopt(zmq.ZAP_DOMAIN, b"vllm-p2p")
+        if ":" in host:
+            self._router.setsockopt(zmq.IPV6, 1)
         _apply_heartbeat(self._router)
         bind_addr = _tcp_addr(host, port)
-        self._router.bind(bind_addr)
+        try:
+            self._router.bind(bind_addr)
+        except Exception:
+            self.close()
+            raise
         logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
 
     # ------------------------------------------------------------------
@@ -241,7 +279,11 @@ class ZmqTransport(ControlTransport):
                     self._local_id,
                     sender_id,
                 )
-                conn = self._open_connection(sender_id, direction="inbound")
+                try:
+                    conn = self._open_connection(sender_id, direction="inbound")
+                except ValueError as exc:
+                    logger.warning("P2P: rejecting inbound peer %r: %s", sender_id, exc)
+                    continue
                 if new_connections is None:
                     new_connections = []
                 new_connections.append(conn)
@@ -263,6 +305,7 @@ class ZmqTransport(ControlTransport):
 
         self._router.setsockopt(zmq.LINGER, 0)
         self._router.close()
+        self._auth.stop()
         self._zmq_ctx.destroy(linger=0)
 
     # ------------------------------------------------------------------
@@ -273,8 +316,8 @@ class ZmqTransport(ControlTransport):
         self, peer_id: str, direction: str = "outbound"
     ) -> ZmqConnection:
         """Create a DEALER socket + monitor and register the connection."""
-        host, port_str = peer_id.rsplit(":", 1)
-        dealer_addr = _tcp_addr(host, port_str)
+        host, port = self._peer_allowlist.resolve_peer(peer_id)
+        dealer_addr = _tcp_addr(host, port)
 
         logger.debug(
             "ZmqTransport %s: creating DEALER for %s peer %s -> %s",
@@ -285,6 +328,8 @@ class ZmqTransport(ControlTransport):
         )
 
         dealer = self._zmq_ctx.socket(zmq.DEALER)
+        if ":" in host:
+            dealer.setsockopt(zmq.IPV6, 1)
         _apply_heartbeat(dealer)
         dealer.identity = self._local_id.encode()
         # ZMQ_IMMEDIATE stays 0: messages queue before the TCP connect
@@ -343,7 +388,11 @@ class ZmqTransport(ControlTransport):
                 continue
 
             identity, data = frames
-            sender_id = identity.decode()
+            try:
+                sender_id = identity.decode()
+            except UnicodeDecodeError:
+                logger.warning("P2P: rejecting invalid peer identity %r", identity)
+                continue
 
             logger.debug(
                 "ZmqTransport %s: ROUTER recv from %s (%d bytes)",

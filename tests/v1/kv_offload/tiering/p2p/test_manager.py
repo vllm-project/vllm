@@ -9,6 +9,7 @@ using fake transport and session objects.
 from __future__ import annotations
 
 import mmap
+import socket
 import threading
 import time
 import uuid
@@ -50,6 +51,7 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     P2PSecondaryTierManager,
     _annotate_req_context,
 )
+from vllm.v1.kv_offload.tiering.p2p.peer_policy import PeerAllowlist
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     SessionCloseResult,
@@ -67,6 +69,16 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import StoreDrainResult
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def peer_dns(monkeypatch):
+    """Resolve the in-memory transports' synthetic hostnames without network I/O."""
+
+    def resolve(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 def _remote_prefiller_kv_params(
@@ -140,6 +152,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr.tier_type = "p2p"
     mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
+    mgr._allowed_peers = PeerAllowlist(["127.0.0.0/8", "10.0.0.0/24"])
     mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
@@ -3388,7 +3401,7 @@ def drain_peers(monkeypatch, drain_transports):
     a.pair(b)
     controls = {"A:1": a, "B:2": b}
     monkeypatch.setattr(
-        manager_module, "ZmqTransport", lambda local_id, *_: controls[local_id]
+        manager_module, "ZmqTransport", lambda local_id, *_, **__: controls[local_id]
     )
     transports = iter(drain_transports)
     monkeypatch.setattr(

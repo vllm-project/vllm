@@ -342,11 +342,27 @@ Block content hashes must match across instances for peers to exchange blocks (s
 | `type` | yes | — | Must be `p2p`. |
 | `host` | no | `$VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) | Address the control socket binds to, used verbatim as the identity peers dial back. When omitted, resolves from the env var below. The `localhost` default binds loopback only — for cross-host P2P you **must** set it to the node's routable IP (see below). |
 | `port` | no | `$VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) | Base port for the control socket. Must be reachable from peers. The bound port is `base + data_parallel_index` (one socket per DP replica). When omitted, the base resolves from the env var below. |
+| `allowed_peers` | no | `["127.0.0.0/8", "::1"]` | List of trusted peer IP addresses, hostnames, or CIDRs. Checked for outbound destinations, inbound source IPs, and dial-back destinations before sharing KV cache metadata. `[]` denies all peers. |
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
 | `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
 | `unbound_store_timeout_s` | no | `60` | Seconds a producer holds stored blocks for a consumer that has not fetched them yet. Raise it for deployments whose prefills outlast the default; the blocks keep primary-tier CPU slots pinned for the whole window. Once it expires a late fetch is rejected in a single round trip, so the consumer falls back to local prefill immediately. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+For cross-host P2P, configure `allowed_peers` on **each** instance as well as
+its routable `host`. For example, a `secondary_tiers` entry can be
+`{"type": "p2p", "host": "10.0.0.1", "allowed_peers": ["10.0.0.0/24"]}`.
+An explicit list replaces the loopback default. Invalid entries or hostnames
+that cannot be resolved fail startup. Configured hostnames are resolved to IPs
+at startup; restart the instance to update those addresses. All addresses returned
+for a request's hostname must be allowed, and the connection uses a validated
+numeric address. Rejected transfers fall back to local prefill.
+
+Only allow peers trusted with the **entire shared CPU KV cache**: authorized
+peers receive NIXL registration metadata for that region. This IP-based policy
+does not provide per-request or per-tenant isolation, encryption, or cryptographic
+peer authentication. Keep both control and RDMA traffic on an
+[isolated trusted network](../usage/security.md#inter-node-communication).
 
 Fetches queued while the peer handshake is pending fail locally if the request
 finishes or its load deadline expires. They do not wait for an abort

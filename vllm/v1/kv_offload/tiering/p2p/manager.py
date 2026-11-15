@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
+from vllm.v1.kv_offload.tiering.p2p.peer_policy import PeerAllowlist
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -249,6 +250,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        allowed_peers: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -291,11 +293,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            allowed_peers: IP addresses, hostnames or CIDRs authorized to
+                access the shared CPU KV cache. Defaults to loopback only
+                (`127.0.0.0/8` and `::1`). An empty list denies all peers.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
             ValueError: If `unbound_store_timeout_s` is not a positive
-                number, or anything convertible to one.
+                number, or anything convertible to one, or `allowed_peers`
+                contains an invalid or unresolvable entry.
 
         """
         backpressure_detector = kwargs.pop("backpressure_detector", None)
@@ -327,6 +333,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 f"{unbound_store_timeout_s!r}"
             )
         self._unbound_store_timeout_s = timeout_s
+        self._allowed_peers = PeerAllowlist(allowed_peers)
 
         # Block hashes chain from NONE_HASH (see v1/core/kv_cache_utils.py).
         # Peers whose seeds differ compute different hashes for identical
@@ -371,7 +378,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             backends=backends,
             num_threads=int(num_threads),
         )
-        self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
+        self._control: ControlTransport = ZmqTransport(
+            self._local_id, host, port, peer_allowlist=self._allowed_peers
+        )
 
         self._sessions: dict[str, P2PSession] = {}
         # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
@@ -620,9 +629,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             source.kv_request_id if source is not None else None,
             source.peer_id if source is not None else None,
         )
-        if source is None:
+        if source is None or source.kv_request_id in self._failed_req_ids:
             logger.debug(
-                "P2P %s: submit_load job_id=%d FAILED missing consumer params",
+                "P2P %s: submit_load job_id=%d FAILED missing or rejected source",
                 self._local_id,
                 job_id,
             )
@@ -790,6 +799,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Returns None if the session could not be created (capacity
         exceeded or transport error).
         """
+        if not self._authorize_peer(peer_id):
+            return None
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
@@ -832,9 +843,22 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._sessions[peer_id] = session
         return session
 
+    def _authorize_peer(self, peer_id: str) -> bool:
+        try:
+            self._allowed_peers.resolve_peer(peer_id)
+        except ValueError as exc:
+            logger.warning(
+                "P2P %s: rejecting peer %r: %s", self._local_id, peer_id, exc
+            )
+            return False
+        return True
+
     def _accept_new_peers(self, new_connections: Sequence[ControlConnection]) -> None:
         max_peers = envs.VLLM_P2P_MAX_PEERS
         for conn in new_connections:
+            if not self._authorize_peer(conn.peer_id):
+                conn.close()
+                continue
             logger.info(
                 "P2P %s: accepting incoming connection from %s",
                 self._local_id,
