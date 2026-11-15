@@ -1157,6 +1157,53 @@ async def test_stream_continuous_usage():
 
 
 @pytest.mark.asyncio
+async def test_stream_enable_force_include_usage():
+    """--enable-force-include-usage forces usage on every chunk and final chunk
+    even without stream_options.
+    """
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_force_include_usage=True)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    assert parsed[-1] == "[DONE]"
+
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+    assert len(data_chunks) == 2
+    for i, dc in enumerate(data_chunks):
+        assert dc["usage"] is not None, f"chunk {i} missing usage"
+        assert dc["usage"]["prompt_tokens"] == 3
+
+    assert data_chunks[0]["usage"]["completion_tokens"] == 1
+    assert data_chunks[1]["usage"]["completion_tokens"] == 2
+
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"]["prompt_tokens"] == 3
+    assert usage_chunk["usage"]["completion_tokens"] == 2
+    assert usage_chunk["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
 async def test_stream_with_logprobs():
     """Streaming with logprobs includes logprob data in each chunk."""
     engine = _mock_engine()
