@@ -156,6 +156,16 @@ def test_video_placeholder_reads_scoped_add_timestamps(configured: bool):
             {"width": 500, "height": 280},
             (500, 280),
         ),
+        (
+            {"videos_kwargs": {"max_soft_tokens": 70}},
+            {"width": 96, "height": 48},
+            (70, 25),
+        ),
+        (
+            {"videos_kwargs": {"max_soft_tokens": 280}},
+            {"width": 94, "height": 134},
+            (91, 130),
+        ),
     ],
 )
 def test_dummy_video_follows_size_hint(

@@ -3,6 +3,7 @@
 """EmbeddingGemma2: bidirectional Gemma4-derived multimodal embedding model."""
 
 import dataclasses
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
@@ -79,6 +80,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.multimodal.video import EmbeddingGemma2VideoBackend
 from vllm.sequence import IntermediateTensors
 
@@ -524,13 +526,11 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
                 w = max_soft_tokens // h
                 if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
                     sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
-                scale = min(1.0, max_width / (unit * w), max_height / (unit * h))
-                sizes.append(
-                    ImageSize(
-                        width=max(1, int(unit * w * scale)),
-                        height=max(1, int(unit * h * scale)),
-                    )
-                )
+                divisor = math.gcd(w, h)
+                aspect_w, aspect_h = w // divisor, h // divisor
+                k = min(max_width // aspect_w, max_height // aspect_h)
+                if k * min(aspect_w, aspect_h) >= MIN_DUMMY_SIDE:
+                    sizes.append(ImageSize(width=k * aspect_w, height=k * aspect_h))
 
         return max(
             sizes,

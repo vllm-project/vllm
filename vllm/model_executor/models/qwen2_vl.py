@@ -88,6 +88,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1159,8 +1160,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             scale = min(1.0, max_width / (unit * w), max_height / (unit * h))
             sizes.append(
                 ImageSize(
-                    width=max(1, int(unit * w * scale)),
-                    height=max(1, int(unit * h * scale)),
+                    width=max(min(MIN_DUMMY_SIDE, max_width), int(unit * w * scale)),
+                    height=max(min(MIN_DUMMY_SIDE, max_height), int(unit * h * scale)),
                 )
             )
 

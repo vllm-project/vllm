@@ -88,6 +88,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -159,8 +160,10 @@ def _get_canvas_with_most_tokens(
     for ph, pw in grids:
         if ph * pw <= best_tokens:
             break
-        h_lo, h_hi = (ph - 1) * factor + 1, min(ph * factor, max_height)
-        w_lo, w_hi = (pw - 1) * factor + 1, min(pw * factor, max_width)
+        h_lo = max((ph - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_height))
+        h_hi = min(ph * factor, max_height)
+        w_lo = max((pw - 1) * factor + 1, min(MIN_DUMMY_SIDE, max_width))
+        w_hi = min(pw * factor, max_width)
         if h_lo > h_hi or w_lo > w_hi:
             continue
         candidates = [(w, h) for w in (w_lo, w_hi) for h in (h_lo, h_hi)]
