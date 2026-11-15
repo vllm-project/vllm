@@ -42,7 +42,8 @@ async def test_structured_output(client: openai.AsyncOpenAI):
     output_text = response.output[-1].content[0].text
     event = json.loads(output_text)
 
-    assert event["event_name"].lower() == "science fair"
+    # The model may name the event "going to a science fair".
+    assert "science fair" in event["event_name"].lower()
     assert event["date"] == "Friday"
     participants = event["participants"]
     assert len(participants) == 2
@@ -70,7 +71,7 @@ async def test_structured_output_with_parse(client: openai.AsyncOpenAI):
     assert event is not None
 
     # The output is correct.
-    assert event.event_name.lower() == "science fair"
+    assert "science fair" in event.event_name.lower()
     assert event.date == "Friday"
     participants = event.participants
     assert len(participants) == 2
