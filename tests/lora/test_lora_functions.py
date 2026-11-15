@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, RequestOutput, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
@@ -149,6 +149,39 @@ def test_same_lora_name_with_different_ids(
     )
     assert "Meow Meow Meow" in outputs[0].outputs[0].text
     assert "Woof Woof Woof" in outputs[1].outputs[0].text
+
+
+@pytest.mark.parametrize("max_loras", [1, 4])
+def test_specialize_active_lora_with_base_requests(max_loras):
+    """CUDA graphs specialized on the active LoRA count must still apply an
+    adapter whose request shares the batch with a base model request."""
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=max_loras,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        specialize_active_lora=True,
+    )
+    llm = LLMEngine.from_engine_args(engine_args)
+    prompt = llm.get_tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Who are you?"}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=16)
+    llm.add_request("lora", prompt, sampling_params, lora_request=make_lora_request(1))
+    llm.add_request("base", prompt, sampling_params)
+    texts = {}
+    while llm.has_unfinished_requests():
+        for output in llm.step():
+            assert isinstance(output, RequestOutput)
+            if output.finished:
+                texts[output.request_id] = output.outputs[0].text
+    assert "Alice" in texts["lora"]
+    assert "Alice" not in texts["base"]
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])

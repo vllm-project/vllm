@@ -166,12 +166,12 @@ class LoRAModelRunnerMixin:
             # convert_mapping() will convert these to 0-indexed slot indices.
             if effective_num_loras > 0:
                 if include_no_lora:
-                    # Include -1 (no-LoRA) entries by cycling through
-                    # -1, 1, 2, ..., effective_num_loras
+                    # Include no-LoRA entries by cycling through
+                    # 0, 1, 2, ..., effective_num_loras (0 maps to -1)
                     # This ensures prepare_tensors sees both LoRA and no-LoRA
                     # tokens, computing num_active_loras = effective_num_loras+1
                     cycle_values = np.array(
-                        list(range(1, effective_num_loras + 1)),
+                        list(range(effective_num_loras + 1)),
                         dtype=np.int32,
                     )
                     prompt_lora_mapping = cycle_values[
