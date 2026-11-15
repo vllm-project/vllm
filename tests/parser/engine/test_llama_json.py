@@ -381,6 +381,7 @@ def test_tool_choice_none_streaming_preserves_bare_json(
         '{"city": "Paris", "temp_c": 18}',
         '{"name": "Evelyn", "age": 28}',
         "{}",
+        '{"name": "a", "parameters": {"x',
     ],
 )
 def test_streaming_bare_json_answer_is_content(
