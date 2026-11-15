@@ -1919,6 +1919,43 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
     assert step() == [(request.request_id, 0)]
     assert step() == []
 
+    # A drop smaller than the throttle still reports when it reaches zero.
+    request.prefill_progress_left = 2
+    request.prefill_progress_step = 3
+    request.num_computed_tokens = request.num_tokens
+    zero = scheduler._report_prefill_progress(request)
+    assert zero is not None and zero.remaining_prefill_tokens == 0
+
+
+def test_a_requeued_snapshot_does_not_overtake_the_resumed_request():
+    """A report the request sends itself supersedes the queued preemption one."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    scheduler.update_from_output(
+        first, ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]])
+    )
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    # It resumes before the queued snapshot is flushed and reports as it goes.
+    second = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        second, ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]])
+    )
+    values = [
+        entry.prefill_progress.remaining_prefill_tokens
+        for batch in outputs.values()
+        for entry in batch.outputs
+        if entry.prefill_progress is not None
+    ]
+    assert values == [48], values
+
 
 def test_preempted_request_reports_the_work_it_requeues():
     """A preemption puts the work it discards back on the queue."""

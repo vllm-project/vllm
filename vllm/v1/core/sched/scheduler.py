@@ -2339,6 +2339,9 @@ class Scheduler(SchedulerInterface):
         # A report rides on the output this step already produces for the
         # request; only a step without one needs an output of its own.
         prefill_by_request: dict[str, PrefillProgress] = {}
+        # Requests that reported through their own output this step. A queued
+        # snapshot for any of them is older than what already went out.
+        prefill_reported: set[str] = set()
 
         spec_decoding_stats: SpecDecodingStats | None = None
 
@@ -2601,10 +2604,13 @@ class Scheduler(SchedulerInterface):
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
+                attached_progress = prefill_by_request.pop(req_id, None)
+                if attached_progress is not None:
+                    prefill_reported.add(req_id)
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        prefill_progress=prefill_by_request.pop(req_id, None),
+                        prefill_progress=attached_progress,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2759,6 +2765,15 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
+
+        if prefill_progress:
+            for client_index in list(prefill_progress):
+                prefill_progress[client_index] = [
+                    update
+                    for update in prefill_progress[client_index]
+                    if update.request_id not in prefill_reported
+                    and update.request_id in self.requests
+                ]
 
         # Progress travels as an ordinary output so the frontend routes it per
         # request, including on steps that produce no tokens.
