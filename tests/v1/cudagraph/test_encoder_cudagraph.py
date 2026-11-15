@@ -152,7 +152,7 @@ class _MockModel(SupportsEncoderCudaGraph):
         return EncoderCudaGraphReplayBuffers(values={})
 
     def encoder_cudagraph_forward(
-        self, inputs: dict[str, torch.Tensor], path: str = "default"
+        self, values: dict[str, torch.Tensor], path: str = "default"
     ) -> torch.Tensor:
         return torch.zeros(0)
 
@@ -259,6 +259,43 @@ def test_item_multiple_budgets_fit_fixed_size_items():
     assert all(b % 81 == 0 for b in budgets)
     assert budgets[:16] == [81 * n for n in range(1, 17)]
     assert budgets[-1] == 81 * (2560 // 81)
+
+
+# ---------------------------------------------------------------------------
+# _replay_exceeds_capture
+# ---------------------------------------------------------------------------
+
+
+class TestReplayExceedsCapture:
+    """Replay tensors must fit the fixed capture-buffer leading dimension."""
+
+    def test_fits_when_src_shorter_or_equal(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(33, dtype=torch.int32)}
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_exceeds_when_src_longer(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(67, dtype=torch.int32)}
+        assert EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_ignores_missing_and_scalar_buffers(self):
+        input_buffers = {
+            "cu_seqlens": torch.zeros(33, dtype=torch.int32),
+            "max_seqlen": torch.tensor(16),
+        }
+        replay_values = {
+            "cu_seqlens": None,
+            "max_seqlen": torch.tensor(8),
+            "other": torch.arange(100, dtype=torch.int32),
+        }
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +794,40 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == 1
         # Eager output: SimpleMockViTModel produces n_out = 81 tokens
         assert result[0].shape == (81, _HIDDEN)
+        assert self.mgr.graph_misses == 1
+
+    def test_eager_fallback_when_replay_buffer_exceeds_capture(self):
+        # Capture-sized inputs replay normally; force an oversized leading
+        # dimension on a captured buffer so replay must fall back to eager
+        # instead of raising in the padded copy.
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        real_prepare = self.model.prepare_encoder_cudagraph_replay_buffers
+
+        def oversized_prepare(*args, **kwargs):
+            replay = real_prepare(*args, **kwargs)
+            captured = next(iter(self.mgr.budget_graphs["default"].values()))
+            key = "pixel_values"
+            overflow = captured.input_buffers[key].shape[0] + 8
+            replay.values[key] = torch.randn(
+                overflow,
+                _FLAT,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            return replay
+
+        with patch.object(
+            self.model,
+            "prepare_encoder_cudagraph_replay_buffers",
+            side_effect=oversized_prepare,
+        ):
+            result = self.mgr.execute(mm_kwargs)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (4, _HIDDEN)
+        assert self.mgr.graph_hits == 0
         assert self.mgr.graph_misses == 1
 
     # --- counters ---
@@ -1665,7 +1736,16 @@ class TestFlashInferCuSeqlensPadding:
         )
 
     @staticmethod
-    def _qwen3_vl_padding_fn(flashinfer: bool):
+    def _padding_fn(model: str, flashinfer: bool):
+        from vllm.model_executor.models.glm4_1v import (
+            Glm4vForConditionalGeneration,
+        )
+        from vllm.model_executor.models.kimi_k25 import (
+            KimiK25ForConditionalGeneration,
+        )
+        from vllm.model_executor.models.qwen2_vl import (
+            Qwen2VLForConditionalGeneration,
+        )
         from vllm.model_executor.models.qwen3_vl import (
             Qwen3VLForConditionalGeneration,
         )
@@ -1676,18 +1756,28 @@ class TestFlashInferCuSeqlensPadding:
             if flashinfer
             else AttentionBackendEnum.FLASH_ATTN
         )
-        model = SimpleNamespace(
-            is_multimodal_pruning_enabled=False,
-            get_max_frames_per_video=lambda: 16,
-            visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
-        )
-        config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
-            cast(Any, model)
-        )
+        if model == "kimi_k25":
+            cls = KimiK25ForConditionalGeneration
+            attn = SimpleNamespace(attn_backend=backend)
+            encoder = SimpleNamespace(blocks=[SimpleNamespace(attn=attn)])
+            stub = SimpleNamespace(
+                vision_tower=SimpleNamespace(encoder=encoder),
+                config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=8)),
+            )
+        else:
+            cls = {
+                "qwen2_vl": Qwen2VLForConditionalGeneration,
+                "qwen3_vl": Qwen3VLForConditionalGeneration,
+                "glm4v": Glm4vForConditionalGeneration,
+            }[model]
+            stub = SimpleNamespace(
+                is_multimodal_pruning_enabled=False,
+                get_max_frames_per_video=lambda: 16,
+                visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+            )
+        config = cls.get_encoder_cudagraph_config(cast(Any, stub))
         # Same lookup as EncoderCudaGraphManager replay.
-        return config.padding_logics.get(
-            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
-        )
+        return EncoderCudaGraphManager._get_padding_logic(config, "cu_seqlens")
 
     # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
     # buckets are 8, 16, 32 and 64.
@@ -1696,12 +1786,24 @@ class TestFlashInferCuSeqlensPadding:
         ([49, 196], 2, 16),
         ([64] * 9, 9, 32),  # bucket 16 replayed into bucket 32
         ([49] * 3, 3, 8),  # same bucket
+        ([49], 1, 9),  # Kimi-K2.5: unpadded replay into max_batch_size + 1
     ]
 
-    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(
+        ("model", "flashinfer"),
+        [
+            *(
+                (m, fi)
+                for m in ("qwen3_vl", "glm4v", "kimi_k25")
+                for fi in (True, False)
+            ),
+            ("qwen2_vl", False),  # no FlashInfer ViT path
+        ],
+    )
     @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
     def test_replay_padding_matches_capture_size_metadata(
         self,
+        model: str,
         flashinfer: bool,
         seq_lens: list[int],
         replay_batch: int,
@@ -1713,8 +1815,25 @@ class TestFlashInferCuSeqlensPadding:
         assert want.shape == capture.shape
 
         buf = torch.full_like(capture, -1)
-        self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
+        self._padding_fn(model, flashinfer)(buf, replay)
         assert torch.equal(buf, want)
+
+    def test_oot_attention_owns_padding(self, monkeypatch):
+        from vllm.model_executor.custom_op import op_registry_oot
+        from vllm.model_executor.layers.attention import MMEncoderAttention
+
+        def oot_padding(dst: torch.Tensor, src: torch.Tensor) -> None:
+            pass
+
+        class OOTMMEncoderAttention(MMEncoderAttention):
+            @classmethod
+            def get_cu_seqlens_padding_logics(cls, attn_backend, *keys):
+                return dict.fromkeys(keys, oot_padding)
+
+        monkeypatch.setitem(
+            op_registry_oot, MMEncoderAttention.__name__, OOTMMEncoderAttention
+        )
+        assert self._padding_fn("qwen3_vl", flashinfer=False) is oot_padding
 
 
 # ---------------------------------------------------------------------------

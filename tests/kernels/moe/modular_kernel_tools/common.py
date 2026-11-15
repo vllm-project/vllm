@@ -78,7 +78,7 @@ def _describe_tensor(t: torch.Tensor | None, name: str) -> str:
         return f"{name} : {t.shape} {t.dtype} {t.device}"
 
 
-@dataclass
+@dataclass(slots=True)
 class Config:
     Ms: list[int] | int
     K: int
@@ -488,7 +488,7 @@ class Config:
         return True, None
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightTensors:
     w1: torch.Tensor
     w2: torch.Tensor
@@ -559,7 +559,7 @@ class WeightTensors:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RankTensors:
     hidden_states: torch.Tensor
     hidden_states_scale: torch.Tensor | None
