@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import heapq
+import time
 import weakref
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
@@ -157,6 +159,10 @@ class BlockPool:
             self.blocks
         )
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        # Min-heap of (expires_at, block_id) for cached blocks with finite TTL.
+        # Entries may be stale if a block was re-cached, had its TTL extended,
+        # or was already evicted; stale entries are skipped on pop.
+        self._expiry_heap: list[tuple[float, int]] = []
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -274,6 +280,7 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            self._extend_block_ttl(blk, request.prompt_cache_ttl_s)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -517,6 +524,7 @@ class BlockPool:
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
+            block.reset_ttl()
             already_cached = False
         elif (
             not already_cached
@@ -531,6 +539,7 @@ class BlockPool:
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
+        self._extend_block_ttl(block, request.prompt_cache_ttl_s)
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -677,6 +686,11 @@ class BlockPool:
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        if dst_block.block_hash is not None:
+            dst_block.ttl_s = src_block.ttl_s
+            dst_block.expires_at = src_block.expires_at
+            self._maybe_push_to_expiry_heap(dst_block)
+        src_block.reset_ttl()
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -721,6 +735,101 @@ class BlockPool:
                     self.metrics_collector.on_block_allocated(block)
         return ret
 
+    def _maybe_push_to_expiry_heap(self, block: KVCacheBlock) -> None:
+        """Queue a free block for TTL eviction if needed.
+
+        Only blocks with `ref_cnt == 0` are queued, since the TTL countdown
+        starts when a block is freed. A block is pushed only if its
+        `expires_at` is earlier than its earliest existing heap entry
+        (`block.expiry_heap_at`); if its expiry was pushed later, the existing
+        entry is popped first and the block is pushed again then. Outdated
+        entries are skipped lazily in `evict_expired_blocks`.
+        """
+        if block.ref_cnt == 0 and block.expires_at < block.expiry_heap_at:
+            block.expiry_heap_at = block.expires_at
+            heapq.heappush(self._expiry_heap, (block.expires_at, block.block_id))
+
+            if len(self._expiry_heap) > 2 * len(self.blocks):
+                self._compact_expiry_heap()
+
+    def _compact_expiry_heap(self) -> None:
+        """Drop outdated entries, keeping each block's earliest deadline.
+
+        Re-caching a block with ever earlier deadlines would otherwise grow the
+        heap without bound. The heap is mutated in place because
+        `evict_expired_blocks` holds a reference to it.
+        """
+        self._expiry_heap[:] = [
+            (block.expiry_heap_at, block.block_id)
+            for block in self.blocks
+            if block.expiry_heap_at != float("inf")
+        ]
+        heapq.heapify(self._expiry_heap)
+
+    def _start_expiry(self, block: KVCacheBlock, now: float) -> None:
+        block.expires_at = now + block.ttl_s
+        self._maybe_push_to_expiry_heap(block)
+
+    def _extend_block_ttl(
+        self,
+        block: KVCacheBlock,
+        ttl_s: float | None,
+    ) -> None:
+        resolved_ttl = float("inf") if ttl_s is None else ttl_s
+        if resolved_ttl > block.ttl_s:
+            block.ttl_s = resolved_ttl
+
+    def extend_block_groups_ttl(
+        self,
+        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
+        ttl_s: float | None,
+    ) -> None:
+        """Apply a request's TTL to blocks it hit in the prefix cache."""
+        for blocks in blocks_by_group:
+            for block in blocks:
+                if not block.is_null:
+                    self._extend_block_ttl(block, ttl_s)
+
+    def evict_expired_blocks(self) -> int:
+        """Evict free cached blocks whose TTL has elapsed.
+
+        Pops heap entries whose expiry time has passed. An entry is skipped if
+        the block is no longer cached or is in use again (`ref_cnt > 0`). If
+        the block's `expires_at` was updated after the entry was queued,
+        the block is queued again by `_maybe_push_to_expiry_heap`.
+
+        Returns:
+            The number of blocks evicted.
+
+        """
+        if not self._expiry_heap:
+            return 0
+        now = time.monotonic()
+        evicted_ids: list[int] = []
+        heap = self._expiry_heap
+        blocks = self.blocks
+        while heap and heap[0][0] <= now:
+            expiration, block_id = heapq.heappop(heap)
+            block = blocks[block_id]
+            if block.expiry_heap_at == expiration:
+                block.expiry_heap_at = float("inf")
+            if block.block_hash is None or block.ref_cnt > 0:
+                continue
+            if block.expires_at > now:
+                self._maybe_push_to_expiry_heap(block)
+                continue
+            if self._maybe_evict_cached_block(block):
+                evicted_ids.append(block_id)
+                self.free_block_queue.remove(block)
+                self.free_block_queue.prepend_n([block])
+        if evicted_ids:
+            logger.info(
+                "Evicted %d expired blocks from the prefix cache (TTL): %s",
+                len(evicted_ids),
+                evicted_ids,
+            )
+        return len(evicted_ids)
+
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
         for block in blocks:
             watcher = self._reuse_watchers.pop(block.block_id, None)
@@ -739,12 +848,15 @@ class BlockPool:
         `on_reuse` fires when `get_new_blocks` hands a block out (or the
         cache is reset), so the caller can stop reading it.
         """
+        now = time.monotonic()
         released: list[KVCacheBlock] = []
         for block in blocks:
             assert block.ref_cnt > 0 and not block.is_null
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                if block.block_hash is not None:
+                    self._start_expiry(block, now=now)
                 released.append(block)
         self.free_block_queue.append_n(released)
 
@@ -768,6 +880,7 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        block.reset_ttl()
         self._emit_block_removed_events(evicted_hashes)
         return True
 
@@ -810,6 +923,7 @@ class BlockPool:
 
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
+        now = time.monotonic()
         blocks_to_evict_last = []
         blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
@@ -823,6 +937,8 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
+                if block.block_hash is not None:
+                    self._start_expiry(block, now=now)
                 if block.block_hash is None or not self.enable_caching or evict_first:
                     # LIFO reuse of non-cached blocks for better GPU locality,
                     # and of cached ones when asked to evict them first.
@@ -881,6 +997,7 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        self._expiry_heap.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
@@ -889,6 +1006,8 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            block.reset_ttl()
+            block.expiry_heap_at = float("inf")
 
         if self.metrics_collector:
             self.metrics_collector.reset()

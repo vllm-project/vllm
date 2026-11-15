@@ -621,6 +621,9 @@ class KVCacheManager:
                 num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
+            self.block_pool.extend_block_groups_ttl(
+                new_computed_block_list, request.prompt_cache_ttl_s
+            )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
@@ -938,6 +941,9 @@ class KVCacheManager:
             group_id, block, boundary_tokens = finalized
             offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
+
+    def evict_expired_blocks(self) -> int:
+        return self.block_pool.evict_expired_blocks()
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""

@@ -267,6 +267,11 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    prefix_cache_ttl_seconds: float | None = Field(default=None, gt=0)
+    """Default time-to-live, in seconds, of prefix cache entries. Every use of
+    a cached block renews its TTL.
+    If `None`, cached blocks never expire and are only evicted under memory
+    pressure."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -446,6 +451,7 @@ class CacheConfig:
             "skip_page_size_padded",
             "user_specified_block_size",
             "_block_size_resolved",
+            "prefix_cache_ttl_seconds",
             "_extensible_kv_cache_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",

@@ -206,6 +206,18 @@ class InputProcessor:
                     "enabled. Start the engine with --enable-trace-replay "
                     "to use it."
                 )
+            if params.extra_args:
+                ttl = params.extra_args.get("prompt_cache_ttl_s")
+                if ttl is not None and (
+                    isinstance(ttl, bool)
+                    or not isinstance(ttl, (int, float))
+                    or not ttl > 0
+                ):
+                    raise VLLMValidationError(
+                        f"prompt_cache_ttl_s must be a number > 0, got {ttl!r}",
+                        parameter="prompt_cache_ttl_s",
+                        value=ttl,
+                    )
             # Resolved last so that feature gates above report the missing
             # feature rather than its incompatibility with watermarking.
             watermarking = self.resolve_watermarking(params)

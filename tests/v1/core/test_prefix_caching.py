@@ -4,20 +4,21 @@
 
 import copy
 import gc
+import math
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from math import lcm
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -35,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
@@ -67,6 +69,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseResidentManager,
     HiSparseSourceManager,
 )
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -7212,3 +7215,498 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def _install_fake_clock(monkeypatch) -> MagicMock:
+    import vllm.v1.core.block_pool as block_pool_module
+
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(block_pool_module.time, "monotonic", clock)
+    return clock
+
+
+def _make_ttl_manager_with_clock(monkeypatch, num_blocks: int = 11, **kwargs):
+    clock = _install_fake_clock(monkeypatch)
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, num_blocks),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        **kwargs,
+    )
+    return manager, clock
+
+
+def _make_partial_ttl_pool_with_clock(monkeypatch) -> tuple[BlockPool, MagicMock]:
+    """Pool whose hash granularity is finer than the 16-token cache block."""
+    clock = _install_fake_clock(monkeypatch)
+    block_pool = BlockPool(num_gpu_blocks=11, enable_caching=True, hash_block_size=4)
+    return block_pool, clock
+
+
+def _schedule(manager: KVCacheManager, req: Request) -> int:
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
+    assert (
+        manager.allocate_slots(
+            req,
+            req.num_tokens - num_computed_tokens,
+            num_computed_tokens,
+            computed_blocks,
+        )
+        is not None
+    )
+    return num_computed_tokens
+
+
+def test_prefix_cache_ttl_evicts_on_expiry(monkeypatch):
+    """Blocks leave the prefix cache once their TTL elapses after the last
+    request using them finished, without needing a lookup to notice."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(3) for _ in range(16)] + [3] * 7
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = 10.0
+    assert _schedule(manager, req0) == 0
+    manager.free(req0)
+
+    # Before the deadline: the 3 full blocks are hit.
+    clock.return_value += 9.0
+    assert manager.evict_expired_blocks() == 0
+    req1 = make_request("1", token_ids, 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 48
+
+    # After the deadline: evicted by the sweep.
+    clock.return_value += 2.0
+    assert manager.evict_expired_blocks() == 3
+    for block_id in (1, 2, 3):
+        assert manager.block_pool.blocks[block_id].block_hash is None
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 0
+    assert manager.block_pool.get_num_free_blocks() == 10
+
+
+def test_prefix_cache_ttl_in_use_never_expires(monkeypatch):
+    """A running request counts as using its blocks: they stay cached past the
+    TTL, and the TTL restarts when the request finishes."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = 10.0
+    _schedule(manager, req0)
+
+    # Long-running request: far past the TTL, blocks are still hittable.
+    clock.return_value += 100.0
+    assert manager.evict_expired_blocks() == 0
+    req1 = make_request("1", token_ids, 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 32
+
+    # Released at t+100: TTL restarts, so evicted at t+110, not earlier.
+    manager.free(req0)
+    clock.return_value += 9.0
+    assert manager.evict_expired_blocks() == 0
+    clock.return_value += 1.0
+    assert manager.evict_expired_blocks() == 2
+
+
+def test_prefix_cache_ttl_refreshed_on_hit(monkeypatch):
+    """A cache hit renews the TTL, using the largest TTL of all users."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = 10.0
+    _schedule(manager, req0)
+    manager.free(req0)
+
+    # Hit at t+8 with a longer TTL, released at t+8: new deadline t+38.
+    clock.return_value += 8.0
+    req1 = make_request("1", token_ids, 16, sha256)
+    req1.prompt_cache_ttl_s = 30.0
+    assert _schedule(manager, req1) == 32
+    manager.free(req1)
+
+    # The stale t+10 heap entry must not evict the block.
+    clock.return_value += 25.0
+    assert manager.evict_expired_blocks() == 0
+    clock.return_value += 6.0
+    assert manager.evict_expired_blocks() == 2
+
+    # A later shorter-TTL user still renews with the largest TTL (30s).
+    req2 = make_request("2", token_ids, 16, sha256)
+    req2.prompt_cache_ttl_s = 30.0
+    _schedule(manager, req2)
+    manager.free(req2)
+    req3 = make_request("3", token_ids, 16, sha256)
+    req3.prompt_cache_ttl_s = 1.0
+    assert _schedule(manager, req3) == 32
+    manager.free(req3)
+    clock.return_value += 29.0
+    assert manager.evict_expired_blocks() == 0
+
+
+def test_prefix_cache_ttl_none_never_expires(monkeypatch):
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = None # Setting request's TTL to inf
+    _schedule(manager, req0)
+    manager.free(req0)
+
+    clock.return_value += 1e9
+    assert manager.evict_expired_blocks() == 0
+    assert not manager.block_pool._expiry_heap
+    req1 = make_request("1", token_ids, 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 32
+
+
+def test_prefix_cache_ttl_short_hit_does_not_shorten_inf(monkeypatch):
+    """A short-TTL hit must not shorten an infinite-TTL full block."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = list(range(33))
+
+    req_inf = make_request("inf", token_ids, 16, sha256)
+    req_inf.prompt_cache_ttl_s = None # Setting request's TTL to inf
+    _schedule(manager, req_inf)
+    manager.free(req_inf)
+
+    req_short = make_request("short", token_ids, 16, sha256)
+    req_short.prompt_cache_ttl_s = 1.0
+    assert _schedule(manager, req_short) == 32
+    manager.free(req_short)
+
+    clock.return_value += 1e9
+    assert manager.evict_expired_blocks() == 0
+    assert not manager.block_pool._expiry_heap
+
+
+def test_prefix_cache_ttl_short_partial_does_not_shorten_inf(monkeypatch):
+    """A short-TTL request must not shorten an infinite-TTL block on partial
+    re-cache, partial extension, promotion, or secondary partial insertion."""
+    pool, clock = _make_partial_ttl_pool_with_clock(monkeypatch)
+    token_ids = list(range(16))
+    req_inf = make_request("partial-inf", token_ids[:8], 4, sha256)
+    req_short = make_request("partial-short", token_ids, 4, sha256)
+    req_short.prompt_cache_ttl_s = 1.0
+
+    blk = pool.get_new_blocks(1)[0]
+    pool.cache_partial_block(
+        request=req_inf,
+        block=blk,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=16,
+    )
+    assert blk.ttl_s == math.inf
+
+    # Already-cached partial entry hit by short-TTL request.
+    pool.cache_partial_block(
+        request=req_short,
+        block=blk,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=16,
+    )
+    assert blk.ttl_s == math.inf
+
+    # Extending partial entry (8 -> 12 tokens) by short-TTL request.
+    pool.cache_partial_block(
+        request=req_short,
+        block=blk,
+        num_tokens=12,
+        kv_cache_group_id=0,
+        block_size=16,
+    )
+    assert blk.ttl_s == math.inf
+
+    # Partial -> full promotion by short-TTL request.
+    pool.cache_full_blocks(
+        request=req_short,
+        blocks=[blk],
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=16,
+        kv_cache_group_id=0,
+    )
+    assert blk.ttl_s == math.inf
+
+    # Secondary partial entry on an already-full infinite-TTL block.
+    pool.cache_partial_block(
+        request=req_short,
+        block=blk,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=16,
+    )
+    assert blk.ttl_s == math.inf
+
+    pool.free_blocks([blk])
+    assert blk.expires_at == math.inf
+    clock.return_value += 1e9
+    assert pool.evict_expired_blocks() == 0
+    assert not pool._expiry_heap
+    assert blk.block_hash is not None
+
+
+def test_prefix_cache_ttl_heap_single_entry_per_block(monkeypatch):
+    """Renewing a block's TTL many times keeps one heap entry per block."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    for i in range(1000):
+        req = make_request(str(i), token_ids, 16, sha256)
+        req.prompt_cache_ttl_s = 10.0
+        _schedule(manager, req)
+        manager.free(req)
+        clock.return_value += 0.01
+
+    assert len(manager.block_pool._expiry_heap) <= 2
+    clock.return_value += 9.9
+    assert manager.evict_expired_blocks() == 0
+    clock.return_value += 0.1
+    assert manager.evict_expired_blocks() == 2
+
+
+def test_prefix_cache_ttl_recached_block_expires_on_time(monkeypatch):
+    """A block evicted under memory pressure and re-cached with a shorter TTL
+    expires at its new deadline, not at the old (later) heap entry's, and the
+    stale entries left behind stay bounded."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    pool = manager.block_pool
+    blk = pool.blocks[1]
+
+    for i in range(100):
+        # Cache with a decreasing TTL, then evict as memory pressure would.
+        block_hash = make_block_hash_with_group_id(BlockHash(str(i).encode()), 0)
+        pool._insert_block_hash(block_hash, blk, num_tokens=16)
+        pool._extend_block_ttl(blk, 1000.0 - i)
+        pool._start_expiry(blk, clock.return_value)
+        if i < 99:
+            pool._maybe_evict_cached_block(blk)
+
+    assert len(pool._expiry_heap) <= 2 * len(pool.blocks)
+    clock.return_value += 1000.0 - 99
+    assert manager.evict_expired_blocks() == 1
+    assert blk.block_hash is None
+
+
+def test_prefix_cache_ttl_evicted_blocks_reused_before_live_blocks(monkeypatch):
+    """Expired blocks are moved to the front of the free queue so new
+    allocations reuse them before evicting still-valid cached blocks."""
+    # 2 cached blocks per prompt, plus 1 for the uncached trailing token.
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch, num_blocks=6)
+    tokens_live = [i for i in range(2) for _ in range(16)] + [99]
+    tokens_expiring = [i + 10 for i in range(2) for _ in range(16)] + [99]
+    tokens_new = [i + 20 for i in range(2) for _ in range(16)] + [99]
+
+    req_live = make_request("live", tokens_live, 16, sha256)
+    req_live.prompt_cache_ttl_s = 100.0
+    _schedule(manager, req_live)
+    manager.free(req_live)
+
+    req_expiring = make_request("expiring", tokens_expiring, 16, sha256)
+    req_expiring.prompt_cache_ttl_s = 5.0
+    _schedule(manager, req_expiring)
+    manager.free(req_expiring)
+
+    clock.return_value += 5.0
+    assert manager.evict_expired_blocks() == 2
+
+    req_new = make_request("new", tokens_new, 16, sha256)
+    req_new.prompt_cache_ttl_s = 100.0
+    _schedule(manager, req_new)
+    manager.free(req_new)
+
+    _, num_computed_tokens, _ = manager.get_computed_blocks(
+        make_request("live-check", tokens_live, 16, sha256)
+    )
+    assert num_computed_tokens == 32
+
+
+def test_prefix_cache_ttl_reset_prefix_cache_clears_expiry(monkeypatch):
+    """reset_prefix_cache clears the expiry heap and per-block TTL state."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = 10.0
+    _schedule(manager, req0)
+    manager.free(req0)
+    assert len(manager.block_pool._expiry_heap) == 2
+
+    manager.reset_prefix_cache()
+    assert not manager.block_pool._expiry_heap
+    for block in manager.block_pool.blocks:
+        assert block.ttl_s == 0.0
+        assert block.expires_at == 0.0
+        assert block.expiry_heap_at == math.inf
+
+    clock.return_value += 100.0
+    assert manager.evict_expired_blocks() == 0
+
+
+def test_prefix_cache_ttl_emits_block_removed_events(monkeypatch):
+    """TTL eviction emits BlockRemoved events when KV cache events are enabled."""
+    manager, clock = _make_ttl_manager_with_clock(
+        monkeypatch, enable_kv_cache_events=True
+    )
+    token_ids = [i for i in range(2) for _ in range(16)] + [9]
+
+    req0 = make_request("0", token_ids, 16, sha256)
+    req0.prompt_cache_ttl_s = 10.0
+    _schedule(manager, req0)
+    manager.free(req0)
+    stored = [
+        block_hash
+        for event in manager.take_events()
+        if isinstance(event, BlockStored)
+        for block_hash in event.block_hashes
+    ]
+    assert len(stored) == 2
+
+    clock.return_value += 10.0
+    assert manager.evict_expired_blocks() == 2
+    removed = [
+        block_hash
+        for event in manager.take_events()
+        if isinstance(event, BlockRemoved)
+        for block_hash in event.block_hashes
+    ]
+    assert sorted(removed) == sorted(stored)
+
+
+def test_prefix_cache_ttl_move_block_hashes_transfers_ttl(monkeypatch):
+    """move_block_hashes gives dst_block the TTL and clears it on src_block."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    pool = manager.block_pool
+    src, dst = pool.get_new_blocks(2)
+
+    block_hash = make_block_hash_with_group_id(BlockHash(b"move"), 0)
+    pool._insert_block_hash(block_hash, src, num_tokens=16)
+    pool._extend_block_ttl(src, 10.0)
+
+    pool.move_block_hashes(src, dst)
+    assert src.ttl_s == 0.0
+    assert src.expires_at == 0.0
+    assert dst.ttl_s == 10.0
+    assert dst.block_hash == block_hash
+
+    pool.free_blocks([src, dst])
+    assert dst.expires_at == clock.return_value + 10.0
+
+    clock.return_value += 10.0
+    assert manager.evict_expired_blocks() == 1
+    assert dst.block_hash is None
+
+
+def test_prefix_cache_ttl_replace_partial_resets_ttl(monkeypatch):
+    """Replacing existing hashes on a partial block resets its prior TTL."""
+    pool, clock = _make_partial_ttl_pool_with_clock(monkeypatch)
+    blk = pool.get_new_blocks(1)[0]
+
+    req_long = make_request("long", list(range(16)), 4, sha256)
+    req_long.prompt_cache_ttl_s = 100.0
+    pool.cache_partial_block(
+        request=req_long,
+        block=blk,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=16,
+    )
+
+    req_short = make_request("short", list(range(100, 116)), 4, sha256)
+    req_short.prompt_cache_ttl_s = 5.0
+    pool.cache_partial_block(
+        request=req_short,
+        block=blk,
+        num_tokens=8,
+        kv_cache_group_id=0,
+        block_size=16,
+        replace_existing_hashes=True,
+    )
+    assert blk.ttl_s == 5.0
+
+    pool.free_blocks([blk])
+    clock.return_value += 5.0
+    assert pool.evict_expired_blocks() == 1
+    assert blk.block_hash is None
+
+
+def test_prefix_cache_ttl_unpin_blocks_starts_expiry(monkeypatch):
+    """unpin_blocks starts the TTL countdown on release."""
+    manager, clock = _make_ttl_manager_with_clock(monkeypatch)
+    pool = manager.block_pool
+    blk = pool.get_new_blocks(1)[0]
+
+    block_hash = make_block_hash_with_group_id(BlockHash(b"unpin"), 0)
+    pool._insert_block_hash(block_hash, blk, num_tokens=16)
+    pool._extend_block_ttl(blk, 10.0)
+    assert blk.expires_at == 0.0
+
+    clock.return_value += 5.0
+    pool.unpin_blocks([blk], on_reuse=lambda block: None)
+    assert blk.ref_cnt == 0
+    assert blk.expires_at == clock.return_value + 10.0
+
+    clock.return_value += 9.0
+    assert manager.evict_expired_blocks() == 0
+    clock.return_value += 1.0
+    assert manager.evict_expired_blocks() == 1
+
+
+def _validate_prompt_cache_ttl(ttl) -> SamplingParams:
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=False,
+            enable_trace_replay=False,
+            is_diffusion=False,
+        ),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            _check_supports_watermarking=lambda params: False,
+        ),
+        resolve_watermarking=lambda params: False,
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+    )
+    params = SamplingParams(
+        max_tokens=1,
+        extra_args={"prompt_cache_ttl_s": ttl} if ttl is not None else None,
+    )
+    with patch.object(SamplingParams, "verify"):
+        InputProcessor._validate_params(processor, params, ("generate",))
+    return params
+
+
+@pytest.mark.parametrize(
+    "ttl",
+    ["nan", float("nan"), 0, -1.0, "-inf", float("-inf"), "60", "inf", True, False],
+)
+def test_prompt_cache_ttl_rejects_invalid_values(ttl):
+    with pytest.raises(VLLMValidationError, match="prompt_cache_ttl_s"):
+        _validate_prompt_cache_ttl(ttl)
+
+
+@pytest.mark.parametrize("ttl", [60, 0.5, math.inf, None])
+def test_prompt_cache_ttl_accepts_valid_values(ttl):
+    params = _validate_prompt_cache_ttl(ttl)
+    req = Request(
+        request_id="0",
+        prompt_token_ids=[0],
+        sampling_params=params,
+        pooling_params=None,
+    )
+    assert req.prompt_cache_ttl_s == ttl
+
+
+@pytest.mark.parametrize("ttl", [0, -1.0])
+def test_cache_config_prefix_cache_ttl_seconds_rejects_non_positive(ttl):
+    with pytest.raises(ValueError):
+        CacheConfig(prefix_cache_ttl_seconds=ttl)

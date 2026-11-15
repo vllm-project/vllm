@@ -110,6 +110,7 @@ class Request:
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
+        self.prompt_cache_ttl_s: float | None = None
         if pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
@@ -129,6 +130,9 @@ class Request:
                 )
                 self.kv_cache_report_mode = sampling_params.extra_args.get(
                     "kv_cache_report_mode", "incremental"
+                )
+                self.prompt_cache_ttl_s = sampling_params.extra_args.get(
+                    "prompt_cache_ttl_s"
                 )
             else:
                 self.kv_cache_report_mode = "incremental"
