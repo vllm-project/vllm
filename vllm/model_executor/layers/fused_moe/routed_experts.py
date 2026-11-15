@@ -35,6 +35,9 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
+    from vllm.model_executor.layers.fused_moe.xpu_expert_placement import (
+        ExpertPlacement,
+    )
 
 
 logger = init_logger(__name__)
@@ -81,6 +84,8 @@ class RoutedExperts(PluggableLayer):
 
     # Hash-routing table, owned by the gate.
     hash_indices_table: torch.Tensor | None = None
+    # Per-expert offload placement (XPU), set in __init__ when selected.
+    expert_placement: "ExpertPlacement | None" = None
 
     def __init__(
         self,
@@ -229,7 +234,25 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
+        # Per-expert offload placement (XPU): hot experts become the params, cold
+        # ones load into CPU twins.
+        from vllm.model_executor.layers.fused_moe.xpu_expert_placement import (
+            maybe_place,
+        )
+
+        self.expert_placement = maybe_place(
+            self.layer_name,
+            moe_config,
+            self.expert_map_manager,
+            self.quant_method,
+            moe_quant_params,
+        )
+        if self.expert_placement is not None:
+            moe_quant_params["num_experts"] = self.expert_placement.num_hot
+
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        if self.expert_placement is not None:
+            self.expert_placement.attach_twins(self)
 
         loader = self.shared_expert_online_loader
         if loader is not None and loader.stages_shared_experts:
@@ -783,6 +806,15 @@ class RoutedExperts(PluggableLayer):
             )
             if loaded is not None:
                 return loaded if return_success else None
+
+        # Per-expert placement: a hot expert goes to its VRAM row, a cold one to
+        # its CPU twin.
+        if self.expert_placement is not None:
+            if len(loaded_weight.shape) == 3:
+                raise NotImplementedError(
+                    "Per-expert offload placement: fused 3-D expert tensors"
+                )
+            param, expert_id = self.expert_placement.route(param, expert_id)
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ/AWQ (K-first format).
