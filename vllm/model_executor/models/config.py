@@ -858,14 +858,24 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         model_config = vllm_config.model_config
+        bidirectional = not getattr(model_config.hf_config, "is_causal", True)
         if not model_config.is_diffusion:
             if vllm_config.diffusion_config is not None:
                 raise ValueError(
                     "Nemotron AR mode cannot be combined with --diffusion-config."
                 )
+            if bidirectional:
+                cls._configure_bidirectional_reads(vllm_config)
             if "max_new_tokens" not in model_config.override_generation_config:
                 model_config.override_generation_config["max_new_tokens"] = None
             return
+
+        if bidirectional:
+            raise ValueError(
+                "Nemotron masked diffusion keeps a causal prompt KV cache and "
+                "cannot use is_causal=False. For single-forward bidirectional "
+                "reads, also set ar_mode=True in hf_overrides."
+            )
 
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
@@ -920,6 +930,52 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         if "max_new_tokens" not in model_config.override_generation_config:
             model_config.override_generation_config["max_new_tokens"] = None
+
+    @staticmethod
+    def _configure_bidirectional_reads(vllm_config: "VllmConfig") -> None:
+        """`is_causal=False` turns every layer into encoder-only attention:
+        the prompt runs in one bidirectional forward without KV cache, and the
+        last position is read for checkpoints fine-tuned with bidirectional
+        attention."""
+        if vllm_config.speculative_config is not None:
+            raise ValueError(
+                "Nemotron with is_causal=False reads one token per request and "
+                "does not support speculative decoding."
+            )
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            logger.info(
+                "Disabling prefix caching for Nemotron with is_causal=False: "
+                "a bidirectional prompt's keys depend on later tokens."
+            )
+            cache_config.enable_prefix_caching = False
+        # A prompt chunk would not attend to the later chunks.
+        scheduler_config = vllm_config.scheduler_config
+        scheduler_config.enable_chunked_prefill = False
+        # Later decode steps would not see the prompt, so admission rejects
+        # requests for more than one token; requests without max_tokens
+        # (e.g. chat completions) default to one.
+        model_config = vllm_config.model_config
+        model_config.override_generation_config.setdefault("max_new_tokens", 1)
+        validator = (
+            "vllm.model_executor.models.nemotron_dllm:"
+            "NemotronBidirectionalReadValidator"
+        )
+        processors = list(model_config.logits_processors or ())
+        if validator not in processors:
+            model_config.logits_processors = [*processors, validator]
+        max_prompt_len = scheduler_config.max_num_batched_tokens
+        if scheduler_config.max_num_scheduled_tokens is not None:
+            max_prompt_len = min(
+                max_prompt_len, scheduler_config.max_num_scheduled_tokens
+            )
+        logger.info(
+            "Nemotron with is_causal=False reads the last prompt position in "
+            "one bidirectional forward without chunked prefill. Requests must "
+            "use max_tokens=1, and prompts are limited to %d tokens (one "
+            "scheduling step); raise --max-num-batched-tokens for longer ones.",
+            max_prompt_len,
+        )
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
