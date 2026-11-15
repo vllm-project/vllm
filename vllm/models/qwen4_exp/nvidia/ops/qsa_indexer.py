@@ -474,6 +474,89 @@ def expand_qsa_block_indices(
     )
 
 
+def warmup_gvr2_topk(
+    block_topk: int,
+    decode_width: int | None = None,
+    max_decode_rows: int = 0,
+    prefill_max_cols: int | None = None,
+    max_prefill_tokens: int = 0,
+) -> None:
+    """Pre-compile gvr_2 for every geometry serving can produce, and size
+    the prefill kernel's zero row_starts buffer.
+
+    Compile keys (flashinfer gvr2_topk_host; re-check on pin bumps): decode
+    kernel per (k, exact width, num_tokens band, stride); prefill kernel per
+    (k, pow2 width bucket), so prefill_max_cols covers all narrower widths.
+    A missed geometry compiles once, eagerly - never during graph capture,
+    whose pre-capture eager pass runs each captured shape first.
+    """
+    from flashinfer.topk_varlen.kernels.gvr2_topk_host import (
+        warmup_prefill,
+        warmup_varlen,
+    )
+
+    if decode_width is not None and max_decode_rows > 0:
+        warmup_varlen(
+            top_k=block_topk,
+            max_seq_len=decode_width,
+            num_rows_list=range(1, max_decode_rows + 1),
+            row_stride=decode_width,
+        )
+    if max_prefill_tokens > 0:
+        global _gvr2_prefill_zero_starts
+        _gvr2_prefill_zero_starts = torch.zeros(
+            max_prefill_tokens, dtype=torch.int32, device="cuda"
+        )
+    if prefill_max_cols is not None:
+        warmup_prefill(top_k=block_topk, max_cols=prefill_max_cols)
+
+
+# All-zero, read-only row_starts for the prefill kernel: its window contract
+# needs a per-token start column, and every QSA window starts at 0. Warmup
+# sizes it to the largest prefill chunk, so serving only slices it.
+_gvr2_prefill_zero_starts: torch.Tensor | None = None
+
+
+def _gvr2_topk(
+    logits: torch.Tensor,
+    visible_blocks: torch.Tensor,
+    block_topk: int,
+    block_indices: torch.Tensor,
+    prefill: bool,
+) -> None:
+    from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
+
+    # Every token is its own request (next_n=1) with its visible-block count
+    # as the kv length; both are already in compressed-block units, so
+    # compress_ratio stays 1. max_seq_len=logits width avoids host syncs.
+    row_starts = None
+    if prefill:
+        # The prefill kernel compiles per pow2 width bucket; chunk widths
+        # vary per batch, and the decode kernel compiles per exact width.
+        global _gvr2_prefill_zero_starts
+        num_tokens = logits.shape[0]
+        if (
+            _gvr2_prefill_zero_starts is None
+            or _gvr2_prefill_zero_starts.numel() < num_tokens
+        ):  # warmup skipped
+            _gvr2_prefill_zero_starts = torch.zeros(
+                num_tokens, dtype=torch.int32, device=logits.device
+            )
+        row_starts = _gvr2_prefill_zero_starts[:num_tokens]
+    # -1-fills tokens shorter than block_topk itself.
+    run_varlen(
+        logits,
+        None,
+        visible_blocks,
+        block_indices,
+        next_n=1,
+        compress_ratio=1,
+        max_seq_len=logits.shape[1],
+        top_k=block_topk,
+        row_starts=row_starts,
+    )
+
+
 def _topk(
     logits: torch.Tensor,
     visible_blocks: torch.Tensor,
@@ -481,9 +564,27 @@ def _topk(
     compress_ratio: int,
     block_indices: torch.Tensor,
     topk_workspace: torch.Tensor,
+    prefill: bool = False,
 ) -> None:
-    # similar dispatch logic as DeepSeek indexer
+    # gvr_2 (self-sampling GVR V2) for tensors it can rank; otherwise the
+    # cooperative/persistent chain, as in the DeepSeek indexer.
     block_topk = token_topk // compress_ratio
+    num_tokens, width = logits.shape
+    row_pitch = logits.stride(0) if num_tokens > 1 else width
+    if (
+        current_platform.is_device_capability_family(100)
+        and block_topk in (512, 1024, 2048)
+        and logits.dtype == torch.float32
+        and logits.stride(1) == 1
+        and row_pitch % 4 == 0
+        and row_pitch >= width
+        and logits.data_ptr() % 16 == 0
+        # run_varlen wants a contiguous, 16B-aligned output.
+        and block_indices.is_contiguous()
+        and block_indices.data_ptr() % 16 == 0
+    ):
+        _gvr2_topk(logits, visible_blocks, block_topk, block_indices, prefill)
+        return
     use_cooperative_topk = (
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
@@ -650,6 +751,7 @@ def qsa_select_paged_prefill(
             compress_ratio,
             block_indices[query_slice],
             topk_workspace,
+            prefill=True,
         )
 
 

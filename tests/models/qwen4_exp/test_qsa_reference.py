@@ -835,35 +835,53 @@ def test_qsa_decode_selection_correctness(
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
+@pytest.mark.parametrize(
+    ("query_lens", "sequence_lens"),
+    [
+        ([3, 33], [5120, 4224]),
+        ([1030, 64], [5120, 4224]),
+        ([1030, 64], [140_000, 139_264]),
+    ],
+    ids=["small-chunk", "large-chunk", "large-chunk-wide"],
+)
 def test_qsa_prefill_selection_correctness(
     monkeypatch: pytest.MonkeyPatch,
     seq_len_slack: int,
     force_chunk: bool,
     dtype: torch.dtype,
+    query_lens: list[int],
+    sequence_lens: list[int],
 ) -> None:
     # page_size=24 (does not divide the 64-aligned clipped width) and an
     # oversized page table, so the clipped logits width comes from
     # max_seq_len, not page geometry. seq_len_slack > 0 simulates the
     # spec-decode case where the bound is an over-estimate. force_chunk
-    # drives the logits budget to one row per chunk.
+    # drives the logits budget to one row per chunk. On SM100 every case
+    # takes the gvr_2 top-k; large-chunk-wide also exercises the prefill
+    # kernel's streaming engine and its workspace slab.
     if force_chunk:
         monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "0")
     torch.manual_seed(2)
-    query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
         dtype
     )
-    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16).to(
-        dtype
+    pages_per_request = max(64, -(-max(sequence_lens) // (4 * 24)) + 1)
+    num_pages = len(query_lens) * pages_per_request
+    cache = torch.randn(
+        num_pages, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    ).to(dtype)
+    page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        len(query_lens), -1
     )
-    page_table = torch.randperm(128, device="cuda", dtype=torch.int32).reshape(2, 64)
     token_to_req = torch.repeat_interleave(
-        torch.arange(2, device="cuda", dtype=torch.int32),
+        torch.arange(len(query_lens), device="cuda", dtype=torch.int32),
         torch.tensor(query_lens, device="cuda"),
     )
-    query_start_loc = torch.tensor([0, 3, 36], device="cuda", dtype=torch.int32)
-    sequence_lengths = torch.tensor([5120, 4224], device="cuda", dtype=torch.int32)
+    query_start_loc = torch.tensor(
+        [0, *itertools.accumulate(query_lens)], device="cuda", dtype=torch.int32
+    )
+    sequence_lengths = torch.tensor(sequence_lens, device="cuda", dtype=torch.int32)
     query_positions = torch.cat(
         [
             torch.arange(length - query_len, length, device="cuda", dtype=torch.int32)

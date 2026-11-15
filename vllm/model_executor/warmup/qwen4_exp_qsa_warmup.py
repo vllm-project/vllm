@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -58,6 +60,42 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         max_num_batched_tokens=runner.max_num_tokens,
     )
     logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
+
+    # Compile the gvr_2 top-k engines the QSA top-k dispatch selects by
+    # default on SM100, so neither CUDA-graph capture nor serving compiles.
+    block_topk = indexer.token_topk // indexer.compress_ratio
+    if current_platform.is_device_capability_family(100) and block_topk in (
+        512,
+        1024,
+        2048,
+    ):
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
+            warmup_gvr2_topk,
+        )
+
+        decode_width = (
+            block_table_for(indexer.compressed_key_cache.prefix).shape[1]
+            * k_cache.shape[1]
+        )
+        max_model_len = worker.vllm_config.model_config.max_model_len
+        prefill_width = min(
+            max(64, round_up(-(-max_model_len // indexer.compress_ratio), 64)),
+            decode_width,
+        )
+        warmup_gvr2_topk(
+            block_topk,
+            decode_width=decode_width,
+            max_decode_rows=runner.max_num_reqs * runner.decode_query_len,
+            prefill_max_cols=prefill_width,
+            max_prefill_tokens=runner.max_num_tokens,
+        )
+        logger.info(
+            "Warmed up Qwen4Exp QSA gvr_2 top-k (k=%d, decode width %d, "
+            "prefill width %d).",
+            block_topk,
+            decode_width,
+            prefill_width,
+        )
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,
