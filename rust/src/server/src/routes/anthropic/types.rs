@@ -111,17 +111,41 @@ pub(super) enum OutputEffort {
 pub(super) struct MessagesResponse {
     pub(super) id: String,
     #[serde(rename = "type")]
-    pub(super) message_type: &'static str,
+    pub(super) message_type: MessageType,
     pub(super) role: &'static str,
     pub(super) content: Vec<OutputContentBlock>,
     pub(super) model: String,
-    pub(super) stop_reason: &'static str,
+    pub(super) stop_reason: MessagesStopReason,
     pub(super) stop_sequence: Option<String>,
     pub(super) usage: MessagesUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) kv_transfer_params: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) ec_transfer_params: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MessageType {
+    Message,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MessagesStopReason {
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+}
+
+impl MessagesStopReason {
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::MaxTokens => "max_tokens",
+            Self::StopSequence => "stop_sequence",
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -155,13 +179,29 @@ pub(super) struct ContextManagement {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ErrorResponse {
     #[serde(rename = "type")]
-    pub(super) kind: &'static str,
+    pub(super) kind: ErrorResponseType,
     pub(super) error: ErrorDetail,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ErrorResponseType {
+    Error,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ErrorDetail {
     #[serde(rename = "type")]
-    pub(super) kind: &'static str,
+    pub(super) kind: ErrorType,
     pub(super) message: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ErrorType {
+    InvalidRequestError,
+    NotFoundError,
+    ConflictError,
+    OverloadedError,
+    ApiError,
 }

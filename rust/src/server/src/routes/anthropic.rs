@@ -16,8 +16,8 @@ use vllm_chat::AssistantMessageExt as _;
 
 use self::convert::{convert_output_blocks, prepare_messages_request, stop_reason, usage};
 use self::types::{
-    ContextManagement, CountTokensResponse, ErrorDetail, ErrorResponse, MessagesRequest,
-    MessagesResponse,
+    ContextManagement, CountTokensResponse, ErrorDetail, ErrorResponse, ErrorResponseType,
+    ErrorType, MessageType, MessagesRequest, MessagesResponse,
 };
 use crate::error::{ApiError, chat_submit_error, invalid_request, text_submit_error};
 use crate::routes::openai::utils::validate_max_output_tokens;
@@ -29,14 +29,14 @@ fn error_body(error: ApiError) -> ErrorResponse {
     let kind = match error {
         ApiError::InvalidRequest { .. }
         | ApiError::JsonParseError { .. }
-        | ApiError::InvalidQuery { .. } => "invalid_request_error",
-        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => "not_found_error",
-        ApiError::Conflict { .. } => "conflict_error",
-        ApiError::ServiceUnavailable { .. } => "overloaded_error",
-        ApiError::ServerError { .. } => "api_error",
+        | ApiError::InvalidQuery { .. } => ErrorType::InvalidRequestError,
+        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => ErrorType::NotFoundError,
+        ApiError::Conflict { .. } => ErrorType::ConflictError,
+        ApiError::ServiceUnavailable { .. } => ErrorType::OverloadedError,
+        ApiError::ServerError { .. } => ErrorType::ApiError,
     };
     ErrorResponse {
-        kind: "error",
+        kind: ErrorResponseType::Error,
         error: ErrorDetail {
             kind,
             message: error.message(),
@@ -129,7 +129,7 @@ pub(super) async fn messages(
                 model = %model.response_model(),
                 prompt_tokens = response.usage.prompt_token_count,
                 output_tokens = response.usage.output_token_count,
-                finish_reason = reason,
+                finish_reason = reason.as_str(),
                 "Messages finished"
             );
         }
@@ -138,12 +138,12 @@ pub(super) async fn messages(
                 LoggedOutput::Response,
                 &text,
                 Some(&response.token_ids),
-                Some(reason),
+                Some(reason.as_str()),
             );
         }
         Ok::<_, ApiError>(MessagesResponse {
             id: request_id,
-            message_type: "message",
+            message_type: MessageType::Message,
             role: "assistant",
             content,
             model: model.response_model(),

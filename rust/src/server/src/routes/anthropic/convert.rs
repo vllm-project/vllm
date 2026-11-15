@@ -10,8 +10,8 @@ use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::TokenUsage;
 
 use super::types::{
-    AssistantContent, AssistantInputBlock, InputMessage, MessagesRequest, MessagesUsage,
-    OutputContentBlock, OutputEffort, TextBlock, TextContent, ThinkingConfig,
+    AssistantContent, AssistantInputBlock, InputMessage, MessagesRequest, MessagesStopReason,
+    MessagesUsage, OutputContentBlock, OutputEffort, TextBlock, TextContent, ThinkingConfig,
 };
 use crate::error::{ApiError, chat_submit_error, invalid_request, server_error};
 use crate::lora::LoraModelResolution;
@@ -208,12 +208,16 @@ pub(super) fn convert_output_blocks(
     Ok(content)
 }
 
-pub(super) fn stop_reason(finish: &FinishReason) -> Result<(&'static str, Option<&str>), ApiError> {
+pub(super) fn stop_reason(
+    finish: &FinishReason,
+) -> Result<(MessagesStopReason, Option<&str>), ApiError> {
     match finish {
         FinishReason::Error(error) => Err(crate::error::engine_error(error.as_deref())),
-        FinishReason::Length => Ok(("max_tokens", None)),
-        FinishReason::Stop(Some(StopReason::Text(text))) => Ok(("stop_sequence", Some(text))),
-        FinishReason::Stop(_) => Ok(("end_turn", None)),
+        FinishReason::Length => Ok((MessagesStopReason::MaxTokens, None)),
+        FinishReason::Stop(Some(StopReason::Text(text))) => {
+            Ok((MessagesStopReason::StopSequence, Some(text)))
+        }
+        FinishReason::Stop(_) => Ok((MessagesStopReason::EndTurn, None)),
         _ => Err(server_error!("Generation did not complete successfully")),
     }
 }

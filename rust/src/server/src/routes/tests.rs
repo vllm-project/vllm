@@ -13033,12 +13033,25 @@ async fn render_forwards_n_to_the_generate_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn anthropic_text_generation_reports_content_and_stop() {
-    for (text, finish, expected) in [
-        ("Hello", EngineCoreFinishReason::Length, "max_tokens"),
-        ("", EngineCoreFinishReason::Stop, "end_turn"),
+    for (output, finish, text, expected, stop_sequence) in [
+        (
+            "Hello",
+            EngineCoreFinishReason::Length,
+            "Hello",
+            "max_tokens",
+            None,
+        ),
+        ("", EngineCoreFinishReason::Stop, "", "end_turn", None),
+        (
+            "HelloSTOP",
+            EngineCoreFinishReason::Length,
+            "Hello",
+            "stop_sequence",
+            Some("STOP"),
+        ),
     ] {
         let (mut app, engine_task) = test_app_with_stream_output_specs(vec![(
-            bytes_to_token_ids(text.as_bytes()),
+            bytes_to_token_ids(output.as_bytes()),
             Some(finish),
         )])
         .await;
@@ -13046,18 +13059,19 @@ async fn anthropic_text_generation_reports_content_and_stop() {
             &mut app,
             "/v1/messages",
             json!({
-                "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
+                "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10, "stop_sequences": ["STOP"],
                 "messages": [{"role": "user", "content": "Hi"}]
             }),
         )
         .await;
         engine_task.await.unwrap();
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["type"], "message");
         assert_eq!(body["role"], "assistant");
         assert_eq!(body["content"], json!([{"type": "text", "text": text}]));
         assert_eq!(body["stop_reason"], expected);
-        assert_eq!(body.get("stop_sequence"), Some(&serde_json::Value::Null));
-        assert_eq!(body["usage"]["output_tokens"], text.len());
+        assert_eq!(body.get("stop_sequence"), Some(&json!(stop_sequence)));
+        assert_eq!(body["usage"]["output_tokens"], output.len());
     }
 }
 
