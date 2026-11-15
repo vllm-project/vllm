@@ -73,8 +73,6 @@ variants:
       - "modelopt"
       - "--kv-cache-dtype"
       - "fp8"
-      - "--gpu-memory-utilization"
-      - "0.9"
       - "--async-scheduling"
     description: "NVFP4 quantized — Blackwell only; TP4+EP with FP8 KV cache"
 
@@ -173,7 +171,6 @@ guide: |
   vllm serve stepfun-ai/Step-3.7-Flash-NVFP4 \
       --served-model-name step3p7 \
       --tensor-parallel-size 4 \
-      --gpu-memory-utilization 0.9 \
       --enable-expert-parallel \
       --quantization modelopt \
       --kv-cache-dtype fp8 \
@@ -195,7 +192,6 @@ guide: |
   vllm serve stepfun-ai/Step-3.7-Flash-FP8 \
       --served-model-name step3p7-flash \
       --tensor-parallel-size 1 \
-      --gpu-memory-utilization 0.95 \
       --kv-cache-dtype fp8 \
       --reasoning-parser step3p5 \
       --tool-call-parser step3p5 \
@@ -215,7 +211,6 @@ guide: |
       -v "$HOME/.cache/huggingface/hub:/root/.cache/huggingface/hub" \
       vllm/vllm-openai:stepfun37 \
       stepfun-ai/Step-3.7-Flash-FP8 \
-        --gpu-memory-utilization 0.95 \
         --trust-remote-code \
         --reasoning-parser step3p5 \
         --enable-auto-tool-choice \

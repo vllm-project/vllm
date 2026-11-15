@@ -17,6 +17,19 @@ Before using EP, you need to install the necessary dependencies. We are actively
     NCCL, so you must upgrade it before building or running DeepEP. See the
     [EP kernels guide](../../tools/ep_kernels) for instructions.
 
+Builds using NCCL < 2.31 require the same NCCL version at runtime. Rebuild
+DeepEP after changing that version.
+
+### DeepEP GIN barrier patch diagnostics
+
+`tools/ep_kernels/install_python_libraries.sh` automatically applies the GIN
+barrier visibility patch to pinned DeepEP 2.1 (`a56d6156`). It reports when the patch
+is already applied, warns when another DeepEP revision causes it to skip the
+patch, and aborts the build if application fails. A skip warning means this
+vendored fix was not applied; check that your chosen DeepEP revision contains
+the equivalent ordering fixes. Use a fresh build workspace before retrying a
+failed application.
+
 ### Backend Selection Guide
 
 vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
@@ -29,6 +42,7 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+| `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
 ## Single Node Deployment
 
@@ -79,6 +93,48 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size 8 \         # Data parallelism across 8 processes
     --enable-expert-parallel         # Enable expert parallelism
 ```
+
+### MoRI EP (ROCm)
+
+`--all2all-backend mori` moves MoE tokens with MoRI. It runs MoRI EPv2 (`mori.ops.dispatch_combine_v2`, which reads and writes peer GPU memory directly through a MoRI CCO symmetric-memory window) where EPv2 is supported, and MoRI EPv1 otherwise.
+
+```bash
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 \
+VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 \
+vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --all2all-backend mori
+```
+
+`VLLM_MORI_EP_V2` selects the MoRI version:
+
+| `VLLM_MORI_EP_V2` | Behavior |
+| ----------------- | -------- |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
+| `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
+| `0` | EPv1 |
+
+On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
+
+Choosing a MoRI backend: use EPv2 wherever it applies, and EPv1 for deployments EPv2 does not support. EPv2 cuts its receive buffers to the rows a step can actually receive and lets AITER fused MoE write its output straight into the combine buffer, so it does less work per step than EPv1.
+
+| Deployment | Backend |
+| ---------- | ------- |
+| EP within one node (or one gfx1250 UALink fabric), BF16 model, AITER fused MoE | `mori` (runs EPv2) |
+| EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | EPv2 rejects these experts at startup. Enable AITER fused MoE (`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1`) so `mori` runs EPv2 with AITER experts; MoRI EPv1 (`VLLM_MORI_EP_V2=0`) also needs AITER fused MoE. To keep Triton experts without AITER, use a non-MoRI backend such as `allgather_reducescatter` |
+| EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1) |
+
+Within one node, all EPv1 options run the same IntraNode kernel. To pin the inter-node kernel, set the threshold: `0` always picks InterNodeV1, and a value at least the per-rank token budget always picks InterNodeV1LL. `mori_high_throughput` and `mori_low_latency` do the same pinning but are deprecated and will be removed in a future release; use `mori` instead.
+
+EPv2 limitations:
+
+- All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
+- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup. Block FP8 and MXFP4 weights work; per-tensor FP8 activations (`--quantization fp8` without blocks, ModelOpt FP8) do not, since AITER cannot quantize the received rows per tensor.
+- AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
+- Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
+- Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
 ## Multi-Node Deployment
 
@@ -144,6 +200,45 @@ Enable EPLB with the `--enable-eplb` flag.
 
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
+### Multimodel EPLB with speculative decoding
+
+When speculative decoding uses a draft model that implements `MixtureOfExperts`
+(for example Qwen3-Next MTP, EAGLE, or DeepSeek DSpark), vLLM registers the
+draft and target in the same `EplbState`. Each model keeps its own expert load
+windows, communicators, and rearrangement maps, but shares the same rearrangement
+step counter across EP ranks.
+
+Target and draft models may have different expert topologies. This is required
+for DeepSeek V4.1 DSpark, where draft layers use `dspark_n_routed_experts`
+while the target backbone uses the full routed-expert count. Each model is
+load-balanced independently.
+
+For supported MoE drafts, target EPLB also enables draft EPLB by default. Set
+`draft_enable_eplb` to `false` in the speculative config to disable EPLB for
+the draft while keeping it enabled for the target. In that case,
+`eplb_config.draft_num_redundant_experts` cannot be set.
+
+For every registered model, `(num_routed_experts + num_redundant_experts)` must
+be divisible by the EP world size.
+
+Set `draft_num_redundant_experts` in `--eplb-config` to select the redundant
+expert count for a speculative MoE draft. This setting is ignored unless a
+speculative MoE draft is configured. When unset, vLLM inherits the target's
+count if the target and draft have the same routed-expert counts and that count
+is valid for the draft. Otherwise, vLLM computes the minimum valid count from
+the draft's routed expert counts and the shared EP size. An explicit value is
+used as given and rejected if it is invalid; validation suggests the minimum
+valid count when one value works for all draft layers. This applies to Eagle,
+Eagle3, MTP, DFlash, and supported DSpark drafts. A single redundant-expert
+count must make every draft layer's total expert count divisible by the EP
+size; configuration fails when the draft's layers require different padding
+counts.
+For DSpark drafts, divisibility is checked against the target EP group. If EPLB
+is enabled and `draft_tensor_parallel_size` is `1`, prefill context parallelism
+or data parallelism must also be greater than `1`.
+Draft EPLB for DSpark is not supported with Elastic EP; set
+`speculative_config.draft_enable_eplb=false` to disable EPLB for the draft.
+
 ### EPLB Parameters
 
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
@@ -153,7 +248,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
+| `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
@@ -176,6 +272,16 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+For speculative decoding with a MoE draft, configure both speculative decoding
+and the draft-specific EPLB count:
+
+```bash
+vllm serve <target-moe-model> \
+  --enable-eplb \
+  --eplb-config '{"num_redundant_experts":2,"draft_num_redundant_experts":2}' \
+  --speculative-config '{"method":"draft_model","model":"<draft-moe-model>","num_speculative_tokens":5}'
+```
 
 ### Expert Distribution Formula
 
@@ -335,8 +441,8 @@ coordinates recovery across the engines.
 ### Configuring recovery
 
 Both retry and scale-down require `--enable-fault-tolerance`,
-`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
-`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+`--enable-expert-parallel`, and an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough
@@ -344,6 +450,18 @@ redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
 accessible to survivors so they can reload expert weights.
 The orchestrator selects the recovery mode when it sends the recovery request.
+
+The `FaultToleranceConfig.request_failure_policy` setting controls how faults
+affect unfinished requests. The default, `"fail"`, aborts them immediately.
+To keep them queued for resumption after successful retry or scale-down recovery,
+set `--fault-tolerance-config '{"request_failure_policy": "recompute"}'`.
+The engine recomputes their KV cache from the prompt and already generated
+tokens, then continues generation. Streams on surviving engines stall during
+recovery and continue afterward; requests on a dead engine cannot be resumed
+this way.
+To discard queued requests for a particular retry, include `"abort": true` in
+the retry request's `params`. This parameter must be a JSON boolean and defaults
+to `false`; resumption still requires `request_failure_policy="recompute"`.
 
 ### Coordinating recovery
 

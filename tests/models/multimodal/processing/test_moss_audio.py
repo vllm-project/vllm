@@ -202,8 +202,10 @@ def _assert_mm_inputs_equal(left, right):
             [*[ord(char) for char in "before "], MOSS_AUDIO_BOS_TOKEN_ID],
         ),
         (
-            f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}"
-            f"{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after",
+            (
+                f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}"
+                f"{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
+            ),
             [*[ord(char) for char in "before "], MOSS_AUDIO_BOS_TOKEN_ID],
         ),
         ("Describe this audio.", [MOSS_AUDIO_BOS_TOKEN_ID]),
@@ -294,6 +296,22 @@ def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
     _assert_mm_inputs_equal(baseline_text, cached_text_miss)
     _assert_mm_inputs_equal(baseline_text, cached_text_hit)
     _assert_mm_inputs_equal(baseline_text, cached_token_hit)
+
+
+def test_moss_audio_dummy_audio_fills_audio_budget():
+    processor, _ = _build_moss_audio_processor()
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=4096, mm_counts={"audio": 1}
+    )
+    dummy = processor.dummy_inputs.get_dummy_mm_data(4096, {"audio": 1}, {})
+    processed = processor(
+        MOSS_AUDIO_PLACEHOLDER,
+        mm_items=processor.info.parse_mm_data(dummy),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert budget is not None
+    assert processed["prompt_token_ids"].count(MOSS_AUDIO_TOKEN_ID) == budget["audio"]
 
 
 def test_moss_audio_supports_language_model_lora_only():

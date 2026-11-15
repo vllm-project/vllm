@@ -396,6 +396,7 @@ async fn harmony_assistant_event_stream(
             DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             } => {
                 y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
@@ -409,6 +410,7 @@ async fn harmony_assistant_event_stream(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        ..
                     },
                 finished,
             } => {
@@ -442,6 +444,7 @@ async fn harmony_assistant_event_stream(
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
                         weight_versions: finished.weight_versions,
+                        routed_experts: finished.routed_experts,
                     })
                     .await;
                 }
