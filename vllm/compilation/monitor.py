@@ -27,7 +27,7 @@ def monitor_torch_compile(
     On normal exit: logs the compile time and exits depyf.
     On exception: cleans up depyf without logging (compilation failed).
 
-    ``announce_start=False`` suppresses the "Starting torch.compile" line;
+    `announce_start=False` suppresses the "Starting torch.compile" line;
     used by the AOT-load probe so a failed load attempt doesn't announce a
     compile it didn't perform.
     """

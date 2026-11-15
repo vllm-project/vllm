@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """LoRA-aware FlashInfer TRT-LLM MoE experts (BF16, MXFP4 x BF16).
 
-Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153
+Reuses the routed API + `gemm1_lora_delta` path from FlashInfer PR #3153
 (BF16) and PR #3987 (FP4 block-scale):
 
-  * The W13 (gate_up) LoRA delta is passed directly as ``gemm1_lora_delta`` to
+  * The W13 (gate_up) LoRA delta is passed directly as `gemm1_lora_delta` to
     the routed kernel, which fuses it into FC1 before SwiGLU (BiasType::Mn).
   * The W2 (down) LoRA cannot be fused -- we take the FC1 activation output
-    returned by the kernel (``gemm1_activation_output``, permuted) together with
-    ``expanded_idx_to_permuted_idx``, unpermute it, compute the W2 delta out of
+    returned by the kernel (`gemm1_activation_output`, permuted) together with
+    `expanded_idx_to_permuted_idx`, unpermute it, compute the W2 delta out of
     kernel via punica, and add it to the already-finalized output.
 
 Constraints (matching the PR support matrix; final gating lives in the oracle):
@@ -168,7 +168,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """Override the base 3D-weight assumption.
 
         FusedMoEKernel._fused_experts calls moe_problem_size before apply(),
-        but the base impl asserts ``len(w1.shape) == 3``. The flashinfer
+        but the base impl asserts `len(w1.shape) == 3`. The flashinfer
         trtllm path stores shuffled weights in 4D BlockMajorK layout, so we
         derive the (E, M, N, K, topk) tuple from config + inputs instead.
         The N/K here only feed workspace sizing, which we zero out in
@@ -425,14 +425,14 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """True when no token in the batch selects a LoRA adapter.
 
         Mirrors the no-lora fast path in
-        ``PunicaWrapperGPU.add_lora_fused_moe``: the punica kernel metadata
-        carries a CPU ``no_lora_flag`` computed once per forward from the
+        `PunicaWrapperGPU.add_lora_fused_moe`: the punica kernel metadata
+        carries a CPU `no_lora_flag` computed once per forward from the
         token->LoRA mapping. Reading it is a host-only check (no device sync),
         and under CUDA graphs the branch is frozen at capture time against the
-        graph's ``num_active_loras`` dispatch key, so it stays correct on replay.
+        graph's `num_active_loras` dispatch key, so it stays correct on replay.
         """
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
-        if meta is None:
+        if meta is None or lora_context.local_token_lora_mapping is not None:
             return False
         flag = meta.no_lora_flag_cpu
         return bool(flag.numel() == 1 and flag.item())
@@ -481,11 +481,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         top_k: int,
         scale: float = 1.0,
     ) -> None:
-        """Fused base finalize + W2 LoRA reduction, written into ``output``.
+        """Fused base finalize + W2 LoRA reduction, written into `output`.
 
         For each token: sum the routing-weighted permuted base rows over top_k
-        (``expert_weights`` in expanded order, ``idx_map < 0`` dropped), scale by
-        ``scale``, and add the already-weighted ``w2_delta`` reduced over top_k.
+        (`expert_weights` in expanded order, `idx_map < 0` dropped), scale by
+        `scale`, and add the already-weighted `w2_delta` reduced over top_k.
         """
         # Inputs may carry hidden padding that `output` does not.
         K = output.size(1)

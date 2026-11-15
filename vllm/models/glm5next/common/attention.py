@@ -35,7 +35,12 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayerConfig,
+    MLAAttentionSpec,
+)
 
 logger = init_logger(__name__)
 
@@ -79,18 +84,18 @@ def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     """Indexer K cache that stores kpool-compressed entries.
 
-    Setting ``tokens_per_state = index_kpool`` on the KV cache spec makes vLLM's
-    indexer metadata builder emit pool-granular ``slot_mapping`` /
-    ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free, and shrinks the
-    cache allocation store one state per ``index_kpool`` tokens. The pool
+    Setting `tokens_per_state = index_kpool` on the KV cache spec makes vLLM's
+    indexer metadata builder emit pool-granular `slot_mapping` /
+    `seq_lens` / `cu_seq_lens` / `page_table` for free, and shrinks the
+    cache allocation store one state per `index_kpool` tokens. The pool
     *content* (softmax-weighted sum vs keep-every-Nth) is computed by the
     kpool compress kernel inside the indexer op — the cache only provides the
     addressing, which is identical for both schemes.
 
     The indexer shares one block with the co-located MLA (a single
-    ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
-    ``cache_config.block_size``. DeepGEMM's paged-MQA kernel takes 32- or
-    64-state pages (only 64 on SM120), which ``Glm5NextIndexerBackend``
+    `MLAAttentionSpec` / block_table), so `block_size` is the model-wide
+    `cache_config.block_size`. DeepGEMM's paged-MQA kernel takes 32- or
+    64-state pages (only 64 on SM120), which `Glm5NextIndexerBackend`
     declares as its kernel block sizes.
     """
 
@@ -109,14 +114,17 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextIndexerCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         from dataclasses import replace
 
-        spec = super().get_kv_cache_spec(vllm_config)
+        layer_config = super().get_kv_cache_config(vllm_config)
         # ``tokens_per_state`` is the KV-spec representation of kpool
         # compression in the current cache-layout API.
-        assert isinstance(spec, MLAAttentionSpec)
-        return replace(spec, tokens_per_state=self._index_kpool)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
+        return replace(
+            layer_config,
+            spec=replace(layer_config.spec, tokens_per_state=self._index_kpool),
+        )
 
     def get_attn_backend(self):
         return Glm5NextIndexerBackend
@@ -126,16 +134,16 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
 
     Holds the trailing incomplete pool's raw K + gate score: one block of
-    ``ring`` slots per request, overwritten in place by ``pos % ring``
+    `ring` slots per request, overwritten in place by `pos % ring`
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly. ``CircularBufferSpec`` provides the
+    compress the boundary pool correctly. `CircularBufferManager` provides the
     no-prune, 1-block/req allocation that lets the in-progress pool survive
     across steps and across transfer.
 
-    Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
-    bf16 gate score (``head_dim``) as the "V" half -- not the fp8-compressed
-    entry, which lives in ``Glm5NextIndexerCache``.
+    Stores raw bf16 K (`head_dim`) as the "K" half of each block and the
+    bf16 gate score (`head_dim`) as the "V" half -- not the fp8-compressed
+    entry, which lives in `Glm5NextIndexerCache`.
     """
 
     def __init__(
@@ -153,7 +161,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         assert index_kpool > 1, "Glm5NextTailCache expects index_kpool > 1"
         self._index_kpool = index_kpool
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
         # Drafts are stashed before acceptance. With a one-pool ring, the
@@ -167,7 +175,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             f"({self.cache_config.block_size}) must be a multiple of the "
             f"tail ring ({ring})"
         )
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=ring,
             num_kv_heads=2,
             head_size=self.head_dim,
@@ -177,6 +185,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             # rank owning a pool can compress it.
             dcp_sharded=False,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def get_attn_backend(self):
         from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend
