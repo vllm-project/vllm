@@ -68,13 +68,6 @@ pub(super) enum AssistantInputBlock {
     },
 }
 
-#[derive(serde::Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub(super) enum OutputContentBlock {
-    Text { text: String },
-    Thinking { thinking: String, signature: String },
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum ThinkingConfig {
@@ -115,16 +108,6 @@ pub(super) enum OutputEffort {
 }
 
 #[derive(serde::Serialize)]
-pub(super) struct CountTokensResponse {
-    pub(super) input_tokens: usize,
-    pub(super) context_management: ContextManagement,
-}
-#[derive(serde::Serialize)]
-pub(super) struct ContextManagement {
-    pub(super) original_input_tokens: usize,
-}
-
-#[derive(serde::Serialize)]
 pub(super) struct MessagesResponse {
     pub(super) id: String,
     #[serde(rename = "type")]
@@ -142,6 +125,13 @@ pub(super) struct MessagesResponse {
 }
 
 #[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub(super) enum OutputContentBlock {
+    Text { text: String },
+    Thinking { thinking: String, signature: String },
+}
+
+#[derive(serde::Serialize)]
 pub(super) struct MessagesUsage {
     pub(super) input_tokens: usize,
     pub(super) output_tokens: usize,
@@ -149,6 +139,17 @@ pub(super) struct MessagesUsage {
     pub(super) cache_read_input_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) cache_creation_input_tokens: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct CountTokensResponse {
+    pub(super) input_tokens: usize,
+    pub(super) context_management: ContextManagement,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct ContextManagement {
+    pub(super) original_input_tokens: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
