@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -263,12 +264,14 @@ class FlintAttention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
+        # Keep the production graph in the canonical fusion shape: Q/K are
+        # normalized per head, flattened for RoPE, then viewed by Attention.
+        q = q.reshape(num_tokens, self.q_size)
+        k = k.reshape(num_tokens, self.kv_size)
+
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
             assert k is not None
-
-        q = q.reshape(num_tokens, self.q_size)
-        k = k.reshape(num_tokens, self.kv_size)
 
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -326,6 +329,7 @@ class FlintDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class FlintModel(nn.Module):
     def __init__(
         self,
@@ -432,8 +436,8 @@ class FlintForCausalLM(nn.Module, SupportsPP):
         self.quant_config = quant_config
 
         self.model = FlintModel(
-            vllm_config,
-            quant_config,
+            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head = ParallelLMHead(

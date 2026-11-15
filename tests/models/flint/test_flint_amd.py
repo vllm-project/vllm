@@ -8,7 +8,14 @@ import pytest
 import torch
 
 import vllm.models.flint.amd.model as flint_amd_model
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import (
+    AttentionConfig,
+    CompilationConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.load import LoadConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
@@ -26,11 +33,12 @@ from vllm.models.flint.amd.model import (
     _flint_gguf_quant_config,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 pytestmark = pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only test")
 
 
-def _tiny_vllm_config(tmp_path, *, quant_config=None):
+def _tiny_vllm_config(tmp_path, *, quant_config=None, **vllm_config_kwargs):
     config = {
         "architectures": ["FlintForCausalLM"],
         "model_type": "flint",
@@ -62,7 +70,40 @@ def _tiny_vllm_config(tmp_path, *, quant_config=None):
         model_config=model_config,
         load_config=LoadConfig(load_format="dummy"),
         quant_config=quant_config,
+        **vllm_config_kwargs,
     )
+
+
+def test_flint_amd_enables_qk_norm_rope_kvcache_fusion(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    compilation_config = _tiny_vllm_config(tmp_path).compilation_config
+
+    assert compilation_config.pass_config.fuse_qk_norm_rope_kvcache
+    assert compilation_config.use_inductor_graph_partition
+    assert "+rotary_embedding" in compilation_config.custom_ops
+
+
+@pytest.mark.parametrize(
+    "vllm_config_kwargs",
+    [
+        {"compilation_config": CompilationConfig(custom_ops=["-rotary_embedding"])},
+        {"attention_config": AttentionConfig(backend=AttentionBackendEnum.TRITON_ATTN)},
+    ],
+    ids=["rotary_embedding_disabled", "triton_attention"],
+)
+def test_flint_amd_skips_qk_norm_rope_kvcache_fusion(
+    tmp_path, monkeypatch, vllm_config_kwargs
+):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    compilation_config = _tiny_vllm_config(
+        tmp_path, **vllm_config_kwargs
+    ).compilation_config
+
+    assert not compilation_config.pass_config.fuse_qk_norm_rope_kvcache
+    assert not compilation_config.use_inductor_graph_partition
+    assert "+rotary_embedding" not in compilation_config.custom_ops
 
 
 def test_flint_amd_tiny_model_initializes_with_dummy_weights(tmp_path, dist_init):
