@@ -97,6 +97,36 @@ from .utils import (
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_adaptive_prefill_preserves_decode_and_caps_new_prompt(
+    async_scheduling, enabled
+):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=128, max_model_len=128,
+        async_scheduling=async_scheduling, adaptive_prefill=enabled,
+        adaptive_prefill_token_ms=10,
+    )
+    (decode,) = create_requests(
+        num_requests=1, num_tokens=1, max_tokens=32, req_ids=["decode"]
+    )
+    scheduler.add_request(decode)
+    first = scheduler.schedule()
+    scheduler.update_from_output(first, ModelRunnerOutput(
+        req_ids=["decode"], sampled_token_ids=[[1]],
+        adaptive_prefill_device_ms=2,
+    ))
+    (prefill,) = create_requests(
+        num_requests=1, num_tokens=64, max_tokens=8, req_ids=["prefill"]
+    )
+    scheduler.add_request(prefill)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["decode"] == 1
+    scheduled = output.num_scheduled_tokens["prefill"]
+    assert 0 < scheduled <= (4 if enabled else 64)
+    assert (scheduler.adaptive_prefill is not None) == enabled
+
+
 @pytest.mark.parametrize(
     ("async_scheduling", "outcome", "num_speculative_tokens"),
     [
