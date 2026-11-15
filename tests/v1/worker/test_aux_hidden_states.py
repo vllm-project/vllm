@@ -18,7 +18,7 @@ class HiddenCaptureReferenceExtension:
     model_runner: "GPUModelRunner"
 
     @torch.no_grad()
-    def check_reference_logits(self, states):
+    def check_reference_logits(self, states, token_ids):
         runner = self.model_runner
         states = torch.tensor(states, device="cuda", dtype=runner.dtype)
         model = runner.model
@@ -33,6 +33,10 @@ class HiddenCaptureReferenceExtension:
             rebuilt = cap * torch.tanh(rebuilt / cap)
         rebuilt *= metadata["logit_scale"]
         torch.testing.assert_close(rebuilt, logits, atol=0, rtol=0)
+        torch.testing.assert_close(
+            logits.argmax(-1),
+            torch.tensor(token_ids, device=logits.device),
+        )
         return True
 
 
@@ -108,15 +112,35 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
         ].outputs[0]
         assert empty.hidden_states.shape == (0, full.hidden_states.shape[1])
         assert empty.hidden_states.dtype == full.hidden_states.dtype
-        paired = llm.generate(prompt, capture_params(n=2), use_tqdm=False)[0].outputs
+        paired = llm.generate(
+            prompt,
+            capture_params(n=2, temperature=0.8, seed=42, top_k=128),
+            use_tqdm=False,
+        )[0].outputs
+        paired_plain = llm.generate(
+            prompt,
+            SamplingParams(
+                n=2,
+                temperature=0.8,
+                seed=42,
+                top_k=128,
+                max_tokens=16,
+                min_tokens=16,
+                ignore_eos=True,
+            ),
+            use_tqdm=False,
+        )[0].outputs
         assert len(paired) == 2
-        for output in paired:
+        for output, baseline in zip(paired, paired_plain):
+            assert output.token_ids == baseline.token_ids
+            assert output.hidden_states.shape == full.hidden_states.shape
             torch.testing.assert_close(
-                output.hidden_states, full.hidden_states, atol=0, rtol=0
+                output.hidden_states[:1], full.hidden_states[:1], atol=0, rtol=0
             )
         assert all(
             llm.collective_rpc(
-                "check_reference_logits", args=(full.hidden_states.tolist(),)
+                "check_reference_logits",
+                args=(full.hidden_states.tolist(), list(full.token_ids)),
             )
         )
         tokenizer = llm.get_tokenizer()

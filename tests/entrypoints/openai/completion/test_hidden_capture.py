@@ -41,7 +41,14 @@ def capture_server():
 @pytest.mark.parametrize("stream", [False, True])
 def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
     common = dict(
-        temperature=0, top_p=1, max_tokens=4, min_tokens=4, ignore_eos=True, n=2
+        temperature=0.8,
+        seed=42,
+        top_k=128,
+        top_p=1,
+        max_tokens=4,
+        min_tokens=4,
+        ignore_eos=True,
+        n=2,
     )
     if endpoint.endswith("generate"):
         body = dict(
