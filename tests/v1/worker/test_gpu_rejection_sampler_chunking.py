@@ -55,6 +55,7 @@ def _make_rejection_sampler(
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = sampler
     rejection_sampler.num_speculative_steps = num_speculative_steps
+    rejection_sampler.draft_temperature = None
     rejection_sampler.enable_adaptive_verification = False
     rejection_sampler.synthetic_conditional_rates = None
     rejection_sampler.use_block_verification = False

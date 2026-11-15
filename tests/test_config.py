@@ -4263,6 +4263,69 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize("temperature", [None, 0.0, 0.7, 1.5])
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_controls_proposal_sampling(temperature, tmp_path):
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    ).save_pretrained(tmp_path)
+    target = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float32",
+        max_model_len=128,
+    )
+    config = SpeculativeConfig(
+        method="draft_model",
+        model=str(tmp_path),
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+        draft_sample_method="probabilistic",
+        draft_temperature=temperature,
+    )
+    assert config.draft_temperature == temperature
+    assert config.draft_sample_method == (
+        "greedy" if temperature == 0.0 else "probabilistic"
+    )
+
+
+@pytest.mark.parametrize("temperature", [-0.1, float("inf"), float("nan")])
+@pytest.mark.skip_global_cleanup
+def test_invalid_draft_temperature_is_rejected(temperature):
+    with pytest.raises(ValidationError, match="draft_temperature"):
+        SpeculativeConfig(
+            method="draft_model",
+            draft_sample_method="probabilistic",
+            draft_temperature=temperature,
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_positive_draft_temperature_requires_probabilistic_sampling():
+    with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
+        SpeculativeConfig(method="draft_model", draft_temperature=0.7)
+
+
+@pytest.mark.parametrize("method", ["ngram", "suffix"])
+@pytest.mark.skip_global_cleanup
+def test_draft_temperature_requires_a_draft_model(method):
+    with pytest.raises(ValueError, match="draft_temperature is not supported"):
+        SpeculativeConfig(
+            method=method,
+            num_speculative_tokens=1,
+            draft_sample_method="probabilistic",
+            draft_temperature=0.7,
+        )
+
+
 @pytest.mark.parametrize(
     ("method", "drops_block"),
     [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],

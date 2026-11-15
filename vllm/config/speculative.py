@@ -129,6 +129,7 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
+    "draft_temperature",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
@@ -741,6 +742,14 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    draft_temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    """Temperature for draft proposals, independent of the target's sampling
+    temperature. Unset preserves the sampling method's behavior: greedy drafts
+    use argmax, probabilistic drafts inherit each request's temperature.
+    A positive value requires draft_sample_method='probabilistic'; zero selects
+    greedy drafting without caching draft logits. Only valid for model-based
+    speculators."""
+
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
@@ -806,6 +815,7 @@ class SpeculativeConfig:
             "synthetic_acceptance_length",
             "enable_adaptive_verification",
             "draft_sample_method",
+            "draft_temperature",
             "dspark_draft_topk",
             "xpress_topc",
             "fly_window_size",
@@ -1465,6 +1475,17 @@ class SpeculativeConfig:
         )
 
     def __post_init__(self):
+        if self.draft_temperature == 0.0:
+            self.draft_sample_method = "greedy"
+        elif (
+            self.draft_temperature is not None
+            and self.draft_sample_method != "probabilistic"
+        ):
+            raise ValueError(
+                "A positive draft_temperature requires "
+                "draft_sample_method='probabilistic'."
+            )
+
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight

@@ -159,6 +159,7 @@ class RejectionSampler:
         watermark_key: int | None = None,
     ):
         self.sampler = sampler
+        self.draft_temperature = spec_config.draft_temperature
         self.watermark_key = watermark_key
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
@@ -296,6 +297,7 @@ class RejectionSampler:
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
+            draft_temperature=self.draft_temperature,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
             fly_window_size=self.fly_window_size,
