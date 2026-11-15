@@ -903,8 +903,8 @@ class Step3VLForConditionalGeneration(
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``outputs['global']`` contains global-image features and ``outputs['local']``
-        contains local-patch features (or ``None`` when there are no patches).
+        `outputs['global']` contains global-image features and `outputs['local']`
+        contains local-patch features (or `None` when there are no patches).
         """
         output = outputs["global"]
         local_output = outputs.get("local")
@@ -935,7 +935,11 @@ class Step3VLForConditionalGeneration(
                 parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
             parts.append(global_part[i].reshape(-1, hidden))
-            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+            if len(parts) > 1:
+                merged[idx] = torch.cat(parts, dim=0)
+            else:
+                # A view of the graph output, which later replays overwrite.
+                merged[idx] = parts[0].clone() if clone else parts[0]
 
         out = [merged[i] for i in indices]
         for i, idx in enumerate(indices):

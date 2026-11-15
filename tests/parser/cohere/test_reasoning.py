@@ -19,7 +19,7 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
 from .utils import make_parser, stream_parser
 
 
-@dataclass
+@dataclass(slots=True)
 class ReasoningCase:
     parser_name: str
     model_output: str
@@ -197,7 +197,7 @@ class TestParserSelection:
         assert request.skip_special_tokens is False
 
     def test_non_cohere_selection_does_not_import_melody_parser(self, monkeypatch):
-        """``cohere_melody`` is optional; other parsers must not depend on it."""
+        """`cohere_melody` is optional; other parsers must not depend on it."""
         import sys
 
         monkeypatch.setitem(sys.modules, "vllm.parser.cohere_command", None)

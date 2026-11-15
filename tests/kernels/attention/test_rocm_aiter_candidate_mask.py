@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm correctness tests for the strided DSA candidate mask.
 
-``_apply_candidate_mask_strided`` is a decode-path variant of the shared
-``apply_candidate_mask``. It differs in two ways that need pinning down:
+`_apply_candidate_mask_strided` is a decode-path variant of the shared
+`apply_candidate_mask`. It differs in two ways that need pinning down:
 
 * it launches a fixed number of programs that stride the column axis, rather
-  than one program per 1024-column tile, so at ``max_model_len`` widths the
+  than one program per 1024-column tile, so at `max_model_len` widths the
   grid no longer scales with a workspace that is mostly padding;
-* it stops at each row's ``end`` instead of sanitizing the whole width.
+* it stops at each row's `end` instead of sanitizing the whole width.
 
 The second is only sound because every consumer bounds its scan by the same
-ends -- ``top_k_per_row_decode`` takes ``rowEnd`` from ``seq_lens``. So the
-contract is agreement with the shared kernel over ``[0, end)`` and nothing
+ends -- `top_k_per_row_decode` takes `rowEnd` from `seq_lens`. So the
+contract is agreement with the shared kernel over `[0, end)` and nothing
 beyond it, which is what these tests assert rather than comparing whole rows.
 """
 
@@ -143,9 +143,9 @@ def test_matches_shared_kernel_with_starts(block_size):
 def test_matches_shared_kernel_model_shape(max_block, copies):
     """DeepSeek-V4.1-Flash decode: 2048 candidate blocks of 8 columns.
 
-    With ``max_block`` small the candidates crowd into a few tiles, so most
+    With `max_block` small the candidates crowd into a few tiles, so most
     tiles keep many blocks and the rest keep none; with it unset they spread
-    over the whole width. ``copies`` takes the batch across the row counts at
+    over the whole width. `copies` takes the batch across the row counts at
     which the fused kernel switches to wider tiles.
     """
     ends = [0, 1, 2048, 15000, 16384, 32000, 131073, WIDE] * copies
@@ -217,8 +217,8 @@ def test_leaves_columns_past_end_untouched():
     Skipping the tail is where the speedup comes from, so a change that
     quietly restores full-width sanitizing should fail here rather than just
     get slower. The fused kernel on gfx942 and gfx950 masks its stores to
-    ``end`` itself; elsewhere work stops at the tile boundary containing
-    ``end``, so that is the bound asserted.
+    `end` itself; elsewhere work stops at the tile boundary containing
+    `end`, so that is the bound asserted.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _MASK_TILE,

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import field
@@ -108,7 +108,7 @@ class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
     An omitted activation key lets the quantization implementation choose its
-    default. An explicitly configured ``activation: null`` requests no
+    default. An explicitly configured `activation: null` requests no
     activation quantization; methods that do not support that request raise an
     error.
     """
@@ -181,10 +181,10 @@ class QuantizationConfigArgs:
     """
 
     linear: QuantSpec | None = None
-    """Spec applied to ``LinearBase`` layers."""
+    """Spec applied to `LinearBase` layers."""
 
     moe: QuantSpec | None = None
-    """Spec applied to ``FusedMoEFactory`` layers."""
+    """Spec applied to `FusedMoEFactory` layers."""
 
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for. Online quantization also supports
@@ -418,7 +418,7 @@ _layer_target_spec: ContextVar[QuantSpec | None] = ContextVar(
 
 
 @contextmanager
-def layer_target_spec_scope(spec: QuantSpec | None) -> Iterator[None]:
+def layer_target_spec_scope(spec: QuantSpec | None) -> Generator[None]:
     """Apply a layer's `targets` spec to `user_activation_override`."""
     token = _layer_target_spec.set(spec)
     try:

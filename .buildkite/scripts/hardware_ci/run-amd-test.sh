@@ -115,11 +115,11 @@ _acquire_dpx_lock() {
     || { echo "DPX: expected exactly one render device, found ${#dev[@]}" >&2; return 1; }
   mkdir -p "$HF_HOME/.vllm-dpx-locks"
   exec 9>>"$HF_HOME/.vllm-dpx-locks/$(stat -Lc %t-%T "${dev[0]}").lock"
-  flock -n 9 || { echo "DPX GPU collision on ${dev[0]}" >&2; return 1; }
+  flock -w 600 9 || { echo "DPX GPU collision on ${dev[0]}" >&2; return 134; }
 }
 
 if [[ ${BUILDKITE_AGENT_META_DATA_QUEUE:-} == *dpx* && $gpus != 0 ]]; then
-  _acquire_dpx_lock || exit 1
+  _acquire_dpx_lock || exit
 fi
 
 # ---------------------------------------------------------------------------

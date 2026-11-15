@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-05
+  date_updated: 2026-11-13
   tasks:
     - text
     - multimodal
@@ -143,8 +143,6 @@ variants:
           - '{"cpu_offload":true}'
           - "--max-num-batched-tokens"
           - "4096"
-          - "--gpu-memory-utilization"
-          - "0.92"
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
           PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
@@ -204,6 +202,8 @@ compatible_strategies:
 kv_offload_support:
   offloading_cpu: verified
   offloading_fs: verified
+  # MI355X, attention DP2: the mi355x_agentx_dp2_umbp preset.
+  umbp: verified
 
 strategy_hardware:
   # Single GPU; only TP1 is measured.
@@ -1505,6 +1505,87 @@ presets:
       scored 0.972 exact match (strict) over 1319 questions. Throughput runs use
       DSpark's synthetic golden acceptance length (3.51); the preset keeps real block
       rejection for ordinary serving and accuracy evaluation.
+
+  mi355x_agentx_dp2_umbp:
+    label: "AgentX DP2"
+    hardware: mi355x
+    strategy: single_node_dep
+    # Same checkpoint note as mi355x_agentx: the lane served the 0909 launch
+    # checkpoint, and 1017 shares its format and memory layout.
+    variants: [fp8, default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Two GPUs per server with attention DP2 and the MoE tensor-parallel across both ranks (no expert parallelism), behind a consistent-hash vLLM Router, at concurrency 128 to 384. At 256 and 384 UMBP offloads KV cache to a node-local host-DRAM pool shared by both ranks; 128 runs without offloading. Per-tensor fp8 KV cache, prefill cadence 11 and Engram tables in host memory."
+    source: { label: "InferenceX #5036", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5036", key: "dsv41flash-fp4-mi355x-vllm-agentic-dspark-umbp", revision: 3a4e0673e96ab2e37ab246963c9ff55b8ce32f41 }
+    # Carries vllm-project/vllm#64715 (UMBP standalone for DeepSeek-V4.1-Flash)
+    # and #66036 (per-tensor fp8_e4m3 KV for the ROCm sparse MLA).
+    image: "vllm/vllm-openai-rocm:nightly-be47189f37f6162991366ff6b91539f6e9d1f432@sha256:a6263de19d7e68fc12d7ee37da0cc0d2817b8eb9a83c4f22911783befd133ebc"
+    select:
+      frontend: rust
+      features: { spec_decoding: true, text_only: true, encoder_parallel: false }
+      kv_offload: umbp
+    # The MI355X kernels the TP rows get from strategy_overrides.single_node_tp
+    # (MXFP4 indexer, block size 128, AITER sparse MLA) are restated here: DEP
+    # does not inherit them. --monokernel stays off, since mono decode rejects DP.
+    args:
+      - "--data-parallel-size"
+      - "2"
+      - "--engram-config"
+      - '{"cpu_offload":true}'
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+      - "--block-size"
+      - "128"
+      - "--kv-cache-dtype"
+      - "fp8_e4m3"
+      - "--prefill-schedule-interval"
+      - "11"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-cudagraph-capture-size"
+      - "1024"
+    # Attention DP with the experts tensor-parallel across the two ranks.
+    remove_args:
+      - "--enable-expert-parallel"
+    env:
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
+      OMP_NUM_THREADS: "1"
+    points:
+      # The GPU KV cache holds the working set at 128, where UMBP did not help.
+      dp2_c128:
+        label: "128 (no offload)"
+        concurrency: 128
+        select:
+          kv_offload: off
+      dp2_c256:
+        label: "256"
+        concurrency: 256
+        default: true
+      dp2_c384:
+        label: "384"
+        concurrency: 384
+    runbook: |
+      Each server takes two GPUs, so an 8-GPU node holds four. The UMBP Server
+      on the KV Offload row runs once per node and every server on the node
+      attaches to it; its pool is shared, with no per-engine quota. InferenceX
+      sizes the pool at 449 GB for one two-GPU server (0.60 of that server's
+      share of host DRAM), on 4 KiB pages.
+
+      UMBP pays off once the working set outgrows GPU KV. In local agentx-fast
+      replays (1200 s, single runs) of this configuration on the default
+      `fp8_ds_mla` KV cache and an earlier nightly, against the same
+      configuration without offloading, total throughput per GPU rose 10.1% at
+      concurrency 256 and doubled at 384, where the server without offloading
+      was overloaded (73% GPU prefix hits, 265 s TTFT p90) and UMBP restored
+      21.5% of prompt tokens. At 128 the GPU KV cache held the working set and
+      UMBP did not help (−4.7%), so the 128 point runs without it. Throughput levels
+      off past 384: at 544, UMBP held throughput level with 384 at much higher
+      latency.
+
+      The `fp8_e4m3` KV cache and the pinned nightly are qualified by the
+      InferenceX sweep of the source PR, not by those local runs. Throughput
+      runs use DSpark's synthetic golden acceptance length (3.51); the preset
+      keeps real block rejection for ordinary serving and accuracy evaluation.
 
 hardware_notes:
   dgx_station_gb300:

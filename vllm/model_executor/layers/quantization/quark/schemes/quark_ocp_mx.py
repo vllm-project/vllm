@@ -130,8 +130,8 @@ class QuarkOCP_MX(QuarkScheme):
     def _expanding_scale_loader(self, weight_loader: Callable) -> Callable:
         """Expand a 2-D block scale to one row per weight row.
 
-        A ``block_size=[R, 32]`` export carries one e8m0 value per R weight
-        rows; the kernels want one per row. At ``R == 1`` the layouts already
+        A `block_size=[R, 32]` export carries one e8m0 value per R weight
+        rows; the kernels want one per row. At `R == 1` the layouts already
         coincide, so the loader is passed through untouched.
         """
         if self.scale_block_rows == 1:
@@ -247,7 +247,8 @@ class QuarkOCP_MX(QuarkScheme):
             )
         elif self.weight_quant_key == kMxfp8Static:
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
-                weight_shape=layer.weight.shape
+                weight_shape=layer.weight.shape,
+                activation_quant_key=self.activation_quant_key,
             )
             if current_platform.is_rocm():
                 expose_input_quant_key(layer, self.ocp_mx_linear)

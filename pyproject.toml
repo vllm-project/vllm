@@ -58,6 +58,8 @@ include = ["vllm*"]
 "!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
+# packages re-export their submodules
+"vllm/**/__init__.py" = ["F403"]
 "vllm/_version.py" = ["ALL"]
 # test args are mostly pytest fixtures, which don't benefit from descriptions
 "tests/**" = ["D417"]
@@ -92,18 +94,10 @@ ignore = [
     "D205", "D209", "D301", "D400", "D401", "D404", "D415",
     # incompatible pydocstyle pairs; pin the half `ruff` already picks
     "D203", "D213",
-    # star imports
-    "F405", "F403",
     # lambda expression assignment
     "E731",
     # zip without `strict=`
     "B905",
-    # Loop control variable not used within loop body
-    "B007",
-    # f-string format
-    "UP032",
-    # `StrEnum` changes `str()` and `format()` output of members
-    "UP042",
 ]
 
 [tool.ruff.lint.pydocstyle]
