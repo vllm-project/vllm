@@ -10,15 +10,15 @@ Inkling output format (every marker is a dedicated special token)::
         {"name":"get_weather","args":{"city":"SF"}}<|end_message|>
 
 Blocks are self-describing and may repeat in any order; sampling may
-also end a block with the standalone ``<|content_model_end_sampling|>``
-token. The tool-call payload is a single JSON object whose ``name`` is
-extracted by the engine's name-from-args path and whose ``args`` object
-is carved out of the wrapper by :func:`_inkling_arg_converter`.
+also end a block with the standalone `<|content_model_end_sampling|>`
+token. The tool-call payload is a single JSON object whose `name` is
+extracted by the engine's name-from-args path and whose `args` object
+is carved out of the wrapper by `_inkling_arg_converter`.
 
-Note the terminal *labels*: ``THINK_START``/``THINK_END`` are what the
-engine keys its reasoning plumbing on (``is_reasoning_end``,
-``count_reasoning_tokens``, initial-state seeding), so ``<|end_message|>``
-is labelled ``THINK_END`` here even though it ends every block kind —
+Note the terminal *labels*: `THINK_START`/`THINK_END` are what the
+engine keys its reasoning plumbing on (`is_reasoning_end`,
+`count_reasoning_tokens`, initial-state seeding), so `<|end_message|>`
+is labelled `THINK_END` here even though it ends every block kind —
 the transition table, not the label, carries the semantics.
 """
 
@@ -66,15 +66,15 @@ INKLING_SPECIAL_TOKENS = (
 
 
 def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
-    """Carve the ``args`` object out of the tool-call JSON wrapper.
+    """Carve the `args` object out of the tool-call JSON wrapper.
 
-    Why a converter at all: the engine's ``tool_args_json`` machinery
+    Why a converter at all: the engine's `tool_args_json` machinery
     treats the *entire* TOOL_ARGS text as the tool arguments, but Inkling's
-    payload is the ``{"name":...,"args":{...}}`` wrapper — without a
-    converter, ``_compute_arg_delta`` streams the wrapper verbatim into
-    the OpenAI ``arguments`` field (``converter is None -> raw delta``,
-    unconditionally; ``stream_arg_deltas=False`` does not stop it).
-    :func:`extract_json_member_object` returns a prefix-stable verbatim
+    payload is the `{"name":...,"args":{...}}` wrapper — without a
+    converter, `_compute_arg_delta` streams the wrapper verbatim into
+    the OpenAI `arguments` field (`converter is None -> raw delta`,
+    unconditionally; `stream_arg_deltas=False` does not stop it).
+    `extract_json_member_object` returns a prefix-stable verbatim
     substring, which the engine's argument-delta diffing requires.
     """
     span = extract_json_member_object(raw_args, "args")
@@ -232,7 +232,7 @@ class InklingParser(ParserEngine):
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Seed the initial parsing state from the prompt tail.
 
-        Mirrors the Rust parser's ``initialize()``: scanning the prompt
+        Mirrors the Rust parser's `initialize()`: scanning the prompt
         backwards, the last relevant special token decides whether generation
         continues inside a thinking block, a text block, a model message
         header, or between blocks.

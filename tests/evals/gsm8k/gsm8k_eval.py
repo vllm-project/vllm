@@ -134,9 +134,9 @@ async def call_vllm_chat_api(
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible chat completions endpoint.
 
-    ``model``, ``temperature``, ``stop`` and the other optional fields are
-    omitted from the request when ``None``, so the server defaults apply (vLLM
-    uses its served model when ``model`` is omitted).
+    `model`, `temperature`, `stop` and the other optional fields are
+    omitted from the request when `None`, so the server defaults apply (vLLM
+    uses its served model when `model` is omitted).
 
     Returns:
         Tuple of (final answer content, completion_tokens). Reasoning returned
@@ -253,11 +253,11 @@ def evaluate_gsm8k(
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using vLLM serve endpoint.
 
-    ``temperature``, ``top_p`` and ``top_k`` are sent only when not ``None``;
-    otherwise the server default applies. ``model`` is used only in chat mode,
-    where it may be ``None`` (the server uses its served model).
-    ``reasoning_effort`` and ``chat_template_kwargs`` require
-    ``use_chat_completions=True``. Stop strings are sent only in completions
+    `temperature`, `top_p` and `top_k` are sent only when not `None`;
+    otherwise the server default applies. `model` is used only in chat mode,
+    where it may be `None` (the server uses its served model).
+    `reasoning_effort` and `chat_template_kwargs` require
+    `use_chat_completions=True`. Stop strings are sent only in completions
     mode.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
@@ -348,9 +348,9 @@ def evaluate_gsm8k_offline(
     Same prompts and scoring as evaluate_gsm8k(), but runs generation
     directly via llm.generate() instead of calling a server over HTTP.
 
-    When ``use_chat_completions=True``, prompts go through the chat template via
-    ``llm.chat()`` instead of raw completion (for instruction-tuned models).
-    ``chat_template_kwargs`` are forwarded to ``llm.chat()`` when provided.
+    When `use_chat_completions=True`, prompts go through the chat template via
+    `llm.chat()` instead of raw completion (for instruction-tuned models).
+    `chat_template_kwargs` are forwarded to `llm.chat()` when provided.
     """
     from vllm import SamplingParams
 

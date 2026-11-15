@@ -57,11 +57,11 @@ Failure model
 The transport decides each failure's scope:
 
 - Transfer: write_blocks() returned None or poll() listed the id in
-  ``failed``. The caller fails that round; the peer recomputes.
+  `failed`. The caller fails that round; the peer recomputes.
 - Peer: the registration for a peer is unusable (one decisive error, such
   as any failed state check of an inflight transfer, or repeated transfer
   failures with no success between). poll(peer_id) reports the cause in
-  ``PollResult.peer_fault`` until remove_remote_peer(). A transfer whose
+  `PollResult.peer_fault` until remove_remote_peer(). A transfer whose
   state check failed stays inflight unless the failure proves it can no
   longer write, so the peer's teardown is what bounds it.
 
@@ -230,11 +230,11 @@ class DataTransport(ABC):
 
         Registration is O(num_blocks) and can take seconds for a large
         secondary tier, so the session starts it here and sends
-        ``ConnectAckMsg`` only once the returned future resolves. The
+        `ConnectAckMsg` only once the returned future resolves. The
         acknowledgement is therefore the peer's guarantee that this side
-        is ready to serve, and no ``write_blocks`` can arrive before it.
+        is ready to serve, and no `write_blocks` can arrive before it.
 
-        The default implementation runs ``add_remote_peer`` inline and
+        The default implementation runs `add_remote_peer` inline and
         returns an already-resolved future; transports whose registration
         is cheap need not override it.
 
@@ -318,11 +318,11 @@ class DataTransport(ABC):
 
         Args:
             peer_id: If given, only poll (and drain) transfers submitted for
-                this peer_id — the value passed to ``write_blocks``. This is
+                this peer_id — the value passed to `write_blocks`. This is
                 required when a single transport is shared across multiple
-                peer sessions: ``poll()`` pops completed handles, so an
+                peer sessions: `poll()` pops completed handles, so an
                 unscoped poll by one session would consume and discard the
-                completions of its siblings, starving them. ``None`` polls
+                completions of its siblings, starving them. `None` polls
                 every peer's transfers (used only for the shutdown drain).
 
         Returns:
