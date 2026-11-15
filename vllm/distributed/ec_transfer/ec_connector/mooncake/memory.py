@@ -536,8 +536,9 @@ class ConsumerMemoryPool:
         evicted when its final lease is released. Evictions are not
         reported via `drain_reclaimed` -- the Scheduler already expired
         its own records at reset, and a late notice could clobber a
-        re-established resident of the same hash. This is a no-op before
-        the receive slab is prepared.
+        re-established resident of the same hash. Reclaim notices
+        accumulated before the reset are dropped for the same reason.
+        This is a no-op before the receive slab is prepared.
         """
         if self.tensor is None:
             return
@@ -554,6 +555,7 @@ class ConsumerMemoryPool:
             for mm_hash in published:
                 if not self._residents.evict_unleased(mm_hash, evict):
                     self._residents.mark_invalidated(mm_hash)
+            self._reclaimed.clear()
             self._poll_frees_locked()
 
     def retire_stale(

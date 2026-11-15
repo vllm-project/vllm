@@ -429,16 +429,17 @@ def test_active_ec_connector_reset_forwards_to_transfer_connector():
 _POOL_CAPACITY_2 = 512  # two 256-byte-aligned allocations
 
 
-class _HeldEvent(torch.Event):
-    """Stand-in for a CUDA retire event that never reports completion."""
+class _ToggleEvent(torch.Event):
+    """Stand-in for a CUDA retire event whose completion the test controls."""
 
     def __init__(self) -> None:
         super().__init__()
         self.polled = False
+        self.complete = False
 
     def query(self) -> bool:
         self.polled = True
-        return False
+        return self.complete
 
 
 def _two_tensor_pool() -> ConsumerMemoryPool:
@@ -601,7 +602,13 @@ def test_reset_evictions_are_not_reported_as_reclaimed():
 
 
 def test_replaced_retire_event_is_not_inherited_by_new_resident():
-    """The replacement resident must not inherit the old one's retire event."""
+    """Retire-event ownership across the old/new resident interleave.
+
+    The replacement publish drops the old entry's event; the stale lease's
+    final release frees the old allocation without touching the new
+    resident's event; and a later LRU eviction of the new resident gates
+    on that event, not the old one's.
+    """
     pool = _two_tensor_pool()
     old = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
     assert old is not None
@@ -609,18 +616,57 @@ def test_replaced_retire_event_is_not_inherited_by_new_resident():
     lease = pool.acquire_cached("hashA", _SHAPE, _DTYPE)
     assert lease is not None
 
-    sentinel = _HeldEvent()
-    pool._retire_events["hashA"] = sentinel
+    stale_event = _ToggleEvent()
+    pool._retire_events["hashA"] = stale_event
     pool.invalidate_published()
 
     fresh = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
     assert fresh is not None
     pool.publish("hashA", fresh)
-
     assert "hashA" not in pool._retire_events
+    assert stale_event.polled is False
 
+    # A CUDA retire of the new resident would record an event; stand one in.
     pool.retire_stale({}, freed=["hashA"])
-    reclaimed = pool.reclaim_and_allocate(_NBYTES, _SHAPE, _DTYPE)
-    assert reclaimed is not None
-    assert sentinel.polled is False
+    new_event = _ToggleEvent()
+    pool._retire_events["hashA"] = new_event
+
+    pool.release_cached(lease)
+    assert pool._retire_events["hashA"] is new_event
     assert pool._pending_frees == []
+    extra = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert extra is not None
+    assert extra.tensor.data_ptr() == old.tensor.data_ptr()
+
+    refill = pool.reclaim_and_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert refill is None
+    assert new_event.polled is True
+    new_event.complete = True
+    refill = pool.reclaim_and_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert refill is not None
+    assert pool.drain_reclaimed() == {"hashA"}
+
+
+def test_reset_drops_pending_reclaimed_notices():
+    """A reclaim notice accumulated before the reset must not outlive it."""
+    pool = _two_tensor_pool()
+    manager = _reservation_manager(pool)
+    _load_and_publish(manager, "xfer-x", "hashX")
+    _load_and_publish(manager, "xfer-y", "hashY")
+    manager.retire_stale({}, freed=["hashX", "hashY"])
+    record_z, write_z = _reserve(manager, "xfer-z", "hashZ")
+    assert record_z is not None
+    assert write_z is True  # pressure evicted hashX
+    assert "hashX" in pool._reclaimed  # notice pending, not yet reported
+
+    _worker_with_pool(pool).reset()
+
+    assert pool.drain_reclaimed() == set()
+
+    # A post-reset LRU eviction still reports.
+    _load_and_publish(manager, "xfer-p", "hashP")
+    manager.retire_stale({}, freed=["hashP"])
+    record_r, write_r = _reserve(manager, "xfer-r", "hashR")
+    assert record_r is not None
+    assert write_r is True
+    assert pool.drain_reclaimed() == {"hashP"}
