@@ -148,6 +148,7 @@ class WorkerLoRAManager:
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
                 moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                unsupported_lora_modules=self._adapter_manager.unsupported_lora_modules,
             )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
@@ -156,8 +157,7 @@ class WorkerLoRAManager:
             self._adapter_manager._validate_moe_lora_format(lora)
 
             # Validate classification-head weights.
-            self._adapter_manager._validate_modules_to_save(lora)
-            self._adapter_manager._validate_token_classification_lora(lora)
+            self._adapter_manager._validate_classification_head_lora(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

@@ -26,7 +26,7 @@ class VideoSourceMetadata(NamedTuple):
 
 
 def check_frame_pixel_limit(width: int, height: int) -> None:
-    """Reject video frames exceeding ``VLLM_MAX_IMAGE_PIXELS``."""
+    """Reject video frames exceeding `VLLM_MAX_IMAGE_PIXELS`."""
     max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
     if max_pixels > 0 and width * height > max_pixels:
         raise ValueError(

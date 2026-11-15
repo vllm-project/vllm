@@ -80,6 +80,11 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class OpenCUAProcessor(Qwen2VLProcessor):
+    @classmethod
+    def get_attributes(cls) -> list[str]:
+        # `__init__` builds the image and video processors from `vision_config`
+        return ["image_processor", "tokenizer", "video_processor"]
+
     def check_argument_for_proper_class(self, attribute_name: str, arg: object) -> None:
         if attribute_name == "tokenizer":
             return

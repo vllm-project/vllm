@@ -141,6 +141,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     assert len(outputs) == len(prompts)
     for output in outputs:
+        assert output.prompt_token_ids is not None
         expected_shape = (
             len(output.prompt_token_ids),
             num_layers,
@@ -172,6 +173,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     assert len(outputs) == len(chunked_prompts)
     for output in outputs:
+        assert output.prompt_token_ids is not None
         prompt_len = len(output.prompt_token_ids)
         expected_shape = (prompt_len, num_layers, hidden_size)
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
@@ -214,6 +216,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     # First output: prompt-only hidden states, default path
     out0 = outputs[0]
+    assert out0.kv_transfer_params is not None
+    assert out0.prompt_token_ids is not None
     path0 = out0.kv_transfer_params["hidden_states_path"]
     assert path0 != custom_path
     obj0 = example_hidden_states_connector.load_hidden_states(path0)
@@ -227,6 +231,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     # Second output: prompt + output tokens, custom path
     out1 = outputs[1]
+    assert out1.kv_transfer_params is not None
+    assert out1.prompt_token_ids is not None
     assert out1.kv_transfer_params["hidden_states_path"] == custom_path
     obj1 = example_hidden_states_connector.load_hidden_states(custom_path)
     token_ids = obj1["token_ids"]
@@ -290,6 +296,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         token_ids = obj["token_ids"]
         hidden_states = obj["hidden_states"]
 
+        assert output.prompt_token_ids is not None
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
             len(output.prompt_token_ids),
@@ -344,9 +351,47 @@ def test_extract_hidden_states_tp2():
         token_ids = obj["token_ids"]
         hidden_states = obj["hidden_states"]
 
+        assert output.prompt_token_ids is not None
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
             len(output.prompt_token_ids),
             len(layer_ids),
             hidden_size,
         )
+
+
+@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
+@create_new_process_for_each_test()
+def test_extract_layer_zero_is_input_embeddings(tmp_path, model_impl):
+    """Layer 0 is the input to the first decoder layer, i.e. the input embeddings."""
+    from transformers import AutoModelForCausalLM
+
+    model = "meta-llama/Llama-3.2-1B-Instruct"
+    llm = LLM(
+        model=model,
+        model_impl=model_impl,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": [0, 1]}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=256,
+        gpu_memory_utilization=0.4,
+    )
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    output = llm.generate(["Hello world"], sampling_params)[0]
+    expected_shape = (len(output.prompt_token_ids), 2, hidden_size)
+    token_ids, hidden_states = get_and_check_output(output, expected_shape)
+
+    hf_model = AutoModelForCausalLM.from_pretrained(model, dtype=hidden_states.dtype)
+    with torch.no_grad():
+        embeddings = hf_model.get_input_embeddings()(token_ids)
+    torch.testing.assert_close(hidden_states[:, 0, :], embeddings)

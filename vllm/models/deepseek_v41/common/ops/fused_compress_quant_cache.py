@@ -30,6 +30,8 @@ def fused_save_compress_norm(
     rms_norm_eps: float,
     compress_ratio: int,
     latent_out: torch.Tensor,
+    prev_rows: torch.Tensor | None = None,
+    prev_row_indices: torch.Tensor | None = None,
 ) -> None:
     """Pool each closed group into a normalized BF16 latent; save FP32 states.
 
@@ -37,14 +39,14 @@ def fused_save_compress_norm(
     attention layer schedules on separate streams.
 
     Ratio 2 keeps one ring block per request holding the open group's rows:
-    position ``p`` lives in row ``p % capacity`` and ``slot_mapping`` encodes
-    ``block * capacity + p % capacity``. The grid has one program per request
+    position `p` lives in row `p % capacity` and `slot_mapping` encodes
+    `block * capacity + p % capacity`. The grid has one program per request
     followed by one per pair of packed tokens. A request program handles the
     group that the chunk's first token closes with its predecessor's ring row,
-    then stores the chunk's last ``capacity`` rows to the ring; because the
+    then stores the chunk's last `capacity` rows to the ring; because the
     same program does both, ring reads and writes never race. A pair program
     handles the group that ends inside its pair, reading both rows from the
-    raw input. Ratio 1 has no ring and one program per token; ``slot_mapping``
+    raw input. Ratio 1 has no ring and one program per token; `slot_mapping`
     then only marks valid tokens.
 
     Args:
@@ -58,6 +60,11 @@ def fused_save_compress_norm(
         rms_norm_eps: RMSNorm epsilon.
         compress_ratio: Group size, either 1 or 2.
         latent_out: BF16 [tokens, 512], written only at valid group boundaries.
+        prev_rows: FP32 [rows, 1024] rows gathered from all PCP ranks (CR2). A
+            chunk reads its predecessor here where `prev_row_indices` is set,
+            and the ring is left to `save_ring_rows`.
+        prev_row_indices: [num_reqs] row in `prev_rows` holding the token
+            before each chunk's first token, or -1 to read the ring.
 
     """
     assert compress_ratio in (1, 2)
@@ -82,6 +89,11 @@ def fused_save_compress_norm(
             state_cache.shape[1],
         )
         num_reqs = query_start_loc.numel() - 1
+        if prev_rows is not None:
+            assert prev_row_indices is not None
+            assert prev_row_indices.numel() >= num_reqs
+            assert prev_rows.dtype == torch.float32 and prev_rows.shape[1] == 1024
+            assert prev_rows.stride(1) == 1 and prev_rows.stride(0) % 16 == 0
     else:
         state_cache = query_start_loc = token_to_req_indices = None
         state_stride = state_row_stride = state_block = 1
@@ -90,6 +102,8 @@ def fused_save_compress_norm(
     assert num_tokens <= min(kv_score.shape[0], positions.numel())
     if num_tokens == 0:
         return
+    has_prev_rows = prev_rows is not None
+    prev_row_stride = prev_rows.stride(0) if prev_rows is not None else 1
     grid = num_reqs + triton.cdiv(num_tokens, compress_ratio)
     _fused_save_compress_norm_kernel[(grid,)](
         kv_score,
@@ -100,15 +114,19 @@ def fused_save_compress_norm(
         token_to_req_indices,
         rms_norm_weight,
         latent_out,
+        prev_rows if has_prev_rows else kv_score,
+        prev_row_indices if has_prev_rows else slot_mapping,
         num_tokens,
         num_reqs,
         RAW_STRIDE=kv_score.stride(0),
+        PREV_ROW_STRIDE=prev_row_stride,
         STATE_STRIDE=state_stride,
         STATE_ROW_STRIDE=state_row_stride,
         STATE_BLOCK=state_block,
         COMPRESS_RATIO=compress_ratio,
         EPS=rms_norm_eps,
         JOIN_ROW_PTRS=_JOIN_ROW_PTRS,
+        HAS_PREV_ROWS=has_prev_rows,
         num_warps=4,
         **({"launch_pdl": False} if current_platform.is_cuda() else {}),
     )
@@ -124,15 +142,19 @@ def _fused_save_compress_norm_kernel(
     req_ids,
     norm_weight,
     latent,
+    prev_rows,
+    prev_row_indices,
     num_tokens,
     num_reqs,
     RAW_STRIDE: tl.constexpr,
+    PREV_ROW_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
     STATE_ROW_STRIDE: tl.constexpr,
     STATE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     EPS: tl.constexpr,
     JOIN_ROW_PTRS: tl.constexpr,
+    HAS_PREV_ROWS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     d = tl.arange(0, 512)
@@ -152,6 +174,10 @@ def _fused_save_compress_norm_kernel(
             if (position + 1) % 2 == 0:
                 ring = state + (state_slot // STATE_BLOCK).to(tl.int64) * STATE_STRIDE
                 prev = ring + ((position - 1) % STATE_BLOCK) * STATE_ROW_STRIDE
+                if HAS_PREV_ROWS:
+                    prev_idx = tl.load(prev_row_indices + pid)
+                    if prev_idx >= 0:
+                        prev = prev_rows + prev_idx.to(tl.int64) * PREV_ROW_STRIDE
                 current = raw + start.to(tl.int64) * RAW_STRIDE
                 if JOIN_ROW_PTRS:
                     # Joining pointers hides row alignment from Triton; restate it.
@@ -177,19 +203,20 @@ def _fused_save_compress_norm_kernel(
                         weight_prev + weight_current
                     )
                 _store_latent(pooled, start, norm_weight, latent, EPS)
-            num_rows = tl.minimum(end - start, STATE_BLOCK)
-            for k in tl.range(0, num_rows):
-                token = end - num_rows + k
-                slot = tl.load(state_slots + token)
-                if slot >= 0:
-                    row = (
-                        state
-                        + (slot // STATE_BLOCK).to(tl.int64) * STATE_STRIDE
-                        + (slot % STATE_BLOCK) * STATE_ROW_STRIDE
-                    )
-                    src = raw + token.to(tl.int64) * RAW_STRIDE
-                    tl.store(row + d, tl.load(src + d))
-                    tl.store(row + 512 + d, tl.load(src + 512 + d))
+            if not HAS_PREV_ROWS:
+                num_rows = tl.minimum(end - start, STATE_BLOCK)
+                for k in tl.range(0, num_rows):
+                    token = end - num_rows + k
+                    slot = tl.load(state_slots + token)
+                    if slot >= 0:
+                        row = (
+                            state
+                            + (slot // STATE_BLOCK).to(tl.int64) * STATE_STRIDE
+                            + (slot % STATE_BLOCK) * STATE_ROW_STRIDE
+                        )
+                        src = raw + token.to(tl.int64) * RAW_STRIDE
+                        tl.store(row + d, tl.load(src + d))
+                        tl.store(row + 512 + d, tl.load(src + 512 + d))
             return
 
     # Group program: one token (ratio 1) or the token of the pair that ends
@@ -212,6 +239,50 @@ def _fused_save_compress_norm_kernel(
     _store_latent(pooled, t, norm_weight, latent, EPS)
 
 
+def save_ring_rows(
+    rows: torch.Tensor, slot_mapping: torch.Tensor, state_cache: torch.Tensor
+) -> None:
+    """Store FP32 [kv, score] rows to their ring slots, skipping slot -1."""
+    assert rows.dtype == torch.float32 and rows.shape[1] == 1024
+    assert rows.stride(1) == 1 and state_cache.stride(2) == 1
+    assert slot_mapping.numel() == rows.shape[0]
+    if rows.shape[0] == 0:
+        return
+    _save_ring_rows_kernel[(rows.shape[0],)](
+        rows,
+        slot_mapping,
+        state_cache,
+        ROW_STRIDE=rows.stride(0),
+        STATE_STRIDE=state_cache.stride(0),
+        STATE_ROW_STRIDE=state_cache.stride(1),
+        STATE_BLOCK=state_cache.shape[1],
+        num_warps=4,
+    )
+
+
+@triton.jit
+def _save_ring_rows_kernel(
+    rows,
+    slot_mapping,
+    state,
+    ROW_STRIDE: tl.constexpr,
+    STATE_STRIDE: tl.constexpr,
+    STATE_ROW_STRIDE: tl.constexpr,
+    STATE_BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    slot = tl.load(slot_mapping + pid)
+    if slot < 0:
+        return
+    d = tl.arange(0, 1024)
+    dst = (
+        state
+        + (slot // STATE_BLOCK).to(tl.int64) * STATE_STRIDE
+        + (slot % STATE_BLOCK) * STATE_ROW_STRIDE
+    )
+    tl.store(dst + d, tl.load(rows + pid.to(tl.int64) * ROW_STRIDE + d))
+
+
 @triton.jit
 def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     d = tl.arange(0, 512)
@@ -219,6 +290,89 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     variance = tl.sum(pooled * pooled, 0) / 512
     normed = pooled * tl.rsqrt(variance + EPS) * weight
     tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
+
+
+# Value bytes per packed row width. The 584-byte V4 main KV row and the FP8 and
+# MXFP4 indexer K rows keep their scales after the values of the whole page; the
+# 528-byte and 288-byte V4.1 rows keep each row's scales right after its values.
+_PIPELINE_CACHE_VALUE_BYTES = {584: 576, 528: 528, 288: 288, 132: 128, 68: 64}
+
+
+def copy_pipeline_cache_rows(
+    cache: torch.Tensor,
+    rows: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    *,
+    scatter: bool,
+) -> None:
+    assert cache.dtype == rows.dtype == torch.uint8
+    assert cache.ndim == 3 and cache.stride(-1) == 1
+    assert rows.shape == (positions.numel(), cache.shape[-1])
+    assert rows.is_contiguous() and positions.is_contiguous()
+    assert slot_mapping.is_contiguous() and slot_mapping.numel() <= rows.shape[0]
+    assert compress_ratio in (1, 2)
+    value_bytes = _PIPELINE_CACHE_VALUE_BYTES.get(cache.shape[-1])
+    assert value_bytes is not None, f"unsupported paged cache row {cache.shape[-1]} B"
+    if rows.shape[0] == 0:
+        return
+    _copy_pipeline_cache_rows[(rows.shape[0],)](
+        cache,
+        rows,
+        positions,
+        slot_mapping,
+        slot_mapping.numel(),
+        CACHE_STRIDE=cache.stride(0),
+        CACHE_BLOCK=cache.shape[1],
+        ROW_BYTES=cache.shape[-1],
+        VALUE_BYTES=value_bytes,
+        COMPRESS_RATIO=compress_ratio,
+        SCATTER=scatter,
+        BLOCK=triton.next_power_of_2(cache.shape[-1]),
+        num_warps=4,
+        launch_pdl=False,
+    )
+
+
+@triton.jit(do_not_specialize=["num_slots"])
+def _copy_pipeline_cache_rows(
+    cache,
+    rows,
+    positions,
+    slots,
+    num_slots,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    ROW_BYTES: tl.constexpr,
+    VALUE_BYTES: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SCATTER: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    slot = tl.load(slots + token, mask=token < num_slots, other=-1)
+    position = tl.load(positions + token)
+    valid = (slot >= 0) & ((position + 1) % COMPRESS_RATIO == 0)
+    byte = tl.arange(0, BLOCK)
+    row = slot % CACHE_BLOCK
+    # For split layouts, each page stores all values before all scales.
+    offset = tl.where(
+        byte < VALUE_BYTES,
+        row * VALUE_BYTES + byte,
+        CACHE_BLOCK * VALUE_BYTES
+        + row * (ROW_BYTES - VALUE_BYTES)
+        + byte
+        - VALUE_BYTES,
+    )
+    cache_ptr = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE + offset
+    row_ptr = rows + token.to(tl.int64) * ROW_BYTES + byte
+    if SCATTER:
+        value = tl.load(row_ptr, mask=byte < ROW_BYTES, other=0)
+        tl.store(cache_ptr, value, mask=valid & (byte < ROW_BYTES))
+    else:
+        value = tl.load(cache_ptr, mask=valid & (byte < ROW_BYTES), other=0)
+        tl.store(row_ptr, value, mask=byte < ROW_BYTES)
 
 
 def rope_quant_insert(
@@ -234,14 +388,15 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: ``uint8`` is a paged FlashMLA layout, whose record the per-token
+    layout: `uint8` is a paged FlashMLA layout, whose record the per-token
     byte width names -- 584 B for V4 (576 value bytes and eight segregated
     UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
     (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
     32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
-    e4m3 scales of 16 dims each), which only the compressed cache uses.
-    ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
-    read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
+    e4m3 scales of 16 dims each), which only the compressed cache uses. The
+    two V4.1 records keep each token's scales right after its own values.
+    `bfloat16` and `float8_e4m3fn` are the plain [448 NoPE | 64 RoPE] rows
+    read by FlashInfer, the latter scaled by the per-tensor `fp8_scale`.
     """
     assert compress_ratio in (1, 2)
     assert latent.shape[1] == 512 and latent.dtype == torch.bfloat16
@@ -390,8 +545,8 @@ def _rope_quant_insert_mxfp8_kernel(
         rotated = tl.where(rotated == rotated, rotated, 0.0)
 
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
-    values = page + (slot % CACHE_BLOCK) * 512
-    scales = page + CACHE_BLOCK * 512 + (slot % CACHE_BLOCK) * 16
+    values = page + (slot % CACHE_BLOCK) * 528
+    scales = values + 512
 
     quant = tl.reshape(rotated, (16, 32))
     amax = tl.maximum(tl.max(tl.abs(quant), 1), 1e-4)
@@ -420,7 +575,7 @@ def _rope_quant_insert_nvfp4_kernel(
 ):
     """V4.1 NVFP4 record: RoPE, then e2m1 with one e4m3 scale per 16 dims.
 
-    The scale is ``amax / 6`` (6 is e2m1's largest magnitude) clamped to the
+    The scale is `amax / 6` (6 is e2m1's largest magnitude) clamped to the
     e4m3 range, with no per-tensor scale on top.
     """
     t = tl.program_id(0)
@@ -453,12 +608,9 @@ def _rope_quant_insert_nvfp4_kernel(
     lo, hi = tl.split(tl.reshape(tl.reshape(scaled, (512,)), (256, 2)))
 
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
-    tl.store(
-        page + (slot % CACHE_BLOCK) * 256 + tl.arange(0, 256),
-        _fp32x2_to_fp4x2(lo, hi),
-    )
-    scales = page + CACHE_BLOCK * 256 + (slot % CACHE_BLOCK) * 32
-    tl.store(scales + tl.arange(0, 32), scale.to(tl.uint8, bitcast=True))
+    values = page + (slot % CACHE_BLOCK) * 288
+    tl.store(values + tl.arange(0, 256), _fp32x2_to_fp4x2(lo, hi))
+    tl.store(values + 256 + tl.arange(0, 32), scale.to(tl.uint8, bitcast=True))
 
 
 @triton.jit

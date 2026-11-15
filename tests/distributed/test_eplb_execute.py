@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,9 +24,41 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e8m0fnu, torch.float4_e2m1fn_x2])
+def test_set_eplb_state_registers_byte_dtypes_as_uint8_views(dtype):
+    """NCCL lacks these dtypes, so EPLB must see their bytes as uint8 views
+    sharing storage with the parameter the kernel reads."""
+    weight = torch.zeros(2, 8, dtype=torch.int32)
+    scale = torch.zeros(2, 4, dtype=torch.uint8).view(dtype)
+    layer = SimpleNamespace(
+        get_expert_weights=lambda: [weight, scale],
+        set_eplb_state=lambda **_: None,
+    )
+    model = SimpleNamespace(moe_layers=[layer])
+    empty = torch.empty(0)
+    MixtureOfExperts.set_eplb_state(model, empty, empty, empty)
+
+    registered_weight, registered_scale = model.expert_weights[0]
+    assert registered_weight is weight
+    assert registered_scale.dtype == torch.uint8
+    registered_scale.fill_(127)
+    assert torch.equal(scale.view(torch.uint8), registered_scale)
+
+
+def _skip_unless_symm_mem(world_size: int) -> None:
+    if not current_platform.is_cuda() or not current_platform.is_fully_connected(
+        [
+            current_platform.visible_device_id_to_physical_device_id(i)
+            for i in range(world_size)
+        ]
+    ):
+        pytest.skip("symm_mem requires NVLink-connected CUDA GPUs")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -413,6 +446,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
+        expert_buffer = communicator.owned_expert_buffer or expert_buffer
         communicator.set_stream(stream)
 
         for layer_idx in range(num_layers):
@@ -434,6 +468,8 @@ def _test_async_transfer_layer_without_mtp_worker(
                 new_indices=new_indices_cpu[layer_idx].numpy(),
                 ep_rank=ep_rank,
             )
+            # As in the async worker: expert_buffer writes are not stream-ordered.
+            torch.accelerator.current_stream().synchronize()
 
     local_ok = verify_expert_weights_after_shuffle(
         expert_weights,
@@ -528,6 +564,7 @@ def _test_rearrange_expert_weights_with_redundancy(
             expert_weights=expert_weights,
             expert_buffer=expert_buffer,
         )
+        expert_buffer = communicator.owned_expert_buffer or expert_buffer
 
         # Execute weight rearrangement
         rearrange_expert_weights_inplace(
@@ -591,7 +628,8 @@ def _test_rearrange_expert_weights_with_redundancy(
     ],
 )
 @pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "torch_xccl", "pynccl", "nixl"]
+    "eplb_communicator",
+    ["torch_nccl", "torch_gloo", "torch_xccl", "pynccl", "nixl", "symm_mem"],
 )
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
@@ -611,6 +649,8 @@ def test_rearrange_expert_weights_with_redundancy(
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if eplb_communicator == "symm_mem":
+        _skip_unless_symm_mem(world_size)
     distributed_run(
         _test_rearrange_expert_weights_with_redundancy,
         world_size,
@@ -711,7 +751,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "torch_xccl", "nixl"])
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_gloo", "torch_xccl", "nixl", "symm_mem"]
+)
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -728,6 +770,8 @@ def test_async_transfer_layer_without_mtp(
         pytest.skip("torch_xccl requires XPU")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if eplb_communicator == "symm_mem":
+        _skip_unless_symm_mem(world_size)
 
     distributed_run(
         _test_async_transfer_layer_without_mtp_worker,

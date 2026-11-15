@@ -7,7 +7,7 @@ the four alignment-padded pages side by side (layout BLHNC). The zeroer must ste
 the full packed row per block while zeroing only each layer's meaningful page — never
 the alignment padding, never an adjacent layer's page.
 
-CPU only: the zeroer's ``__init__`` precomputes the segment tables; no kernel is
+CPU only: the zeroer's `__init__` precomputes the segment tables; no kernel is
 launched.
 """
 
@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import full_layer
 from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -78,6 +79,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
         },
         num_blocks=NUM_BLOCKS,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     assert n_segs == NUM_LAYERS
@@ -105,11 +107,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     from unittest.mock import MagicMock
 
     from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
-    from vllm.v1.kv_cache_interface import (
-        KVCacheGroupSpec,
-        KVCacheLayout,
-        UniformTypeKVCacheSpecs,
-    )
+    from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayout
 
     def make_spec(head_size):
         return MLAAttentionSpec(
@@ -119,14 +117,10 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     g1_specs = {"g1.big": make_spec(512), "g1.small": make_spec(128)}
     g2_specs = {"g2.huge": make_spec(1024)}
     groups = [
-        KVCacheGroupSpec(
-            list(g1_specs),
-            UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=g1_specs),
-        ),
-        KVCacheGroupSpec(
-            list(g2_specs),
-            UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=g2_specs),
-        ),
+        KVCacheGroup.from_layers(
+            {name: full_layer(spec) for name, spec in specs.items()}
+        )
+        for specs in (g1_specs, g2_specs)
     ]
     from vllm.config import CacheConfig
 
@@ -157,6 +151,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
         },
         num_blocks=config.num_blocks,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     # g1.big and g2.huge overlay at offset 0 -> one segment with g2's wider
