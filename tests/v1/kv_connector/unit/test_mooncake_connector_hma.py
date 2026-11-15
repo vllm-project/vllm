@@ -29,7 +29,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 
 from .offloading_connector.utils import make_kv_cache_group
@@ -618,7 +617,7 @@ def hisparse_producer(request):
     packed, tp, rank = request.param
     cache_config = _make_packed_mla_kv_cache_config(8)
     names = cache_config.kv_cache_groups[0].layer_names
-    page = cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    page = cache_config.kv_cache_groups[0].kv_cache_specs[names[0]].page_size_bytes
     backing = torch.arange(16, dtype=torch.uint8).repeat_interleave(page).view(8, -1)
     caches = dict(zip(names, backing.split(page, dim=1)))
     if not packed:
