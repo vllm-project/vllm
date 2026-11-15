@@ -231,7 +231,6 @@ def test_glimmer_engine_has_no_gpu_sync(monkeypatch, vllm_runner) -> None:
 
     with vllm_runner(
         model_info.default,
-        trust_remote_code=False,
         load_format="dummy",
         enforce_eager=True,
         max_model_len=8192,

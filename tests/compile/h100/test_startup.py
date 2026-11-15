@@ -26,7 +26,6 @@ MODEL = "microsoft/Phi-tiny-MoE-instruct"
 def _run_vllm(vllm_runner):
     with vllm_runner(
         MODEL,
-        trust_remote_code=False,
         max_model_len=256,
         max_num_batched_tokens=1024,
         load_format="dummy",

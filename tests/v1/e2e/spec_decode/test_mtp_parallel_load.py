@@ -294,7 +294,6 @@ def test_mtp_drafter_runs_as_one_pp_stage(vllm_runner):
         enforce_eager=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
-        trust_remote_code=False,
     ) as runner:
         _generate_token_ids_inline(runner.llm)
         assert _spec_decode_num_drafts(runner.llm.get_metrics()) > 0
