@@ -705,23 +705,54 @@ class TestSpansOnPoolingRequests:
             limit_mm_per_prompt={"image": 0, "audio": 0},
         )
         try:
-            outputs = llm.embed(
-                [prompt(ids, spans) for ids, spans in cases],
-                pooling_params=PoolingParams(),
-                use_tqdm=False,
-            )
+            outputs = {
+                mode: llm.embed(
+                    [
+                        prompt(ids, spans if mode == "spans" else [])
+                        for ids, spans in cases
+                    ],
+                    pooling_params=PoolingParams(),
+                    use_tqdm=False,
+                )
+                for mode in ("spans", "causal")
+            }
         finally:
             del llm, engine
             free_gpu_memory()
-        for i, output in enumerate(outputs):
+
+        def error(output, ref: torch.Tensor) -> float:
             embedding = torch.nn.functional.normalize(
                 torch.tensor(output.outputs.embedding), dim=-1
             )
-            ref = references["pooled", i, "spans"]
-            ref_causal = references["pooled", i, "causal"]
-            # The error is a small fraction of what the spans change.
-            effect = 1 - torch.dot(ref, ref_causal)
-            assert 1 - torch.dot(embedding, ref) < 0.1 * effect, (i, effect)
+            return 1 - torch.dot(embedding, ref).item()
+
+        err = {
+            mode: [
+                error(o, references["pooled", i, mode])
+                for i, o in enumerate(outputs[mode])
+            ]
+            for mode in ("spans", "causal")
+        }
+        refs = [references["pooled", i, "spans"] for i in range(len(cases))]
+        effect = [
+            1 - torch.dot(ref, references["pooled", i, "causal"]).item()
+            for i, ref in enumerate(refs)
+        ]
+        # The error is about that of causal requests and a small fraction of
+        # what the spans change. The spans move a pooled state by as little as
+        # 0.009 (1 - cos), where numerics alone move it by up to 0.001.
+        assert mean(err["spans"]) < 2 * mean(err["causal"]), err
+        assert mean(err["spans"]) < 0.1 * mean(effect), (err["spans"], effect)
+        # Each span request is closer to its span reference than to the causal
+        # one.
+        to_causal = [
+            error(o, references["pooled", i, "causal"])
+            for i, o in enumerate(outputs["spans"])
+        ]
+        assert all(c > 2 * e for c, e in zip(to_causal, err["spans"])), (
+            to_causal,
+            err["spans"],
+        )
 
 
 @pytest.mark.parametrize(
