@@ -104,14 +104,14 @@ def _prompt_logprob_rows(
     prompt_token_ids: GenericSequence[int],
     prompt_logprobs: GenericSequence[dict[int, Logprob] | None] | None,
 ) -> list[dict[int, Logprob] | None]:
-    """Return prompt logprob rows aligned one-to-one with ``prompt_token_ids``.
+    """Return prompt logprob rows aligned one-to-one with `prompt_token_ids`.
 
-    A request resumed after ``reset_prefix_cache`` can keep its prompt token ids
+    A request resumed after `reset_prefix_cache` can keep its prompt token ids
     while the prompt logprobs that came with the dropped prefill output are gone
     (#61490). Echoing those tokens then concatenated a short logprob list ahead
     of the sampled rows, which both indexed past the end of the list and shifted
     the sampled logprobs onto prompt positions. Missing prompt rows become
-    explicit ``None`` placeholders so the positions stay honest and the sampled
+    explicit `None` placeholders so the positions stay honest and the sampled
     rows keep their own values.
     """
     rows: list[dict[int, Logprob] | None] = list(prompt_logprobs or [])
