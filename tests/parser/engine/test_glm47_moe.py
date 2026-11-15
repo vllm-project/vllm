@@ -11,6 +11,7 @@ non-streaming parse, without converting the whole argument on every delta.
 """
 
 import dataclasses
+import json
 
 import pytest
 
@@ -164,6 +165,118 @@ def _stream_arguments(parser, request, chunks: list[str]) -> str:
             if tool_call.function and tool_call.function.arguments:
                 args.append(tool_call.function.arguments)
     return "".join(args)
+
+
+class TestUnknownToolCalls:
+    def _request_with_declared_tool(self, mock_request):
+        mock_request.tools = [
+            ChatCompletionToolsParam(function={"name": "known_tool", "parameters": {}})
+        ]
+        return mock_request
+
+    def test_unknown_tool_calls_after_think_end(self, mock_request):
+        request = self._request_with_declared_tool(mock_request)
+        parser = Glm47MoeParser(make_mock_tokenizer(VOCAB))
+        text = (
+            f"{THINK_END}{TOOL_CALL_START}mcp_session-close_list_backup_dirs"
+            f"{TOOL_CALL_END}{TOOL_CALL_START}unknown_with_args"
+            "<arg_key>path</arg_key><arg_value>/backup</arg_value>"
+            f"{TOOL_CALL_END}"
+        )
+
+        result = parser.extract_tool_calls(text, request)
+
+        assert result.tools_called
+        assert [call.function.name for call in result.tool_calls] == [
+            "mcp_session-close_list_backup_dirs",
+            "unknown_with_args",
+        ]
+        assert json.loads(result.tool_calls[0].function.arguments) == {}
+        assert json.loads(result.tool_calls[1].function.arguments) == {
+            "path": "/backup"
+        }
+
+    def test_unknown_tool_name_is_emitted_after_arg_key_or_tool_end(self, mock_request):
+        request = self._request_with_declared_tool(mock_request)
+        parser = Glm47MoeParser(make_mock_tokenizer(VOCAB))
+        name = "mcp_session-close_list_backup_dirs"
+        chunks = [
+            THINK_END,
+            TOOL_CALL_START,
+            name,
+            "<arg_key>",
+            "path",
+            "</arg_key>",
+            "<arg_value>",
+            "/backup",
+            "</arg_value>",
+            TOOL_CALL_END,
+        ]
+        results = []
+        for index, chunk in enumerate(chunks):
+            delta = parser.parse_delta(
+                chunk,
+                [],
+                request,
+                finished=index == len(chunks) - 1,
+            )
+            results.append(delta)
+            emitted_names = [
+                call.function.name
+                for result in results
+                if result and result.tool_calls
+                for call in result.tool_calls
+                if call.function and call.function.name
+            ]
+            if index <= 2:
+                assert not emitted_names
+            if index == 3:
+                assert emitted_names == [name]
+
+        assert any(result and result.tool_calls for result in results)
+        assert json.loads(
+            "".join(
+                call.function.arguments
+                for result in results
+                if result and result.tool_calls
+                for call in result.tool_calls
+                if call.function and call.function.arguments
+            )
+        ) == {"path": "/backup"}
+
+        zero_arg_parser = Glm47MoeParser(make_mock_tokenizer(VOCAB))
+        zero_arg_chunks = [THINK_END, TOOL_CALL_START, name, TOOL_CALL_END]
+        zero_arg_results = []
+        for index, chunk in enumerate(zero_arg_chunks):
+            delta = zero_arg_parser.parse_delta(
+                chunk,
+                [],
+                request,
+                finished=index == len(zero_arg_chunks) - 1,
+            )
+            zero_arg_results.append(delta)
+            emitted_names = [
+                call.function.name
+                for result in zero_arg_results
+                if result and result.tool_calls
+                for call in result.tool_calls
+                if call.function and call.function.name
+            ]
+            if index < len(zero_arg_chunks) - 1:
+                assert not emitted_names
+        assert emitted_names == [name]
+        assert (
+            json.loads(
+                "".join(
+                    call.function.arguments
+                    for result in zero_arg_results
+                    if result and result.tool_calls
+                    for call in result.tool_calls
+                    if call.function and call.function.arguments
+                )
+            )
+            == {}
+        )
 
 
 class TestStreamedToolArguments:
