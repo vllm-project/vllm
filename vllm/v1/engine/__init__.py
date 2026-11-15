@@ -325,12 +325,13 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Remaining prefill work for this request, while it is prefilling.
+    # Appended last so `array_like` positional serialization stays compatible.
+    prefill_progress: PrefillProgress | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-    # Remaining prefill work for this request, while it is prefilling.
-    prefill_progress: PrefillProgress | None = None
 
 
 class UtilityOutput(
