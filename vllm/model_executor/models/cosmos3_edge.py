@@ -552,12 +552,12 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
         mappings.update(
             {
                 f"{source_prefix}.input_layernorm.": f"{attention_prefix}.norm.",
-                f"{source_prefix}.self_attn.qkv_proj.": (
-                    f"{attention_prefix}.mixer.qkv_proj."
-                ),
-                f"{source_prefix}.self_attn.o_proj.": (
-                    f"{attention_prefix}.mixer.o_proj."
-                ),
+                **{
+                    f"{source_prefix}.self_attn.{proj}_proj.": (
+                        f"{attention_prefix}.mixer.{proj}_proj."
+                    )
+                    for proj in ("q", "k", "v", "o")
+                },
                 f"{source_prefix}.post_attention_layernorm.": (f"{mlp_prefix}.norm."),
                 f"{source_prefix}.mlp.": f"{mlp_prefix}.mixer.",
             }
@@ -585,9 +585,9 @@ class Cosmos3EdgeForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
-            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
-            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".q_proj.": (".qkv_proj.", "q"),
+            ".k_proj.": (".qkv_proj.", "k"),
+            ".v_proj.": (".qkv_proj.", "v"),
         },
         orig_to_new_prefix={
             **_cosmos3_edge_diffusers_prefix_map(),
