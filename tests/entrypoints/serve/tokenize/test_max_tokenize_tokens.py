@@ -4,12 +4,16 @@
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 import vllm.envs as envs
+from tests.utils import RemoteOpenAIServer
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeCompletionRequest
 from vllm.renderers.params import resolve_max_tokenize_tokens
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 
 @pytest.mark.parametrize(
@@ -24,7 +28,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
     ],
 )
 def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expected):
-    # Environment variables may have been cached by other tests or server setup.
+    # Environment variables may have been cached by earlier tests or server setup.
     envs.disable_envs_cache()
     if env_value is None:
         monkeypatch.delenv("VLLM_MAX_TOKENIZE_TOKENS", raising=False)
@@ -37,11 +41,49 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
 
     # The explicit ModelConfig field is populated from EngineArgs when set;
     # otherwise the resolver consults the environment and then the fallback.
-    model_config = SimpleNamespace(max_tokenize_tokens=args.max_tokenize_tokens,
-                                   max_model_len=100)
+    model_config = SimpleNamespace(
+        max_tokenize_tokens=args.max_tokenize_tokens,
+        max_model_len=100,
+    )
     tok_params = TokenizeCompletionRequest(
         model="test-model", prompt="hello"
     ).build_tok_params(model_config)
 
     assert resolve_max_tokenize_tokens(model_config) == expected
     assert tok_params.max_total_tokens == expected
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "expected"),
+    [
+        pytest.param(100, 131072, id="default-floor"),
+        pytest.param(70000, 140000, id="default-uses-model-length"),
+    ],
+)
+def test_max_tokenize_tokens_default_uses_model_length_floor(max_model_len, expected):
+    model_config = SimpleNamespace(max_tokenize_tokens=None, max_model_len=max_model_len)
+    assert resolve_max_tokenize_tokens(model_config) == expected
+
+
+def test_tokenize_request_rejects_over_limit_requests():
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-tokenize-tokens",
+        "5",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "128",
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        over_limit = "hello " * 10
+        response = requests.post(
+            remote_server.url_for("tokenize"),
+            json={"model": MODEL_NAME, "prompt": over_limit},
+        )
+
+    assert response.status_code == 400, response.text
+    assert "max_tokenize_tokens" in response.text or "max token" in response.text.lower()
