@@ -122,7 +122,7 @@ def bench_mode(args, mode, backend, shapes):
             print(json.dumps(rows[-1]), flush=True)
     del llm
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     return rows
 
 
