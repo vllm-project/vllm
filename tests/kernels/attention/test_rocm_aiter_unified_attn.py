@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm kernel correctness tests for AITER unified attention.
 
-Compares ``aiter.ops.triton.unified_attention`` against ``ref_paged_attn`` under
+Compares `aiter.ops.triton.unified_attention` against `ref_paged_attn` under
 decode, prefill, and mixed batches with varied shapes.
 """
 

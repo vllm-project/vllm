@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for control-layer ABCs, ZmqClientConnection, and ECSession."""
 
+import os
+import select
+import signal
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -309,6 +314,53 @@ def test_zmq_servers_allocate_distinct_reachable_ports():
         client.close()
         for server in servers:
             server.close()
+
+
+# A producer that takes one request and never answers it.
+_SILENT_PRODUCER = """
+import zmq
+router = zmq.Context().socket(zmq.ROUTER)
+print(router.bind_to_random_port("tcp://127.0.0.1"), flush=True)
+router.recv_multipart()
+print("received", flush=True)
+router.recv_multipart()
+"""
+
+
+def _read_line(proc: subprocess.Popen, timeout_s: float = 10) -> str:
+    assert proc.stdout is not None
+    ready, _, _ = select.select([proc.stdout], [], [], timeout_s)
+    assert ready, "producer did not report in time"
+    return proc.stdout.readline()
+
+
+@pytest.mark.cpu_test
+def test_zmq_client_transport_reports_frozen_peer():
+    """A producer that stops responding without closing TCP must be reported."""
+    mod = "vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq"
+    producer = subprocess.Popen(
+        [sys.executable, "-c", _SILENT_PRODUCER], stdout=subprocess.PIPE, text=True
+    )
+    client: ZmqClientTransport | None = None
+    try:
+        addr: PeerAddr = ("127.0.0.1", int(_read_line(producer)))
+        with (
+            patch(f"{mod}._HEARTBEAT_IVL_MS", 100),
+            patch(f"{mod}._HEARTBEAT_TIMEOUT_MS", 500),
+        ):
+            client = ZmqClientTransport()
+            conn = client.connect(addr)
+        conn.send(b"request")
+        assert _read_line(producer) == "received\n"
+        os.kill(producer.pid, signal.SIGSTOP)
+        assert conn.monitor is not None
+        assert conn.monitor.poll(timeout=5000), "frozen producer never reported"
+        assert client.poll_dead() == [addr]
+    finally:
+        if client is not None:
+            client.close()
+        producer.kill()
+        producer.wait()
 
 
 def test_zmq_server_rejects_an_occupied_explicit_port():
