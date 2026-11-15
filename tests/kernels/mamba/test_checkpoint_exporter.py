@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
 )
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
@@ -73,11 +74,12 @@ CALLERS = {
         recurrent="rows",
         recurrent_dtype=torch.bfloat16,
     ),
-    # Leaves state_len unset: its conv cache has no spec slots.
+    # With a DSpark drafter (num_speculative_tokens=7).
     "kimi-k3-flashkda": _Caller(
-        FlashKDAPrefillCheckpointExporter(),
+        FlashKDAPrefillCheckpointExporter(state_len=3),
         width=96,
         conv_window=3,
+        num_spec=7,
         recurrent="per_row",
     ),
     "glm5next-flashkda": _Caller(
@@ -193,6 +195,48 @@ def test_exporter_stores_each_callers_checkpoints(
 
     assert torch.equal(conv_state, expected_conv)
     assert torch.equal(recurrent_state, expected_recurrent)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+@pytest.mark.parametrize("num_spec", [0, 7])
+def test_prefill_resumed_from_checkpoint_matches_unbroken_pass(num_spec: int):
+    """A prefill resumed from an exported checkpoint reproduces the conv output
+    of one unbroken pass, also when speculative decoding widens the conv state
+    beyond the `kernel_size - 1` inputs the conv reads."""
+    kernel_size, width, num_tokens, offset, slot = 4, 256, 2048, 1000, 1
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(0)
+    x = torch.randn(num_tokens, width, device=device, generator=gen)
+    weight = torch.randn(width, kernel_size, device=device, generator=gen)
+    state_width = kernel_size - 1 + num_spec
+
+    def conv(inputs: torch.Tensor, conv_state: torch.Tensor, resume: bool):
+        return causal_conv1d_fn(
+            inputs.T.contiguous(),
+            weight,
+            None,
+            conv_states=conv_state,
+            query_start_loc=torch.tensor(
+                [0, inputs.shape[0]], dtype=torch.int32, device=device
+            ),
+            cache_indices=torch.tensor([slot], dtype=torch.int32, device=device),
+            has_initial_state=torch.tensor([resume], device=device),
+            activation="silu",
+        ).T
+
+    unbroken = conv(x, torch.zeros(2, width, state_width, device=device), False)
+    conv_state = torch.zeros(2, width, state_width, device=device)
+    FlashKDAPrefillCheckpointExporter(state_len=kernel_size - 1).export(
+        MambaPrefillCheckpointMetadata(
+            torch.tensor([offset], dtype=torch.int32, device=device),
+            torch.tensor([slot], dtype=torch.int32, device=device),
+        ),
+        raw_qkv=x,
+        conv_state=conv_state,
+        cu_seqlens=torch.tensor([0, num_tokens], dtype=torch.int32, device=device),
+    )
+
+    assert torch.equal(conv(x[offset:], conv_state, True), unbroken[offset:])
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
