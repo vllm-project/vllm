@@ -280,7 +280,8 @@ guide: |
   ## Troubleshooting
 
   **OOM on small GPUs:**
-  Lower `--max-model-len` or `--gpu-memory-utilization`.
+  Lower `--max-model-len` or `--max-num-seqs`. On TPU, XPU and CPU, lowering
+  `--gpu-memory-utilization` also leaves more headroom.
 
   **EAGLE3 draft head not loading:**
   Upgrade vLLM to >= 0.9.0 — earlier releases don't support the EAGLE3 verification path.

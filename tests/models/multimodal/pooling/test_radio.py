@@ -173,8 +173,8 @@ def test_summary_idxs_all_use_summary_false_is_empty():
 
 def _native_state_dict_from_model(model: RadioModel) -> dict[str, torch.Tensor]:
     """Reverse-map a model's parameters onto native Transformers checkpoint keys
-    (``encoder.layer.N.*`` with split ``attention.attention.{query,key,value}``
-    and ``attention.output.dense``), so loading it must round-trip back to the
+    (`encoder.layer.N.*` with split `attention.attention.{query,key,value}`
+    and `attention.output.dense`), so loading it must round-trip back to the
     original parameters."""
     state_dict: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
