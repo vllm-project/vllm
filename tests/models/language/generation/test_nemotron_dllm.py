@@ -100,6 +100,38 @@ def test_arch_in_model_registry():
     assert "NemotronLabsDiffusionModel" in ModelRegistry.get_supported_archs()
 
 
+@pytest.mark.parametrize(
+    "architecture", ["NemotronLabsDiffusionModel", "NemotronLabsDiffusionForCausalLM"]
+)
+def test_lora_support(architecture):
+    from vllm.lora.utils import parse_fine_tuned_lora_name
+    from vllm.model_executor.models.interfaces import supports_lora
+    from vllm.model_executor.models.nemotron_dllm import (
+        NemotronLabsDiffusionForBlockDiffusion,
+    )
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    model_cls = ModelRegistry._try_load_model_cls(architecture)
+    assert model_cls is NemotronLabsDiffusionForBlockDiffusion
+    assert supports_lora(model_cls)
+    model_info = ModelRegistry._try_inspect_model_cls(architecture)
+    assert model_info is not None and model_info.supports_lora
+    assert model_cls.packed_modules_mapping == {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    # PEFT adapters trained on the HF checkpoint name the backbone `encoder.`.
+    mapper = (
+        NemotronLabsDiffusionForBlockDiffusion.hf_to_vllm_mapper.get_rename_mapper()
+    )
+    for module in ("self_attn.q_proj", "self_attn.o_proj", "mlp.down_proj"):
+        name, is_lora_a = parse_fine_tuned_lora_name(
+            f"base_model.model.encoder.layers.3.{module}.lora_A.weight", mapper
+        )
+        assert name == f"model.layers.3.{module}"
+        assert is_lora_a
+
+
 @pytest.mark.parametrize("flash_version", [None, 3])
 def test_attention_backend_supports_mixed_causality(flash_version):
     from types import SimpleNamespace
@@ -871,3 +903,237 @@ def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
         if temperature > 0:
             frequency = (canvas[row] == 1).float().mean()
             assert abs(frequency - distribution.probs[1]) < 0.03
+
+
+# ---------------------------------------------------------------------------
+# GPU + weights: a PEFT LoRA adapter matches the same adapter merged into the
+# weights, on the masked-diffusion and AR paths.
+# ---------------------------------------------------------------------------
+LORA_ALPHA = 16
+LORA_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+
+@pytest.fixture(scope="module", params=[8, 16], ids=["r8", "r16"])
+def lora_checkpoints(request, tmp_path_factory):
+    """Write a synthetic rank-r PEFT adapter (checkpoint `encoder.` names) and a
+    copy of the checkpoint with the same adapter merged into its weights."""
+    rank = request.param
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    src = (
+        MODEL_PATH
+        if os.path.isdir(MODEL_PATH)
+        else hf_api().snapshot_download(repo_id=MODEL_PATH)
+    )
+    adapter_dir = tmp_path_factory.mktemp(f"nemotron_dllm_lora_r{rank}")
+    merged_dir = tmp_path_factory.mktemp(f"nemotron_dllm_merged_r{rank}")
+    scale = LORA_ALPHA / rank
+    generator = torch.Generator().manual_seed(0)
+    adapter: dict[str, torch.Tensor] = {}
+    for name in sorted(os.listdir(src)):
+        path = os.path.realpath(os.path.join(src, name))
+        if not name.endswith(".safetensors"):
+            if os.path.isfile(path):
+                os.symlink(path, merged_dir / name)
+            continue
+        tensors = {}
+        with safe_open(path, framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118
+                weight = f.get_tensor(key)
+                module = key.removesuffix(".weight")
+                if key.endswith(".weight") and module.rsplit(".", 1)[-1] in (
+                    LORA_TARGETS
+                ):
+                    out_features, in_features = weight.shape
+                    lora_a = 0.01 * torch.randn(rank, in_features, generator=generator)
+                    lora_b = 0.01 * torch.randn(out_features, rank, generator=generator)
+                    lora_a, lora_b = lora_a.bfloat16(), lora_b.bfloat16()
+                    adapter[f"base_model.model.{module}.lora_A.weight"] = lora_a
+                    adapter[f"base_model.model.{module}.lora_B.weight"] = lora_b
+                    delta = scale * (lora_b.float() @ lora_a.float())
+                    weight = (weight.float() + delta).to(weight.dtype)
+                tensors[key] = weight.contiguous()
+        save_file(tensors, str(merged_dir / name), metadata={"format": "pt"})
+    num_layers = json.loads((merged_dir / "config.json").read_text())[
+        "num_hidden_layers"
+    ]
+    assert len(adapter) == 2 * len(LORA_TARGETS) * num_layers
+    save_file(adapter, str(adapter_dir / "adapter_model.safetensors"))
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "peft_type": "LORA",
+                "task_type": "CAUSAL_LM",
+                "base_model_name_or_path": MODEL_PATH,
+                "r": rank,
+                "lora_alpha": LORA_ALPHA,
+                "lora_dropout": 0.0,
+                "target_modules": list(LORA_TARGETS),
+                "bias": "none",
+                "fan_in_fan_out": False,
+                "use_rslora": False,
+                "use_dora": False,
+            }
+        )
+    )
+    return rank, str(adapter_dir), str(merged_dir)
+
+
+def _vllm_lora_forward(obj, token_ids, causal_flag, lora_request):
+    """`_vllm_manual_forward` with `lora_request` active on every token
+    (None = no adapter active) when the engine has LoRA enabled."""
+    runner = getattr(obj, "worker", obj).model_runner
+    if runner.lora_config is not None:
+        lora_id, requests = 0, set()
+        if lora_request is not None:
+            runner.add_lora(lora_request)
+            lora_id, requests = lora_request.lora_int_id, {lora_request}
+        mapping = (lora_id,) * len(token_ids)
+        runner._set_active_loras(mapping, mapping, requests)
+    return _vllm_manual_forward(obj, token_ids, causal_flag)
+
+
+def _run_lora_engine(
+    model,
+    hf_overrides,
+    prompt_ids,
+    ar_mode,
+    adapter_dir=None,
+    rank=None,
+    enforce_eager=True,
+):
+    """Logits of one forward (canvas positions under bidirectional attention
+    for diffusion, prompt positions under causal attention for AR) and greedy
+    tokens, without and (if `adapter_dir`) with the adapter."""
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+    from vllm.lora.request import LoRARequest
+
+    lora_kwargs: dict = {}
+    requests: dict = {"base": None}
+    if adapter_dir is not None:
+        lora_kwargs = dict(enable_lora=True, max_lora_rank=rank, max_loras=1)
+        requests["lora"] = LoRARequest("synthetic", 1, adapter_dir)
+    token_ids = list(prompt_ids)
+    if not ar_mode:
+        token_ids += [MASK_TOKEN_ID] * CANVAS_LENGTH
+    llm = LLM(
+        model=model,
+        dtype="bfloat16",
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        hf_overrides=hf_overrides,
+        attention_config={"backend": "TRITON_ATTN"},
+        trust_remote_code=True,
+        enforce_eager=enforce_eager,
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=0.6,
+        **lora_kwargs,
+    )
+    try:
+        assert llm.llm_engine.vllm_config.model_config.is_diffusion != ar_mode
+        results = {}
+        for tag, lora_request in requests.items():
+            logits = llm.llm_engine.collective_rpc(
+                partial(
+                    _vllm_lora_forward,
+                    token_ids=token_ids,
+                    causal_flag=ar_mode,
+                    lora_request=lora_request,
+                )
+            )[0]
+            if not ar_mode:
+                logits = logits[len(prompt_ids) :]
+            output = llm.generate(
+                TokensPrompt(prompt_token_ids=list(prompt_ids)),
+                SamplingParams(temperature=0.0, max_tokens=CANVAS_LENGTH),
+                lora_request=lora_request,
+            )[0].outputs[0]
+            results[tag] = (logits, list(output.token_ids))
+        return results
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        torch._dynamo.reset()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="module")
+def base_lora_results():
+    """Base-model results per mode, shared across adapter ranks."""
+    return {}
+
+
+@requires_gpu
+@requires_weights
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "cudagraph"])
+@pytest.mark.parametrize("ar_mode", [False, True], ids=["diffusion", "ar_mode"])
+def test_lora_matches_merged_weights(
+    monkeypatch,
+    record_property,
+    lora_checkpoints,
+    base_lora_results,
+    ar_mode,
+    enforce_eager,
+):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    rank, adapter_dir, merged_dir = lora_checkpoints
+    hf_overrides = {"ar_mode": True} if ar_mode else {}
+    prompt_ids = _prompt_ids(_load_tokenizer(), device="cpu")[0].tolist()
+
+    # enforce_eager=False serves the adapter through torch.compile and CUDA
+    # graphs.
+    run = partial(
+        _run_lora_engine,
+        hf_overrides=hf_overrides,
+        prompt_ids=prompt_ids,
+        ar_mode=ar_mode,
+        enforce_eager=enforce_eager,
+    )
+    with_lora = run(MODEL_PATH, adapter_dir=adapter_dir, rank=rank)
+    merged = run(merged_dir)["base"]
+    key = (ar_mode, enforce_eager)
+    if key not in base_lora_results:
+        base_lora_results[key] = run(MODEL_PATH)["base"]
+    plain = base_lora_results[key]
+
+    def max_diff(x, y):
+        return (x[0] - y[0]).abs().max().item()
+
+    def argmax_match(x, y):
+        return (x[0].argmax(-1) == y[0].argmax(-1)).float().mean().item()
+
+    adapter_vs_merged = max_diff(with_lora["lora"], merged)
+    adapter_effect = max_diff(merged, plain)
+    enable_lora_vs_plain = max_diff(with_lora["base"], plain)
+    summary = (
+        f"r{rank}: max|adapter - merged| {adapter_vs_merged:.4f}, "
+        f"max|merged - base| {adapter_effect:.4f}, "
+        f"max|base on --enable-lora engine - base| {enable_lora_vs_plain:.4f}"
+    )
+    record_property("lora_diffs", summary)
+
+    # The adapter must change the model, and the unmerged adapter must agree
+    # with the merged weights far more closely than with the base model.
+    assert argmax_match(merged, plain) < 1.0, summary
+    assert adapter_vs_merged < 0.25 * adapter_effect, summary
+    assert argmax_match(with_lora["lora"], merged) >= 0.9, summary
+    # Greedy generation through the scheduler with the adapter matches the
+    # merged model.
+    assert with_lora["lora"][1] == merged[1], summary
+    # Enabling LoRA does not change requests that use no adapter.
+    assert enable_lora_vs_plain == 0.0, summary
+    assert with_lora["base"][1] == plain[1], summary

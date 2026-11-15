@@ -45,7 +45,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
 
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 
 logger = init_logger(__name__)
 
@@ -138,7 +138,9 @@ class NemotronLabsDiffusionDecoderLayer(LlamaDecoderLayer):
         )
 
 
-class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuant):
+class NemotronLabsDiffusionForBlockDiffusion(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsQuant
+):
     """Ministral masked block-diffusion LM for vLLM.
 
     The backbone is a stock `LlamaModel` with Ministral parameters; the
@@ -153,6 +155,8 @@ class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuan
         }
     )
 
+    # LoRA covers the decoder linear layers. The untied `diffusion_head` is not
+    # an `lm_head`, so it takes no adapter.
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
