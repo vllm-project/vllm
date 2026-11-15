@@ -1927,8 +1927,8 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
 
     assert [step() for _ in range(5)] == [[48], [32], [16], [0], []]
 
-    # The step that finishes a prefill also samples the first token, and the
-    # report rides on that output rather than a separate one.
+    # The step that finishes a prefill samples the first token, so the report
+    # rides on that output.
     scheduler = create_scheduler(
         max_num_batched_tokens=64, max_model_len=256, enable_prefill_progress=True
     )
@@ -1988,9 +1988,8 @@ def test_preemption_reports_the_work_it_requeues_and_yields_to_a_newer_one():
     )
     assert reported(outputs) == [request.num_tokens]
 
-    # Let it run again so the second preemption has a running request, then
-    # resume it before the queued snapshot is flushed: the report it makes for
-    # itself replaces the older, larger one instead of following it.
+    # Let it run so the next preemption has a running request, then resume it
+    # before the queued snapshot flushes; its own report wins.
     scheduler.update_from_output(
         scheduler.schedule(),
         ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),

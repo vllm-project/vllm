@@ -1636,9 +1636,8 @@ async fn streaming_prefill_progress_survives_a_mixed_output() {
                                 })),
                                 ..request_output(&request.request_id, vec![], None)
                             },
-                            // The same output carries progress, tokens and the
-                            // finish reason, which is what the scheduler does once
-                            // a step produces output of its own.
+                            // One output, as the scheduler emits it: progress,
+                            // the token and the finish reason.
                             EngineCoreOutput {
                                 prefill_progress: Some(Box::new(PrefillProgress {
                                     request_id: request.request_id.clone(),
@@ -1694,8 +1693,7 @@ async fn streaming_prefill_progress_survives_a_mixed_output() {
     .await
     .expect("stream completion timeout");
     assert!(responses.iter().any(|response| response.prompt_info.is_some()));
-    // The frontend splits a merged core output into a progress frame and the
-    // text frame that follows it, so both have to arrive, in that order.
+    // The frontend splits that output, so the progress frame comes first.
     let terminal = responses
         .iter()
         .position(|response| {

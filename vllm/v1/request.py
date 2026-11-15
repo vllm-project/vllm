@@ -87,9 +87,8 @@ class Request:
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
-        # Prefill progress reporting: tokens left at the last report, and the
-        # interval between reports, fixed by the first one. ``None`` means the
-        # request has not reported yet.
+        # Prefill progress: tokens left at the last report, and the interval
+        # between reports. ``None`` means it has not reported yet.
         self.prefill_progress_left: int | None = None
         self.prefill_progress_step = 0
         self.priority = priority

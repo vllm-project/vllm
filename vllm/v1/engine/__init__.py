@@ -325,8 +325,7 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
-    # Remaining prefill work for this request, while it is prefilling.
-    # Appended last so `array_like` positional serialization stays compatible.
+    # Remaining prefill work. Appended last for `array_like` compatibility.
     prefill_progress: PrefillProgress | None = None
 
     @property

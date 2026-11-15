@@ -82,12 +82,11 @@ impl OutputSender {
     /// delivered immediately, the latter together with any held-back outputs.
     pub fn send(&mut self, output: EngineCoreStreamOutput) {
         let finished = output.finished();
-        // Holding a progress-only output back would keep the worker's own view of
-        // its remaining work from the consumer until the next token arrives.
+        // Holding a progress-only output back would keep the worker's view of
+        // its remaining work from the consumer.
         let progress_only =
             output.output.prefill_progress.is_some() && output.output.new_token_ids.is_empty();
-        // Progress must not take the first-output credit: the first token is
-        // still owed an immediate delivery of its own.
+        // Progress does not take the first-output credit.
         if progress_only {
             self.flush();
             self.deliver(Delivery::One(output));

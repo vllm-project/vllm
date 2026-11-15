@@ -774,10 +774,8 @@ class OutputProcessor:
                     reqs_to_abort.append(req_id)
                 continue
 
-            # A frame that carries only prefill progress has no token, pooling or
-            # terminal event. Counting it would record a first token that has not
-            # been produced, and falling through would end the prefill bookkeeping
-            # below while a pooling request has no detokenizer to reach.
+            # A progress-only frame has no token, pooling or terminal event, so
+            # it must not count as one.
             if (
                 engine_core_output.prefill_progress is not None
                 and not engine_core_output.new_token_ids

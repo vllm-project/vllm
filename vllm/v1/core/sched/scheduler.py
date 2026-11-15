@@ -479,8 +479,7 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
-        # Progress waiting to go out, keyed by request so a newer report
-        # replaces an older one. Preemptions write here too.
+        # Pending reports by request id; a newer report replaces an older one.
         self._pending_prefill_progress: dict[str, tuple[int, PrefillProgress]] = {}
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
@@ -1855,8 +1854,7 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
-        # The work this preemption puts back is reported before the request is
-        # scheduled again, so a consumer never prices it from the old value.
+        # Report the requeued work now, before the request runs again.
         if (
             self.scheduler_config.enable_prefill_progress
             and request.prefill_progress_step > 0
@@ -2279,9 +2277,8 @@ class Scheduler(SchedulerInterface):
                 -(-remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST),
             )
         if remaining <= 0:
-            # Reaching zero is a state change, not a sample: it is never
-            # throttled. ``step`` stays set so a later preemption still knows
-            # this request was reporting.
+            # Zero is a state change, never throttled. ``step`` stays set so a
+            # later preemption still knows this request was reporting.
             request.prefill_progress_left = None
             return PrefillProgress(
                 request_id=request.request_id, remaining_prefill_tokens=0
@@ -2553,8 +2550,7 @@ class Scheduler(SchedulerInterface):
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if request.prefill_progress_left is not None:
                         request.prefill_progress_left = None
-                        # Attach the final zero to this step's terminal output;
-                        # a step without one flushes it as its own frame.
+                        # Ride on the terminal output when there is one.
                         pending_progress[req_id] = (
                             request.client_index,
                             PrefillProgress(
