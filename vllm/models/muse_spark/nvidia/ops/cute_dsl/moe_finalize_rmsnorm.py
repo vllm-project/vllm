@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CuTeDSL fused MoE finalize with MuseSpark1x's post-expert RMSNorm."""
+"""CuTeDSL fused MoE finalize with Muse Spark's post-expert RMSNorm."""
 
 import operator
 from typing import Any
@@ -398,7 +398,7 @@ def moe_finalize_with_rmsnorm(
     start_expert: int = 0,
     num_local_experts: int = 0,
 ) -> None:
-    """Unpermute, norm each expert's row, and reduce into ``output``."""
+    """Unpermute, norm each expert's row, and reduce into `output`."""
     assert HAS_CUTEDSL, "the fused MoE finalize requires nvidia-cutlass-dsl"
     num_tokens, hidden_dim = output.shape
     if num_tokens == 0:

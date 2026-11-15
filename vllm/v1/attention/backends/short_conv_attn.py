@@ -40,6 +40,11 @@ class ShortConvAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # causal_conv1d computes each token from its own window only.
+        return True
+
 
 @dataclass
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
@@ -105,6 +110,11 @@ class PleShortConvAttentionBackend(ShortConvAttentionBackend):
     def get_builder_cls() -> type["PleShortConvAttentionMetadataBuilder"]:
         return PleShortConvAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The dilated PLE conv path has not been validated.
+        return False
+
 
 class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     metadata_cls = PleShortConvAttentionMetadata
@@ -125,7 +135,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_spec = self.num_spec_tokens
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
+            vllm_config, kv_cache_spec, self.checkpoint_alignment
         )
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -288,6 +298,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             m.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
 
         if query_start_loc.device.type == "cpu":
