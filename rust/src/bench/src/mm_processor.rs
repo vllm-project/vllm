@@ -128,6 +128,29 @@ pub struct MmProcessorArgs {
     #[arg(long)]
     pub chat_template: Option<String>,
 
+    /// Type of multimodal processor cache. Only `shm` (POSIX shared memory
+    /// FIFO shared with the engine workers) is implemented.
+    #[arg(long)]
+    pub mm_processor_cache_type: Option<String>,
+
+    /// The size (in GiB) of the shm multimodal processor cache.
+    #[arg(long, default_value_t = 4.0, allow_negative_numbers = true)]
+    pub mm_processor_cache_gb: f64,
+
+    /// Size limit (in MiB) for each cached object.
+    #[arg(long, default_value_t = 128)]
+    pub mm_shm_cache_max_object_size_mb: u64,
+
+    /// Reuse one shared image per bucket across requests so the processor
+    /// cache hits.
+    #[arg(long, default_value_t = false)]
+    pub random_mm_share_image: bool,
+
+    /// Emit a stable per-bucket UUID with shared images, so cache hits skip
+    /// even media fetch/decode. Requires --random-mm-share-image.
+    #[arg(long, default_value_t = false)]
+    pub random_mm_share_image_uuid: bool,
+
     /// Managed headless-engine options.
     #[command(flatten)]
     pub engine: ManagedEngineArgs,
@@ -144,6 +167,27 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
              a local managed engine"
         );
     }
+    if args.random_mm_share_image_uuid && !args.random_mm_share_image {
+        anyhow::bail!("--random-mm-share-image-uuid requires --random-mm-share-image");
+    }
+
+    // The shm cache's segment must exist before the engine's workers attach.
+    let mm_cache = match args.mm_processor_cache_type.as_deref() {
+        Some("shm") => {
+            let cache =
+                vllm_mm_cache::MmProcessorShmCache::create(vllm_mm_cache::MmShmCacheConfig {
+                    shm_name: vllm_mm_cache::MmShmCacheConfig::unique_shm_name(),
+                    data_buffer_size: (args.mm_processor_cache_gb * (1u64 << 30) as f64) as usize,
+                    max_object_size: (args.mm_shm_cache_max_object_size_mb as usize) << 20,
+                })
+                .context("failed to create the shm multi-modal processor cache")?;
+            Some(Arc::new(cache))
+        }
+        Some(other) => anyhow::bail!(
+            "unsupported --mm-processor-cache-type `{other}`: only `shm` is implemented"
+        ),
+        None => None,
+    };
 
     // Spawn the managed headless Python engine (real weights, real encoder).
     let handshake_port = args
@@ -154,6 +198,23 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
     if args.trust_remote_code {
         python_args.push("--trust-remote-code".to_string());
     }
+    if mm_cache.is_some() {
+        python_args.extend([
+            "--mm-processor-cache-type".to_string(),
+            "shm".to_string(),
+            "--mm-processor-cache-gb".to_string(),
+            args.mm_processor_cache_gb.to_string(),
+            "--mm-shm-cache-max-object-size-mb".to_string(),
+            args.mm_shm_cache_max_object_size_mb.to_string(),
+        ]);
+    }
+    let mut envs = ManagedEngineConfig::rust_frontend_envs();
+    if let Some(cache) = &mm_cache {
+        envs.push((
+            "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME".to_string(),
+            cache.shm_name().to_string(),
+        ));
+    }
     let engine_config = ManagedEngineConfig {
         python: args.engine.python.clone(),
         model: args.model.clone(),
@@ -162,6 +223,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         data_parallel_size: args.engine.data_parallel_size,
         client_handshake_address: None,
         python_args,
+        envs,
     };
     eprintln!(
         "Spawning managed headless engine: python={} model={} data_parallel_size={}",
@@ -171,7 +233,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         .await
         .context("failed to start managed Python headless engine")?;
 
-    let result = run_mm_processor_with_engine(args, handshake_port, &timing).await;
+    let result = run_mm_processor_with_engine(args, handshake_port, &timing, mm_cache).await;
     let shutdown_result = engine
         .shutdown(ENGINE_SHUTDOWN_TIMEOUT)
         .await
@@ -185,6 +247,7 @@ async fn run_mm_processor_with_engine(
     args: MmProcessorArgs,
     handshake_port: u16,
     timing: &RequestTimingStats,
+    mm_cache: Option<Arc<vllm_mm_cache::MmProcessorShmCache>>,
 ) -> Result<()> {
     let range_ratio =
         RangeRatio::parse(&args.random_range_ratio).context("invalid --random-range-ratio")?;
@@ -205,6 +268,7 @@ async fn run_mm_processor_with_engine(
         &args.model,
         LoadModelBackendsOptions {
             chat_template: args.chat_template.clone(),
+            mm_processor_cache: mm_cache.clone(),
             ..LoadModelBackendsOptions::default()
         },
     )
@@ -239,6 +303,9 @@ async fn run_mm_processor_with_engine(
     })
     .await
     .context("failed to connect to engine core")?;
+    if let Some(cache) = &mm_cache {
+        cache.set_n_readers(client.world_size() as u32);
+    }
 
     let chat = ChatLlm::new(
         TextLlm::new(EngineCoreLlm::new(client), backends.text_backend),
@@ -355,6 +422,8 @@ fn generate_dataset(
         limit,
         buckets,
         false,
+        args.random_mm_share_image,
+        args.random_mm_share_image_uuid,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -369,8 +438,12 @@ fn build_chat_request(sample: &SampleRequest) -> Result<ChatRequest> {
     let mut parts = vec![ChatContentPart::text(sample.prompt.as_ref())];
     if let Some(mm_items) = &sample.multi_modal_content {
         for fragment in mm_items.iter() {
-            let url = extract_image_url(fragment)?;
-            parts.push(ChatContentPart::image_url(url));
+            let (url, uuid) = extract_image_url(fragment)?;
+            parts.push(ChatContentPart::ImageUrl {
+                image_url: url,
+                detail: None,
+                uuid,
+            });
         }
     }
     request.messages = vec![ChatMessage::user(ChatContent::from(parts))];
@@ -379,7 +452,7 @@ fn build_chat_request(sample: &SampleRequest) -> Result<ChatRequest> {
 
 /// Extract the `image_url.url` string from a pre-serialized content fragment
 /// (`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}`).
-fn extract_image_url(fragment: &str) -> Result<String> {
+fn extract_image_url(fragment: &str) -> Result<(String, Option<String>)> {
     let value: serde_json::Value = serde_json::from_str(fragment)
         .with_context(|| format!("invalid multimodal fragment: {fragment}"))?;
     let url = value
@@ -387,7 +460,8 @@ fn extract_image_url(fragment: &str) -> Result<String> {
         .and_then(|v| v.get("url"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| BenchError::Config("fragment missing image_url.url".to_string()))?;
-    Ok(url.to_string())
+    let uuid = value.get("uuid").and_then(|v| v.as_str()).map(str::to_string);
+    Ok((url.to_string(), uuid))
 }
 
 fn parse_percentiles(raw: &str) -> Result<Vec<f64>> {

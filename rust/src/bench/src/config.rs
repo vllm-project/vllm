@@ -217,6 +217,10 @@ pub struct BenchConfig {
     /// Datasets that support it pre-build the chat `messages` array
     /// (text + multimodal parts) instead of prompt + separate mm content.
     pub enable_multimodal_chat: bool,
+    /// Reuse one shared image per bucket so a frontend processor cache hits.
+    pub random_mm_share_image: bool,
+    /// Emit stable per-bucket UUIDs with shared images (skip fetch on hits).
+    pub random_mm_share_image_uuid: bool,
     /// LoRA adapter names. None = no LoRA routing (use --model directly).
     /// Stored as Arc<str> so per-request override is a cheap clone.
     pub lora_modules: Option<Vec<Arc<str>>>,
@@ -884,6 +888,8 @@ impl BenchConfig {
             random_mm_limit,
             random_mm_buckets,
             enable_multimodal_chat: args.enable_multimodal_chat,
+            random_mm_share_image: args.random_mm_share_image,
+            random_mm_share_image_uuid: args.random_mm_share_image_uuid,
             lora_modules,
             lora_assignment: args.lora_assignment,
         })

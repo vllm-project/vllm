@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
 /// A bucket key: (height, width, num_frames). num_frames=1 means image, >1 means video.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MmBucketKey {
     pub height: u32,
     pub width: u32,
@@ -185,7 +186,16 @@ const IMG_JSON_SUFFIX: &str = r#""}}"#;
 ///
 /// The base64 data is written directly into the final string — no intermediate
 /// String or format!() copy.
-fn generate_random_image(width: u32, height: u32, rng: &mut StdRng) -> Result<Arc<str>> {
+///
+/// With `uuid`, the fragment carries a part-level `"uuid"` field so the
+/// frontend can serve the item from its processor cache without even
+/// fetching or decoding it.
+fn generate_random_image(
+    width: u32,
+    height: u32,
+    rng: &mut StdRng,
+    uuid: Option<&str>,
+) -> Result<Arc<str>> {
     let pixel_count = (width as usize) * (height as usize) * 3;
     let mut pixels = vec![0u8; pixel_count];
     rng.fill(pixels.as_mut_slice());
@@ -201,15 +211,22 @@ fn generate_random_image(width: u32, height: u32, rng: &mut StdRng) -> Result<Ar
 
     let jpeg_bytes = buf.into_inner();
 
-    // Pre-compute exact output size: prefix + base64_len + suffix
-    let b64_len = jpeg_bytes.len().div_ceil(3) * 4;
-    let total_len = IMG_JSON_PREFIX.len() + b64_len + IMG_JSON_SUFFIX.len();
-
     // Single allocation: write base64 directly into the JSON fragment string
-    let mut json_fragment = String::with_capacity(total_len);
+    let b64_len = jpeg_bytes.len().div_ceil(3) * 4;
+    let mut json_fragment = String::with_capacity(IMG_JSON_PREFIX.len() + b64_len + 64);
     json_fragment.push_str(IMG_JSON_PREFIX);
     base64::engine::general_purpose::STANDARD.encode_string(&jpeg_bytes, &mut json_fragment);
-    json_fragment.push_str(IMG_JSON_SUFFIX);
+    match uuid {
+        // `{"type":"image_url","image_url":{"url":"..."},"uuid":"<uuid>"}`:
+        // the uuid sits at the content-part level, matching the server's
+        // `ContentPart::ImageUrl` shape.
+        Some(uuid) => {
+            json_fragment.push_str(r#""},"uuid":""#);
+            json_fragment.push_str(uuid);
+            json_fragment.push_str(r#""}"#);
+        }
+        None => json_fragment.push_str(IMG_JSON_SUFFIX),
+    }
 
     Ok(Arc::from(json_fragment))
 }
@@ -283,7 +300,7 @@ fn sample_mm_items(
         } else {
             image_count += 1;
         }
-        result.push(key.clone());
+        result.push(*key);
     }
 
     result
@@ -307,6 +324,8 @@ pub fn generate_random_mm_dataset(
     limit: &MmLimitPerPrompt,
     buckets: &[(MmBucketKey, f64)],
     enable_multimodal_chat: bool,
+    share_image: bool,
+    share_uuid: bool,
 ) -> Result<Vec<SampleRequest>> {
     if !(0.0..=1.0).contains(&num_mm_items_range_ratio) {
         return Err(BenchError::Config(
@@ -427,6 +446,29 @@ pub fn generate_random_mm_dataset(
         .collect();
     let prompts = prompts?;
 
+    // --random-mm-share-image: generate one image per bucket up front and
+    // reuse it for every item, so the frontend processor cache hits. Images
+    // are seeded with a constant so the warmup batch primes the measured
+    // batch's cache entries.
+    let shared_images: HashMap<MmBucketKey, Arc<str>> = if share_image {
+        buckets
+            .iter()
+            .filter(|(_, prob)| *prob > 0.0)
+            .enumerate()
+            .map(|(i, (key, _))| {
+                let mut bucket_rng = StdRng::seed_from_u64(0xC0FFEE + i as u64);
+                let uuid = share_uuid.then(|| format!("mm-bench-bucket{i}"));
+                let image =
+                    generate_random_image(key.width, key.height, &mut bucket_rng, uuid.as_deref())
+                        .expect("Image generation should not fail");
+                (*key, image)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let shared_images = &shared_images;
+
     // Generate images for each request (parallel per request)
     // Each request gets its own RNG seeded deterministically.
     let rid_prefix = request_id_prefix.to_string();
@@ -438,9 +480,10 @@ pub fn generate_random_mm_dataset(
                 StdRng::seed_from_u64(seed.wrapping_add(i as u64).wrapping_add(0xBEEF));
             let mm_items: Vec<Arc<str>> = mm_configs[i]
                 .iter()
-                .map(|key| {
-                    generate_random_image(key.width, key.height, &mut item_rng)
-                        .expect("Image generation should not fail")
+                .map(|key| match shared_images.get(key) {
+                    Some(shared) => shared.clone(),
+                    None => generate_random_image(key.width, key.height, &mut item_rng, None)
+                        .expect("Image generation should not fail"),
                 })
                 .collect();
 
@@ -643,7 +686,7 @@ mod tests {
     #[test]
     fn test_generate_random_image() {
         let mut rng = StdRng::seed_from_u64(42);
-        let result = generate_random_image(64, 64, &mut rng).unwrap();
+        let result = generate_random_image(64, 64, &mut rng, None).unwrap();
         // Result is a pre-serialized JSON fragment
         assert!(
             result
