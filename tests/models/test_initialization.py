@@ -230,7 +230,11 @@ def can_initialize(
         kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
-        if model_arch == "Glm5NextForConditionalGeneration":
+        if model_arch in (
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
+            "Glm5NextMTPModel",
+        ):
             kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
         LLM(
