@@ -29,7 +29,7 @@ Which hits need a cache segment in RL:
 |---|---|---|
 | C0 | No cache; cap hits at `aux_start` and recompute | Loses prefix sharing: every turn recomputes the context it could have hit; creates second computations |
 | C1 | Engine-local block-row cache allocated and evicted with the KV; blocks missing from the session written at request end | Exact; ~1% of the KV for R3 on DeepSeek-V4.1-Flash; ~54 GB raw for the indexer per engine |
-| C2 | R3 as an extra KV-cache layer (#64383) | "KV hit ⇒ rows present" across KV tiers including offload; 0.21% of KV capacity; needs a host group with one slot per token |
+| C2 | R3 as an extra KV-cache layer | "KV hit ⇒ rows present" across KV tiers including offload; 0.21% of KV capacity; needs a host group with one slot per token. Not adopted: cannot hold the indexer (~10 KB/token) or hidden states, and still needs a separate delivery path |
 | C3 | Store keyed by global block hash (#57968) | One copy, but per-batch release loses rows still shared, and pool pressure drops them |
 | C6 | **The delivery pool doubles as the session's cache**: a hit is allowed only up to what the session already published | **Chosen.** No extra memory, works for the indexer too. Cases 1–3 are covered; case 4 is truncated, so each session computes a shared prefix once itself |
 
