@@ -596,6 +596,16 @@ COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link benchmarks /app/vllm/benchmarks
 COPY --link examples /app/vllm/examples
+# amd_kernels: the FlyDSL kernels MiniMax-M3.1 runs on gfx950 where installed
+# (vllm/models/minimax_m3/amd/akr_config.py). Pure Python and not on PyPI: pinned
+# by a tag of its repository, as the stack pins AITER by AITER_BRANCH.
+# TODO: amd_kernels needs FlyDSL >= 0.5.0, but the stack's AITER (v0.1.29) pins
+# flydsl==0.4.2; AITER main pins 0.5.0. Move AITER_BRANCH to its first release
+# with 0.5.0.
+ARG AMD_KERNELS_REPO="https://github.com/Inferact/amd-kernels.git"
+ARG AMD_KERNELS_TAG="v20261114.00+fd233ef"
+RUN pip install --no-cache-dir --no-deps \
+    "amd-kernels @ git+${AMD_KERNELS_REPO}@${AMD_KERNELS_TAG}"
 ARG CI_ARCH
 LABEL ai.vllm.rocm.ci-arch=${CI_ARCH}
 ARG VLLM_VERSION
