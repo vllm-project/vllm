@@ -61,3 +61,11 @@ async def kv_event_sources(raw_request: Request):
     """KV-event publisher config per DP rank; empty on render-only servers."""
     client: EngineClient | None = raw_request.app.state.engine_client
     return client.get_kv_event_sources() if client is not None else {}
+
+
+@router.get("/kv_identity")
+async def kv_identity(raw_request: Request):
+    """KV identity and its components per DP rank; empty on render-only
+    servers."""
+    client: EngineClient | None = raw_request.app.state.engine_client
+    return client.get_kv_identities() if client is not None else {}
