@@ -11,18 +11,18 @@ parser reads ATEM markup out of those channels.
 Five areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
-     ``<atem:invoke>`` echoed inside reasoning must never become a call);
+     `<atem:invoke>` echoed inside reasoning must never become a call);
   2. the reasoning -> tool-parser handoff, which regressed once by returning
-     ``content=None`` and starving the tool parser;
-  3. channel routing: ``to=commentary`` is content, a recipient-less
-     ``<|message|>`` is reasoning, ``to=developer`` is dropped, and a tool
-     header written without the closing ``<|eom|>`` still ends the reasoning;
+     `content=None` and starving the tool parser;
+  3. channel routing: `to=commentary` is content, a recipient-less
+     `<|message|>` is reasoning, `to=developer` is dropped, and a tool
+     header written without the closing `<|eom|>` still ends the reasoning;
   4. streaming, where markers routinely straddle chunk boundaries, plus
-     truncation isolation for an unterminated ``to=self`` block;
+     truncation isolation for an unterminated `to=self` block;
   5. tool-name normalization against the tools registered on the request.
 
 These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_parse_delta.py``.
+a real tokenizer live in `test_muse_parse_delta.py`.
 """
 
 import json
@@ -38,7 +38,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
 from vllm.tool_parsers import schema_types
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
-from vllm.tool_parsers.muse_tool_parser import MuseToolParser
+from vllm.tool_parsers.muse_tool_parser import (
+    _NAME_RE,
+    _PARAM_RE,
+    MuseToolParser,
+)
 
 R: MuseReasoningParser
 T: MuseToolParser
@@ -80,7 +84,7 @@ _NO_REQ = cast(ChatCompletionRequest, None)
 
 
 def _req(*names: str) -> ChatCompletionRequest:
-    """A request with ``names`` registered as tools."""
+    """A request with `names` registered as tools."""
     return cast(
         ChatCompletionRequest,
         SimpleNamespace(
@@ -90,7 +94,7 @@ def _req(*names: str) -> ChatCompletionRequest:
 
 
 def _call(name):
-    """One tool-call turn invoking ``name``."""
+    """One tool-call turn invoking `name`."""
     return (
         f"<|start|>assistant to={name}<|message|>"
         f'<atem:function_calls>\n<atem:invoke name="{name}">\n'
@@ -100,6 +104,66 @@ def _call(name):
 
 
 # ---------------------------------------------------------------- tool calls
+
+
+def test_attribute_scan_stops_at_the_tag_boundary():
+    """A repeated open tag must not restart the attribute search per tag."""
+    assert _NAME_RE.match('<atem:invoke name="f"') is not None
+    for n in (2, 10, 100, 1000):
+        assert _NAME_RE.match("<atem:invoke " * n + 'name="f"') is None
+        assert (
+            _PARAM_RE.match("<atem:parameter " * n + 'name="k">v</atem:parameter>')
+            is None
+        )
+
+    raw = (
+        "<|start|>assistant to=weather.get<|message|>"
+        + "<atem:invoke " * 4000
+        + "</atem:invoke><|eot|>"
+    )
+    assert not MuseToolParser.extract_tool_calls(T, raw, _NO_REQ).tools_called
+
+
+def test_streaming_parses_once_per_completed_invoke(monkeypatch):
+    """Streaming parses once per completed invoke, not on every delta."""
+    request = ChatCompletionRequest(model="muse", messages=[])
+    tail = (
+        "<|start|>assistant to=read.read<|message|><atem:function_calls>\n"
+        '<atem:invoke name="read.read">\n'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+    real = MuseToolParser._parse_tool_calls
+    parses = 0
+
+    def counting(cls, *args, **kwargs):
+        nonlocal parses
+        parses += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(MuseToolParser, "_parse_tool_calls", classmethod(counting))
+
+    for pad in (0, 500, 5000):
+        for chunk in (1, 4, 17):
+            raw = " to=self<|message|>" + "." * pad + "<|eom|>" + tail
+            parses = 0
+            parser = MuseToolParser(object())
+            names, prev, i = [], "", 0
+            while i < len(raw):
+                cur = raw[: i + chunk]
+                delta = MuseToolParser.extract_tool_calls_streaming(
+                    parser, prev, cur, cur[len(prev) :], [], [], [], request
+                )
+                if delta is not None and delta.tool_calls:
+                    names += [_fn_of(tc)[0] for tc in delta.tool_calls]
+                prev = cur
+                i += chunk
+            deltas = len(raw) // chunk + 1
+            assert names == ["read.read"], f"pad={pad} chunk={chunk}: {names}"
+            assert parses == 1, (
+                f"pad={pad} chunk={chunk}: parsed {parses}x over {deltas} deltas"
+            )
 
 
 def test_single_tool_call_after_reasoning():
@@ -329,7 +393,7 @@ def test_missing_eom_before_tool_header_keeps_tool_call():
 
 
 def _stream(raw: str, chunk: int):
-    """Feed ``raw`` incrementally in ``chunk``-char steps through BOTH streaming
+    """Feed `raw` incrementally in `chunk`-char steps through BOTH streaming
     parsers; return (reasoning, content, tool_calls)."""
     reasoning, content, toolcalls = [], [], []
     prev = ""
@@ -522,8 +586,10 @@ def test_named_custom_tool_choice_skips_structured_outputs():
         ("<|message|>Thinking.<|eot|>", "Thinking.", None),
         ("to=developer<|message|>internal note<|eom|>", None, None),
         (
-            "to=commentary<|message|>Checking. "
-            "to=developer<|message|>internal note<|eom|>",
+            (
+                "to=commentary<|message|>Checking. "
+                "to=developer<|message|>internal note<|eom|>"
+            ),
             None,
             "Checking. ",
         ),
@@ -533,8 +599,10 @@ def test_named_custom_tool_choice_skips_structured_outputs():
             "Done.",
         ),
         (
-            "to=self<|message|>First.<|eom|>"
-            "<|start|>assistant<|message|>Second.<|eot|>",
+            (
+                "to=self<|message|>First.<|eom|>"
+                "<|start|>assistant<|message|>Second.<|eot|>"
+            ),
             "First.Second.",
             None,
         ),
@@ -633,7 +701,7 @@ _SPECIALS = ["<|message|>", "<|start|>", "<|eom|>", "<|eot|>"]
 
 
 class _CharTokenizer:
-    """Char-level stub: specials are single ids, other chars are ``ord()``."""
+    """Char-level stub: specials are single ids, other chars are `ord()`."""
 
     def __init__(self):
         self._id_of = {s: 200100 + i for i, s in enumerate(_SPECIALS)}

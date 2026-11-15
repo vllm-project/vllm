@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 index top-k (FlyDSL) against AITER's ``pa_sparse_block_topk``
+"""MiniMax-M3 index top-k (FlyDSL) against AITER's `pa_sparse_block_topk`
 block ids, bit for bit, on realistic and adversarial decode and prefill rows."""
 
 import math
@@ -71,7 +71,7 @@ def _scores(kind, heads, rows, width, nblk, gen):
 
 
 def _topk_out(heads, rows, pad):
-    """``topk_idx`` and the tensor compared: with ``pad`` a view (non-zero row
+    """`topk_idx` and the tensor compared: with `pad` a view (non-zero row
     start, larger head stride) of a larger persistent buffer, compared whole
     (nothing outside the view is written)."""
     if not pad:

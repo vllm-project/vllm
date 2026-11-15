@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm._custom_ops import biased_topk_cpu, hash_topk_cpu
+from vllm._cpu_ops import biased_topk_cpu, hash_topk_cpu
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -91,14 +91,14 @@ def _sqrtsoftplus_bias_topk(
     selection uses a bias-corrected score (weight + correction_bias), but
     the returned weight for each selected expert is the *unbiased* value
     (the "noaux_tc" pattern -- bias steers selection only). Always
-    renormalizes selected weights to sum to ``routed_scaling_factor``,
+    renormalizes selected weights to sum to `routed_scaling_factor`,
     matching the reference Triton kernel
     (vllm/model_executor/layers/fused_moe/router/dsv4_topk.py).
 
-    When ``hash_indices_table`` is given (hash-routed layers), expert
-    selection instead comes from ``hash_indices_table[input_ids]`` --
+    When `hash_indices_table` is given (hash-routed layers), expert
+    selection instead comes from `hash_indices_table[input_ids]` --
     the bias-corrected-score topk is skipped entirely, matching the CUDA
-    reference kernel (``dsv4HashTopkSoftplusSqrt``).
+    reference kernel (`dsv4HashTopkSoftplusSqrt`).
 
     Backed by the ported SGLang AVX512 kernels `biased_topk_cpu` (the
     correction-bias path) and `hash_topk_cpu` (the hash-routed-layer path);
@@ -236,8 +236,23 @@ class CPURouter(BaseRouter):
                 hash_indices_table=self._hash_indices_table,
             )
         elif self.custom_routing_function is None:
-            assert self.scoring_func == "softmax"
-            return _softmax_topk(router_logits, self.top_k, self.renormalize)
+            if self.scoring_func == "softmax":
+                return _softmax_topk(router_logits, self.top_k, self.renormalize)
+            elif self.scoring_func == "sigmoid":
+                # One expert group makes the group masking a no-op, leaving the
+                # plain sigmoid top-k that MiniMax2 routing asks for.
+                return _grouped_topk(
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=1,
+                    topk_group=1,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    e_score_correction_bias=self.e_score_correction_bias,
+                )
+            else:
+                raise ValueError(f"Unsupported scoring function: {self.scoring_func}")
         else:
             topk_weights, topk_ids = self.custom_routing_function(
                 hidden_states=hidden_states,
@@ -268,11 +283,11 @@ def select_experts(
     hash_indices_table: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Routing helper for the CPU MoE experts that still use the monolithic
-    contract and so must compute routing themselves from ``router_logits``
+    contract and so must compute routing themselves from `router_logits`
     (the zentorch-accelerated path and the ARM W4A8 dynamic-quant kernel,
     kept monolithic since zentorch/Arm hardware isn't available to validate
     a modular migration here). Modular CPU experts get routing from
-    ``CPURouter`` instead; this is a thin wrapper around the same logic for
+    `CPURouter` instead; this is a thin wrapper around the same logic for
     the two classes that can't use it.
     """
     router = CPURouter(
