@@ -209,6 +209,7 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
         aux_hidden_state_layers=(),
         _mtp_hidden_buffer=None,
         _run_layers=run_layers,
+        _link_mono=lambda: None,
         _collapse=lambda hidden, *args: hidden,
         norm=lambda hidden: hidden,
     )
