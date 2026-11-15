@@ -3271,6 +3271,50 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_without_kv_connector():
 
 
 @pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_warns_once_when_ignored(
+    caplog, disable_log_dedup
+):
+    """Dropping forwarded ids is a behavior change, so it is not silent.
+
+    A deployment that upgrades goes from reusing the ids to re-tokenizing, with
+    no error to notice it by. The warning names the flag that restores reuse and
+    is emitted once, not per request.
+    """
+    serving_chat = _build_serving_chat(_build_mock_engine())
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+
+    with caplog.at_level("WARNING", logger="vllm.renderers.online_renderer"):
+        await serving_chat.render_chat_request(request)
+
+    assert "--enable-prompt-token-ids" in caplog.text
+    assert "no KV transfer connector" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_opt_in_is_not_warned_about(
+    caplog, disable_log_dedup
+):
+    """A server that opted in is honoring the ids, so there is nothing to warn."""
+    serving_chat = _build_serving_chat(
+        _build_mock_engine(), enable_prompt_token_ids=True
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+
+    with caplog.at_level("WARNING", logger="vllm.renderers.online_renderer"):
+        await serving_chat.render_chat_request(request)
+
+    assert "--enable-prompt-token-ids" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_chat_kv_transfer_prompt_token_ids_opt_in_without_kv_connector():
     """An explicit server opt-in preserves direct token-id reuse."""
     mock_engine = _build_mock_engine()

@@ -164,10 +164,12 @@ def _reused_prompt_token_ids(
     if getattr(renderer.config, "kv_transfer_config", None) is None and not (
         enable_prompt_token_ids
     ):
-        logger.debug(
+        logger.warning_once(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "the server has no KV transfer connector and "
-            "--enable-prompt-token-ids is not set, so messages are rendered instead."
+            "--enable-prompt-token-ids is not set, so messages are rendered "
+            "instead. Set --enable-prompt-token-ids to keep reusing ids "
+            "forwarded by a trusted caller."
         )
         return None
     # bool is an int subclass, hence the exact type check.

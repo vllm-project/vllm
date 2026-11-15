@@ -79,6 +79,9 @@ decode = client.chat.completions.create(
 
 If `messages` has non-text content, or `echo` or `return_prompt_text` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. On a server without a KV connector, the ids and any accompanying `prompt_features` are also ignored by default and `messages` is rendered. Set the frontend flag `--enable-prompt-token-ids` to honor the ids without a connector only when callers are trusted to supply ids matching the model tokenizer and rendered prompt. When reuse is enabled, `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
+!!! warning "Behavior change for aggregated servers without a KV connector"
+    Forwarded `prompt_token_ids` used to be honored on any server. They are now ignored unless the server has a KV transfer connector or is started with `--enable-prompt-token-ids`. A deployment that forwards ids to an aggregated server, such as a KV-cache-aware router that tokenizes once, goes back to rendering and tokenizing `messages` after the upgrade. The request still succeeds, so the only signal is a one-time warning naming `--enable-prompt-token-ids`. Start the server with that flag to keep reusing the ids.
+
 ## Generate API output modes
 
 When the prefill and decode stages use the [Generate API](../serving/online_serving/token_in_token_out.md) (`/inference/v1/generate`), only the decode response reaches the client, so set `output_mode` on the decode request only. A proxy that reuses the client's request body for the prefill request must reset `output_mode` to `tokens` there. A prefill instance started with `--tokens-only` has no tokenizer and rejects `output_mode: "text"` with a 400.
