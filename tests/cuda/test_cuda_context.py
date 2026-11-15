@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 
-from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
+
+from ..utils import create_new_process_for_each_test
 
 
 def check_cuda_context():
