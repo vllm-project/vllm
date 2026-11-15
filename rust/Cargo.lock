@@ -5776,6 +5776,7 @@ dependencies = [
  "expect-test",
  "libc",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
