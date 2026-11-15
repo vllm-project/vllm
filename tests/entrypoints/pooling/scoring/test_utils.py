@@ -5,7 +5,7 @@ import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import TokenizersBackend
 
-from vllm.entrypoints.pooling.scoring.typing import ScoreInput
+from vllm.entrypoints.pooling.scoring.types import ScoreInput
 from vllm.entrypoints.pooling.scoring.utils import (
     truncate_text_to_tokens,
     validate_score_input,

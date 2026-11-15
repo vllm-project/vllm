@@ -10,7 +10,7 @@ import multiprocessing
 import os
 import signal
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import psutil
@@ -42,7 +42,7 @@ def update_environment_variables(envs_dict: dict[str, str]):
 
 
 @contextlib.contextmanager
-def set_env_var(key: str, value: str) -> Iterator[None]:
+def set_env_var(key: str, value: str) -> Generator[None]:
     """Temporarily set an environment variable."""
     old = os.environ.get(key)
     os.environ[key] = value
