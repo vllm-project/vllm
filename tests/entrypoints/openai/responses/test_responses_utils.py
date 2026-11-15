@@ -1011,8 +1011,8 @@ class TestConstructInputMessagesInstructionsLeak:
 
 
 class TestBuildResponseOutputItemsStatus:
-    """Item ``status`` must follow the finish reason of the generation
-    (#57998): a ``length`` cut marks the item that was cut ``incomplete``."""
+    """Item `status` must follow the finish reason of the generation
+    (#57998): a `length` cut marks the item that was cut `incomplete`."""
 
     _CALLS = [
         FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),

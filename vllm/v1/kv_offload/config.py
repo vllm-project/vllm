@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingGroupConfig:
     # Total token span covered by one block across all workers
     # (accounts for context parallelism).
@@ -21,7 +21,7 @@ class OffloadingGroupConfig:
     sliding_window_size_in_chunks: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingModelConfig:
     # Model identifier (e.g. HuggingFace model path).
     name: str
@@ -33,7 +33,7 @@ class OffloadingModelConfig:
     config_hash: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingCacheConfig:
     # Tokens per block hash.
     tokens_per_hash: int
@@ -41,7 +41,7 @@ class OffloadingCacheConfig:
     blocks_per_chunk: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingParallelConfig:
     # Worker index in [0, world_size). 0 on the scheduler side.
     rank: int
@@ -69,7 +69,7 @@ class OffloadingParallelConfig:
     is_parallelism_agnostic: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingConfig:
     groups: tuple[OffloadingGroupConfig, ...]
     # KV bytes stored by one worker per block.

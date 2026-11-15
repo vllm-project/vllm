@@ -31,22 +31,20 @@ class PoolingRunner:
         selected_task = self.model_config.get_pooling_task(model_tasks)
         if selected_task not in _SUPPORTED_TASKS:
             hint = (
-                "Set an explicitly supported task or VLLM_USE_V2_MODEL_RUNNER=0."
+                " Set an explicitly supported task."
                 if _SUPPORTED_TASKS.intersection(model_tasks)
-                else "Set VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
+                else ""
             )
             raise ValueError(
-                "Model Runner V2 supports pooling tasks "
-                f"{sorted(_SUPPORTED_TASKS)}, but this model selects "
-                f"{selected_task!r} from {list(model_tasks)}. {hint}"
+                f"vLLM supports pooling tasks {sorted(_SUPPORTED_TASKS)}, but "
+                f"this model selects {selected_task!r} from {list(model_tasks)}."
+                f"{hint}"
             )
         self.supported_tasks = frozenset(self.get_supported_tasks(model))
         if not self.supported_tasks:
             raise ValueError(
-                "Model Runner V2 supports pooling tasks "
-                f"{sorted(_SUPPORTED_TASKS)}, but this model supports "
-                f"{list(model_tasks)}. "
-                "Set VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
+                f"vLLM supports pooling tasks {sorted(_SUPPORTED_TASKS)}, but "
+                f"this model supports {list(model_tasks)}."
             )
         self.pooling_params: dict[int, PoolingParams] = {}
         self.pooling_states: dict[int, PoolingStates] = {}
