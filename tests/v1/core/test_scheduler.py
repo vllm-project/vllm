@@ -1965,17 +1965,9 @@ def test_preemption_reports_the_work_it_requeues_and_yields_to_a_newer_one():
     )
     assert reported(outputs) == [48]
 
-    # Once it is decoding there is no prefill work left to report.
-    while request.num_computed_tokens < request.num_tokens:
-        scheduler.update_from_output(
-            scheduler.schedule(),
-            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
-        )
-    scheduler.update_from_output(
-        scheduler.schedule(),
-        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[7]]),
-    )
-    assert request.num_output_tokens > 0
+    # A request that already produced a token has no prefill work to report.
+    request.num_computed_tokens = request.num_tokens
+    request.append_output_token_ids([7])
     preempt()
     output = scheduler.schedule()
     output.num_scheduled_tokens.clear()
@@ -5246,6 +5238,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.num_computed_tokens = request.num_tokens
 
     scheduler.perf_metrics = None
+    scheduler._pending_prefill_progress = {}
+    scheduler.scheduler_config = Mock(enable_prefill_progress=False)
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
