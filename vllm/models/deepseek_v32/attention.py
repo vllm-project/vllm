@@ -35,6 +35,7 @@ from vllm.model_executor.models.utils import (
     compute_skip_topk_layers,
     extract_layer_index,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.pcp import (
@@ -220,6 +221,13 @@ class DeepseekV32Attention(MLAAttention):
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
 
+        parallel_config = vllm_config.parallel_config
+        self.sequence_parallel_moe = (
+            current_platform.is_cuda()
+            and parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+        )
+
         self.skip_topk = False
         enable_short_prefill_scoring_skip = (
             not is_mtp_layer
@@ -299,19 +307,35 @@ class DeepseekV32Attention(MLAAttention):
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        if self.indexer is not None and not self.skip_topk:
+            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+        else:
+            kw = None
+
+        # SP-MoE also shards one-token batches, whose row counts are equal.
+        if self.sequence_parallel_moe or hidden_states.shape[0] < positions.shape[0]:
+            # Gather the smaller replicated projections, keeping TP weights intact.
+            projected = qkv_lora if kw is None else torch.cat((qkv_lora, kw), dim=-1)
+            projected = sp_all_gather(projected.contiguous())[: positions.shape[0]]
+            if kw is None:
+                qkv_lora = projected
+            else:
+                qkv_lora, kw = projected.split(
+                    [qkv_lora.shape[-1], kw.shape[-1]], dim=-1
+                )
+
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
-
-        if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+        if kw is not None:
+            assert self.indexer is not None
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
         else:
             index_k = None
             index_weights = None
 
-        num_tokens = hidden_states.shape[0]
+        num_tokens = qkv_lora.shape[0]
         output = torch.empty(
             (num_tokens, self.num_local_heads * self.v_head_dim),
             dtype=hidden_states.dtype,

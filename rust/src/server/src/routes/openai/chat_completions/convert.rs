@@ -148,22 +148,10 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
-    // OpenAI treats `tools: []` like an omitted field: with no tool declared
-    // anywhere, `auto` and `required` have nothing to call and fall back to
-    // `none`. A named choice still fails tool resolution, as no tool matches it.
-    let tool_choice = match request.tool_choice {
-        Some(ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::Required))
-            if request.tools.as_ref().is_some_and(Vec::is_empty)
-                && messages.iter().all(|message| message.declared_tools().is_none()) =>
-        {
-            Some(ToolChoice::Value(ToolChoiceValue::None))
-        }
-        tool_choice => tool_choice,
-    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         convert_tools(request.tools)?,
-        tool_choice.as_ref().map(convert_tool_choice).transpose()?,
+        request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
@@ -1729,39 +1717,6 @@ mod tests {
         assert!(!prepared.options.is_named_tool_choice);
     }
 
-    /// Like OpenAI, `tools: []` is an omitted field: no tool reaches the
-    /// renderer, and `auto` and `required` fall back to `none`.
-    #[test]
-    fn prepare_chat_request_treats_empty_tools_as_omitted() {
-        let cases = [
-            None,
-            Some(ToolChoiceValue::None),
-            Some(ToolChoiceValue::Auto),
-            Some(ToolChoiceValue::Required),
-        ];
-        for tool_choice in cases {
-            let request = ChatCompletionRequest {
-                tools: Some(Vec::new()),
-                tool_choice: tool_choice.map(ToolChoice::Value),
-                ..base_request()
-            };
-
-            let prepared = prepare_chat_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
-
-            assert!(prepared.chat_request.initial_tools().is_empty());
-            assert_eq!(
-                prepared.chat_request.tool_choice(),
-                &ChatToolChoice::None,
-                "{tool_choice:?}"
-            );
-        }
-    }
-
     /// Tools declared in a developer message stay available under `tools: []`,
     /// as they would with `tools` omitted.
     #[test]
@@ -1809,8 +1764,7 @@ mod tests {
         }
     }
 
-    /// A named tool choice keeps the empty list, so it reports the missing
-    /// function instead of falling back to `none`.
+    /// A named tool choice with empty `tools` reports the missing function.
     #[test]
     fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
         let request = ChatCompletionRequest {
