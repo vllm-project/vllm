@@ -516,7 +516,7 @@ def _vllm_manual_forward(obj, token_ids, causal_flag):
     device = runner.device
     kv_cache_config = runner.kv_cache_config
     assert len(kv_cache_config.kv_cache_groups) == 1
-    block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+    block_size = kv_cache_config.kv_cache_groups[0].block_size
 
     length = len(token_ids)
     n_blocks = (length + block_size - 1) // block_size
