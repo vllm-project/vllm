@@ -14,41 +14,13 @@ vLLM implements the Anthropic Messages API, which is the same API that Claude Co
 
 This means any model served by vLLM with proper tool calling support can act as a drop-in replacement for Claude models in Claude Code.
 
-## Rust frontend support
-
-The Rust frontend supports `/v1/messages/count_tokens` and non-streaming
-`/v1/messages` for text conversations with top-level and inline system messages.
-Inline system messages use the shared renderer's developer-role fallback, keeping
-instructions in place or merging them with an adjacent user turn instead of
-moving them to the leading system prompt as Python may do. Inline system billing
-headers are stripped before rendering.
-Generation accepts `max_tokens`, `temperature`, `top_p`, `top_k`, and `stop_sequences`.
-Counting accepts the same request fields but does not require `max_tokens`.
-`temperature` must be between 0 and 1, inclusive, following the Anthropic API.
-A final assistant message containing non-empty text is continued; token counting
-uses the same continuation prompt. Both endpoints reuse the shared chat renderer
-and tokenizer.
-
-Parsed reasoning is returned as `thinking` blocks with generated
-UUID signatures. Assistant history accepts `thinking` blocks, ignores their
-signatures, and skips opaque `redacted_thinking` blocks. These signatures match
-the Python frontend's placeholders, not Anthropic's encrypted signatures.
-
-Both endpoints accept `thinking` and `output_config.effort`, using the shared
-reasoning-effort map and renderer. Enabled thinking requires `budget_tokens` of
-at least 1,024; adaptive thinking preserves the requested effort or model default.
-Disabled and `between_tools` thinking map to effort `none`, subject to the
-configured effort map. As in Python, `thinking.display` is accepted but ignored;
-reasoning is always returned. Streaming, tools, output-format configuration,
-other content types, and other request options return an error.
-Authentication uses the existing bearer-token configuration.
-Request failures use Anthropic error envelopes. Retryable engine rejections return
-HTTP 503.
-Use `VLLM_USE_RUST_FRONTEND=0` for the Claude Code workflow below.
-
 ## Requirements
 
 Claude Code requires a model with strong tool calling capabilities. The model must support the OpenAI-compatible tool calling API. See [Tool Calling](../../features/tool_calling.md) for details on enabling tool calling for your model.
+
+Use the Python frontend for Claude Code (`VLLM_USE_RUST_FRONTEND=0` when starting
+vLLM). The Rust frontend does not yet support the streaming and tool calls
+required by this workflow.
 
 ## Installation
 
