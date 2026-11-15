@@ -20,13 +20,6 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
 
-try:
-    from vllm.fs_io_C import batch_lookup as batch_lookup_C
-
-    _HAS_BATCH_LOOKUP_C = True
-except ImportError:
-    _HAS_BATCH_LOOKUP_C = False
-
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -39,7 +32,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -60,27 +53,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
-
-
-class FsAsyncLookupManager(AsyncLookupManager):
-    """Async lookup manager for FileSystemTierManager."""
-
-    def __init__(
-        self,
-        tier: "FileSystemTierManager",
-        tier_type: str,
-    ) -> None:
-        super().__init__(tier_type=tier_type)
-        self._tier = tier
-
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
-        if _HAS_BATCH_LOOKUP_C:
-            # C extension: GIL released for the entire faccessat() batch.
-            return batch_lookup_C(paths)
-        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -117,6 +89,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        write_only: bool = False,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -138,6 +111,7 @@ class FileSystemTierManager(SecondaryTierManager):
             offloading_spec, primary_kv_view, tier_type, backpressure_detector
         )
         self.locality = Locality(locality) if locality is not None else None
+        self._write_only = write_only
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -206,7 +180,7 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._lookup_manager = FsAsyncLookupManager(self.file_mapper, self.tier_type)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -214,6 +188,8 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if self._write_only:
+            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY

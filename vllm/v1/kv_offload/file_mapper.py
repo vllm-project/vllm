@@ -141,4 +141,10 @@ class FileMapper:
             :_BASE_PATH_HASH_LEN
         ]
         safe_model_name = fields["model_name"].replace("/", "_")
+        import logging
+
+        _fm_logger = logging.getLogger(__name__)
+        _fm_logger.warning("FileMapper hash=%s, fields:", digest)
+        for k, v in sorted(fields.items()):
+            _fm_logger.warning("  %s: %r", k, v)
         return f"{root_dir}/{safe_model_name}_{digest}"
