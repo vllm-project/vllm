@@ -18,7 +18,9 @@ def _tokenizer(rstrip: bool = False) -> PreTrainedTokenizerFast:
         vocab.setdefault(a + b, len(vocab))
     bpe = Tokenizer(models.BPE(vocab=vocab, merges=merges, unk_token=" "))
     bpe.pre_tokenizer = pre_tokenizers.Whitespace()
-    bpe.add_special_tokens([AddedToken(s, rstrip=rstrip, normalized=False) for s in SPECIALS])
+    bpe.add_special_tokens(
+        [AddedToken(s, rstrip=rstrip, normalized=False) for s in SPECIALS]
+    )
     return PreTrainedTokenizerFast(tokenizer_object=bpe)
 
 

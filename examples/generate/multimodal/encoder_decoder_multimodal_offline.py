@@ -59,7 +59,7 @@ def run_fireredasr2():
 
     This model uses a Conformer encoder + Qwen2 LLM decoder architecture
     for speech-to-text transcription.  Audio is passed via the implicit
-    prompt format with the ``<|AUDIO|>`` placeholder token.
+    prompt format with the `<|AUDIO|>` placeholder token.
     """
     engine_args = EngineArgs(
         model="allendou/FireRedASR2-LLM-vllm",

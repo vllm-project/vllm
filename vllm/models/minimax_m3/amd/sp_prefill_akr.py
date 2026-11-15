@@ -69,6 +69,26 @@ def make_o_proj_full(layer, quant_config, prefix: str):
     return full
 
 
+def full_o_proj_layers(model) -> frozenset[int]:
+    """The decoder layers of ``model`` (a ``MiniMaxM3Model``) with an o_proj_full."""
+    return frozenset(
+        i
+        for i in range(model.start_layer, model.end_layer)
+        if getattr(model.layers[i].self_attn, "o_proj_full", None) is not None
+    )
+
+
+def load_o_proj_full(weights, layers: frozenset[int]):
+    """A ``WeightsMapper`` weights transform: each checkpoint o_proj tensor of a layer
+    in ``layers`` once more, for its o_proj_full."""
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    for name, weight in weights:
+        yield name, weight
+        if ".self_attn.o_proj." in name and extract_layer_index(name) in layers:
+            yield name.replace(".self_attn.o_proj.", ".self_attn.o_proj_full."), weight
+
+
 def _unsupported(layer) -> str | None:
     """None when ``layer`` can run the amd_kernels SP layer, else why not."""
     lib = _lib()

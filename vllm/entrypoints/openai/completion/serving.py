@@ -56,6 +56,7 @@ logger = init_logger(__name__)
 
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
 _PROBE_INDEX = 987654321
+_encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
 
 
 def _delta_frame_template(
@@ -65,10 +66,10 @@ def _delta_frame_template(
     constant for a stream, so only index and text are rendered per chunk.
 
     Taking them from the serializer keeps frames byte-identical to
-    ``model_dump_json(exclude_unset=True)`` if the models gain fields.
+    `model_dump_json(exclude_unset=True)` if the models gain fields.
 
     Returns:
-        ``(prefix, infix, suffix)``, or None if the sentinels are ambiguous.
+        `(prefix, infix, suffix)`, or None if the sentinels are ambiguous.
 
     """
     probe = CompletionStreamResponse(
@@ -391,11 +392,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
 
-                prompt_text = res.prompt
-                if prompt_text is None:
-                    engine_input = engine_inputs[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_input)
-
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
                     num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
@@ -416,9 +412,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
-                        if request.return_token_ids:
-                            prompt_text = ""
-                        assert prompt_text is not None
+                        prompt_text = "" if request.return_token_ids else res.prompt
+                        if prompt_text is None:
+                            prompt_text = self._extract_prompt_text(
+                                engine_inputs[prompt_idx]
+                            )
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
@@ -498,7 +496,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         prefix, infix, suffix = delta_template
                         yield (
                             f"{prefix}{i}{infix}"
-                            f"{json.dumps(delta_text, ensure_ascii=False)}"
+                            f"{_encode_delta_text(delta_text)}"
                             f"{suffix}"
                         )
                         continue
