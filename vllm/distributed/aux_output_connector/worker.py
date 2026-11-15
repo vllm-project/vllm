@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
+    retained_objects,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -32,14 +33,13 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass
+@dataclass(slots=True)
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
@@ -51,7 +51,7 @@ class _WorkerRequestState:
     finished: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
@@ -88,7 +88,6 @@ class AuxOutputWorkerConnector:
         *,
         vllm_config: VllmConfig,
         model: torch.nn.Module,
-        kv_cache_config: KVCacheConfig,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         capturer = RoutedExpertsCapturer(
@@ -96,6 +95,7 @@ class AuxOutputWorkerConnector:
         )
         bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
+        self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
@@ -107,21 +107,20 @@ class AuxOutputWorkerConnector:
         self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
             return
 
+        vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
-        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
+        num_objects, hash_block_size = retained_objects(vllm_config, kv_cache_config)
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
-        if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+        max_bytes = num_objects * block_nbytes
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
@@ -131,7 +130,7 @@ class AuxOutputWorkerConnector:
             shape_per_token,
             hash_block_size,
             vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens,
+            vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
 
@@ -278,11 +277,14 @@ class AuxOutputWorkerConnector:
                 local_start = emit_start % block_size
                 rows = stored[local_start : local_start + stored_end - emit_start]
                 if stored_end < token_end:
-                    rows = np.concatenate(
-                        (rows, buffer.read(request_id, stored_end, token_end))
+                    suffix = buffer.read(
+                        request_id, stored_end, token_end, state.pending_blocks
                     )
+                    rows = np.concatenate((rows, suffix))
             else:
-                rows = buffer.read(request_id, emit_start, token_end)
+                rows = buffer.read(
+                    request_id, emit_start, token_end, state.pending_blocks
+                )
             outputs[request_id] = AuxRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
@@ -406,10 +408,6 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module, vllm_config: VllmConfig
 ) -> AuxOutputWorkerConnector:
-    return AuxOutputWorkerConnector(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=vllm_config,
-    )
+    return AuxOutputWorkerConnector(model=model, vllm_config=vllm_config)

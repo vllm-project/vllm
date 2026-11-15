@@ -17,8 +17,8 @@ logger = init_logger(__name__)
 @contextlib.contextmanager
 def device_stream(stream: torch.Stream | None):
     """Platform-agnostic context manager that activates *stream* as the
-    current accelerator stream for the duration of the ``with`` block.
-    A no-op when *stream* is ``None``."""
+    current accelerator stream for the duration of the `with` block.
+    A no-op when *stream* is `None`."""
     if stream is None:
         yield
         return
@@ -57,8 +57,12 @@ class CpuGpuEvent:
         Should only be called by the Async Eplb thread.
         """
         self._recorded.wait()
-        self._event.wait(stream)
-        self._recorded.clear()
+        try:
+            self._event.wait(stream)
+        finally:
+            # Clear even if the CUDA wait raises, so a faulted cycle does
+            # not leave the event armed for the next iteration.
+            self._recorded.clear()
 
     def record(self, stream: torch.Stream | None = None):
         """Unblocks the waiting thread after calling event.record().
@@ -83,7 +87,7 @@ def override_envs_for_eplb(
 
     Args:
         parallel_config: The parallel configuration object.
-        moe_backend: The configured MoE backend (e.g. ``deep_gemm_mega_moe``).
+        moe_backend: The configured MoE backend (e.g. `deep_gemm_mega_moe`).
 
     """
     is_data_parallel = parallel_config.data_parallel_size > 1

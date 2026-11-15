@@ -6,7 +6,9 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -17,7 +19,7 @@ use crate::normalize_top_k;
 pub struct HfTokenizerConfig {
     #[serde(flatten)]
     pub special_tokens: HfSpecialTokens,
-    pub chat_template: Option<String>,
+    pub chat_template: Option<HfChatTemplate>,
     /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
     /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
     /// containing "Tiktoken" which can be used as a hint for backend
@@ -26,6 +28,53 @@ pub struct HfTokenizerConfig {
     /// The Hugging Face `response_template`: a declarative description of the
     /// model's output protocol, executed by the `hf` unified parser.
     pub response_template: Option<serde_json::Value>,
+}
+
+/// The `chat_template` field of `tokenizer_config.json`: one template, or the
+/// named templates Transformers serializes as a list of `{name, template}`
+/// (e.g. `default` and `tool_use`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HfChatTemplate {
+    Single(String),
+    Named(Vec<HfNamedChatTemplate>),
+}
+
+/// One entry of a list-form `chat_template`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HfNamedChatTemplate {
+    pub name: String,
+    pub template: String,
+}
+
+impl HfChatTemplate {
+    /// The template Transformers uses when no tools are passed: the single
+    /// template, or the one named `default`.
+    pub fn default_template(&self) -> Option<&str> {
+        match self {
+            Self::Single(template) => Some(template),
+            Self::Named(_) => self.named("default"),
+        }
+    }
+
+    /// The template Transformers prefers when tools are passed: the one named
+    /// `tool_use`, if any.
+    pub fn tool_use_template(&self) -> Option<&str> {
+        self.named("tool_use")
+    }
+
+    /// Look up a named template. Transformers collects the list into a dict,
+    /// so a later entry wins over an earlier one with the same name.
+    fn named(&self, name: &str) -> Option<&str> {
+        match self {
+            Self::Single(_) => None,
+            Self::Named(templates) => templates
+                .iter()
+                .rev()
+                .find(|template| template.name == name)
+                .map(|template| template.template.as_str()),
+        }
+    }
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
@@ -97,6 +146,7 @@ impl HfSpecialTokens {
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
+#[serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -108,6 +158,12 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. An unexpected
+    /// value reads as absent rather than failing model loading.
+    #[serde_as(as = "DefaultOnError")]
+    dtype: Option<ModelDtype>,
+    #[serde_as(as = "DefaultOnError")]
+    torch_dtype: Option<ModelDtype>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
@@ -210,6 +266,12 @@ impl ModelConfig {
     /// may provide the value.
     pub fn model_type(&self) -> Option<&str> {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
+    }
+
+    /// Return the checkpoint dtype, following the same text-config selection
+    /// as `model_type`.
+    pub fn dtype(&self) -> Option<ModelDtype> {
+        (self.dtype.or(self.torch_dtype)).or_else(|| self.text_config.as_deref()?.dtype())
     }
 
     /// Return the effective model vocabulary size, following the same
@@ -321,7 +383,39 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, ModelConfig};
+    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, ModelDtype};
+
+    #[test]
+    fn tokenizer_config_reads_single_and_named_chat_templates() {
+        let single: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":"single"}"#).unwrap();
+        let named: HfTokenizerConfig = serde_json::from_str(
+            r#"{"chat_template":[
+                {"name":"default","template":"old default"},
+                {"name":"tool_use","template":"tool use"},
+                {"name":"default","template":"default"}
+            ]}"#,
+        )
+        .unwrap();
+        let without_default: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":[{"name":"rag","template":"rag"}]}"#).unwrap();
+
+        let selected = [single, named, without_default].map(|config| {
+            let template = config.chat_template.unwrap();
+            (
+                template.default_template().map(str::to_owned),
+                template.tool_use_template().map(str::to_owned),
+            )
+        });
+        assert_eq!(
+            selected,
+            [
+                (Some("single".to_string()), None),
+                (Some("default".to_string()), Some("tool use".to_string())),
+                (None, None),
+            ]
+        );
+    }
 
     #[test]
     fn generation_config_normalizes_vllm_top_k_values() {
@@ -338,6 +432,34 @@ mod tests {
         for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
             assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
         }
+    }
+
+    #[test]
+    fn model_config_reads_checkpoint_dtype() {
+        for (config, expected) in [
+            (r#"{"dtype":"bfloat16"}"#, Some(ModelDtype::BFloat16)),
+            (r#"{"torch_dtype":"float16"}"#, Some(ModelDtype::Float16)),
+            // Both names, as written by some transformers versions.
+            (
+                r#"{"dtype":"bfloat16","torch_dtype":"bfloat16"}"#,
+                Some(ModelDtype::BFloat16),
+            ),
+            (
+                r#"{"text_config":{"torch_dtype":"float32"}}"#,
+                Some(ModelDtype::Float32),
+            ),
+            (r#"{"torch_dtype":"float8_e4m3fn"}"#, None),
+            (r#"{"torch_dtype":{"unexpected":true}}"#, None),
+            ("{}", None),
+        ] {
+            let config: ModelConfig = serde_json::from_str(config).unwrap();
+            assert_eq!(config.dtype(), expected, "{config:?}");
+        }
+        // An unexpected dtype does not fail the rest of the config.
+        let config: ModelConfig =
+            serde_json::from_str(r#"{"torch_dtype":"float8_e4m3fn","model_type":"llama"}"#)
+                .unwrap();
+        assert_eq!(config.model_type(), Some("llama"));
     }
 
     #[test]

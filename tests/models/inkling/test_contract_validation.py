@@ -37,8 +37,10 @@ def test_vision_scale_plan_breaks_assignment_ties_in_order():
 @pytest.mark.parametrize(
     ("config_cls", "kwargs", "missing"),
     [
-        (InklingAudioConfig, {"decoder_dmodel": 16}, "n_mel_bins"),
-        (InklingVisionConfig, {"decoder_dmodel": 16}, "vision_encoder_type"),
+        pytest.param(InklingAudioConfig, {"decoder_dmodel": 16}, "n_mel_bins"),
+        pytest.param(
+            InklingVisionConfig, {"decoder_dmodel": 16}, "vision_encoder_type"
+        ),
     ],
 )
 def test_enabled_tower_requires_architecture_fields(config_cls, kwargs, missing):

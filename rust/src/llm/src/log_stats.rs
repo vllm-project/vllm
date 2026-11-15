@@ -6,10 +6,14 @@ use std::time::{Duration, Instant};
 
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info};
+use vllm_engine_core_client::protocol::stats::KvFetchReqsByStage;
 use vllm_metrics::{
-    EngineLabels, F64Gauge, METRICS, PromptTokenSourceLabels, SchedulerLogStatsAccumulator,
-    SchedulerLogStatsInterval, U64Counter, U64Gauge, WaitingReasonLabels,
+    EngineLabels, F64Gauge, KvFetchStageLabels, METRICS, PromptTokenSourceLabels,
+    SchedulerLogStatsAccumulator, SchedulerLogStatsInterval, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
+
+use crate::request_metrics::RequestSuccessCounters;
 
 const WAITING_REASON_DEFERRED: &str = "deferred";
 
@@ -25,9 +29,11 @@ struct EngineMetrics {
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
     num_preemptions: U64Counter,
+    request_success: RequestSuccessCounters,
     spec_decode_num_drafts: U64Counter,
     spec_decode_num_draft_tokens: U64Counter,
     spec_decode_num_accepted_tokens: U64Counter,
+    spec_decode_num_verified_tokens: U64Counter,
     estimated_flops_per_gpu: U64Counter,
     estimated_read_bytes_per_gpu: U64Counter,
     estimated_write_bytes_per_gpu: U64Counter,
@@ -37,6 +43,8 @@ struct EngineMetrics {
     scheduler_running: U64Gauge,
     scheduler_waiting: U64Gauge,
     scheduler_deferred: U64Gauge,
+    /// One handle per `KvFetchReqsByStage::STAGES` entry.
+    scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
 }
 
@@ -51,9 +59,11 @@ struct CounterSnapshot {
     external_prefix_cache_queries: u64,
     external_prefix_cache_hits: u64,
     num_preemptions: u64,
+    num_finished_reqs: u64,
     spec_decode_num_drafts: u64,
     spec_decode_num_draft_tokens: u64,
     spec_decode_num_accepted_tokens: u64,
+    spec_decode_num_verified_tokens: u64,
     estimated_flops_per_gpu: u64,
     estimated_read_bytes_per_gpu: u64,
     estimated_write_bytes_per_gpu: u64,
@@ -66,6 +76,7 @@ struct SpecDecodingLogStats {
     draft_throughput: f64,
     accepted_tokens: u64,
     draft_tokens: u64,
+    verified_tokens: u64,
     per_position_acceptance_rates: Vec<f64>,
     draft_acceptance_rate: f64,
 }
@@ -134,6 +145,7 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                     .external_prefix_cache_hits
                     .get_or_create_owned(&el),
                 num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
+                request_success: RequestSuccessCounters::resolve(model_name, engine),
                 spec_decode_num_drafts: m.scheduler.spec_decode_num_drafts.get_or_create_owned(&el),
                 spec_decode_num_draft_tokens: m
                     .scheduler
@@ -142,6 +154,10 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                 spec_decode_num_accepted_tokens: m
                     .scheduler
                     .spec_decode_num_accepted_tokens
+                    .get_or_create_owned(&el),
+                spec_decode_num_verified_tokens: m
+                    .scheduler
+                    .spec_decode_num_verified_tokens
                     .get_or_create_owned(&el),
                 estimated_flops_per_gpu: m
                     .scheduler
@@ -162,6 +178,15 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                     .scheduler
                     .scheduler_waiting_by_reason
                     .get_or_create_owned(&deferred),
+                scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
+                    m.scheduler.scheduler_kv_fetch_by_stage.get_or_create_owned(
+                        &KvFetchStageLabels {
+                            model_name: model_name.to_string(),
+                            engine,
+                            stage,
+                        },
+                    )
+                }),
                 kv_cache_usage: m.scheduler.kv_cache_usage.get_or_create_owned(&el),
             }
         })
@@ -221,7 +246,13 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval
         // Read scheduler gauges (aggregate across engines).
         let (num_running, num_waiting, kv_cache_usage) = read_scheduler_gauges(&engines);
         let num_deferred = read_deferred_waiting(&engines);
+        let [
+            kv_fetch_waiting_to_start,
+            kv_fetch_in_progress,
+            kv_fetch_completed_waiting,
+        ] = read_kv_fetch_by_stage(&engines);
         let delta_preemptions = curr.num_preemptions.wrapping_sub(prev.num_preemptions);
+        let delta_finished_reqs = curr.num_finished_reqs.wrapping_sub(prev.num_finished_reqs);
 
         // Compute prefix cache hit rate over this interval.
         let delta_queries = curr.prefix_cache_queries.wrapping_sub(prev.prefix_cache_queries);
@@ -252,6 +283,16 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval
         if num_deferred > 0 {
             write!(msg, ", Deferred: {num_deferred} reqs").unwrap();
         }
+        write!(msg, ", Finished: {delta_finished_reqs} reqs").unwrap();
+        if kv_fetch_waiting_to_start + kv_fetch_in_progress + kv_fetch_completed_waiting > 0 {
+            write!(
+                msg,
+                ", KV fetch: {kv_fetch_waiting_to_start} waiting to start, \
+                 {kv_fetch_in_progress} in progress, \
+                 {kv_fetch_completed_waiting} completed waiting"
+            )
+            .unwrap();
+        }
         if delta_preemptions > 0 {
             write!(msg, ", Preemptions: {delta_preemptions}").unwrap();
         }
@@ -281,12 +322,14 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval
                  Accepted throughput: {:.2} tokens/s, \
                  Drafted throughput: {:.2} tokens/s, \
                  Accepted: {} tokens, \
-                 Drafted: {} tokens",
+                 Drafted: {} tokens, \
+                 Verified: {} tokens",
                 spec_stats.mean_acceptance_length,
                 spec_stats.accepted_throughput,
                 spec_stats.draft_throughput,
                 spec_stats.accepted_tokens,
                 spec_stats.draft_tokens,
+                spec_stats.verified_tokens,
             )
             .unwrap();
             if !spec_stats.per_position_acceptance_rates.is_empty() {
@@ -330,9 +373,11 @@ fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
         snap.external_prefix_cache_queries += e.external_prefix_cache_queries.get();
         snap.external_prefix_cache_hits += e.external_prefix_cache_hits.get();
         snap.num_preemptions += e.num_preemptions.get();
+        snap.num_finished_reqs += e.request_success.total();
         snap.spec_decode_num_drafts += e.spec_decode_num_drafts.get();
         snap.spec_decode_num_draft_tokens += e.spec_decode_num_draft_tokens.get();
         snap.spec_decode_num_accepted_tokens += e.spec_decode_num_accepted_tokens.get();
+        snap.spec_decode_num_verified_tokens += e.spec_decode_num_verified_tokens.get();
         snap.estimated_flops_per_gpu += e.estimated_flops_per_gpu.get();
         snap.estimated_read_bytes_per_gpu += e.estimated_read_bytes_per_gpu.get();
         snap.estimated_write_bytes_per_gpu += e.estimated_write_bytes_per_gpu.get();
@@ -366,6 +411,18 @@ fn read_deferred_waiting(engines: &[EngineMetrics]) -> u64 {
     engines.iter().map(|e| e.scheduler_deferred.get()).sum()
 }
 
+/// Read waiting requests per async KV load stage across all engines, in
+/// `KvFetchReqsByStage::STAGES` order.
+fn read_kv_fetch_by_stage(engines: &[EngineMetrics]) -> [u64; 3] {
+    let mut counts = [0u64; 3];
+    for e in engines {
+        for (count, gauge) in counts.iter_mut().zip(&e.scheduler_kv_fetch_by_stage) {
+            *count += gauge.get();
+        }
+    }
+    counts
+}
+
 /// Return the cache hit rate as a percentage for a counter delta.
 fn cache_hit_rate(hits: u64, queries: u64) -> f64 {
     if queries > 0 {
@@ -393,6 +450,9 @@ fn spec_decoding_log_stats(
     let accepted_tokens = curr
         .spec_decode_num_accepted_tokens
         .wrapping_sub(prev.spec_decode_num_accepted_tokens);
+    let verified_tokens = curr
+        .spec_decode_num_verified_tokens
+        .wrapping_sub(prev.spec_decode_num_verified_tokens);
 
     let (accepted_throughput, draft_throughput) = if elapsed > 0.0 {
         (
@@ -423,6 +483,7 @@ fn spec_decoding_log_stats(
         draft_throughput,
         accepted_tokens,
         draft_tokens,
+        verified_tokens,
         per_position_acceptance_rates,
         draft_acceptance_rate,
     })
@@ -484,6 +545,8 @@ fn format_position_rates(output: &mut String, rates: &[f64]) {
 
 #[cfg(test)]
 mod tests {
+    use vllm_metrics::FinishedReasonLabels;
+
     use super::*;
 
     #[tokio::test]
@@ -494,6 +557,28 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "the stats logger runs until it is aborted");
+    }
+
+    #[test]
+    fn read_counters_counts_requests_finished_for_any_reason() {
+        let model_name = "read-counters-finished-reqs";
+        let engines = resolve_engine_metrics(model_name, &[0, 1]);
+        let prev = read_counters(&engines);
+
+        for (engine, finished_reason) in [(0, "stop"), (0, "abort"), (1, "length")] {
+            METRICS
+                .request
+                .request_success
+                .get_or_create(&FinishedReasonLabels {
+                    model_name: model_name.to_string(),
+                    engine,
+                    finished_reason,
+                })
+                .inc();
+        }
+
+        let curr = read_counters(&engines);
+        assert_eq!(curr.num_finished_reqs - prev.num_finished_reqs, 3);
     }
 
     #[test]
@@ -513,12 +598,14 @@ mod tests {
             spec_decode_num_drafts: 10,
             spec_decode_num_draft_tokens: 100,
             spec_decode_num_accepted_tokens: 40,
+            spec_decode_num_verified_tokens: 90,
             ..Default::default()
         };
         let curr = CounterSnapshot {
             spec_decode_num_drafts: 14,
             spec_decode_num_draft_tokens: 120,
             spec_decode_num_accepted_tokens: 52,
+            spec_decode_num_verified_tokens: 105,
             ..Default::default()
         };
 
@@ -529,6 +616,7 @@ mod tests {
         assert_eq!(stats.draft_throughput, 10.0);
         assert_eq!(stats.accepted_tokens, 12);
         assert_eq!(stats.draft_tokens, 20);
+        assert_eq!(stats.verified_tokens, 15);
         assert_eq!(stats.per_position_acceptance_rates, vec![1.0, 0.5, 0.25]);
         assert_eq!(stats.draft_acceptance_rate, 60.0);
     }

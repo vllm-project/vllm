@@ -6,6 +6,7 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -20,9 +21,6 @@ from vllm.model_executor.layers.mamba.kda_checkpoint import (
 )
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
-from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
-    gather_initial_states,
-)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_amd,
 )
@@ -77,7 +75,7 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
-SPEC_DECODE_IMPLS = {
+SPEC_DECODE_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "nvidia": fused_recurrent_kda_nvidia,
     "amd": fused_recurrent_kda_amd,
 }
@@ -145,25 +143,6 @@ def test_kda_recoverssm_config_state_layout():
     assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(
         vllm_config
     ) == MambaStateShapeCalculator.kda_state_shape(1, 4, 32, num_spec=2)
-
-
-@torch.inference_mode()
-def test_gather_initial_states_correctness():
-    row_size = 8 * 128 * 128
-    storage = torch.randn(5, row_size + 256, dtype=torch.float32, device=DEVICE)
-    state = storage[:, :row_size].view(5, 8, 128, 128)
-    assert not state.is_contiguous()
-    assert state[0].is_contiguous()
-    indices = torch.tensor([4, 1, 3], dtype=torch.int32, device=DEVICE)
-    has_initial_state = torch.tensor([True, False, True], device=DEVICE)
-
-    expected = state[indices].clone()
-    expected[~has_initial_state] = 0
-
-    torch.testing.assert_close(
-        gather_initial_states(state, indices, has_initial_state),
-        expected,
-    )
 
 
 def naive_recurrent_kda(

@@ -38,6 +38,12 @@ def bf16x2_to_fp32x2(data, *, loc=None, ip=None) -> tuple[Float32, Float32]:
         )
 
     elif isinstance(data, (cute.Tensor, cute.TensorSSA)):
+        # TensorSSA in, TensorSSA out (it can't be recast: stage it in rmem)
+        is_ssa = isinstance(data, cute.TensorSSA)
+        if is_ssa:
+            frag = cute.make_rmem_tensor(data.shape, data.dtype)
+            frag.store(data)
+            data = frag
         # recast to 32-bit registers if needed
         if data.element_type == BFloat16:
             data = cute.recast_tensor(data, Uint32)
@@ -48,7 +54,7 @@ def bf16x2_to_fp32x2(data, *, loc=None, ip=None) -> tuple[Float32, Float32]:
         out = cute.make_rmem_tensor(size * 2, Float32)
         for i in range(size):
             out[i * 2], out[i * 2 + 1] = bf16x2_to_fp32x2(data[i])
-        return out
+        return out.load() if is_ssa else out
 
     else:
         raise ValueError(f"Unsupported type {type(data)}")

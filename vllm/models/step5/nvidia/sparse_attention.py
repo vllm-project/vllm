@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from ..common.ops.summary_update import build_prefill_groups
 from .ops.attention_gate import headwise_sigmoid_gate
 from .ops.sparse_prefill import make_prefill_chunks
 from .ops.sparse_prefill_pages import (
@@ -29,7 +30,6 @@ from .ops.sparse_prefill_pages import (
     plan_staged_prefill_pages,
     stage_prefill_pages,
 )
-from .ops.summary_update import build_prefill_groups
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
 _PREFILL_STAGING_BYTES = 512 << 20
@@ -363,7 +363,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         defer_inactive_clear=False,
         dsa_gate=None,
     ):
-        """``dsa_gate`` ([tokens, heads]) returns headwise-gated output."""
+        """`dsa_gate` ([tokens, heads]) returns headwise-gated output."""
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("Step5 does not support output quantization")
         if output is None:
@@ -508,12 +508,12 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
     def plan_prefill_step(self, attn_metadata, n, lengths, layout, positions=None):
         """Layer-invariant prefill metadata, built once per step.
 
-        ``lengths`` are host sequence lengths. Without ``positions`` they must
-        be exact; with exact device ``positions`` they may be upper bounds
+        `lengths` are host sequence lengths. Without `positions` they must
+        be exact; with exact device `positions` they may be upper bounds
         (MRv2 speculative decoding), which is what lets the metadata builder
         plan before the forward without a host sync. Returns None if only the
-        ragged fallback applies and the lengths are not exact. ``layout`` is a
-        ``_PrefillLayout`` of the full (all-group) query and KV cache.
+        ragged fallback applies and the lengths are not exact. `layout` is a
+        `_PrefillLayout` of the full (all-group) query and KV cache.
         """
         assert self.summary_cache is not None and self.adapter is not None
         exact = positions is None
@@ -793,10 +793,10 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
 
 
 class Step5SplitKVFlashAttentionBackend(FlashAttentionBackend):
-    """``FLASH_ATTN`` with Step5's fused SWA decode for the non-DSA layers.
+    """`FLASH_ATTN` with Step5's fused SWA decode for the non-DSA layers.
 
-    Keeps the inherited ``get_name()``: only the impl differs from the parent,
-    so these layers resolve to the registered ``FLASH_ATTN`` entry.
+    Keeps the inherited `get_name()`: only the impl differs from the parent,
+    so these layers resolve to the registered `FLASH_ATTN` entry.
     """
 
     @staticmethod

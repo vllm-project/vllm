@@ -36,6 +36,31 @@ pub struct PreparedTextRequest {
     pub generate_request: GenerateRequest,
 }
 
+/// Sampling values sent to the engine, after request values, model defaults,
+/// and vLLM defaults are resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveSampling {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub max_tokens: u32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+}
+
+impl PreparedTextRequest {
+    /// Return the resolved sampling values of the generate request.
+    pub fn effective_sampling(&self) -> EffectiveSampling {
+        let params = &self.generate_request.sampling_params;
+        EffectiveSampling {
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            presence_penalty: params.presence_penalty,
+            frequency_penalty: params.frequency_penalty,
+        }
+    }
+}
+
 /// Convert a high-level [`TextRequest`] into one lower-level
 /// [`GenerateRequest`] ready for the `llm` crate.
 pub fn lower_text_request(
@@ -1690,6 +1715,15 @@ mod tests {
     #[test]
     fn resolve_max_tokens_caps_by_model_len() {
         let result = resolve_max_tokens(Some(150), None, 200, 100);
+        assert_eq!(result.unwrap(), 100);
+    }
+
+    /// Shared lowering only clamps, even a budget above the whole context
+    /// window: `/inference/v1/generate` accepts it like Python, while chat and
+    /// completions reject it in their HTTP handlers.
+    #[test]
+    fn resolve_max_tokens_caps_budget_above_model_len() {
+        let result = resolve_max_tokens(Some(1000), None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
