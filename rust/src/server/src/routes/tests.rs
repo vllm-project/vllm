@@ -13254,13 +13254,20 @@ async fn anthropic_reasoning_output_preserves_blocks_and_usage() {
 }
 
 // A real HF renderer exposes replayed reasoning and effective effort in the prompt.
-async fn anthropic_reasoning_backend() -> vllm_chat::DynChatBackend {
+const ANTHROPIC_REASONING_TEMPLATE: &str = "{{ reasoning_effort | default('unset') }}|{% if enable_thinking is defined %}{{ enable_thinking | tojson }}{% else %}unset{% endif %}|{% for message in messages %}{{ message.role }}:{{ message.reasoning or '' }}:{{ message.content }};{% endfor %}";
+
+async fn anthropic_hf_backend(chat_template: &str) -> vllm_chat::DynChatBackend {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
     fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
-    fs::write(dir.path().join("tokenizer_config.json"), json!({
-        "chat_template": "{{ reasoning_effort | default('unset') }}|{% if enable_thinking is defined %}{{ enable_thinking | tojson }}{% else %}unset{% endif %}|{% for message in messages %}{{ message.role }}:{{ message.reasoning or '' }}:{{ message.content }};{% endfor %}"
-    }).to_string()).unwrap();
+    fs::write(
+        dir.path().join("tokenizer_config.json"),
+        json!({
+            "chat_template": chat_template
+        })
+        .to_string(),
+    )
+    .unwrap();
     let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
         .await
         .unwrap();
@@ -13304,7 +13311,7 @@ async fn anthropic_replays_thinking_without_signatures_or_redacted_data() {
     content.push(json!({"type": "redacted_thinking", "data": "opaque-data"}));
     let expected = token_ids("unset|unset|user::Hi;assistant:reason:answer;user::Next;");
     let expected_count = expected.len();
-    let backend = anthropic_reasoning_backend().await;
+    let backend = anthropic_hf_backend(ANTHROPIC_REASONING_TEMPLATE).await;
     let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
         move |llm| ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend),
         move |request| assert_eq!(decode_prompt_token_ids(request).unwrap(), expected),
@@ -13329,7 +13336,7 @@ async fn anthropic_replays_thinking_without_signatures_or_redacted_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn anthropic_thinking_controls_reach_renderer_and_engine() {
-    let backend = anthropic_reasoning_backend().await;
+    let backend = anthropic_hf_backend(ANTHROPIC_REASONING_TEMPLATE).await;
     for (thinking, effort, remap_none, expected_controls, budget) in [
         (
             json!({"type": "enabled", "budget_tokens": 1024, "display": "omitted"}),
@@ -13433,4 +13440,80 @@ async fn anthropic_rejects_invalid_thinking_and_unsupported_content() {
             assert_eq!(response["error"]["type"], "invalid_request_error");
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_inline_system_uses_renderer_fallback() {
+    for (template, expected) in [
+        (
+            "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}",
+            "system:Base;user:Hi;assistant:Answer;system:Reminder;user:Next;",
+        ),
+        (
+            "{% for m in messages %}{% if m.role == 'system' and not loop.first %}{{ raise_exception('System must be first') }}{% endif %}{{ m.role }}:{{ m.content }};{% endfor %}",
+            "system:Base;user:Hi;assistant:Answer;user:Reminder\n\nNext;",
+        ),
+    ] {
+        let backend = anthropic_hf_backend(template).await;
+        let expected = token_ids(expected);
+        let expected_count = expected.len();
+        let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
+            move |llm| ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend),
+            move |request| assert_eq!(decode_prompt_token_ids(request).unwrap(), expected),
+        )
+        .await;
+        let body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 16,
+            "system": "Base", "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Answer"},
+                {"role": "system", "content": "Reminder"},
+                {"role": "user", "content": "Next"}]});
+        let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{count}");
+        assert_eq!(count["input_tokens"], expected_count);
+        let (status, response) = post_json(&mut app, "/v1/messages", body).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        engine_task.await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_inline_system_strips_billing_headers() {
+    let backend =
+        anthropic_hf_backend("{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}")
+            .await;
+    let expected = token_ids(
+        "system:Base;user:x-anthropic-billing-header: user text;assistant:Answer;system:Reminder;user:Next;",
+    );
+    let expected_count = expected.len();
+    let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
+        move |llm| ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend),
+        move |request| assert_eq!(decode_prompt_token_ids(request).unwrap(), expected),
+    )
+    .await;
+    let mut messages = vec![
+        json!({"role": "user", "content": "x-anthropic-billing-header: user text"}),
+        json!({"role": "assistant", "content": "Answer"}),
+    ];
+    messages.extend([
+        json!({"role": "system", "content": "x-anthropic-billing-header: hash-a"}),
+        json!({"role": "system", "content": [
+            {"type": "text", "text": "x-anthropic-billing-header: hash-b"}]}),
+    ]);
+    let content = json!([
+        {"type": "text", "text": "x-anthropic-billing-header: hash-c"},
+        {"type": "text", "text": "Reminder"}
+    ]);
+    messages.push(json!({"role": "system", "content": content}));
+    messages.push(json!({"role": "user", "content": "Next"}));
+    let body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 16,
+        "system": [{"type": "text", "text": "Base"}], "messages": messages});
+    let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{count}");
+    assert_eq!(count["input_tokens"], expected_count);
+    let (status, response) = post_json(&mut app, "/v1/messages", body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    engine_task.await.unwrap();
 }

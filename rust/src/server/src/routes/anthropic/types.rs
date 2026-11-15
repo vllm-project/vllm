@@ -28,6 +28,7 @@ pub(in crate::routes) struct MessagesRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
 pub(super) enum InputMessage {
+    System { content: TextContent },
     User { content: TextContent },
     Assistant { content: AssistantContent },
 }

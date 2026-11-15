@@ -20,16 +20,21 @@ use crate::utils::ResolvedRequestContext;
 
 impl Normalizable for MessagesRequest {
     fn normalize(&mut self) {
-        if let Some(TextContent::Blocks(blocks)) = &mut self.system {
-            blocks
-                .retain(|TextBlock::Text { text }| !text.starts_with("x-anthropic-billing-header"));
+        if let Some(system @ TextContent::Blocks(_)) = &mut self.system {
+            system.strip_billing_headers();
         }
+        self.messages.retain_mut(|message| match message {
+            InputMessage::System { content } => content.strip_billing_headers(),
+            _ => true,
+        });
     }
 }
 
 impl From<InputMessage> for ChatMessage {
     fn from(message: InputMessage) -> Self {
         match message {
+            // The renderer handles inline instructions without moving them to the front.
+            InputMessage::System { content } => Self::developer(content.into_content(), None),
             InputMessage::User { content } => Self::user(content.into_content()),
             InputMessage::Assistant { content } => match content {
                 AssistantContent::Text(text) => Self::assistant_text(text),
@@ -65,6 +70,21 @@ impl From<OutputEffort> for EffortValue {
 }
 
 impl TextContent {
+    /// Filter system text blocks and return whether to keep the content.
+    fn strip_billing_headers(&mut self) -> bool {
+        fn keep_system_text(text: &str) -> bool {
+            !text.is_empty() && !text.starts_with("x-anthropic-billing-header")
+        }
+
+        match self {
+            Self::Text(text) => keep_system_text(text),
+            Self::Blocks(blocks) => {
+                blocks.retain(|TextBlock::Text { text }| keep_system_text(text));
+                !blocks.is_empty()
+            }
+        }
+    }
+
     fn into_content(self) -> ChatContent {
         match self {
             Self::Text(text) => ChatContent::Text(text),

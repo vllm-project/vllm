@@ -17,8 +17,12 @@ This means any model served by vLLM with proper tool calling support can act as 
 ## Rust frontend support
 
 The Rust frontend supports `/v1/messages/count_tokens` and non-streaming
-`/v1/messages` for text conversations with a top-level system prompt. Generation
-accepts `max_tokens`, `temperature`, `top_p`, `top_k`, and `stop_sequences`.
+`/v1/messages` for text conversations with top-level and inline system messages.
+Inline system messages use the shared renderer's developer-role fallback, keeping
+instructions in place or merging them with an adjacent user turn instead of
+moving them to the leading system prompt as Python may do. Inline system billing
+headers are stripped before rendering.
+Generation accepts `max_tokens`, `temperature`, `top_p`, `top_k`, and `stop_sequences`.
 Counting accepts the same request fields but does not require `max_tokens`.
 `temperature` must be between 0 and 1, inclusive, following the Anthropic API.
 A final assistant message containing non-empty text is continued; token counting
