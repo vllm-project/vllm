@@ -27,7 +27,7 @@ class EPTestOptions(NamedTuple):
     hf_overrides: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]

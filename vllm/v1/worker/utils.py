@@ -258,7 +258,7 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
@@ -457,6 +457,14 @@ class AttentionGroup:
     ) -> None:
         metadata = attn_metadata[self.layer_names[0]]
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
+
+
+def groups_with_metadata_builders(
+    groups: Iterable[AttentionGroup],
+) -> list[AttentionGroup]:
+    """The groups that build attention metadata: groups made only of
+    init_attn_backend's no_attn_metadata_layer_names have no builders."""
+    return [group for group in groups if group.metadata_builders]
 
 
 def map_kv_caches_to_kernel_blocks(
@@ -1033,7 +1041,7 @@ def get_uniform_decode_token_count(
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 

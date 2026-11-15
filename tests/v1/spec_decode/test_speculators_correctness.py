@@ -12,7 +12,7 @@ from vllm.config import SpeculativeConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SpeculatorTestConfig:
     model_path: str
     method: str
