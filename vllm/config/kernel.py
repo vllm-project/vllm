@@ -293,6 +293,11 @@ class KernelConfig:
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
+    enable_b12x_autotune: bool = False
+    """If True, benchmark b12x NVFP4 W4A16 linear kernel configurations during
+    warmup and use the fastest for every planned token count, instead of b12x's
+    default configurations. Selections are cached under `VLLM_CACHE_ROOT`."""
+
     enable_rocm_aiter_gemm_warmup: bool = False
     """If True, run a dummy forward at every AITER tuned-GEMM token bucket up to
     `max_num_batched_tokens` during kernel warmup on ROCm, so AITER builds those

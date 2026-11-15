@@ -1055,26 +1055,30 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
 def test_b12x_nvfp4_w4a16_autotune_prepares_tuned_plans(
     monkeypatch, tmp_path, default_vllm_config
 ) -> None:
-    """VLLM_B12X_AUTOTUNE prepares every planned token count with a measured
-    selection, and the tuned plan computes the same result."""
+    """kernel_config.enable_b12x_autotune prepares every planned token count
+    with a measured selection, keeps no benchmark inputs, and computes the
+    same result."""
     import vllm.utils.b12x as b12x_utils
 
     supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
     if not supported:
         pytest.skip(reason)
-    monkeypatch.setenv("VLLM_B12X_AUTOTUNE", "1")
+    monkeypatch.delenv("B12X_AUTOTUNE", raising=False)
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
-    monkeypatch.setattr(b12x_utils, "_TUNING_SESSION", None)
+    monkeypatch.setattr(b12x_utils, "_TUNING_SESSIONS", {})
+    default_vllm_config.kernel_config.enable_b12x_autotune = True
     default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 8]
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 64
     n, k = 256, 512
     layer, decoded = _nvfp4_w4a16_layer(n, k)
     kernel = B12xNvFp4W4A16LinearKernel(None)
     kernel.process_weights_after_loading(layer)
     kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
     plan = layer.b12x_nvfp4_plan
-    sources = {plan.variants[m].selection.source for m in plan.token_counts}
-    assert sources <= {"tuned", "cached"}, sources
     for m in plan.token_counts:
+        prepared = plan.variants[m].prepared
+        assert prepared.selection.source in ("tuned", "cached", "fixed")
+        assert prepared.owners == ()
         x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
         expected = (x.double() @ decoded.double().T).bfloat16()
         torch.testing.assert_close(

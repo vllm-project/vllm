@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import torch
 
-import vllm.envs as envs
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -193,6 +192,7 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
                 exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
             )
             layer.b12x_nvfp4_plan_query = query
+        layer.b12x_nvfp4_autotune = config.kernel_config.enable_b12x_autotune
 
     def get_b12x_warmup_unit(
         self,
@@ -203,8 +203,10 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         plan = layer.b12x_nvfp4_plan
 
         def compile() -> None:
-            if envs.VLLM_B12X_AUTOTUNE:
-                prepare_b12x_autotuned((_autotune_request(layer, plan),))
+            if layer.b12x_nvfp4_autotune:
+                prepare_b12x_autotuned(
+                    (_autotune_request(layer, plan),), layer.weight.device
+                )
             for tokens in sorted(set(token_counts) | set(plan.token_counts)):
                 source = torch.zeros(
                     (tokens, layer.weight.shape[1] * 2),
@@ -251,7 +253,12 @@ def _autotune_request(layer: torch.nn.Module, plan):
     packed = layer.b12x_nvfp4_packed_weight
     k = layer.weight.shape[1] * 2
 
-    def call_for(tokens: int):
+    def prepare(state):
+        # The prepared plan keeps this call's owners, so it must not hold
+        # buffers; inputs belong to the benchmark calls, which are released.
+        return PreparedCall(run=lambda: None)
+
+    def benchmark_for(tokens: int):
         def factory(state):
             seed = torch.randn(
                 (tokens, k), dtype=torch.bfloat16, device=layer.weight.device
@@ -273,11 +280,10 @@ def _autotune_request(layer: torch.nn.Module, plan):
 
         return factory
 
-    calls = {tokens: call_for(tokens) for tokens in plan.token_counts}
     return plan.request(
         name=f"vllm.nvfp4_w4a16.{plan.handle}",
-        prepare_calls=calls,
-        benchmark_calls=calls,
+        prepare_calls={tokens: prepare for tokens in plan.token_counts},
+        benchmark_calls={tokens: benchmark_for(tokens) for tokens in plan.token_counts},
     )
 
 

@@ -82,27 +82,35 @@ def get_b12x_paged_attention() -> ModuleType | None:
     return _get_submodule("b12x.attention.paged")
 
 
-_TUNING_SESSION: Any = None
+_TUNING_SESSIONS: dict[int, Any] = {}
 
 
-def prepare_b12x_autotuned(requests: Iterable[Any]) -> None:
+def prepare_b12x_autotuned(requests: Iterable[Any], device: torch.device) -> None:
     """Prepare b12x plans with autotuned configurations.
 
-    One session serves the whole process: it must stay open, because closing it
-    releases the plans it prepared. Selections are cached on disk, so a restart
-    with the same shapes skips the measurements.
+    Like b12x's own default preparation, one session per device stays open for
+    the process: closing it would release the plans it prepared. Selections are
+    cached on disk, so a restart with the same shapes skips the measurements.
     """
-    global _TUNING_SESSION
     from b12x.preparation import PreparationSession
 
     import vllm.envs as envs
 
-    if _TUNING_SESSION is None:
-        _TUNING_SESSION = PreparationSession(
+    index = torch.device(device).index
+    if index is None:
+        index = torch.cuda.current_device()
+    session = _TUNING_SESSIONS.get(index)
+    if session is None:
+        session = PreparationSession(
+            device=index,
             autotune=True,
             cache_dir=os.path.join(envs.VLLM_CACHE_ROOT, "b12x_tuning"),
+            # Compiler workers are spawned processes that re-import __main__;
+            # compile in-process when vLLM itself runs in the caller's process.
+            compile_workers=None if envs.VLLM_ENABLE_V1_MULTIPROCESSING else 0,
         )
-    _TUNING_SESSION.prepare(tuple(requests))
+        _TUNING_SESSIONS[index] = session
+    session.prepare(tuple(requests))
 
 
 def b12x_warmup_token_counts(
