@@ -343,8 +343,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     ) -> PrefixLMFASegments | None:
         """Split each request's queries by bidirectional range.
 
-        A query in range ``[start, end]`` attends to keys ``0..end``, which is
-        plain non-causal attention over ``end + 1`` keys, so every
+        A query in range `[start, end]` attends to keys `0..end`, which is
+        plain non-causal attention over `end + 1` keys, so every
         (request, range) piece is one FlashAttention-2 sequence. Returns None
         unless every query token lies in a range, as in a PrefixLM prefill.
         """

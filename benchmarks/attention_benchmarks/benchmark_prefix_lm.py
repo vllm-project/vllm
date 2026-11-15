@@ -7,22 +7,20 @@ A PrefixLM decision request is one shared state followed by one block per
 question, each attending bidirectionally inside its block and to everything
 before it. Two batch shapes cover how such requests are prefilled:
 
-- ``state``: every request prefills its state and first question from scratch.
-- ``questions``: every question resumes after a prefix-cache hit on its state.
+- `state`: every request prefills its state and first question from scratch.
+- `questions`: every question resumes after a prefix-cache hit on its state.
 
 Backends timed on the same batch and inputs (outputs are checked against the
 first one):
 
-- ``triton``: ``TRITON_ATTN`` with its own kernel (FA2 path disabled).
-- ``triton_fa``: ``TRITON_ATTN`` as shipped; it hands these batches to
+- `triton`: `TRITON_ATTN` with its own kernel (FlashAttention path disabled).
+- `triton_fa`: `TRITON_ATTN` as shipped; it hands these batches to
   FlashAttention-2 on SM 8.x and FlashAttention-3 on SM 9.x.
-- ``flashinfer``: ``FLASHINFER`` with native mm-prefix ranges (#46558).
+- `flashinfer`: `FLASHINFER` with native mm-prefix ranges (#46558).
 
-Example (a Qwen3.5-9B full-attention layer):
+Example (a Qwen3.5-9B full-attention layer), from benchmarks/attention_benchmarks:
 
-    cd benchmarks/attention_benchmarks
-    python benchmark_prefix_lm.py --state-lens 2048 8192 14336 \
-        --num-requests 1 4 --questions 11
+    python benchmark_prefix_lm.py --state-lens 2048 8192 14336 --num-requests 1 4
 """
 
 import argparse

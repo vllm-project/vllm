@@ -934,7 +934,7 @@ PREFIX_LM_MM_RANGES = {
 def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: bool):
     """A PrefixLM prefill takes the FlashAttention path, anything else Triton.
 
-    The batch is built from real metadata and a real ``TritonAttentionImpl``.
+    The batch is built from real metadata and a real `TritonAttentionImpl`.
     The decode row has a query outside every range, so it must leave the fast
     path off; both paths are checked against the same dense reference.
     """
