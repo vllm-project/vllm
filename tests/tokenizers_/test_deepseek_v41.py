@@ -523,3 +523,58 @@ def test_deepseek_v41_unknown_role_raises_value_error():
             [{"role": "SYSTEM", "content": "Hello"}],
             thinking_mode="chat",
         )
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string", "maxLength": 8}},
+    "required": ["answer"],
+}
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("system", [None, "policy"])
+def test_response_format_renders_reference_block(thinking, system):
+    messages = [{"role": "user", "content": "question"}]
+    if system is not None:
+        messages.insert(0, {"role": "system", "content": system})
+    reference = copy.deepcopy(messages)
+    if system is None:
+        reference.insert(0, {"role": "system", "content": ""})
+    reference[0]["response_format"] = SCHEMA
+    expected = encode_messages(
+        reference,
+        thinking_mode="thinking" if thinking else "chat",
+        reasoning_effort="high",
+    )
+    assert render(messages, thinking=thinking, response_format=SCHEMA) == expected
+    assert "## Response Format:" in expected
+
+
+@pytest.mark.parametrize(
+    ("response_format", "schema"),
+    [
+        (
+            {
+                "type": "json_schema",
+                "json_schema": {"name": "a", "strict": True, "schema": SCHEMA},
+            },
+            SCHEMA,
+        ),
+        ({"type": "json_object"}, {"type": "object"}),
+        ({"type": "text"}, None),
+        (None, None),
+    ],
+)
+def test_chat_request_response_format_reaches_the_encoder(response_format, schema):
+    from vllm.renderers.deepseek_v4 import _apply_chat_template_kwargs
+
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        messages=[{"role": "user", "content": "question"}],
+        response_format=response_format,
+    )
+    kwargs = _apply_chat_template_kwargs(request.build_chat_params(None, "auto"))
+    assert kwargs.get("response_format") == schema
+    prompt = render(request.messages, **kwargs)
+    assert ("## Response Format:" in prompt) == (schema is not None)

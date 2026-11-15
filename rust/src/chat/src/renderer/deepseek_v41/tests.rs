@@ -18,6 +18,7 @@ use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
     ResolvedToolContext,
 };
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 fn render(request: &ChatRequest) -> String {
     DeepSeekV41ChatRenderer::default()
@@ -554,4 +555,45 @@ fn joins_assistant_text_parts_with_reference_separator() {
 
         answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
     .assert_eq(&render(&request));
+}
+
+/// Expected prompts come from the reference `encoding/encoding.py` with
+/// `response_format` set on the system message.
+#[test]
+fn renders_json_schema_response_format_like_reference_encoder() {
+    let mut request = request();
+    request.sampling_params.structured_outputs = Some(StructuredOutputsParams::json(json!({
+        "type": "object",
+        "properties": {"answer": {"type": "string", "maxLength": 8}},
+        "required": ["answer"],
+    })));
+    assert_eq!(
+        render(&request),
+        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{\"type\": \"object\", \"properties\": {\"answer\": {\"type\": \"string\", \"maxLength\": 8}}, \"required\": [\"answer\"]}<｜User｜>question<｜Assistant｜><think>"
+    );
+}
+
+#[test]
+fn renders_json_object_response_format_after_tools_on_first_system() {
+    let messages = vec![ChatMessage::system("policy"), ChatMessage::user("question")];
+    let tools = vec![tool("get_time", "Time", json!({"type": "object"}), false)];
+    let mut request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+    request.sampling_params.structured_outputs = Some(StructuredOutputsParams::json_object());
+    assert_eq!(
+        render(&request),
+        "<｜begin▁of▁sentence｜><｜System｜>policy\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"get_time\", \"description\": \"Time\", \"parameters\": {\"type\": \"object\"}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{\"type\": \"object\"}<｜User｜>question<｜Assistant｜></think>"
+    );
+}
+
+#[test]
+fn ignores_constraints_without_a_reference_rendering() {
+    let mut request = request();
+    let plain = render(&request);
+    request.sampling_params.structured_outputs = Some(StructuredOutputsParams::regex("[a-z]+"));
+    assert_eq!(render(&request), plain);
 }

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.config import VllmConfig
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -20,6 +22,26 @@ from .params import ChatParams
 _FIM_BEGIN = "<｜fim▁begin｜>"
 _FIM_HOLE = "<｜fim▁hole｜>"
 _FIM_END = "<｜fim▁end｜>"
+
+
+def _response_schema(response_format: Any) -> dict[str, Any] | None:
+    """The JSON schema a `response_format` puts on the answer, which the
+    reference encoder renders into the system turn (`response_format_template`).
+    JSON mode renders `{"type": "object"}`, the schema its grammar enforces."""
+    if response_format is None:
+        return None
+    if response_format.type == "json_object":
+        return {"type": "object"}
+    if response_format.type == "json_schema" and response_format.json_schema:
+        return response_format.json_schema.json_schema
+    return None
+
+
+def _apply_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
+    kwargs = params.get_apply_chat_template_kwargs()
+    if (schema := _response_schema(params.response_format)) is not None:
+        kwargs["response_format"] = schema
+    return kwargs
 
 
 class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
@@ -85,7 +107,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         rendered = self._apply_chat_template(
             conversation=conversation,
             messages=messages,
-            **params.get_apply_chat_template_kwargs(),
+            **_apply_chat_template_kwargs(params),
         )
 
         return conversation, self._build_prompt(rendered, mm_data, mm_uuids)
@@ -106,7 +128,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         rendered = await self._apply_chat_template_async(
             conversation=conversation,
             messages=messages,
-            **params.get_apply_chat_template_kwargs(),
+            **_apply_chat_template_kwargs(params),
         )
 
         return conversation, self._build_prompt(rendered, mm_data, mm_uuids)
