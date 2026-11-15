@@ -376,6 +376,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
+        w._claimed_reqs = set()
         w.draft_tp_mappings = {}
         w._head_sharded_draft_kv_heads = None
         w._head_sharded_draft_regions = set()
@@ -390,6 +391,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._failed_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
+        w._notif_lock = threading.Lock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
         w._packed_member_layouts = {}

@@ -2536,6 +2536,7 @@ def recv_worker():
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._handshake_lock = threading.RLock()
+    worker._notif_lock = threading.Lock()
     worker._handshake_futures = {}
     worker._remote_agents = {}
     worker._engine_by_address = {}

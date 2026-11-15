@@ -400,7 +400,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
         for rank, agent_name in agents.items():
             try:
-                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+                self._send_notif(agent_name, notif_msg)
             except Exception as e:
                 self._log_failure(
                     failure_type="push_reg_notif_failed",
@@ -833,6 +833,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         done_pushing = successful
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
+            self._claimed_reqs.discard(req_id)
             self._reqs_to_process.discard(req_id)
             done_sending.add(req_id)
 

@@ -10,7 +10,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -1466,7 +1466,7 @@ class MooncakeConnectorWorker:
         self._lease_cache: dict[EngineId, LeaseHeartbeat] = {}
         self._lease_cache_lock = threading.Lock()
         self._lease_last_sent = 0.0
-        self._lease_renewal_started = False
+        self._lease_renewal: Future | None = None
         self._unclaimed_grace: float = float(
             kv_transfer_config.get_from_extra_config("kv_unclaimed_grace", 0)
         )
@@ -1603,6 +1603,8 @@ class MooncakeConnectorWorker:
                 self, "bootstrap_server"
             ):
                 self.bootstrap_server.shutdown()
+        if self._lease_renewal is not None:
+            self._lease_renewal.cancel()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
@@ -3058,14 +3060,14 @@ class MooncakeConnectorWorker:
                 for eid, hb in lease_heartbeats.items()
             }
             self._lease_last_sent = time.perf_counter()
-        if not self._lease_renewal_started and self._kv_lease_duration is not None:
-            self._lease_renewal_started = True
-            asyncio.run_coroutine_threadsafe(
+        if self._lease_renewal is None and self._kv_lease_duration is not None:
+            self._lease_renewal = asyncio.run_coroutine_threadsafe(
                 self._lease_renewal_loop(), self.receiver_loop
             )
 
     def _forget_lease(self, pull_meta: PullReqMeta) -> None:
-        if not hasattr(self, "_lease_cache_lock"):  # worker built without __init__ (tests)
+        # Workers built without __init__ (tests) have no lease cache.
+        if not hasattr(self, "_lease_cache_lock"):
             return
         with self._lease_cache_lock:
             hb = self._lease_cache.get(pull_meta.remote_engine_id)

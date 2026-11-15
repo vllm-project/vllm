@@ -3568,7 +3568,7 @@ class NixlBaseConnectorWorker:
         """Send notifications deferred by split DRAM/VRAM reads."""
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
             try:
-                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+                self._send_notif(agent_name, notif_id)
             except Exception as e:
                 self._log_failure(
                     failure_type="notification_failed",
@@ -3587,7 +3587,12 @@ class NixlBaseConnectorWorker:
         with self._hb_lock:
             self._hb_cache = {
                 eid: HeartbeatInfo(
-                    set(hb.req_ids), hb.host, hb.port, hb.tp_size, hb.dcp_size, hb.pp_size
+                    set(hb.req_ids),
+                    hb.host,
+                    hb.port,
+                    hb.tp_size,
+                    hb.dcp_size,
+                    hb.pp_size,
                 )
                 for eid, hb in metadata.heartbeat_by_engine.items()
             }
@@ -3614,13 +3619,18 @@ class NixlBaseConnectorWorker:
                     continue
                 snapshot = {
                     eid: HeartbeatInfo(
-                        set(hb.req_ids), hb.host, hb.port, hb.tp_size, hb.dcp_size, hb.pp_size
+                        set(hb.req_ids),
+                        hb.host,
+                        hb.port,
+                        hb.tp_size,
+                        hb.dcp_size,
+                        hb.pp_size,
                     )
                     for eid, hb in self._hb_cache.items()
                 }
                 self._hb_last_sent = time.perf_counter()
             try:
-                self._send_heartbeats_now(snapshot)
+                self._send_heartbeats_now(snapshot, handshake=False)
             except Exception:
                 logger.debug("Background heartbeat failed", exc_info=True)
 
@@ -3636,13 +3646,22 @@ class NixlBaseConnectorWorker:
             if not hb.req_ids:
                 del self._hb_cache[meta.remote.engine_id]
 
+    def _send_notif(self, agent_name: str, notif_msg: bytes) -> None:
+        # Serialized with the background heartbeat thread.
+        with self._notif_lock:
+            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+
     def _send_heartbeats_now(
-        self, heartbeat_by_engine: dict[EngineId, HeartbeatInfo]
+        self,
+        heartbeat_by_engine: dict[EngineId, HeartbeatInfo],
+        handshake: bool = True,
     ) -> None:
         for engine_id, hb_info in heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
-            # the **next** heartbeat for this remote can go through.
-            if (
+            # the **next** heartbeat for this remote can go through. Only the
+            # main thread starts handshakes; the background thread skips
+            # engines that have not completed one.
+            if handshake and (
                 self._ensure_handshake(
                     engine_id,
                     hb_info.host,
@@ -3656,15 +3675,19 @@ class NixlBaseConnectorWorker:
             ):
                 continue  # handshake is still pending
 
-            # Refresh the TTL: a heartbeat means the router still paired this P-D,
-            # so requests are still waiting on this engine
-            self._engine_last_active[engine_id] = time.perf_counter()
+            with self._handshake_lock:
+                remote_agents = self._remote_agents.get(engine_id)
+                if remote_agents is None:
+                    continue
+                agent_names = list(remote_agents.values())
+                # Refresh the TTL: a heartbeat means the router still paired
+                # this P-D, so requests are still waiting on this engine
+                self._engine_last_active[engine_id] = time.perf_counter()
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in self._remote_agents[engine_id].values():
+            for agent_name in agent_names:
                 try:
-                    with self._notif_lock:
-                        self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
+                    self._send_notif(agent_name, hb_msg)
                 except Exception:
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
@@ -4159,8 +4182,9 @@ class NixlBaseConnectorWorker:
             for address, eid in list(self._engine_by_address.items()):
                 if eid == engine_id:
                     del self._engine_by_address[address]
-        for agent_name in agents.values():
-            self.nixl_wrapper.remove_remote_agent(agent_name)
+        with self._notif_lock:
+            for agent_name in agents.values():
+                self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self._failed_remote_engines.discard(engine_id)
         self._invalid_remote_engines.discard(engine_id)

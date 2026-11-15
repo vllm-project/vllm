@@ -61,6 +61,7 @@ def region_pull_worker():
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
     worker._handshake_lock = threading.RLock()
+    worker._notif_lock = threading.Lock()
     worker._handshake_futures = {}
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
