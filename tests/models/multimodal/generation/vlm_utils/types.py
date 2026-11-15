@@ -132,6 +132,7 @@ class VLMTestInfo(NamedTuple):
     stop_str: list[str] | None = None
 
     # Exposed options for HF runner
+    hf_runner_kwargs: dict[str, Any] | None = None
     hf_model_kwargs: dict[str, Any] | None = None
     hf_processor: Callable[[str], Any] | None = None
     # Indicates we should explicitly pass the EOS from the tokenizer
@@ -194,6 +195,7 @@ class VLMTestInfo(NamedTuple):
             "use_tokenizer_eos": self.use_tokenizer_eos,
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
+            "hf_runner_kwargs": self.hf_runner_kwargs,
             "hf_model_kwargs": self.hf_model_kwargs,
             "hf_processor": self.hf_processor,
             "stop_str": self.stop_str,
