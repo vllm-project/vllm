@@ -150,6 +150,13 @@ class InputProcessor:
             raise VLLMValidationError(
                 "Segment layouts need --attention-backend FLEX_ATTENTION"
             )
+        if self.model_config.get_sliding_window() is not None:
+            # Local (windowed) layers window on packed token indices, so a
+            # candidate's output would depend on its slot in the prompt.
+            raise VLLMValidationError(
+                "Segment layouts do not support models with sliding-window "
+                "(local) attention layers"
+            )
         if sum(segment_lengths) != prompt_len:
             raise VLLMValidationError(
                 f"segment_lengths sum to {sum(segment_lengths)}, but the prompt "

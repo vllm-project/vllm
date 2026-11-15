@@ -5,6 +5,7 @@ mask, the per-candidate pooler and request validation (CPU)."""
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -13,7 +14,11 @@ from vllm.model_executor.layers.pooler.tokwise.heads import _mean_pool_segments
 from vllm.pooling_params import PoolingParams, SegmentLayoutParams
 from vllm.v1.attention.backends import flex_attention
 from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
-from vllm.v1.worker.gpu.model_states.encoder_only import segment_layout_rows
+from vllm.v1.worker.gpu.model_states import encoder_only
+from vllm.v1.worker.gpu.model_states.encoder_only import (
+    EncoderOnlyModelState,
+    segment_layout_rows,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -34,6 +39,39 @@ def test_segment_layout_rows():
     assert segment_ids.tolist() == [0, 0, 0, 1, 1, 2, 2, 2, 2]
     # Each candidate restarts right after the 3-token prefix.
     assert positions.tolist() == [0, 1, 2, 3, 4, 3, 4, 5, 6]
+
+
+def test_layout_positions_written_into_persistent_buffer(monkeypatch):
+    """CUDA graphs replay the address of the runner's positions buffer, so the
+    restarted positions must be written into that buffer, not returned as a
+    new tensor (which only eager mode would read)."""
+    # CPU-only test: no pinned staging buffers.
+    monkeypatch.setattr(encoder_only, "PIN_MEMORY", False)
+    state = object.__new__(EncoderOnlyModelState)
+    state.rope_state = None
+    state.device = torch.device("cpu")
+    state.token_type_ids = {}
+    state.segment_layouts = {"layout": segment_layout_rows([2, 1, 2])}
+    buffer = torch.arange(16, dtype=torch.int64)
+    # Two requests in one padded step of 8 tokens: one plain (3 tokens) and
+    # one with a layout (5 tokens).
+    input_batch = SimpleNamespace(
+        req_ids=["plain", "layout"],
+        num_scheduled_tokens=np.array([3, 5]),
+        num_computed_tokens_np=np.array([0, 0]),
+        num_tokens_after_padding=8,
+        positions=buffer[:8],
+    )
+    buffer[:8] = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
+
+    model_inputs = state.prepare_inputs(input_batch, req_states=None)
+
+    expected = [0, 1, 2, 0, 1, 2, 2, 3]
+    positions = model_inputs["positions"]
+    assert positions is not None
+    assert positions.data_ptr() == buffer.data_ptr()
+    assert buffer[:8].tolist() == expected
+    assert buffer[8:].tolist() == list(range(8, 16))
 
 
 def _encoder_mask(query_start_loc: list[int], segment_ids: list[int] | None):
@@ -104,3 +142,32 @@ def test_segment_layout_needs_encoder_only_attention():
     )
     with pytest.raises(VLLMValidationError, match="encoder-only"):
         params.verify(_model_config("decoder"))
+
+
+def _input_processor(sliding_window: int | None):
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    processor = object.__new__(InputProcessor)
+    processor.vllm_config = SimpleNamespace(
+        use_v2_model_runner=True,
+        attention_config=SimpleNamespace(backend=AttentionBackendEnum.FLEX_ATTENTION),
+    )
+    processor.model_config = SimpleNamespace(get_sliding_window=lambda: sliding_window)
+    return processor
+
+
+def test_segment_layout_must_cover_the_prompt():
+    processor = _input_processor(sliding_window=None)
+    processor._validate_segment_layout([2, 1, 2], prompt_len=5)
+    with pytest.raises(VLLMValidationError, match="sum to 5"):
+        processor._validate_segment_layout([2, 1, 2], prompt_len=6)
+
+
+def test_segment_layout_refuses_sliding_window_models():
+    # e.g. ModernBERT: local layers window on packed indices, so a candidate's
+    # output would depend on its slot.
+    with pytest.raises(VLLMValidationError, match="sliding-window"):
+        _input_processor(sliding_window=64)._validate_segment_layout(
+            [2, 1, 2], prompt_len=5
+        )

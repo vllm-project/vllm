@@ -48,8 +48,18 @@ def _reference_means(hf_model, prefix: list[int], candidates: list[list[int]]):
     return torch.stack([r.mean(dim=0) for r in rows]).cpu()
 
 
+# Eager FP32 checks the layout tightly. The default mode (compiled, CUDA
+# graphs) runs in BF16, since FP32 FlexAttention does not compile there
+# (#63985); it catches positions that only eager mode reads.
+@pytest.mark.parametrize(
+    ("enforce_eager", "dtype", "tol"),
+    [(True, "float32", 2e-3), (False, "bfloat16", 3e-2)],
+    ids=["eager-fp32", "default-bf16"],
+)
 @pytest.mark.parametrize("num_candidates", [1, 4, 16])
-def test_segment_layout_matches_masked_reference(vllm_runner, num_candidates):
+def test_segment_layout_matches_masked_reference(
+    vllm_runner, num_candidates, enforce_eager, dtype, tol
+):
     from transformers import AutoModel, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -72,9 +82,9 @@ def test_segment_layout_matches_masked_reference(vllm_runner, num_candidates):
         MODEL,
         runner="pooling",
         pooler_config=PoolerConfig(task="token_embed"),
-        dtype="float32",
+        dtype=dtype,
         attention_backend="FLEX_ATTENTION",
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         max_model_len=256,
     ) as vllm_model:
         outputs = vllm_model.llm.encode(
@@ -87,4 +97,4 @@ def test_segment_layout_matches_masked_reference(vllm_runner, num_candidates):
         )
     got = outputs[0].outputs.data.float().cpu()
     assert got.shape == expected.shape
-    torch.testing.assert_close(got, expected, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(got, expected, atol=tol, rtol=tol)

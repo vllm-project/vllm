@@ -180,12 +180,18 @@ class EncoderOnlyModelState(DefaultModelState):
         model_inputs = super().prepare_inputs(input_batch, req_states)
         layout_positions = self._segment_rows(input_batch, column=1)
         if layout_positions is not None:
-            # Candidates restart their positions right after the prefix.
-            default = model_inputs.get("positions")
-            if default is None:
-                default = input_batch.positions[: input_batch.num_tokens_after_padding]
+            # Candidates restart their positions right after the prefix. Write
+            # them into the persistent positions buffer: a CUDA graph replays
+            # the buffer address it captured, so a new tensor would be ignored
+            # outside eager mode.
+            positions = model_inputs.get("positions")
+            if positions is None:
+                positions = input_batch.positions[
+                    : input_batch.num_tokens_after_padding
+                ]
             override = layout_positions.to(self.device, non_blocking=True)
-            model_inputs["positions"] = torch.where(override >= 0, override, default)
+            positions.copy_(torch.where(override >= 0, override, positions))
+            model_inputs["positions"] = positions
         if not self.token_type_ids:
             return model_inputs
 
