@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers shared by the weight cache daemon, the IPC loader and the engine.
 
-These live outside ``protocol`` so callers that only need to know whether a
+These live outside `protocol` so callers that only need to know whether a
 draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
-@dataclass
+@dataclass(slots=True)
 class ExternalWeightCharges:
     """Track a worker's external weight charges and those freed by disk fallback."""
 

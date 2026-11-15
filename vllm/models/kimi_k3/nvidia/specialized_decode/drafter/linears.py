@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DSpark drafter's BF16 linears on the decode GEMM engines.
 
-The draft step multiplies ``R * k`` rows (``R * (k + 1)`` for the context
+The draft step multiplies `R * k` rows (`R * (k + 1)` for the context
 projections) by 0.7 GB (TP8 rank) to 7 GB (DEP rank) of BF16 weights: a decode
 GEMM whose time is the weight stream. cuBLAS runs these skinny shapes through
 split-K kernels at 2.4-3.6 TB/s (Phase-1 drafter breakdown); the warp split-K of
-``cutedsl/gemm/warp_splitk.py`` (many small co-resident CTAs, one cp.async weight
+`cutedsl/gemm/warp_splitk.py` (many small co-resident CTAs, one cp.async weight
 ring each, mma.sync, FP32 split-K partials reduced in shared memory, one BF16
 rounding) keeps the stream near HBM speed up to 32 rows.
 
-``DraftGemm`` picks the engine per row count (``WARP_ROWS``), compiles it the
+`DraftGemm` picks the engine per row count (`WARP_ROWS`), compiles it the
 first time an eager call sees that count (the CUDA-graph warmup runs every
 captured size eagerly before its capture) and runs cuBLAS for anything else.
-``install`` swaps the drafter linears' unquantized ``apply`` for it. Precision:
+`install` swaps the drafter linears' unquantized `apply` for it. Precision:
 BF16 operands, FP32 accumulation, one BF16 rounding, as cuBLAS; only the
 summation order differs.
 """
@@ -39,7 +39,7 @@ def warp_eligible(n, k):
 
 
 class DraftGemm:
-    """``out[M, N] = x[M, K] @ weight[N, K]^T`` with an engine per prepared M."""
+    """`out[M, N] = x[M, K] @ weight[N, K]^T` with an engine per prepared M."""
 
     def __init__(self, weight):
         self.weight = weight
@@ -58,7 +58,7 @@ class DraftGemm:
         return "warp" if m in self.engines else "cublas"
 
     def prepare(self, m):
-        """Compile the engine of ``m`` rows (host only; never under capture)."""
+        """Compile the engine of `m` rows (host only; never under capture)."""
         if m in self.engines or not self.eligible or not 1 <= m <= WARP_ROWS:
             return
         from ..cutedsl.gemm.decode import warp_tactic
@@ -97,9 +97,9 @@ def _linear_method_base():
 
 
 class DraftLinearMethod(_linear_method_base()):  # type: ignore[misc]
-    """An unquantized linear's ``apply`` on ``DraftGemm`` (2-D BF16 inputs without
+    """An unquantized linear's `apply` on `DraftGemm` (2-D BF16 inputs without
     bias; anything else goes to the original method). A subclass of
-    ``UnquantizedLinearMethod`` so type checks on the layer still hold."""
+    `UnquantizedLinearMethod` so type checks on the layer still hold."""
 
     def __init__(self, layer, inner):  # super().__init__ not needed
         self.inner = inner
@@ -121,8 +121,8 @@ class DraftLinearMethod(_linear_method_base()):  # type: ignore[misc]
 
 
 def install(module) -> int:
-    """Route every unquantized BF16 linear under ``module`` through DraftGemm
-    (not ``kv_b_proj``: the decode runs its absorbed W_UK / W_UV instead)."""
+    """Route every unquantized BF16 linear under `module` through DraftGemm
+    (not `kv_b_proj`: the decode runs its absorbed W_UK / W_UV instead)."""
     from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
     count = 0
@@ -141,11 +141,11 @@ def install(module) -> int:
 
 
 def draft_logits(model, hidden_states):
-    """``model.compute_draft_logits``: the lm_head shard (the target's lm_head weight,
-    shared; on ``DraftGemm`` for a plain BF16 head, else its own method), then the
-    vocab gather on the drafter's mailbox (``comm.DrafterComm.gather_logits``; vLLM's
+    """`model.compute_draft_logits`: the lm_head shard (the target's lm_head weight,
+    shared; on `DraftGemm` for a plain BF16 head, else its own method), then the
+    vocab gather on the drafter's mailbox (`comm.DrafterComm.gather_logits`; vLLM's
     all-gather for a shape it does not serve). BF16 logits only (an FP32 head keeps
-    ``compute_logits``)."""
+    `compute_logits`)."""
     lp, head = model.logits_processor, model.lm_head
     cached = getattr(model, "_draft_lm_head_gemm", None)
     if cached is None or cached[0] is not head.weight:

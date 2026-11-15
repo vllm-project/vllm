@@ -269,7 +269,7 @@ def repeated_context_mask(
         contexts: `[num_rows, context_width]` context per row, padded with -1
             before the start of the scanned history.
         max_history: Number of most recent history positions searched, or
-            ``None`` for all of them. The window compared at each position
+            `None` for all of them. The window compared at each position
             reaches `context_width` tokens further back.
         include_prompt: Search the prompt as well as the generated tokens.
         skip_partial_context: Mark contexts containing start padding so they use

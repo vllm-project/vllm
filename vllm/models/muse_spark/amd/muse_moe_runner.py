@@ -431,7 +431,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
     ) -> torch.Tensor:
-        """A cached ``[num_routes, width]`` fp32 ones buffer (grown on demand)."""
+        """A cached `[num_routes, width]` fp32 ones buffer (grown on demand)."""
         buf = self._unit_weights_bufs.get(width)
         if buf is None or buf.shape[0] < num_routes or buf.device != device:
             buf = torch.ones(
@@ -634,7 +634,7 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
 def _quantize_experts_to_mxfp4(
     weight: torch.Tensor, experts_per_chunk: int = 32
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round ``[experts, rows, cols]`` weights to packed OCP MXFP4."""
+    """Round `[experts, rows, cols]` weights to packed OCP MXFP4."""
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     num_experts, rows, cols = weight.shape

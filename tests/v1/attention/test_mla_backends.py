@@ -22,7 +22,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.config.vllm import set_current_vllm_config
+from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
     get_block_table_width,
+    is_quantized_kv_cache,
 )
 
 BACKENDS_TO_TEST = [
@@ -257,7 +258,6 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         sliding_window=None,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
@@ -265,7 +265,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
 
-    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+    spec = MLAAttention.get_kv_cache_config(layer, vllm_config).spec
 
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
@@ -382,6 +382,69 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [1, 64, 300])
+@pytest.mark.parametrize("q_scale", [1.0, 0.37])
+def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
+    """The fused AITER decode query (Kimi-K2 at TP8: 8 heads, L=512, P=128) is
+    the padded fp8 query MLAAttention builds otherwise: torch.bmm into a
+    token-major buffer, _DecodeConcatQuantFP8, then get_mla_padded_q."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+        num_heads, kv_lora_rank, qk_nope_head_dim
+    ):
+        pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
+
+    set_random_seed(0)
+    q = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    q_nope, q_pe = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    q_nope = q_nope.transpose(0, 1)
+    # W_UK^T as split_kv_b_proj + process_weights_after_loading lay it out.
+    kv_b_weight = 0.05 * torch.randn(
+        num_heads * 2 * qk_nope_head_dim,
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
+        [qk_nope_head_dim, qk_nope_head_dim], dim=-1
+    )
+    w_uk_t = w_uk.permute(1, 2, 0)
+    scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+
+    ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
+    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
+    with set_current_vllm_config(VllmConfig()):
+        concat_quant = _DecodeConcatQuantFP8(
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
+        )
+    ref = AiterMLAHelper.get_mla_padded_q(
+        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
+    )
+    out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+        q_nope, w_uk_t, q_pe, scale, padded_heads
+    )
+
+    assert out.shape == ref.shape and out.dtype == ref.dtype
+    # A different accumulation order can flip a bf16 rounding of the BMM
+    # result, which moves the fp8 value by at most one step.
+    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
+    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
+    assert mismatch.item() < 0.01
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
@@ -764,7 +827,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
-        fp8_attention = kv_cache_dtype.startswith("fp8")
+        fp8_attention = is_quantized_kv_cache(kv_cache_dtype)
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -781,7 +844,7 @@ class MockSparseMLAAttentionLayer:
                 scale=self._k_scale,
             )
 
-        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
@@ -864,6 +927,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
+        self.sliding_window = None
 
         # Compute weight matrices from kv_b_proj (like MLAAttention does)
         # This replicates MLAAttention.process_weights_after_loading logic
@@ -897,7 +961,7 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         raise NotImplementedError
 
     # test replica takes only the arguments the test passes
@@ -2138,7 +2202,6 @@ def _run_backend_correctness(
             ),
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
-            sliding_window=vllm_config.model_config.get_sliding_window(),
             cache_dtype_str=kv_cache_dtype,
         )
 
