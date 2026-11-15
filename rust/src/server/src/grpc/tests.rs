@@ -1644,11 +1644,20 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
                                 })),
                                 ..request_output(&request.request_id, vec![], None)
                             },
-                            request_output(
-                                &request.request_id,
-                                vec![b'h' as u32],
-                                Some(EngineCoreFinishReason::Length),
-                            ),
+                            // The same output carries progress, tokens and the
+                            // finish reason, which is what the scheduler does once
+                            // a step produces output of its own.
+                            EngineCoreOutput {
+                                prefill_progress: Some(Box::new(PrefillProgress {
+                                    request_id: request.request_id.clone(),
+                                    remaining_prefill_tokens: 0,
+                                })),
+                                ..request_output(
+                                    &request.request_id,
+                                    vec![b'h' as u32],
+                                    Some(EngineCoreFinishReason::Length),
+                                )
+                            },
                         ],
                         ..Default::default()
                     }
@@ -1693,9 +1702,26 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
     .await
     .expect("stream completion timeout");
     assert!(responses.iter().any(|response| response.prompt_info.is_some()));
-    assert!(responses.iter().any(|response| {
-        response.outputs.as_ref().is_some_and(|output| output.finish_info.is_some())
-    }));
+    // The frontend splits a merged core output into a progress frame and the
+    // text frame that follows it, so both have to arrive, in that order.
+    let terminal = responses
+        .iter()
+        .position(|response| {
+            response
+                .outputs
+                .as_ref()
+                .is_some_and(|output| output.finish_info.is_some())
+        })
+        .expect("a terminal output frame");
+    assert!(!responses[terminal].outputs.as_ref().unwrap().text.is_empty());
+    assert_eq!(
+        responses[..terminal]
+            .iter()
+            .filter_map(|response| response.prefill_progress.as_ref())
+            .map(|progress| progress.remaining_prefill_tokens)
+            .last(),
+        Some(0)
+    );
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }

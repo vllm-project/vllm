@@ -1927,6 +1927,27 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
 
     assert [step() for _ in range(5)] == [[48], [32], [16], [0], []]
 
+    # The step that finishes a prefill also samples the first token, and the
+    # report rides on that output rather than a separate one.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64, max_model_len=256, enable_prefill_progress=True
+    )
+    request = create_requests(num_requests=1, num_tokens=64, max_tokens=4)[0]
+    scheduler.add_request(request)
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[7]]),
+    )
+    merged = [
+        entry
+        for batch in outputs.values()
+        for entry in batch.outputs
+        if entry.prefill_progress is not None
+    ]
+    assert len(merged) == 1
+    assert merged[0].new_token_ids == [7]
+    assert merged[0].prefill_progress.remaining_prefill_tokens == 0
+
     # A drop smaller than the throttle still reports when it reaches zero.
     request.prefill_progress_left = 2
     request.prefill_progress_step = 3
