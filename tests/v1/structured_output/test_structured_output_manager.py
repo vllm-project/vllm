@@ -46,7 +46,7 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlowCase:
     """One bitmask -> accept -> post-accept bitmask scenario."""
 
