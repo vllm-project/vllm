@@ -479,11 +479,10 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
-        # Preemptions queue their requeued work here; the next output flush
-        # sends it. Empty whenever reporting is off.
-        self._deferred_prefill_progress: dict[int, list[PrefillProgress]] = (
-            defaultdict(list)
-        )
+        # Progress waiting to go out, keyed by request so a newer report for
+        # the same request replaces an older one instead of being sent twice.
+        # Preemptions write here too. Empty whenever reporting is off.
+        self._pending_prefill_progress: dict[str, tuple[int, PrefillProgress]] = {}
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
 
@@ -1827,10 +1826,11 @@ class Scheduler(SchedulerInterface):
         remaining = max(0, request.num_tokens - request.num_computed_tokens)
         request.prefill_progress_left = None
         request.prefill_progress_step = 0
-        self._deferred_prefill_progress.setdefault(request.client_index, []).append(
+        self._pending_prefill_progress[request.request_id] = (
+            request.client_index,
             PrefillProgress(
                 request_id=request.request_id, remaining_prefill_tokens=remaining
-            )
+            ),
         )
 
     def _preempt_request(
@@ -2332,16 +2332,8 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-        prefill_progress: dict[int, list[PrefillProgress]] = (
-            self._deferred_prefill_progress
-        )
-        self._deferred_prefill_progress = defaultdict(list)
-        # A report rides on the output this step already produces for the
-        # request; only a step without one needs an output of its own.
-        prefill_by_request: dict[str, PrefillProgress] = {}
-        # Requests that reported through their own output this step. A queued
-        # snapshot for any of them is older than what already went out.
-        prefill_reported: set[str] = set()
+        pending_progress = self._pending_prefill_progress
+        self._pending_prefill_progress = {}
 
         spec_decoding_stats: SpecDecodingStats | None = None
 
@@ -2390,7 +2382,11 @@ class Scheduler(SchedulerInterface):
                 ):
                     progress = self._report_prefill_progress(request)
                     if progress is not None:
-                        prefill_by_request[request.request_id] = progress
+                        # Replaces any queued snapshot for this request.
+                        pending_progress[request.request_id] = (
+                            request.client_index,
+                            progress,
+                        )
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2567,8 +2563,11 @@ class Scheduler(SchedulerInterface):
                         request.prefill_progress_left = None
                         # Attach the final zero to this step's terminal output;
                         # a step without one flushes it as its own frame.
-                        prefill_by_request[req_id] = PrefillProgress(
-                            request_id=req_id, remaining_prefill_tokens=0
+                        pending_progress[req_id] = (
+                            request.client_index,
+                            PrefillProgress(
+                                request_id=req_id, remaining_prefill_tokens=0
+                            ),
                         )
                     if (
                         prefill_stats is not None
@@ -2604,13 +2603,11 @@ class Scheduler(SchedulerInterface):
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
-                attached_progress = prefill_by_request.pop(req_id, None)
-                if attached_progress is not None:
-                    prefill_reported.add(req_id)
+                attached = pending_progress.pop(req_id, None)
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        prefill_progress=attached_progress,
+                        prefill_progress=attached[1] if attached else None,
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2651,12 +2648,7 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        # Steps that produced no output of their own still owe the report.
-        for request_id, progress in prefill_by_request.items():
-            request = self.requests.get(request_id)
-            if request is not None:
-                prefill_progress.setdefault(request.client_index, []).append(progress)
-        prefill_by_request.clear()
+
 
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
@@ -2766,27 +2758,20 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
-        if prefill_progress:
-            for client_index in list(prefill_progress):
-                prefill_progress[client_index] = [
-                    update
-                    for update in prefill_progress[client_index]
-                    if update.request_id not in prefill_reported
-                    and update.request_id in self.requests
-                ]
-
         # Progress travels as an ordinary output so the frontend routes it per
-        # request, including on steps that produce no tokens.
-        for client_index, updates in prefill_progress.items():
+        # request, including on steps that produce no tokens. What is left here
+        # is exactly the requests whose step produced no output of its own.
+        for request_id, (client_index, update) in pending_progress.items():
+            if request_id not in self.requests:
+                continue
             if (eco := engine_core_outputs.get(client_index)) is None:
                 engine_core_outputs[client_index] = eco = EngineCoreOutputs()
-            eco.outputs.extend(
+            eco.outputs.append(
                 EngineCoreOutput(
                     request_id=update.request_id,
                     new_token_ids=[],
                     prefill_progress=update,
                 )
-                for update in updates
             )
 
         if (
