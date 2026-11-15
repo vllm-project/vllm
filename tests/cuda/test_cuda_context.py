@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 
 
@@ -194,6 +195,17 @@ def test_has_device_capability_comparisons(monkeypatch):
         assert not NvmlCudaPlatform.has_device_capability((10, 0))
     finally:
         NvmlCudaPlatform.get_device_capability.cache_clear()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+@create_new_process_for_each_test("spawn")
+def test_capability_queries_leave_cuda_uninitialized():
+    from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+
+    current_platform.is_arch_support_pdl()
+    has_deep_gemm_sparse_mqa()
+    assert not torch.cuda.is_initialized()
+    assert not check_cuda_context()[0]
 
 
 if __name__ == "__main__":

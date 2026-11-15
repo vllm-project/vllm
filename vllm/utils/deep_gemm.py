@@ -295,8 +295,15 @@ def _apply_pdl(mod, enable: bool = True) -> None:
         logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
 
 
+_pdl_pending: Any = None
+
+
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
+    global _pdl_pending
+    if _pdl_pending is not None and torch.cuda.is_initialized():
+        _apply_pdl(_pdl_pending, True)
+        _pdl_pending = None
     global _cublaslt_gemm_nt_impl
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
@@ -355,7 +362,10 @@ def _lazy_init() -> None:
 
     # Enable PDL for DeepGEMM on architectures that support it (SM90+).
     if current_platform.is_arch_support_pdl():
-        _apply_pdl(_dg, True)
+        if torch.cuda.is_initialized():
+            _apply_pdl(_dg, True)
+        else:
+            _pdl_pending = _dg
     _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
