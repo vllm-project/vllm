@@ -41,7 +41,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -56,6 +55,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.engine import (
     EngineCoreEventType,
     EngineCoreOutput,
@@ -2290,7 +2290,6 @@ class Scheduler(SchedulerInterface):
         if last is not None and 0 <= last - remaining < request.prefill_progress_step:
             return None
         request.prefill_progress_left = remaining
-        logger.debug("PP emit %s remaining=%d", request.request_id, remaining)
         return PrefillProgress(
             request_id=request.request_id, remaining_prefill_tokens=remaining
         )
@@ -2640,8 +2639,6 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
-
-
 
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
