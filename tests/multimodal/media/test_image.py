@@ -15,13 +15,10 @@ from PIL.BlpImagePlugin import BLPFormatError
 
 from vllm.multimodal import image as image_utils
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.image import (
-    ALLOWED_IMAGE_FORMATS,
-    has_torchcodec_image_decoding,
-    open_image,
-)
+from vllm.multimodal.image import ALLOWED_IMAGE_FORMATS, open_image
 from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
 from vllm.multimodal.media.video import VideoMediaIO
+from vllm.utils.import_utils import has_torchcodec_image_decoding
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -665,7 +662,9 @@ def test_torchcodec_backend_falls_back_to_pil_on_decode_error(monkeypatch):
 
 
 def test_torchcodec_backend_unavailable_uses_pil(monkeypatch):
-    monkeypatch.setattr(image_utils, "_HAS_TORCHCODEC_IMAGE_DECODING", False)
+    monkeypatch.setattr(
+        "vllm.multimodal.media.image.has_torchcodec_image_decoding", lambda: False
+    )
     image_io = ImageMediaIO(image_backend="torchcodec")
     assert image_io.image_backend == "pil"
     result = image_io.load_bytes(_encode(_noisy_rgb_image(), "JPEG"))

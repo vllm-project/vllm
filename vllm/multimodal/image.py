@@ -9,19 +9,14 @@ import torch
 from PIL import Image, ImageOps
 
 from vllm.logger import init_logger
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule, has_torchcodec_image_decoding
 
-try:
+if has_torchcodec_image_decoding():
     from torchcodec.decoders import decode_image as torchcodec_decode_image
-except (ImportError, RuntimeError, OSError):
-    # torchcodec may be missing, older than 0.16 (no image decoders), or
-    # unable to load its native library.
+else:
     torchcodec_decode_image = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.decode_image"
     )
-    _HAS_TORCHCODEC_IMAGE_DECODING = False
-else:
-    _HAS_TORCHCODEC_IMAGE_DECODING = True
 
 logger = init_logger(__name__)
 
@@ -132,10 +127,6 @@ def convert_image_mode(
         return image
 
     return image.convert(to_mode)
-
-
-def has_torchcodec_image_decoding() -> bool:
-    return _HAS_TORCHCODEC_IMAGE_DECODING
 
 
 # The images torchcodec decodes to the same pixels as Pillow. It differs on

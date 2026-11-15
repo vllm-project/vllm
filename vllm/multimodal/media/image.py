@@ -12,6 +12,7 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.import_utils import has_torchcodec_image_decoding
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -22,7 +23,6 @@ from ..image import (
     can_decode_with_torchcodec,
     convert_image_mode,
     decode_image_torchcodec,
-    has_torchcodec_image_decoding,
     normalize_image,
     open_image,
 )
