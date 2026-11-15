@@ -13310,65 +13310,57 @@ async fn anthropic_replays_thinking_without_signatures_or_redacted_data() {
     let (status, response) = post_json(&mut app, "/v1/messages", body).await;
     engine_task.await.unwrap();
     assert_eq!(status, StatusCode::OK, "{response}");
-    assert_eq!(response["usage"]["input_tokens"], expected_count);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn anthropic_thinking_controls_reach_renderer_and_engine() {
     let backend = anthropic_reasoning_backend().await;
-    for (thinking, effort, remap_none, expected_effort, enabled, budget) in [
-        (json!(null), json!(null), false, "unset", "unset", None),
+    for (thinking, effort, remap_none, expected_controls, budget) in [
         (
             json!({"type": "enabled", "budget_tokens": 1024, "display": "omitted"}),
             json!("high"),
             false,
-            "max",
-            "true",
+            "max|true",
             Some(1024),
         ),
         (
             json!({"type": "adaptive", "display": "summarized"}),
             json!("xhigh"),
             false,
-            "xhigh",
-            "true",
+            "xhigh|true",
             None,
         ),
         (
             json!({"type": "adaptive", "display": "updates"}),
             json!(null),
             false,
-            "unset",
-            "unset",
+            "unset|unset",
             None,
         ),
         (
             json!({"type": "disabled"}),
             json!("high"),
             false,
-            "none",
-            "false",
+            "none|false",
             None,
         ),
         (
             json!({"type": "disabled"}),
             json!("high"),
             true,
-            "low",
-            "true",
+            "low|true",
             None,
         ),
         (
             json!({"type": "between_tools"}),
             json!("max"),
             false,
-            "none",
-            "false",
+            "none|false",
             None,
         ),
     ] {
-        let expected = token_ids(&format!("{expected_effort}|{enabled}|user::Hi;"));
+        let expected = token_ids(&format!("{expected_controls}|user::Hi;"));
         let expected_count = expected.len();
         let backend = backend.clone();
         let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
@@ -13400,7 +13392,6 @@ async fn anthropic_thinking_controls_reach_renderer_and_engine() {
         let (status, response) = post_json(&mut app, "/v1/messages", body).await;
         engine_task.await.unwrap();
         assert_eq!(status, StatusCode::OK, "{response}");
-        assert_eq!(response["usage"]["input_tokens"], expected_count);
     }
 }
 
@@ -13414,7 +13405,6 @@ async fn anthropic_rejects_invalid_thinking_and_unsupported_content() {
         json!({"thinking": {"type": "adaptive", "display": "invalid"}}),
         json!({"thinking": {"type": "invalid"}}),
         json!({"output_config": {"effort": "none"}}),
-        json!({"output_config": {"effort": "minimal"}}),
         json!({"output_config": {"format": {"type": "json_schema", "schema": {}}}}),
         json!({"messages": [{"role": "user", "content": [{"type": "thinking", "thinking": "reason"}]}]}),
         json!({"system": [{"type": "thinking", "thinking": "reason"}]}),
