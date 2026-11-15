@@ -214,10 +214,18 @@ mod tests {
     #[test]
     fn progress_only_output_is_not_held_back() {
         let (mut sender, mut receiver) = channel(8);
-        // Progress does not take the first-output credit: the token that
-        // follows still goes out on its own, not with the eighth.
+        sender.send(output(&[1]));
+        sender.send(progress(500));
+        // The progress frame arrives now instead of with the eighth token.
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![1]], vec![vec![]]]);
+    }
+
+    #[test]
+    fn progress_before_the_first_token_does_not_delay_it() {
+        let (mut sender, mut receiver) = channel(8);
         sender.send(progress(500));
         sender.send(output(&[1]));
+        // Progress first, then the first token on its own, not eight tokens later.
         assert_eq!(deliveries(&mut receiver), vec![vec![vec![]], vec![vec![1]]]);
     }
 

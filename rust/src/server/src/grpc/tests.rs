@@ -1687,9 +1687,9 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
     assert_eq!(progress.remaining_prefill_tokens, 1);
 
     let finished = tokio::time::timeout(Duration::from_secs(10), stream.any(|item| async {
-        item.expect("stream output")
-            .outputs
-            .is_some_and(|output| output.finish_info.is_some())
+        item.expect("stream output").outputs.is_some_and(|output| {
+            output.finish_info.is_some() && !output.token_ids.is_empty()
+        })
     }))
     .await
     .expect("stream completion timeout");
