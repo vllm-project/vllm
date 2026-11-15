@@ -34,8 +34,10 @@ from typing import (
 )
 
 import torch
+import transformers
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, PreTrainedConfig
+from transformers.models.auto.modeling_auto import MODEL_MAPPING
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -471,10 +473,35 @@ def has_bidirectional_attention(model: nn.Module) -> bool:
     return any(not getattr(module, "is_causal", True) for module in model.modules())
 
 
+def use_remote_code(model_config: "ModelConfig", config: PreTrainedConfig) -> bool:
+    """Whether to build the checkpoint's custom modeling code.
+
+    As in `ModelRegistry._try_resolve_transformers`, Transformers' own class for the
+    checkpoint's architecture takes precedence over custom code in `auto_map`, which
+    is only built when there is no such class (or the config class itself is custom).
+    """
+    if not model_config.trust_remote_code:
+        return False
+    architectures = model_config.architectures
+    if not (architectures and hasattr(transformers, architectures[0])):
+        return True
+    if type(config) not in MODEL_MAPPING:
+        return True
+    if "AutoModel" in (getattr(config, "auto_map", None) or {}):
+        logger.info_once(
+            "Using Transformers' implementation of %s rather than the custom "
+            "modeling code of %s.",
+            architectures[0],
+            model_config.model,
+        )
+    return False
+
+
 def get_default_seq_pooling_type(model_config: "ModelConfig") -> "SequencePoolingType":
     """`CLS` for encoders and `LAST` for decoders, like vLLM's own pooling models."""
+    hf_config = model_config.hf_config
     with torch.device("meta"):
         model = AutoModel.from_config(
-            model_config.hf_config, trust_remote_code=model_config.trust_remote_code
+            hf_config, trust_remote_code=use_remote_code(model_config, hf_config)
         )
     return "CLS" if has_bidirectional_attention(model) else "LAST"

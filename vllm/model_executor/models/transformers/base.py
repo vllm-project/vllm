@@ -78,6 +78,7 @@ from vllm.model_executor.models.transformers.utils import (
     replace_embedding_class,
     replace_layernorm_class,
     replace_linear_class,
+    use_remote_code,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -246,7 +247,7 @@ class Base(
         return dict(
             config=self.config,
             dtype=self.model_config.dtype,
-            trust_remote_code=self.model_config.trust_remote_code,
+            trust_remote_code=use_remote_code(self.model_config, self.config),
         )
 
     def _create_model(self) -> "PreTrainedModel":
