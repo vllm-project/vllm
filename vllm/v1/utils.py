@@ -9,7 +9,6 @@ import time
 import weakref
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -32,7 +31,6 @@ from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_mes
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     import numpy as np
@@ -155,10 +153,10 @@ def get_engine_client_zmq_addr(
     host: str,
     port: int = 0,
 ) -> str:
-    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
+    """Return an IPC path (`local_only=True`) or `tcp://host:port`.
 
-    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    `port=0` lets the kernel assign the port at `bind()` time; the
+    caller must recover it via `getsockopt(zmq.LAST_ENDPOINT)`."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -361,6 +359,24 @@ class RustFrontendProcessManager:
         # frontends.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+
+        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # argparse.SUPPRESS, so get_non_default_args() never sees them;
+        # cli/main.py has already merged them into `args.logging_config`.
+        if logging_config := getattr(args, "logging_config", None):
+            args_dict["logging_config"] = {
+                "log_level": logging_config.log_level,
+                "formatter": logging_config.formatter,
+            }
+            if (
+                not logging_config.configure_logging
+                or logging_config.pylogging_config_file
+            ):
+                logger.warning(
+                    "configure_logging and pylogging_config_file apply to "
+                    "Python logging only, not to the Rust frontend's logs."
+                )
+
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
@@ -380,6 +396,11 @@ class RustFrontendProcessManager:
         else:
             input_listener.close()
             output_listener.close()
+            # Rust owns these now; an open copy here keeps the ports listening
+            # after Rust closes them.
+            sock.close()
+            if grpc_sock is not None:
+                grpc_sock.close()
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
@@ -672,19 +693,6 @@ def _shutdown_processes_and_cleanup_listeners(
             listener.cleanup()
 
 
-def copy_slice(
-    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
-) -> torch.Tensor:
-    """Copy the first length elements of a tensor into another tensor in a
-    non-blocking manner.
-
-    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
-
-    Returns the sliced target tensor.
-    """
-    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
-
-
 def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
@@ -740,7 +748,11 @@ def report_usage_stats(
             # Common configuration
             "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
-            "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
+            # Reported at worker init: the extensible KV cache default (1.0) is
+            # still shown if the driver probe later falls back to 0.92.
+            "gpu_memory_utilization": (
+                vllm_config.cache_config.resolved_gpu_memory_utilization
+            ),
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
             "quantization": model_config.quantization,
@@ -821,66 +833,3 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
         except (TypeError, RuntimeError):
             pass
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
-
-
-@dataclass
-class IterationDetails:
-    num_ctx_requests: int
-    num_ctx_tokens: int
-    num_generation_requests: int
-    num_generation_tokens: int
-    num_encoder_inputs: int = 0
-    num_encoder_output_tokens: int = 0
-
-    def __repr__(self) -> str:
-        return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
-                 num_ctx_tokens={self.num_ctx_tokens}, \
-                 num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens}, \
-                 num_encoder_inputs={self.num_encoder_inputs}, \
-                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
-
-
-def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """Compute the number of context/generation requests and tokens
-    for the current iteration's scheduler output. A requests is regarded
-    as a context request if its output tokens are still 0, an extended chunk
-    of chunked prefill falls into this category.
-
-    Args:
-        scheduler_output: The scheduler output for the current iteration.
-
-    Returns:
-        An IterationDetails object containing the number of
-        context/generation requests and tokens.
-
-    """
-    num_context_requests = 0
-    num_context_tokens = 0
-    num_generation_requests = 0
-    num_generation_tokens = 0
-    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
-    for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
-            req_id in new_req_ids
-        ):
-            num_context_requests += 1
-            num_context_tokens += num_tokens
-        else:
-            num_generation_requests += 1
-            num_generation_tokens += num_tokens
-    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
-    num_encoder_inputs = 0
-    num_encoder_output_tokens = 0
-    if scheduled_encoder_input_stats is not None:
-        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
-        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
-
-    return IterationDetails(
-        num_context_requests,
-        num_context_tokens,
-        num_generation_requests,
-        num_generation_tokens,
-        num_encoder_inputs,
-        num_encoder_output_tokens,
-    )

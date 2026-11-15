@@ -2,22 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cohere Chat v2 API protocol.
 
-The bulk of the wire types come straight from the official ``cohere``
+The bulk of the wire types come straight from the official `cohere`
 Python SDK so we stay in sync with the upstream specification and
 avoid re-declaring the schema. We only own three things locally:
 
 1. The top-level request body model (the SDK doesn't ship one — its
-   ``ClientV2.chat`` takes the body as kwargs), with vLLM-specific
-   extensions (``kv_transfer_params`` / ``chat_template_kwargs``).
+   `ClientV2.chat` takes the body as kwargs), with vLLM-specific
+   extensions (`kv_transfer_params` / `chat_template_kwargs`).
 2. The non-streaming response envelope (the SDK exposes the message
-   shape via :class:`AssistantMessageResponse` but no full response
+   shape via `AssistantMessageResponse` but no full response
    wrapper).
 3. The streaming discriminated union (the SDK exports each event type
-   individually but not as a combined ``Annotated[Union[...],
-   discriminator]``).
+   individually but not as a combined `Annotated[Union[...],
+   discriminator]`).
 
-Importing this module pulls in the ``cohere`` package. The router that
-mounts ``POST /cohere/v2/chat`` guards on that import succeeding so vLLM still
+Importing this module pulls in the `cohere` package. The router that
+mounts `POST /cohere/v2/chat` guards on that import succeeding so vLLM still
 boots without the SDK installed.
 
 See https://docs.cohere.com/reference/chat for the upstream spec.
@@ -94,9 +94,9 @@ __all__ = [
 
 
 class CohereError(BaseModel):
-    """Top-level error body returned by ``/cohere/v2/chat`` error responses.
+    """Top-level error body returned by `/cohere/v2/chat` error responses.
 
-    Cohere's documented error schemas are uniform: ``{message, id}``.
+    Cohere's documented error schemas are uniform: `{message, id}`.
     """
 
     message: str
@@ -224,24 +224,24 @@ class CohereChatV2Request(BaseModel):
     @field_validator("messages", mode="before")
     @classmethod
     def _normalize_message_roles(cls, v: Any) -> Any:
-        """Rewrite OpenAI-style ``developer`` roles to ``system``.
+        """Rewrite OpenAI-style `developer` roles to `system`.
 
-        Cohere's v2 ``ChatMessageV2`` discriminated union only admits
-        the four literal roles ``user`` / ``assistant`` / ``system`` /
-        ``tool``. OpenAI's ``developer`` role is documented as
+        Cohere's v2 `ChatMessageV2` discriminated union only admits
+        the four literal roles `user` / `assistant` / `system` /
+        `tool`. OpenAI's `developer` role is documented as
         high-priority system instructions, so we alias it onto
-        ``system`` *before* the SDK discriminator runs (otherwise it
-        rejects the message with a ``literal_error`` against each union
-        member). Mirrors ``_role_to_melody`` in the renderer so the
+        `system` *before* the SDK discriminator runs (otherwise it
+        rejects the message with a `literal_error` against each union
+        member). Mirrors `_role_to_melody` in the renderer so the
         same alias is honoured no matter which surface the message
         arrives through.
 
-        ``mode="before"`` is required so the rewrite happens before the
-        ``list[ChatMessageV2]`` coercion runs the SDK's discriminated
-        union; a default-mode validator would never see ``developer``
+        `mode="before"` is required so the rewrite happens before the
+        `list[ChatMessageV2]` coercion runs the SDK's discriminated
+        union; a default-mode validator would never see `developer`
         because validation would have already failed. On any
         structural malformation (non-iterable input, items without a
-        dict-shaped ``role`` field, etc.) we hand ``v`` back unchanged
+        dict-shaped `role` field, etc.) we hand `v` back unchanged
         and let Pydantic's normal coercion surface a precise error.
         """
         try:
@@ -305,11 +305,11 @@ class CohereLogprobItem(BaseModel):
 class CohereChatV2Response(BaseModel):
     """Cohere Chat v2 non-streaming response body.
 
-    Wraps the SDK :class:`AssistantMessageResponse` (the message shape) in
-    the documented v2 response envelope (``id``, ``finish_reason``,
-    ``usage``, ``logprobs``). The single constructor in
-    :class:`CohereServingChatV2._chat_completion_to_v2` is responsible for
-    supplying a non-empty ``id`` (falling back to a synthesized one if
+    Wraps the SDK `AssistantMessageResponse` (the message shape) in
+    the documented v2 response envelope (`id`, `finish_reason`,
+    `usage`, `logprobs`). The single constructor in
+    `CohereServingChatV2._chat_completion_to_v2` is responsible for
+    supplying a non-empty `id` (falling back to a synthesized one if
     the upstream response is missing it) to this model.
     """
 
