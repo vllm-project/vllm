@@ -122,6 +122,13 @@ def test_idle_connector_events(
     pending = tmp_path / "events"
     idle = tmp_path / "idle"
     watchdog_dir = tmp_path / "watchdog"
+    # ROCm sleep mode needs MI3xx; the MI250 mirror of this suite runs the
+    # awake half only.
+    sleep_mode = current_platform.is_sleep_mode_available()
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx
+
+        sleep_mode = on_mi3xx()
     try:
         with vllm_runner(
             MODEL_NAME,
@@ -130,7 +137,7 @@ def test_idle_connector_events(
             gpu_memory_utilization=0.1,
             kv_cache_memory_bytes=64 * 1024**2,
             enable_prefix_caching=True,
-            enable_sleep_mode=True,
+            enable_sleep_mode=sleep_mode,
             async_scheduling=async_scheduling,
             distributed_executor_backend=IdleEventExecutor,
             kv_transfer_config=KVTransferConfig(
@@ -152,7 +159,7 @@ def test_idle_connector_events(
         ) as runner:
             idle.touch()
             next_seq = 0
-            for asleep in (False, True):
+            for asleep in (False, True) if sleep_mode else (False,):
                 if asleep:
                     runner.llm.sleep(level=1)
                 staging = tmp_path / "pending"
@@ -187,7 +194,8 @@ def test_idle_connector_events(
                         "Disabled events must not poll the connector"
                     )
 
-            runner.llm.wake_up()
+            if sleep_mode:
+                runner.llm.wake_up()
             idle.unlink()
             output = runner.llm.generate(
                 [{"prompt_token_ids": list(range(16))}],
