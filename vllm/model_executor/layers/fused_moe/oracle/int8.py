@@ -59,17 +59,14 @@ def backend_to_kernel_cls(
         return [TritonExperts]
 
     elif backend == Int8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            HummingMoeBackend,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            backend_to_kernel_cls as humming_backend_to_kernel_cls,
         )
 
-        return [
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        ]
+        return humming_backend_to_kernel_cls(HummingMoeBackend.HUMMING)
     elif backend == Int8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUExpertsInt8,

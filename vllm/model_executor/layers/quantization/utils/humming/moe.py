@@ -205,56 +205,24 @@ def select_humming_moe_experts(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> type[mk.FusedMoEExperts] | None:
-    """Select the primary Humming MoE Experts class
-    Note: Shape-specific fallbacks may still occur at runtime.
+    """Select the primary Humming MoE Experts class.
+    Delegates to HummingMoEKernelOracle.
     """
+    from vllm.model_executor.layers.fused_moe.oracle.humming import (
+        select_humming_moe_backend,
+    )
+
     if not has_humming():
         return None
-
-    # NOTE: the kernels are selected in the following order.
-    AVAILABLE_EXPERTS: list[type[mk.FusedMoEExperts]] = [
-        BatchedHummingGroupedExperts,
-        HummingGroupedExperts,
-        HummingIndexedExperts,
-    ]
-
-    # NOTE(rob): We need to peak into the P/F selection to determine
-    # if we are using the batched or standard expert format, which
-    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = config.activation_format
-
-    def _make_log_backend(experts_cls: type[mk.FusedMoEExperts]):
-        return f"Using {experts_cls.__name__} Humming MoE backend."
-
-    def _make_log_unsupported(
-        experts_cls: type[mk.FusedMoEExperts], reason: str | None
-    ) -> str:
-        if reason:
-            return (
-                f"Humming MoE experts {experts_cls.__name__} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"Humming MoE experts '{experts_cls.__name__}' does not support the "
-                "deployment configuration."
-            )
-
-    for k_cls in AVAILABLE_EXPERTS:
-        supported, reason = k_cls.is_supported_config(
-            k_cls,
-            config,
-            weight_key,
-            activation_key,
-            activation_format,
+    try:
+        _, experts_cls = select_humming_moe_backend(
+            config=config,
+            weight_key=weight_key,
+            activation_key=activation_key,
         )
-        if supported:
-            logger.info_once(_make_log_backend(k_cls))
-            return k_cls
-        else:
-            logger.debug_once(_make_log_unsupported(k_cls, reason))
-
-    return None
+        return experts_cls
+    except (NotImplementedError, ValueError):
+        return None
 
 
 def make_humming_moe_kernel(
@@ -263,40 +231,9 @@ def make_humming_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-    )
-    assert prepare_finalize is not None
+    from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts.
-    if prepare_finalize.activation_format.is_batched:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
+    return make_moe_kernel(moe_quant_config, moe_config, experts_cls, routing_tables)
 
 
 def _extract_sublayer_tensors(
