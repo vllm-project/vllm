@@ -32,6 +32,14 @@ class DPLoRACoordinator:
     def update(self, operation_id: str, kind: str, payload: bytes) -> Future:
         future: Future = Future()
         self.pending[operation_id] = kind, payload, future
+        if operation_id in self.results:
+            # Advertise this rank's receipt on the next normal synchronization.
+            success, operation_result = self.results[operation_id]
+            if success:
+                future.set_result(operation_result)
+            else:
+                future.set_exception(ValueError(operation_result))
+            return future
         self.engine.engines_running = True
         self.engine.output_queue.put_nowait(
             (-1, EngineCoreOutputs(start_wave=self.engine.current_wave))
@@ -165,6 +173,8 @@ class DPLoRACoordinator:
         for key in list(self.pending):
             success, operation_result = self.results[key]
             _, _, future = self.pending.pop(key)
+            if future.done():
+                continue
             if success:
                 future.set_result(operation_result)
             else:
