@@ -98,7 +98,7 @@ def prepare_b12x_autotuned(requests: Iterable[Any], device: torch.device) -> Non
 
     index = torch.device(device).index
     if index is None:
-        index = torch.cuda.current_device()
+        index = torch.accelerator.current_device_index()
     session = _TUNING_SESSIONS.get(index)
     if session is None:
         session = PreparationSession(
