@@ -42,12 +42,16 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - tests/kernels/core/test_uva.py
+    - tests/kernels/moe/test_xpu_expert_placement.py
     - vllm/utils/torch_utils.py
+    - vllm/model_executor/layers/fused_moe/experts/xpu_moe.py
+    - vllm/model_executor/layers/fused_moe/xpu_expert_placement.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/core/test_uva.py'
+      pytest -v -s kernels/core/test_uva.py
+      kernels/moe/test_xpu_expert_placement.py'
 
 - label: ":intel: (BMG) XPU Sparse MLA Tests"
   key: xpu-sparse-mla-tests
