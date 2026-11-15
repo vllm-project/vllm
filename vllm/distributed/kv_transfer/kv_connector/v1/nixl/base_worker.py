@@ -23,6 +23,7 @@ import regex as re
 import torch
 import zmq
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -41,6 +42,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HB_NOTIF_PREFIX,
+    HeartbeatMsg,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -707,6 +710,13 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
+        # Own side channel address (as served by the scheduler), sent with
+        # heartbeats so that the remote can handshake back to acknowledge them.
+        self._side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        self._side_channel_port = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+            + vllm_config.parallel_config.data_parallel_index
+        )
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -3412,6 +3422,9 @@ class NixlBaseConnectorWorker:
                     self._recv_failures.remove(req_id)
                     failed_recv_reqs.add(req_id)
             done_recving.update(failed_recv_reqs)
+        failed_recv_reqs |= self._get_lease_lapsed_recvs(
+            done_recving - failed_recv_reqs
+        )
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -3539,6 +3552,10 @@ class NixlBaseConnectorWorker:
         """
         raise NotImplementedError
 
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed receives whose KV must not be used as the lease lapsed."""
+        return set()
+
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into `done_sending`.
 
@@ -3567,17 +3584,14 @@ class NixlBaseConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-    def _handle_heartbeat(self, payload: str) -> None:
-        """Extend leases for requests referenced in a heartbeat.
-
-        Args:
-            payload: comma-separated P-side request IDs, e.g.
-                     "req_abc,req_def".
-
-        """
+    def _handle_heartbeat(self, req_ids: list[ReqId]) -> list[ReqId]:
+        """Extend leases for requests referenced in a heartbeat, returning
+        those renewed."""
+        renewed = []
         new_expiry = time.perf_counter() + self._lease_extension
-        for req_id in payload.split(","):
+        for req_id in req_ids:
             if req_id in self._reqs_to_send:
+                renewed.append(req_id)
                 old = self._reqs_to_send[req_id]
                 self._reqs_to_send[req_id] = max(old, new_expiry)
                 logger.debug(
@@ -3588,6 +3602,7 @@ class NixlBaseConnectorWorker:
                     old,
                     new_expiry,
                 )
+        return renewed
 
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]]
@@ -3726,8 +3741,17 @@ class NixlBaseConnectorWorker:
             # Refresh the TTL: a heartbeat means the router still paired this P-D,
             # so requests are still waiting on this engine
             self._engine_last_active[engine_id] = time.perf_counter()
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            hb = HeartbeatMsg(
+                req_ids=list(hb_info.req_ids),
+                sent_at=time.perf_counter(),
+                engine_id=self.engine_id,
+                host=self._side_channel_host,
+                port=self._side_channel_port,
+                tp_size=self.transfer_tp_size,
+                dcp_size=self.dcp_size,
+                pp_size=self.pp_size,
+            )
+            hb_msg = HB_NOTIF_PREFIX.encode() + msgspec.json.encode(hb)
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)

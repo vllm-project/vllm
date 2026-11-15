@@ -40,7 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
+    HeartbeatMsg,
     NixlAgentMetadata,
     NixlConnectorMetadata,
 )
@@ -1380,7 +1382,17 @@ class TestPushWriterNegative:
 
         # Forwarded heartbeat covers a tracked request, an unknown one,
         # and another tracked one.
-        w._pending_completion_notifs.put(b"HB:req-a,req-unknown,req-b")
+        hb = HeartbeatMsg(
+            req_ids=["req-a", "req-unknown", "req-b"],
+            sent_at=0.0,
+            engine_id="d-engine",
+            host="d-host",
+            port=5600,
+            tp_size=1,
+        )
+        w._pending_completion_notifs.put(
+            HB_NOTIF_PREFIX.encode() + msgspec.json.encode(hb)
+        )
 
         w._get_new_notifs()
 

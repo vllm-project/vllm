@@ -24,6 +24,10 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Lease renewal notifications, D worker -> P worker and back (pull mode).
+HB_NOTIF_PREFIX = "HB:"
+HB_ACK_NOTIF_PREFIX = "HBACK:"
 #
 # NIXL Connector Version
 #
@@ -53,8 +57,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Acknowledge heartbeats; P exports remote_blocks_expiry_time
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass(slots=True)
@@ -229,6 +234,32 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
+
+
+@dataclass(slots=True)
+class HeartbeatMsg:
+    """Heartbeat from D worker to P worker, with D's handshake address."""
+
+    req_ids: list[ReqId]
+    # The sender's time.perf_counter() when the heartbeat was sent.
+    sent_at: float
+    engine_id: EngineId
+    host: str
+    port: int
+    tp_size: int
+    dcp_size: int = 1
+    pp_size: int = 1
+
+
+@dataclass(slots=True)
+class HeartbeatAck:
+    """Heartbeat ack from P worker to D worker: the leases of `req_ids` hold
+    for at least `lease_remaining` seconds past `sent_at` (D clock)."""
+
+    engine_id: EngineId
+    req_ids: list[ReqId]
+    sent_at: float
+    lease_remaining: float
 
 
 @dataclass(slots=True)

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import math
 import time
 from typing import TYPE_CHECKING
 
+import msgspec
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
@@ -13,7 +15,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_ACK_NOTIF_PREFIX,
+    HB_NOTIF_PREFIX,
+    HeartbeatAck,
+    HeartbeatMsg,
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -29,8 +36,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
-# readback, absorbing clock-offset error and read latency.
+# Slack (seconds) subtracted from a remote's block-expiry deadline, absorbing
+# clock-offset error and the delay in observing a read's completion.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
@@ -46,6 +53,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
+        # Lease deadlines (local clock) acknowledged by the remote, by
+        # (remote engine, remote request id).
+        self._acked_lease_deadlines: dict[tuple[EngineId, ReqId], float] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -125,15 +135,23 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
-    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
-        assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
+    def _is_lease_expired(self, meta: ReqMeta) -> bool:
+        """Whether the remote may have released (or soon release) the blocks.
+
+        The exported expiry is extended by acknowledged heartbeats.
+        """
+        remote = meta.remote
+        assert remote is not None
         # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+        if remote.blocks_expiry_time is None or not meta.local_physical_block_ids:
             return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
+        deadline = max(
+            remote.blocks_expiry_time
+            - self._engine_clock_offset.get(remote.engine_id, math.inf),
+            self._acked_lease_deadlines.get(
+                (remote.engine_id, remote.request_id), -math.inf
+            ),
+        )
         return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
@@ -158,7 +176,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
 
-        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
+        if self._is_lease_expired(meta):
             logger.warning(
                 "Declining expired remote read for %s from engine %s.",
                 req_id,
@@ -738,18 +756,29 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 
-        Also handles heartbeat notifications ("HB:req1,req2,...") by
-        extending the lease on the referenced requests.
+        Also handles heartbeats by extending (and acknowledging) the lease on
+        the referenced requests, and their acknowledgements.
         """
         assert self.transfer_topo is not None
         notified_req_ids: set[str] = set()
-        for notifs in self.nixl_wrapper.get_new_notifs().values():
+        for agent_name, notifs in self.nixl_wrapper.get_new_notifs().items():
             for notif in notifs:
                 msg = notif.decode("utf-8")
 
                 # Handle heartbeat messages from D-side.
-                if msg.startswith("HB:"):
-                    self._handle_heartbeat(msg[3:])
+                if msg.startswith(HB_NOTIF_PREFIX):
+                    hb = msgspec.json.decode(
+                        msg[len(HB_NOTIF_PREFIX) :], type=HeartbeatMsg
+                    )
+                    renewed = self._handle_heartbeat(hb.req_ids)
+                    self._ack_heartbeat(agent_name, hb, renewed)
+                    continue
+                if msg.startswith(HB_ACK_NOTIF_PREFIX):
+                    self._handle_heartbeat_ack(
+                        msgspec.json.decode(
+                            msg[len(HB_ACK_NOTIF_PREFIX) :], type=HeartbeatAck
+                        )
+                    )
                     continue
 
                 req_id, expected_consumers = msg.rsplit(":", 1)
@@ -785,3 +814,76 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
+
+    def _ack_heartbeat(
+        self, agent_name: str, hb: HeartbeatMsg, renewed: list[ReqId]
+    ) -> None:
+        """Acknowledge renewed leases to the heartbeat sender, once handshaked
+        back to it."""
+        if not renewed:
+            return
+        engine_id = hb.engine_id
+        fut = self._ensure_handshake(
+            engine_id,
+            hb.host,
+            hb.port,
+            hb.tp_size,
+            hb.dcp_size,
+            hb.pp_size,
+            # Turn-2 reads from the sender reuse the handshake.
+            notif_agents_only=not self._bidirectional_kv_xfer_enabled,
+        )
+        if fut is not None or (
+            agent_name not in self._remote_agents.get(engine_id, {}).values()
+        ):
+            return
+        self._engine_last_active[engine_id] = time.perf_counter()
+        ack = HeartbeatAck(
+            engine_id=self.engine_id,
+            req_ids=renewed,
+            sent_at=hb.sent_at,
+            lease_remaining=self._lease_extension,
+        )
+        try:
+            notif_msg = HB_ACK_NOTIF_PREFIX.encode() + msgspec.json.encode(ack)
+            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+        except Exception:
+            logger.debug(
+                "Failed to acknowledge heartbeat from engine %s",
+                engine_id,
+                exc_info=True,
+            )
+
+    def _handle_heartbeat_ack(self, ack: HeartbeatAck) -> None:
+        """Extend the lease deadlines of acknowledged requests.
+
+        Remote ranks acknowledge separately, and the latest deadline applies:
+        the remote frees the blocks only once all of its ranks released them.
+        """
+        deadline = ack.sent_at + ack.lease_remaining
+        for req_id in ack.req_ids:
+            key = (ack.engine_id, req_id)
+            self._acked_lease_deadlines[key] = max(
+                deadline, self._acked_lease_deadlines.get(key, deadline)
+            )
+        # Drop passed deadlines, eg of completed or aborted requests.
+        now = time.perf_counter()
+        self._acked_lease_deadlines = {
+            key: d for key, d in self._acked_lease_deadlines.items() if d > now
+        }
+
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        lapsed: set[ReqId] = set()
+        for req_id in done_recving:
+            meta = self._recving_metadata.get(req_id)
+            # The read completed no later than now.
+            if meta is not None and meta.remote and self._is_lease_expired(meta):
+                logger.warning(
+                    "Declining KV read for %s from engine %s: the lease may "
+                    "have expired before the read completed.",
+                    req_id,
+                    meta.remote.engine_id,
+                )
+                self.xfer_stats.record_kv_expired_req()
+                lapsed.add(req_id)
+        return lapsed

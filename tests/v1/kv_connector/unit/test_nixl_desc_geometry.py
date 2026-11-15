@@ -2749,6 +2749,7 @@ def _add_prefill_stages(decode, stages):
         )
         for pp_rank, stage in enumerate(stages)
     }
+    decode._engine_clock_offset["prefill"] = 0.0
 
 
 def _pull_page_pairs(
