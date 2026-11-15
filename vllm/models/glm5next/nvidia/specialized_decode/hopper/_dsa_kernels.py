@@ -13,8 +13,9 @@ from vllm.triton_utils import tl, triton
 
 INV_SQRT_128 = tl.constexpr(0.08838834764831845)  # 1 / sqrt(128), exact in FP32
 FP8_MAX = tl.constexpr(448.0)
-TOP_BITS = tl.constexpr(12)  # first radix digit of the long-row select
-TOP_BINS = tl.constexpr(1 << TOP_BITS.value)
+_BITS = 12  # first radix digit of the long-row select
+TOP_BITS = tl.constexpr(_BITS)
+TOP_BINS = tl.constexpr(1 << _BITS)
 
 
 @triton.jit(do_not_specialize=["M", "N0", "N1"])
