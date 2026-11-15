@@ -143,7 +143,7 @@ def summarize(events: list[dict], replays: int, skip: int) -> dict[str, Any]:
 
 
 def profile_graph(
-    graph: torch.cuda.CUDAGraph,
+    graph: Any,
     name: str,
     prefix: str | None,
     skip: int,

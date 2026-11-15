@@ -19,12 +19,13 @@ take `topk_ids`.
 
 import inspect
 import zlib
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
@@ -110,7 +111,8 @@ def _top_k(module: torch.nn.Module) -> int | None:
 
 
 class RoutingFixture:
-    """Installs synthetic routing for one case; `remove()` restores the model."""
+    """Installs synthetic routing; `remove()` restores the model. Installed once,
+    before graphs the model captures at load, so they replay the fixture too."""
 
     def __init__(
         self,
@@ -130,6 +132,10 @@ class RoutingFixture:
         self._biases: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._fired = [0] * len(layers)
         self._layers = layers
+        # Per layer, from the last eager pass: (real rows whose expert ids equal
+        # the fixture's, real rows, real rows per EP rank). Observed on the
+        # experts' input, so a gate that overrides the fixture shows up.
+        self._observed: list[tuple[int, int, list[int]] | None] = [None] * len(layers)
         self._dp_rank, self._dp_size, self._ep_size = dp_rank, dp_size, ep_size
         self._device, self._mode = device, mode
         # Per layer: (num_experts, top_k, rng seed).
@@ -161,9 +167,16 @@ class RoutingFixture:
             if isinstance(experts, torch.nn.Module):
                 params = list(inspect.signature(experts.forward).parameters)
                 if "topk_ids" in params:
+                    index = params.index("topk_ids")
                     self._hooks.append(
                         experts.register_forward_pre_hook(
-                            self._substitute_ids(params.index("topk_ids"), layer),
+                            self._substitute_ids(index, layer), with_kwargs=True
+                        )
+                    )
+                    # Registered second: sees the ids the experts receive.
+                    self._hooks.append(
+                        experts.register_forward_pre_hook(
+                            self._observe_ids(index, layer, gate.weight.shape[0]),
                             with_kwargs=True,
                         )
                     )
@@ -171,7 +184,8 @@ class RoutingFixture:
 
     def _build(self, num_tokens: int) -> None:
         """Generate per-rank rows with headroom for padding; every rank
-        generates the same global fixture and takes its slice."""
+        generates the same global fixture and takes its slice. Logits are
+        built from the ids on first use (only gate hooks read them)."""
         rows = -(-num_tokens // 256) * 256 + 256
         for (num_experts, top_k, layer_seed), tables in zip(self._specs, self._tables):
             rng = np.random.default_rng(layer_seed)
@@ -181,14 +195,47 @@ class RoutingFixture:
             else:
                 ids = balanced_topk_ids(total, num_experts, top_k, self._ep_size, rng)
             ids = ids[self._dp_rank * rows : (self._dp_rank + 1) * rows]
-            logits = torch.full((rows, num_experts), _OTHER_LOGIT, dtype=torch.float32)
-            logits.scatter_(1, torch.from_numpy(ids), _CHOSEN_LOGIT)
-            # Distinct values: no ties for any top-k implementation.
-            logits += torch.from_numpy(rng.uniform(0, 0.5, logits.shape)).float()
             tables.clear()
-            tables["logits"] = logits.to(self._device)
             tables["ids"] = torch.from_numpy(ids).to(self._device)
+            tables["base_ids"] = tables["ids"].clone()
         self._rows = rows
+        self._draw = 0
+
+    def redraw(self, sample: int) -> None:
+        """Relabel every layer's experts with a fresh popularity permutation (sample 0:
+        the original draw), in place so captured graphs replay it. Zipf routing draws
+        that permutation first, so this is a new draw of which experts are hot and on
+        which EP rank; timing samples then average over draws."""
+        if self._mode != "zipf" or sample == self._draw:
+            return
+        for (num_experts, _, layer_seed), tables in zip(self._specs, self._tables):
+            if sample == 0:
+                perm = torch.arange(num_experts, device=self._device)
+            else:
+                rng = np.random.default_rng([*layer_seed, sample])
+                perm = torch.from_numpy(rng.permutation(num_experts)).to(self._device)
+            tables["ids"].copy_(perm[tables["base_ids"].long()].to(tables["ids"].dtype))
+            if "logits" in tables:
+                tables["logits"].copy_(
+                    self._logits_from(tables["ids"], num_experts, layer_seed)
+                )
+        self._draw = sample
+
+    def _logits(self, layer: int) -> torch.Tensor:
+        num_experts, _, layer_seed = self._specs[layer]
+        return self._logits_from(self._tables[layer]["ids"], num_experts, layer_seed)
+
+    def _logits_from(
+        self, ids: torch.Tensor, num_experts: int, layer_seed: list[int]
+    ) -> torch.Tensor:
+        logits = torch.full(
+            (ids.shape[0], num_experts), _OTHER_LOGIT, device=self._device
+        )
+        logits.scatter_(1, ids.long(), _CHOSEN_LOGIT)
+        # Distinct values: no ties for any top-k implementation.
+        gen = torch.Generator(self._device).manual_seed(hash(tuple(layer_seed)))
+        logits += torch.rand(logits.shape, generator=gen, device=self._device) * 0.5
+        return logits
 
     def _rows_for(
         self, layer: int, name: str, num_tokens: int, dtype: torch.dtype
@@ -199,6 +246,9 @@ class RoutingFixture:
             assert not torch.cuda.is_current_stream_capturing()
             self._build(num_tokens)
         tables = self._tables[layer]
+        if name not in tables:
+            assert not torch.cuda.is_current_stream_capturing()
+            tables[name] = self._logits(layer)
         if tables[name].dtype != dtype:
             tables[name] = tables[name].to(dtype)  # Once, at warmup.
         return _fixture_rows(tables[name], num_tokens)
@@ -223,6 +273,55 @@ class RoutingFixture:
             return (*args[:index], replaced, *args[index + 1 :]), kwargs
 
         return hook
+
+    def _observe_ids(self, index: int, layer: int, num_experts: int):
+        def hook(module, args, kwargs):
+            # Once per case, at its first (eager) pass: ops that run eagerly between
+            # graph segments replay their hooks in the timed loop, and this one
+            # syncs with the host.
+            if (
+                self._observed[layer] is not None
+                or torch.cuda.is_current_stream_capturing()
+            ):
+                return None
+            ids = kwargs["topk_ids"] if "topk_ids" in kwargs else args[index]
+            real = torch.ones(ids.shape[0], dtype=torch.bool, device=ids.device)
+            if is_forward_context_available():
+                is_padding = get_forward_context().is_padding
+                if is_padding is not None:
+                    real &= ~is_padding[: ids.shape[0]]
+            fixture = self._rows_for(layer, "ids", ids.shape[0], ids.dtype)
+            # Compare sets: a router may order a token's experts differently.
+            same = ids.sort(dim=1).values == fixture.sort(dim=1).values
+            matched = same.all(dim=1) & real
+            ep_rank = ids[real].clamp(min=0) // (num_experts // self._ep_size)
+            per_rank = torch.bincount(ep_rank.flatten(), minlength=self._ep_size)
+            self._observed[layer] = (
+                int(matched.sum()),
+                int(real.sum()),
+                per_rank.tolist(),
+            )
+            return None
+
+        return hook
+
+    def begin_case(self) -> None:
+        """Observe the next case's routing afresh."""
+        self._observed = [None] * len(self._layers)
+
+    def stats(self) -> dict[str, Any] | None:
+        """Routing the experts received in the case's first eager pass (real rows).
+        Layers that only run inside graphs captured at load are not observed."""
+        observed = [o for o in self._observed if o is not None]
+        if not observed:
+            return None
+        return {
+            "layers": len(observed),
+            "matched": sum(o[0] for o in observed)
+            / max(1, sum(o[1] for o in observed)),
+            # Per layer: this rank's routed slots per EP rank.
+            "ep_slots": [o[2] for o in observed],
+        }
 
     def check_applied(self) -> None:
         """Fail if a layer bypassed both the gate and the experts hooks."""

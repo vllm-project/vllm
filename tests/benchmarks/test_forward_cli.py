@@ -17,7 +17,7 @@ from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
-from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
+from vllm.benchmarks.forward.shapes import jitter_kv_lens, load_cases, parse_case
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
@@ -196,6 +196,38 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     logits, _ = gate(hidden)
     _, ids = selector.select_experts(hidden, logits)
     assert set(ids.flatten().tolist()) == {0, 1}
+
+
+def test_zipf_redraw_relabels_experts_in_place(dist_init):
+    """Timing samples re-draw which experts are hot: a consistent relabeling of the
+    fixture's expert ids, in the same tensors (captured graphs replay it), and sample 0
+    restores the original draw."""
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    device = torch.device(current_platform.device_type)
+    layer = torch.nn.Module()
+    layer.add_module("router", GateLinear(4, 8, params_dtype=torch.float32).to(device))
+    layer.top_k = 2
+    fixture = RoutingFixture(layer, 64, 0, 1, 4, 0, device, mode="zipf")
+    try:
+        tables = fixture._tables[0]
+        tables["logits"] = fixture._logits(0)
+        ids, logits = tables["ids"], tables["logits"]
+        base = ids.clone()
+        fixture.redraw(1)
+        assert tables["ids"] is ids and tables["logits"] is logits
+        mapping: dict[int, int] = {}
+        for old, new in zip(base.flatten().tolist(), ids.flatten().tolist()):
+            assert mapping.setdefault(old, new) == new
+        assert len(set(mapping.values())) == len(mapping) and mapping != {
+            e: e for e in mapping
+        }
+        chosen = logits.topk(2, dim=1).indices.sort(dim=1).values
+        assert torch.equal(chosen, ids.long().sort(dim=1).values)
+        fixture.redraw(0)
+        assert torch.equal(ids, base)
+    finally:
+        fixture.remove()
 
 
 @pytest.mark.benchmark
@@ -582,6 +614,73 @@ def test_jitter_kv_lens():
         jitter_kv_lens(case, 0, 1000, 0)
 
 
+def test_per_rank_cases(tmp_path):
+    """`|` (or `dp_requests` in a shapes file) gives each DP rank its own batch;
+    jitter keeps the split, and a rank count or empty batch that can't run
+    fails before any rank launches."""
+    case = parse_case("imb=8192|4*6@4096:5|2048,2*6@4096:5|6@1024:5")
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "imb",
+                        "dp_requests": [
+                            [{"query_len": 8192, "kv_len": 8192}],
+                            [
+                                {
+                                    "query_len": 6,
+                                    "kv_len": 4096,
+                                    "num_draft_tokens": 5,
+                                    "count": 4,
+                                }
+                            ],
+                            [
+                                {"query_len": 2048, "kv_len": 2048},
+                                {
+                                    "query_len": 6,
+                                    "kv_len": 4096,
+                                    "num_draft_tokens": 5,
+                                    "count": 2,
+                                },
+                            ],
+                            [{"query_len": 6, "kv_len": 1024, "num_draft_tokens": 5}],
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    assert load_cases(str(path)) == [case]
+    assert [len(case.for_dp_rank(r, 4).requests) for r in range(4)] == [1, 4, 3, 1]
+    assert [len(b) for b in jitter_kv_lens(case, 0.5, 8192, 0).rank_batches] == [
+        1,
+        4,
+        3,
+        1,
+    ]
+    with pytest.raises(ValueError, match="DP batches for DP size"):
+        case.for_dp_rank(0, 2)
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "bad",
+                        "dp_requests": [
+                            [{"query_len": 8192, "kv_len": 8192}],
+                            [],
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="at least one request"):
+        load_cases(str(path))
+
+
 def test_bench_packed_kv_blocks():
     """Zero allocated blocks without corrupting neighboring layers or blocks."""
     spec = MLAAttentionSpec(
@@ -649,13 +748,13 @@ def test_bench_speculative_mamba_blocks():
 @pytest.mark.parametrize("capacity", [0, 2])
 def test_bench_forward_rejects_oversized_verify(capacity):
     """Reject drafts beyond the runner's buffer before launching CUDA kernels."""
-    runner = SimpleNamespace(num_speculative_steps=capacity)
+    runner = SimpleNamespace(num_speculative_steps=capacity, dp_rank=0, dp_size=1)
     case = parse_case("verify=2*4@64:3")
     with pytest.raises(
         ValueError,
         match=rf"Case 'verify' needs 3 draft tokens.*supports {capacity}",
     ):
-        run_case(runner, case, SimpleNamespace(), SamplingParams())
+        run_case(runner, case, SimpleNamespace(), SamplingParams(), ("real", None))
 
 
 def test_profile_summary():
