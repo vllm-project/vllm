@@ -42,6 +42,8 @@ Tracking stops when either the KV transfer completes (via `update_connector_outp
 
 Heartbeat sending and processing happen **in the forward loop**, not in a background thread. This means timing is not millisecond-precise --- a long model forward pass will delay heartbeats. However, the lease durations are configured with sufficient margin: with default settings, the heartbeat interval (~5s) and lease extension (~20s) are at least an order of magnitude larger than a typical forward pass. This avoids lock complexity between threads while keeping the design simple and extensible.
 
+The exception is a paused D: its forward loop stops, so D's worker renews the leases of the requests it has already seen from a background thread, at the same interval and serialized with the other NIXL notifications. A request that reaches D after the pause is not known to the worker and is not renewed (see `kv_unclaimed_grace`). Renewal stops when D unregisters its KV cache (sleep).
+
 ## Happy Path
 
 ```mermaid
@@ -123,6 +125,7 @@ The lease mechanism is controlled through `kv_connector_extra_config` in `--kv-t
 |-------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `kv_lease_duration`     | 30s     | Initial lease duration on P. Heartbeat interval and extension amount are derived automatically (`interval = duration // 6`, `extension = duration * 2 // 3`). |
 | `decoder_kv_blocks_ttl` | 480s    | TTL for KV blocks cached on D in bidirectional transfer mode. Simple fixed timeout, not renewed via heartbeats.                                               |
+| `kv_unclaimed_grace`    | 0s      | Extra time P keeps an export no D has claimed yet (no heartbeat or read) after its lease expires. Covers requests reaching a paused D. Also read by Mooncake. |
 
 ```bash
 vllm serve <MODEL> \

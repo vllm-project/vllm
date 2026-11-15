@@ -45,6 +45,8 @@ await engine.resume_generation()
 
 Resumes the scheduler after a pause. Any requests frozen with `mode="keep"` will continue generating.
 
+If `resume_generation` is called while a `mode="keep"` pause is still waiting to complete, that pause call fails with `Resumed before the keep pause completed.` (HTTP 500 over the HTTP endpoint).
+
 ### HTTP Endpoints
 
 With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionality via:
@@ -57,6 +59,14 @@ With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionali
 
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update, and set the weight version on every instance too.
+
+### Prefill/decode disaggregation
+
+With [disaggregated prefill](../features/disagg_prefill.md), every prefill (P) and decode (D) instance is paused and resumed on its own, as with an external load balancer. For continuous rollouts, pause each instance with `mode="keep", clear_cache=False`, in any order:
+
+- P's pause does not wait for D to read the KV that P keeps for it; the transfer finishes after the pause or after resume.
+- A paused D keeps renewing P's KV leases for the requests it has already received (NIXL and Mooncake connectors), so they survive a pause longer than `kv_lease_duration`.
+- Requests that reach D after it paused are not renewed. P frees their KV when the lease expires unless `kv_unclaimed_grace` (see [KV cache lease](../design/nixl_kv_cache_lease.md#configuration)) is set longer than the longest pause.
 
 ## Typical Async RL Flow
 
