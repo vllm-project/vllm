@@ -63,6 +63,8 @@ This cap does not bound all concurrent completions or HTTP encoding buffers.
 `/v1/completions` and `/v1/chat/completions` accept `aux_outputs`,
 `hidden_states_start` and `hidden_states_end` as vLLM extension fields.
 `/inference/v1/generate` accepts them inside `sampling_params`.
+Enable `/inference` routes with `--enable-scale-out`, including the metadata
+query below.
 
 Terminal choices include `hidden_states` (base64 `.npy`), `hidden_states_dtype`
 and `hidden_states_start`. These fields are omitted when not requested.

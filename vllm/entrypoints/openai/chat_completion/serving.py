@@ -1086,7 +1086,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 **hidden_states_response_fields(output),
                 weight_versions=(
-                    output.weight_versions if request.return_weight_versions else None
+                    output.weight_versions
+                    if request.return_weight_versions
+                    or output.hidden_states is not None
+                    else None
                 ),
             )
 

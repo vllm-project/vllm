@@ -29,6 +29,7 @@ def capture_server():
             "--enforce-eager",
             "--no-async-scheduling",
             "--enable-return-hidden-states",
+            "--enable-scale-out",
         ],
         env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
     ) as server:
