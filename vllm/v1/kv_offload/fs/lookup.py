@@ -12,9 +12,9 @@ try:
 except ImportError:
     _HAS_BATCH_LOOKUP_C = False
 
+from vllm.v1.kv_offload.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 
 
 class FsAsyncLookupManager(AsyncLookupManager):

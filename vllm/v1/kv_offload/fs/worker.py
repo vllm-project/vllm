@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.common import FSLoadStoreSpec
 from vllm.v1.kv_offload.pointer_utils import iter_pointer_groups
 
 logger = init_logger(__name__)
@@ -32,17 +33,6 @@ class FileOp:
     device_ptr: int
     size_bytes: int
     file_offset: int
-
-
-class FSLoadStoreSpec(LoadStoreSpec):
-    """Spec for loading/storing KV blocks from a filesystem tier.
-
-    Carries content-addressed OffloadKeys that the worker resolves to
-    file paths via a FileMapper.
-    """
-
-    def __init__(self, keys: list[OffloadKey]):
-        self.keys = keys
 
 
 DEFAULT_MAX_THREADS = 400

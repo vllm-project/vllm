@@ -139,7 +139,8 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). Not used by `FSOffloadingSpec`. |
 | `fs_index_size` | no | `100000` | direct storage | Number of known file keys `FSOffloadingSpec` remembers in memory. |
 | `root_dir` | yes | — | direct storage | Directory holding the block files for `FSOffloadingSpec`. |
-| `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. Only `gds` is available. |
+| `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. The only built-in backend is `gds`. |
+| `fs_backend_module_path` | no | — | direct storage | Python import path for a custom `FSOffloadingWorker` class named by `fs_backend`. Required only when `fs_backend` is not built-in (advanced). |
 | `read_only` | no | `true` | direct storage | If `true`, `FSOffloadingSpec` only loads existing files and never stores. |
 | `gds_max_io_threads` | no | `32` | direct storage | Thread pool size for the `gds` backend's cuFile calls. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |

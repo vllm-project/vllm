@@ -8,8 +8,8 @@ from collections.abc import Iterable
 
 import pytest
 
+from vllm.v1.kv_offload.async_lookup import AsyncLookupManager, LookupPhase
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager, LookupPhase
 
 
 def _key(i: int) -> OffloadKey:
