@@ -60,7 +60,11 @@ map_int8_backend: Callable[[MoEBackend], Int8MoeBackend] = lambda runner_backend
 
 
 class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
-    """INT8 MoE backend selection for one deployment configuration."""
+    """INT8 MoE backend selection for one deployment configuration.
+
+    Defaults to per-channel INT8 weights and per-token INT8 activations.
+    Pass `activation_key=None` for unquantized activations (W8A16).
+    """
 
     name = "Int8"
     priority_backends = (
@@ -90,6 +94,14 @@ class Int8MoEKernelOracle(MoEKernelOracle[Int8MoeBackend]):
             ),
         }
     )
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = kInt8StaticChannelSym,
+        activation_key: QuantKey | None = kInt8DynamicTokenSym,
+    ) -> None:
+        super().__init__(moe_config, weight_key, activation_key)
 
 
 def select_int8_moe_backend(

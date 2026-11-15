@@ -389,16 +389,23 @@ def test_activation_format_is_derived_from_config() -> None:
     assert moe_config.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
 
 
+def test_int8_oracle_defaults_to_w8a8():
+    """Direct construction uses the module selector's default INT8 scheme."""
+    oracle = Int8MoEKernelOracle(make_dummy_moe_config())
+    assert oracle.weight_key == kInt8StaticChannelSym
+    assert oracle.activation_key == kInt8DynamicTokenSym
+
+
 @pytest.mark.parametrize("entrypoint", ["function", "oracle"])
 @pytest.mark.parametrize("requested", ["auto", "triton", "humming"])
 @pytest.mark.parametrize(
     ("weight_key", "activation_key"),
     [
         (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-        (None, None),
+        (kInt8StaticChannelSym, None),
         (kInt8StaticChannelSym, kInt4Static),
     ],
-    ids=["int8", "unquantized", "unsupported-activation-quantization"],
+    ids=["int8-w8a8", "int8-w8a16", "unsupported-activation-quantization"],
 )
 def test_int8_selection_preserves_candidate_priority(
     entrypoint, requested, weight_key, activation_key
