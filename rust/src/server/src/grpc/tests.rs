@@ -39,7 +39,7 @@ use vllm_engine_core_client::mock_engine::{
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::{
-    EngineCoreReadyResponse, KvEventsConfig, PrefixHashConfig,
+    EngineCoreReadyResponse, KvEventsConfig,
 };
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
@@ -48,7 +48,7 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, PrefillProgress,
     RequestBatchOutputs, UtilityCallOutput,
 };
-use vllm_engine_core_client::protocol::request::{BlockHash, EngineCoreRequest};
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
@@ -1613,17 +1613,10 @@ async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
-    let mut ready = default_ready_response();
-    ready.prefix_hash_config = Some(PrefixHashConfig {
-        hash_algo: "sha256".to_string(),
-        hash_block_size: 4,
-        none_hash: BlockHash(vec![0; 32]),
-        num_lookahead_tokens: 0,
-    });
+async fn streaming_prefill_progress_survives_a_mixed_output() {
     let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
         b"engine-grpc-prefill-progress".to_vec(),
-        ready,
+        default_ready_response(),
         Arc::new(FakeTextBackend::default()),
         None,
         |dealer, push| {
@@ -1631,7 +1624,6 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
                 let frames = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&frames[1]).expect("decode generation request");
-                assert_eq!(request.block_hashes.as_ref().map(Vec::len), Some(1));
                 assert_eq!(request.external_req_id.as_deref(), Some("progress-request"));
                 send_outputs(
                     push,

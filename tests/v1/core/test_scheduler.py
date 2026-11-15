@@ -1889,8 +1889,8 @@ def test_long_prefill_threshold_floored_by_fair_share():
     assert output.num_scheduled_tokens[short_req.request_id] == 10
 
 
-def test_prefill_progress_can_be_disabled():
-    """A scheduler left at the default emits no progress at all."""
+def test_prefill_progress_reports_nothing_when_disabled():
+    """A scheduler created with reporting off emits no progress."""
     scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
