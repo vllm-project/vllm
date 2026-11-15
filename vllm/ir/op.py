@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 
 
 def _torch_ops_subtree(lib: Any) -> Any:
-    """``torch.ops`` subtree for ``lib.ns``; fall back if doc mocks replace ``ns``."""
+    """`torch.ops` subtree for `lib.ns`; fall back if doc mocks replace `ns`."""
     ns = getattr(lib, "ns", None)
     if isinstance(ns, str):
         return getattr(torch.ops, ns)
@@ -408,7 +408,7 @@ class IrOp:
     def set_default(self, priority: list[str]) -> None:
         """Permanently set the dispatch priority for this op. Use this for
         process-lifetime setup (e.g., worker startup). For scoped overrides,
-        use ``set_priority`` instead.
+        use `set_priority` instead.
         """
         self._priority_impls = self._filter_priority_impls(priority)
         logger.debug(

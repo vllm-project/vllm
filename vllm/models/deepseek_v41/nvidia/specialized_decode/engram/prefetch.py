@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram WKV ahead of the decoder layers.
 
-With host-offloaded tables, ``Engram`` looks up its rows on a prefetch stream
+With host-offloaded tables, `Engram` looks up its rows on a prefetch stream
 before the decoder layers. The rest of the WKV chain (head all-gather, MXFP8
 quantize, column-parallel GEMM, output all-gather) reads only those rows, so
-for small decode steps ``EngramPrefetch`` runs it on a side stream right after
-each layer's lookup, and the layer only waits for it before the fused post
-kernel. The kernels, inputs and collectives are those of ``Engram.forward``.
+for decode steps `EngramPrefetch` runs it on a side stream right after each
+layer's lookup, and the layer only waits for it before the fused post
+kernel. The kernels, inputs and collectives are those of `Engram.forward`.
 
 The chain issues TP collectives on the side stream, so whether a step starts it
 depends only on the step's rows, which every TP rank shares.
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 
 def prefetchable(engram: Engram) -> bool:
-    """Whether ``engram``'s WKV can run ahead: host-offloaded, TP-only tables
+    """Whether `engram`'s WKV can run ahead: host-offloaded, TP-only tables
     and a CuTe DSL MXFP8 WKV (FlashInfer's CUTLASS MXFP8 GEMM shares one
     process-wide workspace with GEMMs on other streams)."""
     kernel = getattr(getattr(engram.wkv, "quant_method", None), "kernel", None)
@@ -101,7 +101,7 @@ class EngramPrefetch:
         hash_ids: torch.Tensor,
         token_mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        """``engram(hidden_states, hash_ids, token_mask)``, on the WKV started
+        """`engram(hidden_states, hash_ids, token_mask)`, on the WKV started
         ahead when there is one."""
         if engram not in self._pending:
             return engram(hidden_states, hash_ids, token_mask)

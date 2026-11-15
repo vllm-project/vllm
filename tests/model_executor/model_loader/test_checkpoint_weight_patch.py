@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     CheckpointWeightPatch,
+    _validate_sparse_patches,
     load_checkpoint_weight_patches,
 )
 
@@ -42,14 +43,95 @@ def _make_patch(
     *,
     values: list[float],
     indices: list[int] | None = None,
+    shape: tuple[int, ...] = (4,),
+    dtype: torch.dtype = torch.float32,
 ) -> CheckpointWeightPatch:
     return CheckpointWeightPatch(
         name=name,
-        shape=(4,),
-        dtype=torch.float32,
-        values=torch.tensor(values),
+        shape=shape,
+        dtype=dtype,
+        values=torch.tensor(values, dtype=dtype),
         indices=None if indices is None else torch.tensor(indices, dtype=torch.int32),
     )
+
+
+def _q(indices: list[int], values: list[float]) -> CheckpointWeightPatch:
+    return _make_patch("q_proj.weight", indices=indices, values=values)
+
+
+def _k(
+    indices: list[int], values: list[float], shape: tuple[int, ...] = (4,)
+) -> CheckpointWeightPatch:
+    return _make_patch("k_proj.weight", indices=indices, values=values, shape=shape)
+
+
+@pytest.mark.parametrize("max_chunk_bytes", [1, 1 << 20])
+@pytest.mark.parametrize(
+    ("patches", "validate_unique", "expected"),
+    [
+        # Valid: indices may restart or repeat across patches, or come out of order.
+        (
+            [_k([5], [2.0], shape=(8,)), _q([3], [1.0])],
+            True,
+            [-1.0, 1.0, -1.0, -1.0],
+        ),
+        ([_q([2], [1.0]), _q([3, 2], [2.0, 3.0])], True, [3.0, 2.0, -1.0, -1.0]),
+        ([_q([], []), _k([3], [4.0]), _k([], [])], True, [-1.0, -1.0, -1.0, 4.0]),
+        ([_q([2, 2], [7.0, 7.0])], False, [7.0, -1.0, -1.0, -1.0]),
+        # Invalid values and indices, in the first or a later patch.
+        ([_q([2], [1.0]), _k([2], [float("nan")])], True, None),
+        ([_q([-1, 2], [1.0, 2.0]), _k([1], [3.0])], True, None),
+        ([_q([2, 4], [1.0, 2.0])], True, None),
+        # Out of order, so the ends of a patch say nothing about its range.
+        ([_q([3, -1], [1.0, 2.0])], False, None),
+        ([_q([4, 3], [1.0, 2.0])], False, None),
+        # Each patch has its own limit.
+        ([_q([1, 0], [1.0, 2.0]), _k([3], [1.0], shape=(2,))], True, None),
+        # Dtypes that cannot be concatenated are still checked.
+        (
+            [
+                _make_patch(
+                    "q_proj.weight",
+                    indices=[4],
+                    values=[1.0],
+                    dtype=torch.float8_e4m3fn,
+                ),
+                _k([2], [1.0]),
+            ],
+            True,
+            None,
+        ),
+        # Duplicates: unsorted, at the end of a patch, at the start of a later one.
+        ([_q([3, 2, 3], [1.0, 2.0, 3.0])], True, None),
+        ([_q([1, 2, 2], [1.0, 2.0, 3.0]), _k([3], [1.0])], True, None),
+        ([_q([1], [1.0]), _k([2, 2], [1.0, 2.0])], True, None),
+    ],
+)
+def test_sparse_patches_are_validated_before_loading(
+    patches, validate_unique, expected, max_chunk_bytes
+):
+    model = _PackedTPModel()
+    kwargs = {
+        "max_chunk_bytes": max_chunk_bytes,
+        "validate_unique_indices": validate_unique,
+    }
+
+    if expected is None:
+        with pytest.raises(ValueError, match="Sparse checkpoint patches contain"):
+            load_checkpoint_weight_patches(model, patches, **kwargs)
+        assert model.load_calls == []
+    else:
+        load_checkpoint_weight_patches(model, patches, **kwargs)
+        assert model.packed_weight.tolist() == expected
+
+
+@pytest.mark.parametrize("indices", [[0, 2**31 - 1], [2**31 - 1, 0]])
+def test_int32_indices_are_valid_in_tensors_past_the_int32_range(indices):
+    # Through the helper, since loading would allocate the whole tensor.
+    patch = _make_patch(
+        "q_proj.weight", indices=indices, values=[1.0, 2.0], shape=(1 << 31,)
+    )
+    _validate_sparse_patches([patch], 1 << 20, validate_unique_indices=True)
 
 
 def test_dense_and_sparse_patches_follow_packed_tp_loader():

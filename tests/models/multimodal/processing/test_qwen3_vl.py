@@ -59,8 +59,8 @@ def _build_video_mm_data(
     """Create synthetic video data with metadata indicating that
     HF processor should re-sample frames (do_sample_frames=True).
 
-    ``total_num_frames`` is set equal to the ndarray frame count so
-    that HF's ``sample_frames`` indices stay within bounds of the
+    `total_num_frames` is set equal to the ndarray frame count so
+    that HF's `sample_frames` indices stay within bounds of the
     actual tensor that is passed."""
     video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
     metadata = {
@@ -76,7 +76,7 @@ def _build_video_mm_data(
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 def test_processor_partial_scoped_image_size(model_id: str) -> None:
-    """Partial image ``size`` must be completed and applied before the HF call.
+    """Partial image `size` must be completed and applied before the HF call.
 
     Keep video compatibility and per-video kwargs in an image-only call as well:
     Qwen3 must sanitize the video scope before HF validates it. Regression for
@@ -124,7 +124,7 @@ def test_processor_partial_scoped_image_size(model_id: str) -> None:
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 def test_processor_partial_scoped_video_size(model_id: str) -> None:
-    """Partial scoped video ``size`` must be completed and applied before HF."""
+    """Partial scoped video `size` must be completed and applied before HF."""
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 1},
@@ -205,17 +205,17 @@ def test_processor_num_frames_timestamp(
     model_id: str,
     num_frames: int,
 ) -> None:
-    """Regression test: using ``num_frames`` (without ``fps``) must not
+    """Regression test: using `num_frames` (without `fps`) must not
     cause a timestamp / token-count mismatch.
 
-    Before the fix, ``_get_video_second_idx`` ignored the explicit
-    ``num_frames`` and fell back to an fps-based calculation, which
+    Before the fix, `_get_video_second_idx` ignored the explicit
+    `num_frames` and fell back to an fps-based calculation, which
     produced a different number of timestamp entries and ultimately led
     to shape mismatches in downstream token construction.
 
-    We deliberately choose ``num_frames`` values (8, 16) that differ
+    We deliberately choose `num_frames` values (8, 16) that differ
     from what the default fps-based path would compute (which clamps
-    to ``min_frames=4`` for a short video at 30 fps), so this test
+    to `min_frames=4` for a short video at 30 fps), so this test
     would fail without the fix.
     """
     ctx = build_model_context(
@@ -257,7 +257,7 @@ def test_processor_multi_video(
     """Verify that multi-video processing produces correct placeholders.
 
     This exercises the token-level replacement path in
-    ``_apply_hf_processor_main`` which avoids the quadratic text-level
+    `_apply_hf_processor_main` which avoids the quadratic text-level
     prompt expansion.
     """
     ctx = build_model_context(
@@ -320,9 +320,9 @@ def _probe_mm_token_budgets(
 def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
     model_id: str,
 ) -> None:
-    """``videos_kwargs.size`` must raise only the video token budget.
+    """`videos_kwargs.size` must raise only the video token budget.
 
-    A flat ``size`` override still applies to both modalities (the previous
+    A flat `size` override still applies to both modalities (the previous
     shared-namespace behavior). Regression for #52834.
     """
     stock_video, stock_image = _probe_mm_token_budgets(model_id, None)
@@ -565,12 +565,12 @@ def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> None:
-    """Regression test for memory profiling with ``cap_pixels_per_frame``.
+    """Regression test for memory profiling with `cap_pixels_per_frame`.
 
     With the HF per-frame pixel cap enabled (transformers#48071) and a
     raised video budget, a 2-frame profiling dummy would be processed at
     only 2 * cap pixels, underestimating the largest possible video (a
-    fully sampled one still fills the whole ``longest_edge`` budget). The
+    fully sampled one still fills the whole `longest_edge` budget). The
     dummy builder must spread the budget over enough frames that the cap
     is not binding.
     """
