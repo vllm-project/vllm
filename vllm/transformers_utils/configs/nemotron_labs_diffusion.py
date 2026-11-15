@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Config for Nemotron Ministral-based masked block-diffusion LMs.
 
-The HF checkpoint ships a trust-remote-code ``NemotronLabsDiffusionConfig`` that does
-not expose ``canvas_length``, which vLLM uses to detect diffusion models
-(``ModelConfig.is_diffusion``). This local config mirrors the Ministral
-backbone fields and derives ``canvas_length`` from ``block_size``.
+The HF checkpoint ships a trust-remote-code `NemotronLabsDiffusionConfig` that does
+not expose `canvas_length`, which vLLM uses to detect diffusion models
+(`ModelConfig.is_diffusion`). This local config mirrors the Ministral
+backbone fields and derives `canvas_length` from `block_size`.
 """
 
 from typing import Any
@@ -62,12 +62,9 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
         self.mask_token_id = mask_token_id
         self.block_size = block_size
 
-        # Normalize RoPE config: the checkpoint carries the same YaRN dict
-        # under both ``rope_parameters`` and (legacy) ``rope_scaling``. Pop
-        # the legacy key so PreTrainedConfig's rope_scaling property setter
-        # doesn't overwrite the normalized dict below.
-        rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = dict(rope_parameters or rope_scaling or {})
+        # Normalize RoPE config. A legacy RoPE key in the checkpoint is
+        # converted by PreTrainedConfig.convert_rope_params_to_dict.
+        rope_parameters = dict(rope_parameters or {})
         rope_parameters.setdefault("rope_theta", rope_theta)
         rope_parameters.setdefault("rope_type", rope_parameters.pop("type", "default"))
         self.rope_parameters = rope_parameters
@@ -81,11 +78,11 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
 
     @property
     def canvas_length(self) -> int | None:
-        """Canvas width for masked diffusion, or ``None`` for the AR path.
+        """Canvas width for masked diffusion, or `None` for the AR path.
 
         The same checkpoint can be served autoregressively, either with
-        ``hf_overrides={"ar_mode": True}`` or through the causal-LM
-        architecture. ``ModelConfig.is_diffusion`` keys off this value.
+        `hf_overrides={"ar_mode": True}` or through the causal-LM
+        architecture. `ModelConfig.is_diffusion` keys off this value.
         """
         if getattr(self, "ar_mode", False):
             return None

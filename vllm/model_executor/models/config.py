@@ -808,19 +808,19 @@ class NemotronDiffusionOptions(DiffusionModelOptions):
         Literal["low_confidence", "leftmost", "confidence_threshold"] | None
     ) = None
     """Which masked positions to unmask each denoising step.
-    ``low_confidence``: the most confident predictions first (LLaDA),
+    `low_confidence`: the most confident predictions first (LLaDA),
     top-k per step with k from the even transfer schedule.
-    ``leftmost``: strictly left-to-right.
-    ``confidence_threshold``: unmask every position whose chosen-token
-    probability exceeds ``confidence_threshold`` (always at least the single
+    `leftmost`: strictly left-to-right.
+    `confidence_threshold`: unmask every position whose chosen-token
+    probability exceeds `confidence_threshold` (always at least the single
     most confident one, so each step makes progress).
     If not set, read from the model's generation_config.json
-    (``diffusion_selection_policy``), defaulting to ``confidence_threshold``."""
+    (`diffusion_selection_policy`), defaulting to `confidence_threshold`."""
 
     confidence_threshold: float | None = Field(default=None, gt=0, lt=1)
-    """Probability threshold for ``selection_policy="confidence_threshold"``.
+    """Probability threshold for `selection_policy="confidence_threshold"`.
     If not set, read from the model's generation_config.json
-    (``diffusion_confidence_threshold``), defaulting to 0.9."""
+    (`diffusion_confidence_threshold`), defaulting to 0.9."""
 
 
 class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
@@ -830,8 +830,8 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         Ministral masked block-diffusion LM.
 
         Auto-creates DiffusionConfig from the HF config (canvas_length ==
-        block_size) when the user didn't pass ``--diffusion-config``.
-        ``max_denoising_steps`` defaults to ``canvas_length`` at
+        block_size) when the user didn't pass `--diffusion-config`.
+        `max_denoising_steps` defaults to `canvas_length` at
         sampler-build time when generation_config.json doesn't provide it.
         """
         from vllm.v1.attention.backends.registry import AttentionBackendEnum

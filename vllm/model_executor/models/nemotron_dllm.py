@@ -51,7 +51,7 @@ logger = init_logger(__name__)
 
 
 def _hf_yarn_get_mscale(scale: float, mscale: float = 1.0) -> float:
-    """``get_mscale`` from HF ``_compute_yarn_parameters``."""
+    """`get_mscale` from HF `_compute_yarn_parameters`."""
     if scale <= 1.0:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
@@ -141,10 +141,10 @@ class NemotronLabsDiffusionDecoderLayer(LlamaDecoderLayer):
 class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuant):
     """Ministral masked block-diffusion LM for vLLM.
 
-    The backbone is a stock ``LlamaModel`` with Ministral parameters; the
+    The backbone is a stock `LlamaModel` with Ministral parameters; the
     only architectural deltas live in the attention layer (YaRN factor and
     llama-4 Q scale). Mixed causal/bidirectional attention is driven by
-    ``NemotronLabsDiffusionModelState.prepare_attn`` via a per-request causal tensor.
+    `NemotronLabsDiffusionModelState.prepare_attn` via a per-request causal tensor.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -623,7 +623,7 @@ class MaskedDiffusionSampler:
     """Masked diffusion with per-request sampling temperatures.
 
     The default threshold policy reveals all confident positions and guarantees
-    at least one reveal per step. ``logprobs=0`` returns each token's logprob at
+    at least one reveal per step. `logprobs=0` returns each token's logprob at
     reveal time; top-k introspection uses the converged denoising distribution.
     """
 

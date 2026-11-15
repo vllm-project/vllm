@@ -500,10 +500,10 @@ def _prompt_ids(tok, device="cuda"):
 
 
 def _vllm_manual_forward(obj, token_ids, causal_flag):
-    """Single forward of the loaded vLLM model over ``token_ids`` as one request
-    with per-request ``causal=causal_flag``, driving the GPU model runner
+    """Single forward of the loaded vLLM model over `token_ids` as one request
+    with per-request `causal=causal_flag`, driving the GPU model runner
     (KV-cache slots, attn metadata, forward context). Returns fp32 logits
-    ``[len(token_ids), vocab]`` on CPU. Runs under ``collective_rpc``.
+    `[len(token_ids), vocab]` on CPU. Runs under `collective_rpc`.
     """
     from vllm.forward_context import set_forward_context
     from vllm.v1.worker.gpu.attn_utils import (
