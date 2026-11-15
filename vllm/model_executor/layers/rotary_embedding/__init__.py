@@ -20,7 +20,6 @@ from .linear_scaling_rope import LinearScalingRotaryEmbedding
 from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
 from .mrope import MRotaryEmbedding
-from .mrope_interleaved import MRotaryEmbeddingInterleaved
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
@@ -212,7 +211,7 @@ def get_rope(
             raise ValueError(
                 "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
             )
-    elif scaling_type == "yarn":
+    elif scaling_type in ("yarn", "bailing_mrope_yarn"):
         scaling_factor = rope_parameters["factor"]
         original_max_position = rope_parameters["original_max_position_embeddings"]
         extra_kwargs = {
@@ -229,7 +228,18 @@ def get_rope(
             )
         }
         if "mrope_section" in rope_parameters:
-            rotary_emb = MRotaryEmbedding(
+            mrope_cls: type[MRotaryEmbedding] | type[BailingMRotaryEmbedding] = (
+                MRotaryEmbedding
+            )
+            mrope_kwargs = {}
+            if scaling_type == "bailing_mrope_yarn":
+                mrope_cls = BailingMRotaryEmbedding
+            else:
+                mrope_kwargs = dict(
+                    mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                    positions_factor=mrope_positions_factor,
+                )
+            rotary_emb = mrope_cls(
                 head_size,
                 rotary_dim,
                 original_max_position,
@@ -237,9 +247,8 @@ def get_rope(
                 is_neox_style,
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
-                mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
-                positions_factor=mrope_positions_factor,
                 scaling_factor=scaling_factor,
+                **mrope_kwargs,
                 **extra_kwargs,
             )
         else:
@@ -303,21 +312,6 @@ def get_rope(
             long_factor,
             **extra_kwargs,
         )
-    elif scaling_type == "openpangu":
-        mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
-        if "mrope_section" in rope_parameters and mrope_interleaved:
-            rotary_emb = MRotaryEmbeddingInterleaved(
-                head_size,
-                rotary_dim,
-                max_position,
-                base,
-                is_neox_style,
-                dtype,
-                mrope_section=rope_parameters["mrope_section"],
-                mrope_interleaved=mrope_interleaved,
-            )
-        else:
-            raise ValueError("Pangu mrope lacks necessary parameters.")
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
