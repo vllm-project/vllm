@@ -13,6 +13,7 @@ from vllm.tokenizers.hf import (
     CachedHfTokenizer,
     ThreadSafeHFTokenizerMixin,
     get_cached_tokenizer,
+    get_tokenizer_class_name,
     maybe_make_thread_pool,
 )
 
@@ -41,6 +42,15 @@ def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
 
     tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
     assert tokenizer.chat_template == "standard"
+
+
+def test_tokenizer_class_name_skips_vllm_wrappers(local_tokenizer_dir):
+    """`/tokenizer_info` reports this name, so it must be loadable by HF."""
+    tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
+    pooled = maybe_make_thread_pool(tokenizer, copies=2)
+
+    assert type(pooled).__name__ != "TokenizersBackend"
+    assert get_tokenizer_class_name(pooled) == "TokenizersBackend"
 
 
 @pytest.mark.parametrize(

@@ -43,6 +43,7 @@ from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import get_tokenizer_class_name
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
@@ -4041,7 +4042,7 @@ class ASRDataset(HuggingFaceDataset):
     ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         name_or_path = getattr(tokenizer, "name_or_path", "")
-        tok_class = type(tokenizer).__name__
+        tok_class = get_tokenizer_class_name(tokenizer)
         if "openai" in name_or_path:
             prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
         elif tok_class == "CohereAsrTokenizer" or "cohere" in name_or_path.lower():

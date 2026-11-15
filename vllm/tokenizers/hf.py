@@ -18,6 +18,19 @@ _T = TypeVar("_T", bound=TokenizerLike)
 logger = init_logger(__name__)
 
 
+def get_tokenizer_class_name(tokenizer: TokenizerLike) -> str:
+    """Return the class name of `tokenizer` without vLLM's runtime wrappers.
+
+    Wrappers such as `get_cached_tokenizer` swap in a function-local subclass
+    named e.g. `CachedGPT2Tokenizer`; skip those to report `GPT2Tokenizer`.
+    """
+    return next(
+        cls.__name__
+        for cls in type(tokenizer).__mro__
+        if "<locals>" not in cls.__qualname__
+    )
+
+
 class ThreadSafeHFTokenizerMixin:
     """Mixin class for thread-safe HF fast tokenizers."""
 
