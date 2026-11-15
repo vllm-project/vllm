@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import bisect
 import itertools
 import time
 from collections import defaultdict, deque
@@ -903,49 +904,13 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                    else:
-                        preempted_req = self.running[-1]
+                    preempted_req = self.running[-1]
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
-
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                                if iteration_details is not None:
-                                    num_scheduled_encoder_inputs -= len(
-                                        preempted_encoder_inputs
-                                    )
-                    else:
-                        preempted_req = self.running.pop()
+                    preempted_req = self.running.pop()
 
                     self._preempt_request(
                         preempted_req,
@@ -958,16 +923,6 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                if (
-                    self.policy == SchedulingPolicy.PRIORITY
-                    and request.status == RequestStatus.PREEMPTED
-                ):
-                    # The request was the lowest-priority running request and
-                    # preempted itself. The requests after it have higher
-                    # priority and may still fit (it just freed its blocks);
-                    # it was removed from `self.running`, so `req_index`
-                    # already points at the next one.
-                    continue
                 # Cannot schedule this request.
                 break
 
@@ -1578,7 +1533,10 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
-                self.running.append(request)
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    bisect.insort(self.running, request)
+                else:
+                    self.running.append(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
