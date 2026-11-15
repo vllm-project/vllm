@@ -713,6 +713,40 @@ def is_supported_and_can_implement_kernel(
     return True, ""
 
 
+# Compute capabilities where Humming outranks Marlin for block-scaled FP8.
+_HUMMING_FP8_BLOCK_CAPABILITIES = frozenset({86})
+
+
+def _prefer_humming_for_fp8_block(
+    kernels: list[type[_KernelT]], quantization: str, compute_capability: int | None
+) -> list[type[_KernelT]]:
+    """Move Humming directly ahead of Marlin for block-scaled FP8 weights that
+    run weight-only on SM86. Other devices are unmeasured and keep Marlin.
+    Per-tensor FP8 keeps Marlin too: Fp8LinearMethod requantizes fused shards
+    to one scale for every other kernel. A missing compute capability uses the
+    current device."""
+    if quantization != "fp8_block_w8a8":
+        return kernels
+    if compute_capability is None and current_platform.is_cuda():
+        cc = current_platform.get_device_capability()
+        compute_capability = cc.to_int() if cc is not None else None
+    if compute_capability not in _HUMMING_FP8_BLOCK_CAPABILITIES:
+        return kernels
+    humming = next(
+        (i for i, k in enumerate(kernels) if k is HummingFP8ScaledMMLinearKernel),
+        None,
+    )
+    marlin = next(
+        (i for i, k in enumerate(kernels) if k is MarlinFP8ScaledMMLinearKernel),
+        None,
+    )
+    if humming is None or marlin is None or humming < marlin:
+        return kernels
+    kernels = kernels.copy()
+    kernels.insert(marlin, kernels.pop(humming))
+    return kernels
+
+
 def choose_scaled_mm_linear_kernel(
     config: _KernelConfigT,
     possible_kernels: dict[PlatformEnum, list[type[_KernelT]]],
@@ -775,6 +809,9 @@ def choose_scaled_mm_linear_kernel(
         "scaled-mm",
         quantization=quantization,
         compute_capability=compute_capability,
+    )
+    platform_kernels = _prefer_humming_for_fp8_block(
+        platform_kernels, quantization, compute_capability
     )
 
     for kernel in platform_kernels:

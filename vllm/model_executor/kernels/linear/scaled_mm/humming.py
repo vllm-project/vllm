@@ -53,6 +53,17 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(
         cls, config: FP8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
+        # Humming sizes group and block scales by floor division, so it cannot
+        # load a checkpoint's scale for a partial trailing group or block.
+        group_shape = config.weight_quant_key.scale.group_shape
+        size_n, size_k = config.weight_shape
+        if (group_shape.row > 0 and size_n % group_shape.row) or (
+            group_shape.col > 0 and size_k % group_shape.col
+        ):
+            return False, (
+                f"requires the weight shape ({size_n}, {size_k}) to be a multiple "
+                f"of the weight scale group ({group_shape.row}, {group_shape.col})"
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
