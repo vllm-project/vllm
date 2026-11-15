@@ -44,7 +44,7 @@ HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 _INDEXER_PAGE_ALIGNMENT = 16
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HiSparseLayout:
     source_group: KVCacheGroup
     device_groups: list[KVCacheGroup]
@@ -170,23 +170,19 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
-def _fill_hisparse_groups(
-    vllm_config: VllmConfig,
-    mla_specs: dict[str, KVCacheLayerConfig],
-    regular_groups: list[KVCacheGroup],
-    block_bytes: int,
-    spread_indexer_pages: bool = False,
-) -> list[KVCacheGroup]:
-    source_specs, indexer_specs = _partition_hisparse_specs(
+def get_hisparse_page_layer_configs(
+    vllm_config: VllmConfig, mla_specs: dict[str, KVCacheLayerConfig]
+) -> dict[str, KVCacheLayerConfig]:
+    """The resident and hot layers HiSparse derives from its source layers.
+    They are per-layer, so they don't depend on the KV cache layout that
+    groups them."""
+    source_specs, _ = _partition_hisparse_specs(
         {name: lc.spec for name, lc in mla_specs.items()}
     )
     block_sizes = {spec.block_size for spec in source_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one resolved GPU block size.")
     gpu_block_size = block_sizes.pop()
-    if len({spec.block_size for spec in indexer_specs.values()}) != 1:
-        raise ValueError("HiSparse requires one indexer block size.")
-
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config,
         max(
@@ -198,6 +194,40 @@ def _fill_hisparse_groups(
         gpu_block_size,
     )
     assert config is not None
+    resident_manager = HiSparseResidentManager.config()
+    hot_manager = HiSparseHotManager.config(
+        blocks_per_request=cdiv(config.device_buffer_size, gpu_block_size)
+    )
+    layer_configs: dict[str, KVCacheLayerConfig] = {}
+    for name, spec in source_specs.items():
+        layer_configs[f"{name}{HISPARSE_RESIDENT_SUFFIX}"] = KVCacheLayerConfig(
+            resident_manager,
+            HiSparsePageSpec(block_size=gpu_block_size, page_size=spec.page_size_bytes),
+        )
+        layer_configs[f"{name}{HISPARSE_HOT_SUFFIX}"] = KVCacheLayerConfig(
+            hot_manager,
+            HiSparseHotPageSpec(
+                block_size=gpu_block_size,
+                page_size=spec.page_size_bytes,
+                block_stride_alignment=spec.block_stride_alignment,
+            ),
+        )
+    return layer_configs
+
+
+def _fill_hisparse_groups(
+    vllm_config: VllmConfig,
+    mla_specs: dict[str, KVCacheLayerConfig],
+    regular_groups: list[KVCacheGroup],
+    block_bytes: int,
+    spread_indexer_pages: bool = False,
+) -> list[KVCacheGroup]:
+    source_specs, indexer_specs = _partition_hisparse_specs(
+        {name: lc.spec for name, lc in mla_specs.items()}
+    )
+    page_layer_configs = get_hisparse_page_layer_configs(vllm_config, mla_specs)
+    if len({spec.block_size for spec in indexer_specs.values()}) != 1:
+        raise ValueError("HiSparse requires one indexer block size.")
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
     page_stride = None
     if spread_indexer_pages:
@@ -226,12 +256,11 @@ def _fill_hisparse_groups(
     )
 
     hot_group_page_limit = max(block_bytes, indexer_group.page_size_bytes)
-    hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
             hot_units.append([])
-        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
+        hot_units[-1].append((layer_name, layer_spec))
 
     resident_groups: list[KVCacheGroup] = []
     hot_groups: list[KVCacheGroup] = []
@@ -243,42 +272,25 @@ def _fill_hisparse_groups(
                 "HiSparse hot-cache groups require one page size, got "
                 f"{sorted(page_sizes)}."
             )
-        page_size = page_sizes.pop()
         alignments = {spec.block_stride_alignment for _, spec in layers}
         if len(alignments) != 1:
             raise ValueError(
                 "HiSparse hot-cache groups require one block stride alignment, "
                 f"got {alignments}."
             )
-        names = [name for name, _ in layers]
-        resident_names = [
-            name[: -len(HISPARSE_HOT_SUFFIX)] + HISPARSE_RESIDENT_SUFFIX
-            for name in names
-        ]
-        page_spec = HiSparsePageSpec(block_size=gpu_block_size, page_size=page_size)
-        resident_groups.append(
-            KVCacheGroup(
-                dict.fromkeys(resident_names, page_spec),
-                HiSparseResidentManager.config(),
-                gpu_block_size,
-                enable_kv_transfer=False,
+        for suffix, groups in (
+            (HISPARSE_RESIDENT_SUFFIX, resident_groups),
+            (HISPARSE_HOT_SUFFIX, hot_groups),
+        ):
+            groups.append(
+                KVCacheGroup.from_layers(
+                    {
+                        f"{name}{suffix}": page_layer_configs[f"{name}{suffix}"]
+                        for name, _ in layers
+                    },
+                    enable_kv_transfer=False,
+                )
             )
-        )
-        hot_groups.append(
-            KVCacheGroup(
-                dict.fromkeys(
-                    names,
-                    HiSparseHotPageSpec(
-                        block_size=gpu_block_size,
-                        page_size=page_size,
-                        block_stride_alignment=alignments.pop(),
-                    ),
-                ),
-                HiSparseHotManager.config(blocks_per_request=hot_blocks_per_request),
-                gpu_block_size,
-                enable_kv_transfer=False,
-            )
-        )
 
     current: list[tuple[str, MLAAttentionSpec]] = []
     current_page = 0

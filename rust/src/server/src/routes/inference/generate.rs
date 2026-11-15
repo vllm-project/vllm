@@ -1011,6 +1011,7 @@ mod tests {
             num_spec_tokens: 3,
             histogram: vec![0, 1, 1, 0],
             num_draft_tokens: 6,
+            num_verified_tokens: 5,
             ..Default::default()
         };
         let mut output = stream_output(Some(&[11]), Vec::new(), Some(FinishReason::stop_eos()));
@@ -1044,8 +1045,9 @@ mod tests {
                 );
                 let json = serde_json::to_value(&chunks[1]).expect("serialize chunk");
                 let stats = &json["metrics"]["speculative_decoding"];
-                assert_eq!(stats.as_object().expect("metrics object").len(), 7);
+                assert_eq!(stats.as_object().expect("metrics object").len(), 8);
                 assert_eq!(stats["num_draft_tokens"], 6);
+                assert_eq!(stats["num_verified_draft_tokens"], 5);
                 assert_eq!(stats["num_accepted_draft_tokens"], 3);
                 assert_eq!(stats["mean_acceptance_length"], 2.5);
                 assert_eq!(
@@ -1074,9 +1076,13 @@ mod tests {
             num_draft_tokens: 4,
             per_step_accepted: vec![1, 2],
             per_step_drafted: vec![2, 2],
+            num_verified_tokens: 3,
+            per_step_verified: vec![2, 1],
         });
         assert_eq!(detailed.per_step_accepted, Some(vec![1, 2]));
         assert_eq!(detailed.per_step_drafted, Some(vec![2, 2]));
+        assert_eq!(detailed.num_verified_draft_tokens, 3);
+        assert_eq!(detailed.per_step_verified, Some(vec![2, 1]));
     }
 
     #[test]
@@ -1164,9 +1170,10 @@ mod tests {
         );
         let json = serde_json::to_value(&response).expect("serialize response");
         let stats = &json["metrics"]["speculative_decoding"];
-        assert_eq!(stats.as_object().expect("metrics object").len(), 9);
+        assert_eq!(stats.as_object().expect("metrics object").len(), 11);
         assert!(stats["per_step_accepted"].is_null());
         assert!(stats["per_step_drafted"].is_null());
+        assert!(stats["per_step_verified"].is_null());
     }
 
     #[test]

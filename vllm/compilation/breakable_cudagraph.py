@@ -244,7 +244,7 @@ class BreakableCUDAGraphCapture:
 # ---------------------------------------------------------------------------
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class _BreakableEntry:
     batch_descriptor: BatchDescriptor
     capture: BreakableCUDAGraphCapture | None = None
