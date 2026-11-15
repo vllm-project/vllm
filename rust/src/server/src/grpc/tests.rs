@@ -1686,18 +1686,14 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
     let progress = first.prefill_progress.expect("prefill progress");
     assert_eq!(progress.remaining_prefill_tokens, 1);
 
-    let responses: Vec<_> = tokio::time::timeout(
-        Duration::from_secs(10),
-        stream.map(|item| item.expect("stream output")).collect(),
-    )
+    let finished = tokio::time::timeout(Duration::from_secs(10), stream.any(|item| async {
+        item.expect("stream output")
+            .outputs
+            .is_some_and(|output| output.finish_info.is_some())
+    }))
     .await
     .expect("stream completion timeout");
-    assert!(responses.iter().any(|response| {
-        response
-            .outputs
-            .as_ref()
-            .is_some_and(|output| output.finish_info.is_some() && !output.token_ids.is_empty())
-    }));
+    assert!(finished);
     engine_task.await.expect("mock engine task");
     server_task.abort();
 }

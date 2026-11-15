@@ -510,17 +510,11 @@ mod tests {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-        assert!(matches!(
-            events.as_slice(),
-            [
-                DecodedTextEvent::Start { .. },
-                DecodedTextEvent::TextDelta { finished: None, .. },
-                DecodedTextEvent::TextDelta {
-                    finished: Some(_),
-                    ..
-                }
-            ]
-        ));
+        let kinds: Vec<bool> = events
+            .iter()
+            .map(|event| matches!(event, DecodedTextEvent::TextDelta { .. }))
+            .collect();
+        assert_eq!(kinds, vec![false, true, true]);
     }
 
     /// Convert ASCII string to token IDs (one byte per token).

@@ -1816,22 +1816,6 @@ class Scheduler(SchedulerInterface):
             return None
         return new_block_ids_to_zero or None
 
-    def _queue_requeued_progress(self, request: Request) -> None:
-        """Record the work a preemption put back, for the next output flush."""
-        if not self.scheduler_config.enable_prefill_progress:
-            return
-        if request.prefill_progress_left is None:
-            return
-        remaining = max(0, request.num_tokens - request.num_computed_tokens)
-        request.prefill_progress_left = None
-        request.prefill_progress_step = 0
-        self._pending_prefill_progress[request.request_id] = (
-            request.client_index,
-            PrefillProgress(
-                request_id=request.request_id, remaining_prefill_tokens=remaining
-            ),
-        )
-
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1873,7 +1857,19 @@ class Scheduler(SchedulerInterface):
         request.num_preemptions += 1
         # The work this preemption puts back is reported before the request is
         # scheduled again, so a consumer never prices it from the old value.
-        self._queue_requeued_progress(request)
+        if (
+            self.scheduler_config.enable_prefill_progress
+            and request.prefill_progress_left is not None
+        ):
+            request.prefill_progress_left = None
+            request.prefill_progress_step = 0
+            self._pending_prefill_progress[request.request_id] = (
+                request.client_index,
+                PrefillProgress(
+                    request_id=request.request_id,
+                    remaining_prefill_tokens=request.num_tokens,
+                ),
+            )
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 

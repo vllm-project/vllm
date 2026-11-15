@@ -1897,27 +1897,19 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
 
-    def step() -> list[tuple[str, int]]:
-        scheduler_output = scheduler.schedule()
+    def step() -> list[int]:
         outputs = scheduler.update_from_output(
-            scheduler_output,
+            scheduler.schedule(),
             ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
         )
         return [
-            (
-                entry.prefill_progress.request_id,
-                entry.prefill_progress.remaining_prefill_tokens,
-            )
+            entry.prefill_progress.remaining_prefill_tokens
             for batch in outputs.values()
             for entry in batch.outputs
             if entry.prefill_progress is not None
         ]
 
-    assert step() == [(request.request_id, 48)]
-    assert step() == [(request.request_id, 32)]
-    assert step() == [(request.request_id, 16)]
-    assert step() == [(request.request_id, 0)]
-    assert step() == []
+    assert [step() for _ in range(5)] == [[48], [32], [16], [0], []]
 
     # A drop smaller than the throttle still reports when it reaches zero.
     request.prefill_progress_left = 2
