@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 PP_POSITIONS_KEY = "pp_positions"
 
 
-@dataclass
+@dataclass(slots=True)
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 

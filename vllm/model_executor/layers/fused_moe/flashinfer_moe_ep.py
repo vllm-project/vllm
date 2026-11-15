@@ -83,13 +83,13 @@ _E2M1_LUT = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlashInferMoeEpBackendSpec:
     kernel: FlashInferMoeEpKernel
     weight_formats: frozenset[FlashInferMoeEpWeightFormat]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlashInferMoeEpWeights:
     w13: torch.Tensor
     w2: torch.Tensor
@@ -97,7 +97,7 @@ class FlashInferMoeEpWeights:
     w2_scale: torch.Tensor | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlashInferMoeEpEpilogue:
     input_norm_const: float = 1.0
     fc1_alpha: torch.Tensor | None = None

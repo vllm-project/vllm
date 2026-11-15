@@ -145,7 +145,7 @@ GroupShape.PER_TOKEN = GroupShape(1, -1)
 GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScaleDesc:
     """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
@@ -171,7 +171,7 @@ class ScaleDesc:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuantKey:
     """Class for identifying the type of quantization.
     dtype: quantized data type

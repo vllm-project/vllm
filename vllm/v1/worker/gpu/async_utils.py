@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepTimingSample:
     forward_ms: float
     drafter_ms: float
@@ -39,7 +39,7 @@ def _timing_event() -> torch.cuda.Event:
     return torch.cuda.Event(enable_timing=True)
 
 
-@dataclass
+@dataclass(slots=True)
 class StepTimingEvents:
     forward_start: torch.cuda.Event = field(default_factory=_timing_event)
     forward_end: torch.cuda.Event = field(default_factory=_timing_event)
