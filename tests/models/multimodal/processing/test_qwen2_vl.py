@@ -557,11 +557,12 @@ def test_max_video_tokens_reads_scoped_video_size() -> None:
             limit_mm_per_prompt={"image": 0, "video": 1},
         )
         processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-        budget = processor.info.get_mm_max_tokens_per_item(
+        max_tokens = processor.info.get_mm_max_tokens_per_item(
             ctx.model_config.max_model_len, {"video": 1}
-        )["video"]
+        )
+        assert max_tokens is not None
         dummy = processor.get_dummy_mm_inputs({"video": 1})
-        return budget, _count_video_tokens(dummy)
+        return max_tokens["video"], _count_video_tokens(dummy)
 
     assert video_tokens({"videos_kwargs": {"size": size}}) == video_tokens(
         {"size": size}

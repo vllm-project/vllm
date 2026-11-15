@@ -637,6 +637,8 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
 class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
     """Dummy input builder for EmbeddingGemma2 profiling and testing."""
 
+    info: EmbeddingGemma2ProcessingInfo
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
