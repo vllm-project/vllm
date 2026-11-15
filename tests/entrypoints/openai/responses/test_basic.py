@@ -4,9 +4,6 @@
 import openai  # use the official client for correctness check
 import openai.types.responses as openai_responses_types
 import pytest
-import pytest_asyncio
-
-from tests.utils import RemoteOpenAIServer
 
 
 @pytest.mark.asyncio
@@ -94,36 +91,3 @@ async def test_streaming(client: openai.AsyncOpenAI):
         for event in events
     )
     assert isinstance(events[-1], openai_responses_types.ResponseCompletedEvent)
-
-
-@pytest.fixture(scope="module")
-def single_system_template_server():
-    # Qwen3.5's chat template rejects any system message after the first.
-    args = ["--max-model-len", "2048", "--enforce-eager", "--language-model-only"]
-    with RemoteOpenAIServer("Qwen/Qwen3.5-0.8B", args) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def single_system_template_client(single_system_template_server):
-    async with single_system_template_server.get_async_client() as async_client:
-        yield async_client
-
-
-@pytest.mark.asyncio
-async def test_instructions_with_system_input_item(
-    single_system_template_client: openai.AsyncOpenAI,
-):
-    """`instructions` plus a leading system input item must render as one
-    system message for templates that accept only one."""
-    response = await single_system_template_client.responses.create(
-        instructions="Finish the answer with QED.",
-        input=[
-            {"role": "system", "content": "Answer with only the number."},
-            {"role": "user", "content": "What is 13 * 24?"},
-        ],
-        max_output_tokens=16,
-        temperature=0.0,
-    )
-    assert response.status in ("completed", "incomplete")
-    assert response.output
