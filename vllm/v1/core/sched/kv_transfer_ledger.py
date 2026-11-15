@@ -23,8 +23,7 @@ finds it instead of a missing dictionary key.
 from __future__ import annotations
 
 import enum
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -50,8 +49,6 @@ class TransferEntry:
     request: Request
     direction: TransferDirection
     state: TransferState
-    opened_at: float = field(default_factory=time.monotonic)
-    outcome: str | None = None
     # The request finished (e.g. was aborted) while the entry was open.
     request_finished: bool = False
 
@@ -106,7 +103,7 @@ class KVTransferLedger:
     # ---- transitions -----------------------------------------------------
 
     def complete(
-        self, request_id: str, direction: TransferDirection, outcome: str = "ok"
+        self, request_id: str, direction: TransferDirection
     ) -> TransferEntry | None:
         """The worker reported the transfer done (or failed)."""
         entry = self._entries.get((request_id, direction))
@@ -122,7 +119,6 @@ class KVTransferLedger:
             if entry.state == TransferState.OPEN:
                 self._num_open_imports -= 1
         entry.state = TransferState.CLOSING
-        entry.outcome = outcome
         return entry
 
     def close(
@@ -160,33 +156,14 @@ class KVTransferLedger:
     def drop_request(self, request_id: str) -> list[TransferEntry]:
         """Remove every entry of a request (its blocks were freed)."""
         return [
-            e
-            for d in TransferDirection
-            if (e := self.close(request_id, d)) is not None
+            e for d in TransferDirection if (e := self.close(request_id, d)) is not None
         ]
 
     # ---- queries ---------------------------------------------------------
 
-    def get(
-        self, request_id: str, direction: TransferDirection
-    ) -> TransferEntry | None:
-        return self._entries.get((request_id, direction))
-
-    def entries_for(self, request_id: str) -> list[TransferEntry]:
-        return [
-            e
-            for d in TransferDirection
-            if (e := self._entries.get((request_id, d))) is not None
-        ]
-
     def is_referenced(self, request_id: str) -> bool:
         """Whether any transfer still needs this request's blocks."""
-        return any(
-            (request_id, d) in self._entries for d in TransferDirection
-        )
-
-    def has_exports(self) -> bool:
-        return self._num_exports > 0
+        return any((request_id, d) in self._entries for d in TransferDirection)
 
     def has_retained(self) -> bool:
         """Blocks of finished requests are still pinned by a transfer: either
@@ -208,22 +185,3 @@ class KVTransferLedger:
         awaits promotion does not: the scheduler promotes it when it next
         schedules, and a paused scheduler must not wait for that."""
         return self._num_exports > 0 or self._num_live_imports > 0
-
-    def is_empty(self) -> bool:
-        return not self._entries
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    def stats(self) -> dict[str, int]:
-        out = {"exports": 0, "imports_pending": 0, "imports_open": 0, "closing": 0}
-        for e in self._entries.values():
-            if e.direction == TransferDirection.EXPORT:
-                out["exports"] += 1
-            elif e.state == TransferState.PENDING:
-                out["imports_pending"] += 1
-            elif e.state == TransferState.OPEN:
-                out["imports_open"] += 1
-            if e.state == TransferState.CLOSING:
-                out["closing"] += 1
-        return out
