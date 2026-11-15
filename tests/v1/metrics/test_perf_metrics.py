@@ -26,7 +26,6 @@ from vllm.v1.metrics.perf import (
     BaseConfigParser,
     ExecutionContext,
     FfnMetrics,
-    InvalidComponent,
     MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
@@ -987,7 +986,8 @@ def test_quantization_config_parser_int4_methods(quant_method):
     # at the mock model dtype (bfloat16, 2 bytes).
     expected_attn = 2 if quant_method == "gpt_oss_mxfp4" else 0.5
     assert attn_result.weight_byte_size == expected_attn, (
-        f"Expected {expected_attn} for {quant_method}, got {attn_result.weight_byte_size}"
+        f"Expected {expected_attn} for {quant_method}, "
+        f"got {attn_result.weight_byte_size}"
     )
 
     ffn_result = FfnMetrics.get_parser().parse(vllm_config)
