@@ -331,6 +331,11 @@ class QuantizationConfigArgs:
                     f"targets[{pattern}] must be an online shorthand name or "
                     f"a quantization spec, got {type(target).__name__}"
                 )
+            if isinstance(target, QuantSpec) and target.phase is not None:
+                raise ValueError(
+                    f"targets[{pattern}].phase is not supported; set it in "
+                    "quantization_config.linear.phase"
+                )
             if pattern.startswith("re:"):
                 try:
                     re.compile(pattern[3:])

@@ -309,6 +309,9 @@ def test_phase_is_exclusive_with_activation_and_linear_only():
         quant_spec(activation="nvfp4_per_token", phase=_PHASE)
     with pytest.raises(ValueError, match="moe.phase is not supported"):
         quant_config_args(moe={"phase": _PHASE})
+    target = {"weight": "mxfp8", "phase": _PHASE}
+    with pytest.raises(ValueError, match=r"targets\[re:.\*proj\]\.phase"):
+        quant_config_args(targets={"re:.*proj": target})
 
 
 def test_online_quantization_rejects_phase():
