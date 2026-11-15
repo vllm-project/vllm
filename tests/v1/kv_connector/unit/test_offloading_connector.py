@@ -159,18 +159,14 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
         )
 
 
-def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
-    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+def _cache_hit_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Enable these checks on ROCm once MRV2 supports cross
     # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
     if current_platform.is_rocm():
         return
-    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params = SamplingParams(max_tokens=1, temperature=0)
 
-    num_times_cpu_better_than_cold = 0
     num_tests = 10
-    total_cold_time = 0.0
-    total_gpu_hit_time = 0.0
-    total_cpu_hit_time = 0.0
     max_model_len = llm.llm_engine.vllm_config.model_config.max_model_len
     # Use a long prompt that fits within the model's context window.
     prompt_len = min(10001, max_model_len - 1)
@@ -180,16 +176,13 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
         prompts = [TokensPrompt(prompt_token_ids=prompt_token_ids)]
 
         # run generation - this should trigger saving KV cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cold_time = time.time() - start_time
-        total_cold_time += cold_time
+        [cold] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        assert cold.num_cached_tokens == 0
 
         # run generation again - should hit the GPU prefix cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        gpu_hit_time = time.time() - start_time
-        total_gpu_hit_time += gpu_hit_time
+        [gpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        assert gpu_hit.num_cached_tokens is not None
+        assert gpu_hit.num_cached_tokens > 0, "Expected a GPU prefix-cache hit"
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
@@ -204,20 +197,9 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
             )
 
         # run generation again - this should trigger loading from CPU
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cpu_hit_time = time.time() - start_time
-        total_cpu_hit_time += cpu_hit_time
-
-        if cpu_hit_time < cold_time:
-            num_times_cpu_better_than_cold += 1
-
-    print("Average times:")
-    print(f"    Cold: {total_cold_time * 1000 / num_tests:.2f}ms")
-    print(f"    GPU hit: {total_gpu_hit_time * 1000 / num_tests:.2f}ms")
-    print(f"    CPU hit: {total_cpu_hit_time * 1000 / num_tests:.2f}ms")
-
-    assert num_times_cpu_better_than_cold >= 0.8 * num_tests
+        [cpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        assert cpu_hit.num_cached_tokens is not None
+        assert cpu_hit.num_cached_tokens > 0, "Expected a CPU-offloaded prefix hit"
 
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
@@ -318,7 +300,7 @@ def test_cpu_offloading(
     subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
-        _latency_test(llm, subscriber)
+        _cache_hit_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         if subscriber is not None:
@@ -627,7 +609,7 @@ def test_tiering_offloading() -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber)
+        _cache_hit_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
@@ -673,7 +655,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber)
+        _cache_hit_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
