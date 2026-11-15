@@ -28,9 +28,9 @@ class CopyEvent(Protocol):
 
     The worker submits transfers without waiting and learns they are done
     by polling these events in get_finished(): DmaCopyBackend posts real
-    torch events that flip when the DMA stream reaches them; the
-    synchronous backend posts a _CompletedEvent that is already done, so
-    the same poll loop serves both backends.
+    torch events that flip when the DMA stream reaches them;
+    TorchCopyBackend posts a _CompletedEvent once its background thread
+    finishes the copy, so the same poll loop serves both backends.
     """
 
     def query(self) -> bool: ...
@@ -159,13 +159,17 @@ class TorchCopyBackend:
     """Generic tensor-copy backend for platforms without CUDA DMA.
 
     Used where host pages stay pageable and there is no cuMemcpyBatchAsync
-    engine: transfers are plain block-indexed copies on the caller's
-    thread.
+    engine: transfers are plain block-indexed copies run on a background
+    thread, so the worker thread never stalls per transfer.
     """
 
     def __init__(self) -> None:
         self._gpu_caches: dict[str, torch.Tensor] = {}
         self._cpu_caches: dict[str, torch.Tensor] = {}
+        self._queue: queue.SimpleQueue | None = None
+        self._thread: threading.Thread | None = None
+        self._shutdown: bool = False
+        self._error: BaseException | None = None
 
     def init(
         self,
@@ -178,6 +182,12 @@ class TorchCopyBackend:
         assert list(gpu_caches.keys()) == list(cpu_caches.keys())
         self._gpu_caches = gpu_caches
         self._cpu_caches = cpu_caches
+        self._queue = queue.SimpleQueue()
+        self._thread = threading.Thread(
+            target=self._copy_loop,
+            daemon=True,
+        )
+        self._thread.start()
 
     def launch_copy(
         self,
@@ -188,29 +198,73 @@ class TorchCopyBackend:
         events_list: list[tuple[int, CopyEvent]],
         wait_event: torch.Event | None = None,
     ) -> None:
-        if wait_event is not None:
-            # Stores read the live KV cache; the compute stream may still be
-            # writing it. The copy runs on this thread, so block until then --
-            # a host stall of one compute step per store.
-            wait_event.synchronize()
-        if is_store:
-            src, dst = self._gpu_caches, self._cpu_caches
-        else:
-            src, dst = self._cpu_caches, self._gpu_caches
-        for name, src_tensor in src.items():
-            dst_tensor = dst[name]
-            # Gather, move, then write: torch only moves the source to the
-            # destination device on its own for scalar values, so a block copy
-            # across devices has to do it explicitly.
-            src_idx = torch.as_tensor(
-                src_blocks, dtype=torch.long, device=src_tensor.device
+        if self._error is not None:
+            raise RuntimeError("TorchCopyBackend copy thread failed") from self._error
+        assert self._queue is not None
+        self._queue.put(
+            (
+                src_blocks,
+                dst_blocks,
+                is_store,
+                event_idx,
+                events_list,
+                wait_event,
             )
-            dst_idx = torch.as_tensor(
-                dst_blocks, dtype=torch.long, device=dst_tensor.device
-            )
-            gathered = src_tensor.index_select(0, src_idx)
-            dst_tensor.index_copy_(0, dst_idx, gathered.to(dst_tensor.device))
-        events_list.append((event_idx, _CompletedEvent()))
+        )
 
     def shutdown(self) -> None:
-        return None
+        if self._shutdown:
+            return
+        self._shutdown = True
+        if self._queue is not None:
+            self._queue.put(None)
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        if self._error is not None:
+            raise RuntimeError("TorchCopyBackend copy thread failed") from self._error
+
+    def _copy_loop(self) -> None:
+        assert self._queue is not None
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            (
+                src_blocks,
+                dst_blocks,
+                is_store,
+                event_idx,
+                events_list,
+                wait_event,
+            ) = item
+            try:
+                if wait_event is not None:
+                    # Stores read the live KV cache; the compute stream may
+                    # still be writing it. Wait here so the worker thread
+                    # never stalls per transfer.
+                    wait_event.synchronize()
+                if is_store:
+                    src, dst = self._gpu_caches, self._cpu_caches
+                else:
+                    src, dst = self._cpu_caches, self._gpu_caches
+                for name, src_tensor in src.items():
+                    dst_tensor = dst[name]
+                    # Gather, move, then write: torch only moves the source
+                    # to the destination device on its own for scalar values,
+                    # so a block copy across devices has to do it explicitly.
+                    src_idx = torch.as_tensor(
+                        src_blocks, dtype=torch.long, device=src_tensor.device
+                    )
+                    dst_idx = torch.as_tensor(
+                        dst_blocks, dtype=torch.long, device=dst_tensor.device
+                    )
+                    gathered = src_tensor.index_select(0, src_idx)
+                    dst_tensor.index_copy_(0, dst_idx, gathered.to(dst_tensor.device))
+                events_list.append((event_idx, _CompletedEvent()))
+            except Exception as e:
+                # A failed copy never posts its event, so the poll loop
+                # could not report it: keep the first failure and surface it
+                # at shutdown instead of dying silently in the thread.
+                if self._error is None:
+                    self._error = e
+                return

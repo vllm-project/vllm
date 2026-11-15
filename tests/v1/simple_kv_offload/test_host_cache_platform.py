@@ -4,17 +4,19 @@
 
 On non-CUDA platforms the host cache is pageable (no CUDA host registration)
 and transfers cannot go through the cuMemcpyBatchAsync backend, so the worker
-installs a synchronous torch-copy backend instead. Without that split,
+installs an asynchronous torch-copy backend instead. Without that split,
 EngineCore dies at host-cache allocation with `AssertionError: Torch not
 compiled with CUDA enabled`. That backend copies KV blocks between the GPU
-cache and the host cache: it gathers the source blocks, moves them to the
-destination device and writes them there; disk mode has no such fallback and
-must refuse a non-CUDA platform.
+cache and the host cache on a background thread: it gathers the source blocks,
+moves them to the destination device and writes them there; disk mode has no
+such fallback and must refuse a non-CUDA platform.
 """
 
 from __future__ import annotations
 
 import gc
+import threading
+import time
 import types
 import weakref
 from typing import Any
@@ -111,6 +113,63 @@ def _forbid_cuda(monkeypatch) -> MagicMock:
     return cudart
 
 
+def _wait_for_events(
+    events: list[tuple[int, Any]], count: int, timeout: float = 30.0
+) -> None:
+    """Poll until the background thread has posted `count` completions."""
+    deadline = time.monotonic() + timeout
+    while len(events) < count:
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"only {len(events)}/{count} copy events posted in {timeout}s"
+            )
+        time.sleep(0.001)
+    for _, event in events:
+        event.synchronize()
+
+
+class _GateEvent:
+    """CopyEvent stand-in whose synchronize() blocks until released.
+
+    Lets a test hold the background thread inside the wait before any byte
+    moves, proving launch_copy() returned first.
+    """
+
+    def __init__(self) -> None:
+        self._gate = threading.Event()
+        self.synchronize_calls = 0
+
+    def query(self) -> bool:
+        return self._gate.is_set()
+
+    def synchronize(self) -> None:
+        self.synchronize_calls += 1
+        assert self._gate.wait(timeout=30.0), "gate never released"
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+class _ArmDeviceCheckOnCopyThread:
+    """wait_event that arms _NoMixedDeviceOps on the copy thread.
+
+    Dispatch modes are thread-local, so wrapping launch_copy() in the mode on
+    the test thread would watch nothing: the copy runs on the backend's
+    background thread. Its synchronize() is guaranteed to run there before
+    any copy op, which is where the mode has to be entered; the mode stays
+    armed on that daemon thread, which the test shuts down afterwards.
+    """
+
+    def __init__(self) -> None:
+        self._mode = _NoMixedDeviceOps()
+
+    def query(self) -> bool:
+        return True
+
+    def synchronize(self) -> None:
+        self._mode.__enter__()
+
+
 def test_non_cuda_platform_allocates_pageable_caches_without_torch_cuda(monkeypatch):
     """The regression: allocation must not reach torch.cuda on a CUDA-less torch."""
     worker_mod = _patch_platform(monkeypatch, is_cuda_alike=False)
@@ -177,6 +236,9 @@ def test_cuda_alike_platform_keeps_dma_backend(monkeypatch):
     monkeypatch.setattr(worker_mod, "unpin_tensor", MagicMock())
     dma = MagicMock()
     monkeypatch.setattr(worker_mod, "DmaCopyBackend", dma)
+    # The pin call is gated on PIN_MEMORY (true only where CUDA pinning
+    # exists); this test simulates the CUDA side of that gate.
+    monkeypatch.setattr(worker_mod, "PIN_MEMORY", True)
 
     stub = _stub_worker(worker_mod)
     stub._init_cpu_mode(
@@ -216,7 +278,11 @@ def test_non_cuda_store_path_uses_accelerator_stream(monkeypatch):
     assert not cudart.called
     current_stream.assert_called_once_with()
     event.record.assert_called_once_with(current_stream.return_value)
-    assert (cpu["k"][0] == gpu["k"][3]).all()  # store ran synchronously
+    # The store now runs on the backend's background thread: wait for its
+    # completion event instead of assuming launch_copy() already moved bytes.
+    _wait_for_events(worker._store_events, 1)
+    assert (cpu["k"][0] == gpu["k"][3]).all()
+    backend.shutdown()
 
 
 def test_torch_copy_backend_round_trips_selected_blocks():
@@ -238,6 +304,8 @@ def test_torch_copy_backend_round_trips_selected_blocks():
 
     events: list[tuple[int, Any]] = []
     backend.launch_copy([1, 3], [6, 7], is_store=True, event_idx=0, events_list=events)
+    # launch_copy() only enqueues now; the bytes move on the background thread.
+    _wait_for_events(events, 1)
     assert (cpu["k"][6] == 1).all() and (cpu["k"][7] == 3).all()
     assert (cpu["v"][6] == 101).all() and (cpu["v"][7] == 103).all()
     assert (cpu["k"][0] == 0).all()  # untouched blocks stay put
@@ -246,8 +314,10 @@ def test_torch_copy_backend_round_trips_selected_blocks():
     for block in [6, 7]:
         gpu["k"][block] = -1
     backend.launch_copy([6, 7], [2, 4], is_store=False, event_idx=1, events_list=events)
+    _wait_for_events(events, 2)
     assert (gpu["k"][2] == 1).all() and (gpu["k"][4] == 3).all()
     assert len(events) == 2 and events[-1][1].query()
+    backend.shutdown()
 
 
 def test_torch_copy_backend_load_moves_blocks_to_the_gpu_device():
@@ -265,12 +335,23 @@ def test_torch_copy_backend_load_moves_blocks_to_the_gpu_device():
     backend.init(gpu, cpu, torch.device("cpu"))
 
     events: list[tuple[int, Any]] = []
-    with _NoMixedDeviceOps():
-        backend.launch_copy(
-            [6, 7], [2, 4], is_store=False, event_idx=0, events_list=events
-        )
+    # The mode is armed on the copy thread via the wait_event: dispatch modes
+    # are thread-local, so entering the mode around launch_copy() on this
+    # thread would watch nothing now that the copy runs on the background
+    # thread. A mixed-device op regresses as a copy-thread failure, which
+    # surfaces at shutdown instead of an event.
+    backend.launch_copy(
+        [6, 7],
+        [2, 4],
+        is_store=False,
+        event_idx=0,
+        events_list=events,
+        wait_event=_ArmDeviceCheckOnCopyThread(),  # type: ignore[arg-type]
+    )
 
+    _wait_for_events(events, 1)
     assert len(events) == 1 and events[0][0] == 0 and events[0][1].query()
+    backend.shutdown()
 
 
 def test_torch_copy_backend_store_moves_blocks_to_the_host_device():
@@ -279,7 +360,9 @@ def test_torch_copy_backend_store_moves_blocks_to_the_host_device():
     Meta tensors hold no data, so the copy into the host cache stops at
     "Cannot copy out of meta tensor" -- reaching that message is the proof the
     gathered blocks were moved to the destination device. A mixed-device op
-    would be rejected before it, and was before the fix.
+    would be rejected before it, and was before the fix. The copy runs on the
+    background thread now, so the failure surfaces at shutdown (and on later
+    launches) instead of out of launch_copy(); no completion is posted.
     """
     gpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32, device="meta")}
     cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
@@ -287,11 +370,24 @@ def test_torch_copy_backend_store_moves_blocks_to_the_host_device():
     backend = TorchCopyBackend()
     backend.init(gpu, cpu, torch.device("cpu"))
 
-    with (
-        _NoMixedDeviceOps(),
-        pytest.raises(NotImplementedError, match="meta tensor"),
-    ):
-        backend.launch_copy([1, 3], [6, 7], is_store=True, event_idx=0, events_list=[])
+    events: list[tuple[int, Any]] = []
+    backend.launch_copy(
+        [1, 3],
+        [6, 7],
+        is_store=True,
+        event_idx=0,
+        events_list=events,
+        wait_event=_ArmDeviceCheckOnCopyThread(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match="copy thread failed") as excinfo:
+        backend.shutdown()
+    # The chained cause is the proof: the move reached the destination device.
+    assert "meta tensor" in str(excinfo.value.__cause__)
+    assert events == []
+    with pytest.raises(RuntimeError, match="copy thread failed"):
+        backend.launch_copy(
+            [1, 3], [6, 7], is_store=True, event_idx=1, events_list=events
+        )
 
 
 def test_disk_mode_off_cuda_fails_fast(monkeypatch):
@@ -310,3 +406,151 @@ def test_disk_mode_off_cuda_fails_fast(monkeypatch):
 
     assert not cudart.called
     assert stub._backend is None
+
+
+def test_launch_copy_returns_before_bytes_move():
+    """launch_copy() hands off to the background thread and returns.
+
+    The gate holds the copy thread inside wait_event.synchronize() before it
+    can touch any byte, so everything asserted here runs while the copy is
+    still queued: the destination is unchanged and no completion is posted.
+    Releasing the gate then completes the same copy, proving the handoff.
+    """
+    gpu = {"k": torch.arange(NUM_BLOCKS, dtype=torch.int32).unsqueeze(1).repeat(1, 4)}
+    cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    backend = TorchCopyBackend()
+    backend.init(gpu, cpu, torch.device("cpu"))
+
+    gate = _GateEvent()
+    events: list[tuple[int, Any]] = []
+    backend.launch_copy(
+        [3],
+        [0],
+        is_store=True,
+        event_idx=0,
+        events_list=events,
+        wait_event=gate,  # type: ignore[arg-type]
+    )
+
+    deadline = time.monotonic() + 30.0
+    while gate.synchronize_calls == 0:
+        assert time.monotonic() < deadline, "copy thread never reached the wait"
+    assert (cpu["k"][0] == 0).all()  # still queued: no byte moved
+    assert events == []  # and no completion posted
+
+    gate.release()
+    _wait_for_events(events, 1)
+    assert (cpu["k"][0] == gpu["k"][3]).all()
+    assert events[0][1].query()
+    backend.shutdown()
+
+
+def test_copy_completion_is_observable_via_poll():
+    """A queued copy becomes visible through the posted completion event."""
+    gpu = {"k": torch.arange(NUM_BLOCKS, dtype=torch.int32).unsqueeze(1).repeat(1, 4)}
+    cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    backend = TorchCopyBackend()
+    backend.init(gpu, cpu, torch.device("cpu"))
+
+    events: list[tuple[int, Any]] = []
+    backend.launch_copy([5], [1], is_store=True, event_idx=3, events_list=events)
+    _wait_for_events(events, 1)
+    assert len(events) == 1 and events[0][0] == 3 and events[0][1].query()
+    assert (cpu["k"][1] == 5).all()
+    backend.shutdown()
+
+
+def test_store_waits_for_the_compute_done_event():
+    """Stores stay ordered after compute: no byte moves before the wait fires."""
+    gpu = {"k": torch.arange(NUM_BLOCKS, dtype=torch.int32).unsqueeze(1).repeat(1, 4)}
+    cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    backend = TorchCopyBackend()
+    backend.init(gpu, cpu, torch.device("cpu"))
+
+    gate = _GateEvent()
+    events: list[tuple[int, Any]] = []
+    backend.launch_copy(
+        [2],
+        [4],
+        is_store=True,
+        event_idx=0,
+        events_list=events,
+        wait_event=gate,  # type: ignore[arg-type]
+    )
+
+    deadline = time.monotonic() + 30.0
+    while gate.synchronize_calls == 0:
+        assert time.monotonic() < deadline, "copy thread never reached the wait"
+    # The thread is parked in the wait: the store must not have started.
+    assert (cpu["k"][4] == 0).all()
+    assert events == []
+
+    gate.release()
+    _wait_for_events(events, 1)
+    assert (cpu["k"][4] == 2).all()
+    backend.shutdown()
+
+
+def test_shutdown_drains_queued_copies():
+    """Shutdown joins the thread past the queued work instead of dropping it."""
+    gpu = {
+        "k": torch.arange(NUM_BLOCKS, dtype=torch.int32).unsqueeze(1).repeat(1, 4),
+    }
+    cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    backend = TorchCopyBackend()
+    backend.init(gpu, cpu, torch.device("cpu"))
+
+    events: list[tuple[int, Any]] = []
+    for idx in range(NUM_BLOCKS):
+        backend.launch_copy(
+            [idx], [idx], is_store=True, event_idx=idx, events_list=events
+        )
+    backend.shutdown()  # no waiting: draining is the shutdown's job
+
+    assert len(events) == NUM_BLOCKS
+    assert sorted(i for i, _ in events) == list(range(NUM_BLOCKS))
+    assert all(event.query() for _, event in events)
+    assert (cpu["k"] == gpu["k"]).all()
+
+
+def test_stress_mixed_copies_match_the_synchronous_path():
+    """Hundreds of queued mixed load/store copies land exactly as serial ones.
+
+    The reference replays each transfer on plain per-block values in launch
+    order -- the queue is FIFO, so the background thread applies the same
+    order -- without touching the live tensors, keeping the comparison exact
+    while copies are still in flight. Every row stays uniform, so one value
+    per block models the whole transfer.
+    """
+    gen = torch.Generator().manual_seed(20261115)
+    gpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    cpu = {"k": torch.zeros((NUM_BLOCKS, 4), dtype=torch.int32)}
+    for block in range(NUM_BLOCKS):
+        gpu["k"][block] = block
+    ref_gpu_blocks = list(range(NUM_BLOCKS))
+    ref_cpu_blocks = [0] * NUM_BLOCKS
+
+    backend = TorchCopyBackend()
+    backend.init(gpu, cpu, torch.device("cpu"))
+
+    n_copies = 300
+    events: list[tuple[int, Any]] = []
+    for idx in range(n_copies):
+        count = int(torch.randint(1, 5, (1,), generator=gen).item())
+        src_blocks = torch.randperm(NUM_BLOCKS, generator=gen)[:count].tolist()
+        dst_blocks = torch.randperm(NUM_BLOCKS, generator=gen)[:count].tolist()
+        is_store = bool(torch.randint(0, 2, (1,), generator=gen).item())
+        backend.launch_copy(src_blocks, dst_blocks, is_store, idx, events_list=events)
+        if is_store:
+            src_model, dst_model = ref_gpu_blocks, ref_cpu_blocks
+        else:
+            src_model, dst_model = ref_cpu_blocks, ref_gpu_blocks
+        for src_block, dst_block in zip(src_blocks, dst_blocks):
+            dst_model[dst_block] = src_model[src_block]
+
+    _wait_for_events(events, n_copies)
+    assert sorted(i for i, _ in events) == list(range(n_copies))
+    for block in range(NUM_BLOCKS):
+        assert (gpu["k"][block] == ref_gpu_blocks[block]).all()
+        assert (cpu["k"][block] == ref_cpu_blocks[block]).all()
+    backend.shutdown()
