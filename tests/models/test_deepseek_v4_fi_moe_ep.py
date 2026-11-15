@@ -34,6 +34,13 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
     epilogue_from_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    map_fp8_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    backend_to_kernel_cls as fp8_backend_to_kernel_cls,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     Mxfp4MoeBackend,
@@ -59,6 +66,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
     kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -100,13 +110,16 @@ def test_non_fi_backend_ignores_architectures():
     validate_flashinfer_moe_ep_model("auto", ["MixtralForCausalLM"])
 
 
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
-def test_token_sharding_backends_enable_dsv4_sequence_parallel(moe_backend: str):
+def test_token_sharding_backends_enable_dsv4_sequence_parallel(
+    moe_backend: str, pipeline_parallel_size: int
+):
     from vllm.models.deepseek_v4.nvidia.model import _use_sequence_parallel
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pipeline_parallel_size,
             enable_expert_parallel=True,
             tensor_parallel_size=8,
             data_parallel_size=1,
@@ -126,7 +139,7 @@ def test_dsv4_requests_pre_fc2_router_weight_placement():
 def test_backend_specs_preserve_weight_format_contracts():
     cutedsl = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_CUTEDSL)
     assert cutedsl.kernel == "cutedsl"
-    assert cutedsl.weight_formats == frozenset({"nvfp4", "mxfp4"})
+    assert cutedsl.weight_formats == frozenset({"nvfp4", "mxfp4", "fp8_block"})
 
     deep_gemm = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_DEEP_GEMM)
     assert deep_gemm.kernel == "deep_gemm"
@@ -179,6 +192,7 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
     return config
 
 
@@ -212,8 +226,36 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
     assert reason.endswith("EPLB")
 
 
+def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    cutedsl = _megakernel_moe(
+        FLASHINFER_MOE_EP_CUTEDSL, routing_method=RoutingMethodType.Renormalize
+    )
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    assert _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym) == (
+        True,
+        "",
+    )
+    _, reason = _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic)
+    assert "NVFP4 weights on this GPU" in reason
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    assert "FP8_BLOCK weights on this GPU" in reason
+
+    deep_gemm = _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM)
+    _, reason = _is_supported(deep_gemm, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    assert "FP8_BLOCK weights" in reason
+
+    # The kernel quantizes bf16 activations per 1x128 group itself.
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8StaticTensorSym)
+    assert "with block FP8" in reason
+
+
 def test_megakernels_are_oracle_backends():
-    """Quant methods reach the megakernel through the NVFP4/MXFP4 oracles."""
+    """Quant methods reach the megakernel through the NVFP4/MXFP4/FP8 oracles."""
     nvfp4 = map_nvfp4_backend(FLASHINFER_MOE_EP_CUTEDSL)
     assert nvfp4 is NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
     assert nvfp4_backend_to_kernel_cls(nvfp4) == [FlashInferMoeEpExperts]
@@ -233,9 +275,13 @@ def test_megakernels_are_oracle_backends():
     )
     assert quant_config is not None and quant_config.use_nvfp4_w4a4
 
+    fp8 = map_fp8_backend(FLASHINFER_MOE_EP_CUTEDSL)
+    assert fp8 is Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
+    assert fp8_backend_to_kernel_cls(fp8) == [FlashInferMoeEpExperts]
+
 
 def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
-    """The megakernel plugs into ``FusedMoEKernel`` like any other experts impl.
+    """The megakernel plugs into `FusedMoEKernel` like any other experts impl.
 
     Routing stays outside (top-k ids in), dispatch and combine happen inside,
     so prepare passes tokens through untouched and finalize has nothing to do.
@@ -275,7 +321,7 @@ def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
 
 
 def test_epilogue_takes_the_weight_global_scales_from_the_quant_config():
-    """The canonical ``g1/g2_alphas`` become the per-expert fc1/fc2 alphas and
+    """The canonical `g1/g2_alphas` become the per-expert fc1/fc2 alphas and
     keep aliasing the layer's tensors, so EPLB permutations reach the kernel."""
     g1_alphas = torch.tensor([1.0, 2.0])
     g2_alphas = torch.tensor([3.0, 4.0])
@@ -330,7 +376,7 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():
-    """``all2all_backend="passthrough"`` is how the oracles get the
+    """`all2all_backend="passthrough"` is how the oracles get the
     pass-through prepare/finalize."""
     moe = make_dummy_moe_config(
         num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128

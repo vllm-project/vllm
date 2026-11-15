@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -62,6 +62,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     MMPayload,
     PerRequestMetrics,
     StopParam,
@@ -179,7 +181,7 @@ def _tool_field(tool: Any, field: str) -> Any:
 
 
 def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
-    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    """Resolve a named tool choice to the flat `<namespace>__<name>` form."""
     from vllm.tool_parsers.utils import flat_namespace_tool_name
 
     exact_names: set[str] = set()
@@ -384,8 +386,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -541,7 +543,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     """Parser-derived constraints that preserve the public request's text metadata."""
 
-    _DEFAULT_SAMPLING_PARAMS = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -549,7 +551,7 @@ class ResponsesRequest(OpenAIBaseModel):
     }
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         if self._parser_structured_outputs is not None:
             return self._parser_structured_outputs
         if self.text is None or self.text.format is None:
@@ -789,7 +791,7 @@ class ResponsesRequest(OpenAIBaseModel):
         """Normalize input items to bridge OpenResponses schema and openai-python.
 
         The OpenResponses specification treats several fields as optional
-        (``id``, ``status`` on assistant/reasoning items; ``annotations``
+        (`id`, `status` on assistant/reasoning items; `annotations`
         on output_text content) that the openai-python SDK marks as
         required.  Fill sensible defaults so payloads conforming to the
         OpenResponses spec pass SDK validation.

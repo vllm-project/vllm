@@ -90,7 +90,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +106,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -151,6 +151,14 @@ class EngineCoreReadyResponse:
     # Set when the engine hashes request blocks (prefix caching or a KV
     # connector), so that a frontend can send prompt block hashes.
     prefix_hash_config: PrefixHashConfig | None = None
+    # `CacheConfig.metrics_info()` after initialization, the labels of the
+    # frontend's `vllm:cache_config_info`.
+    cache_config_info: dict[str, str] | None = None
+    # `system_fingerprint` inputs for frontends without a VllmConfig (the Rust
+    # frontend): `hash_config()` of the engine's initialized config (None if
+    # hashing failed) and whether expert parallelism is enabled.
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 class EngineCoreRequest(

@@ -9,7 +9,7 @@ from typing import cast
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     CPUActMethod,
     CPUQuantAlgo,
     CPUQuantMethod,
@@ -71,8 +71,8 @@ def swigluoai_w13_interleave_perm(
     two_i: int,
     device: torch.device,
 ) -> torch.Tensor | None:
-    """Index taking a half-split w13 ``[gate | up]`` to the interleaved order
-    ZenDNN's ``swiglu_oai_mul`` expects, or None when no reorder is needed.
+    """Index taking a half-split w13 `[gate | up]` to the interleaved order
+    ZenDNN's `swiglu_oai_mul` expects, or None when no reorder is needed.
     Callers apply it along whichever axis holds their output channels."""
     if not getattr(experts_cls, "requires_interleaved_w13", False):
         return None
@@ -509,12 +509,19 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        return None
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
         SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8Static128BlockSym, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 

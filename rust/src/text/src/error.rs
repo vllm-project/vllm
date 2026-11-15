@@ -56,6 +56,8 @@ pub enum Error {
          got min_tokens={min_tokens}, max_tokens={max_tokens}"
     )]
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
+    #[error("n must be 1 when using greedy sampling, got {n}.")]
+    GreedyParallelSampling { n: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error(
@@ -94,6 +96,7 @@ impl Error {
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::GreedyParallelSampling { .. }
             | Self::InvalidThinkingTokenBudget
             | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
             | Self::InvalidTruncatePromptTokens { .. }

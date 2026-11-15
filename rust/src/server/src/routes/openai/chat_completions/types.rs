@@ -14,6 +14,7 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
+use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -70,7 +71,6 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u32>,
 
     /// How many chat completion choices to generate for each input message
-    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -163,7 +163,9 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
 
-    /// Add spaces between special tokens during detokenization
+    /// Add spaces between special tokens during detokenization. Accepted as a
+    /// no-op: the detokenizers of the served tokenizers already emit adjacent
+    /// added tokens without a separator, which is what `false` asks for.
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
@@ -259,6 +261,9 @@ pub struct ChatCompletionRequest {
     /// tokens.
     pub return_weight_versions: Option<bool>,
 
+    /// Skip the first N prompt tokens from the returned routed-expert rows.
+    pub routed_experts_prompt_start: Option<u32>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -275,6 +280,13 @@ pub struct ChatCompletionRequest {
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
+
+    /// Which multimodal payload chat render returns. Other routes ignore it.
+    pub mm_payload: Option<MmPayload>,
+
+    /// Deprecated alias: `false` is the same as `mm_payload: "none"`. Ignored
+    /// when `mm_payload` is set.
+    pub return_mm_kwargs: Option<bool>,
 
     /// Number of tokens to batch into each streamed chunk. Raises the server's
     /// `--stream-interval` for this request. Values below the server setting
@@ -346,11 +358,14 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             return_prompt_text: None,
             return_weight_versions: None,
+            routed_experts_prompt_start: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
+            mm_payload: None,
+            return_mm_kwargs: None,
             stream_interval: None,
         }
     }
@@ -401,8 +416,8 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
-    /// Always `None`.
-    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    /// The request's routed-expert rows as a base64 NumPy `.npy`, when
+    /// `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
     /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
@@ -446,6 +461,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
@@ -461,6 +478,7 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             prompt: None,
             kv_transfer_params: None,
         }

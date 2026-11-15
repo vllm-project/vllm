@@ -270,7 +270,6 @@ class InternS1ProMoeAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -293,7 +292,6 @@ class InternS1ProMoeAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -318,17 +316,8 @@ class InternS1ProMoeAttention(nn.Module):
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
-        attn_kwargs: dict[str, Any] = (
-            {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {}
-        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -337,7 +326,6 @@ class InternS1ProMoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **attn_kwargs,
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -374,17 +362,14 @@ class InternS1ProMoeDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # update rope related parameters
-        rope_scaling = config.rope_scaling
+        rope_parameters = config.rope_parameters
         fope_keys = {"fope_init_factor", "fope_sep_head", "num_inv_freq"}
-        use_fope = any(rope_scaling.get(key) is not None for key in fope_keys)
-        fope_init_factor = rope_scaling.get("fope_init_factor", None)
-        fope_sep_head = rope_scaling.get("fope_sep_head", None)
-        num_inv_freq = rope_scaling.get("num_inv_freq", None)
+        use_fope = any(rope_parameters.get(key) is not None for key in fope_keys)
+        fope_init_factor = rope_parameters.get("fope_init_factor", None)
+        fope_sep_head = rope_parameters.get("fope_sep_head", None)
+        num_inv_freq = rope_parameters.get("num_inv_freq", None)
 
         config.rope_parameters["use_fope"] = use_fope
         config.rope_parameters["fope_init_factor"] = fope_init_factor
@@ -404,7 +389,6 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
         # `mlp_only_layers` in the config.
@@ -611,7 +595,7 @@ class InternS1ProForConditionalGeneration(
 
     def get_frope_params_map(self) -> dict[str, str]:
         mapper: dict[str, str] = {}
-        for name, params in self.language_model.model.named_parameters():
+        for name, _ in self.language_model.model.named_parameters():
             if "rotary_emb.sin_coef" in name:
                 mapper["language_model.model.rotary_emb.sin_coef"] = (
                     f"language_model.model.{name}"
