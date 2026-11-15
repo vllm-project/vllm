@@ -62,6 +62,8 @@ def test_video_budget_covers_processor_frames():
         (None, None),
         ({"videos_kwargs": {"max_frames": 64}}, None),
         (None, {"max_frames": 64}),
+        ({"videos_kwargs": {"max_soft_tokens": 70}}, None),
+        ({"videos_kwargs": {"max_soft_tokens": 280}}, None),
     ],
 )
 def test_dummy_video_fills_video_budget(
@@ -141,3 +143,50 @@ def test_video_placeholder_reads_scoped_add_timestamps(configured: bool):
 
     assert flat > placeholder_len({})
     assert scoped == flat
+
+
+@pytest.mark.parametrize(
+    ("hint", "frame_size"),
+    [
+        ({"width": 480, "height": 672}, (480, 672)),
+        ({"width": 480}, (480, 672)),
+        ({"height": 480}, (672, 480)),
+    ],
+)
+def test_dummy_video_follows_size_hint(
+    hint: dict[str, int], frame_size: tuple[int, int]
+):
+    num_frames = 4
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={
+            "image": 0,
+            "audio": 0,
+            "video": {"count": 1, "num_frames": num_frames, **hint},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    width, height = frame_size
+    frames = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 1.0,
+        "duration": float(num_frames),
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    inputs = ProcessorInputs(
+        prompt=processor.info.get_tokenizer().encode(
+            "<|video|>", add_special_tokens=False
+        ),
+        mm_data_items=processor.info.parse_mm_data({"video": [(frames, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+    processed = processor.apply(inputs, TimingContext(enabled=False))
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+
+    assert (
+        dummy["mm_placeholders"]["video"][0].get_num_embeds()
+        == processed["mm_placeholders"]["video"][0].get_num_embeds()
+    )

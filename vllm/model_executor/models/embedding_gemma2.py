@@ -20,6 +20,7 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.multimodal import VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -69,6 +70,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
+    ImageSize,
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
@@ -422,47 +424,6 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         # Base-class behavior: add_special_tokens=True (BOS + EOS)
         return BaseProcessingInfo.get_default_tok_params(self)
 
-    def get_mm_max_tokens_per_item(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> Mapping[str, int] | None:
-        config = self.get_hf_config()
-        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
-        val, _ = _get_max_soft_tokens(merged_kwargs)
-        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-            tokens_per_image = val + 2
-        else:
-            tokens_per_image = (
-                getattr(config.vision_config, "default_output_length", 256) + 2
-            )
-        tokens: dict[str, int] = {"image": tokens_per_image}
-        if config.audio_config is not None:
-            processor = self.get_hf_processor()
-            tokens["audio"] = processor.audio_seq_length + 2
-
-        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
-            "videos_kwargs", {}
-        )
-        max_frames = self.get_max_video_frames()
-
-        video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
-        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
-            raise ValueError(
-                f"Unsupported max_soft_tokens={video_max_soft} for video. "
-                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
-            )
-        if not isinstance(video_max_soft, int):
-            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
-
-        # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
-        # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
-        #   Total = num_soft_tokens + 2
-        # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
-        #   Total = num_soft_tokens + 2 + 7
-        add_ts = video_kwargs.get("add_timestamps", False)
-        ts_slack = 7 if add_ts else 0
-        tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
-        return tokens
-
     def get_max_video_frames(self) -> int:
         video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
             "videos_kwargs", {}
@@ -489,6 +450,81 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
             if isinstance(num_frames_opt, int):
                 max_frames = min(max_frames, num_frames_opt)
         return max_frames
+
+    def get_video_max_soft_tokens(self) -> int:
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        video_max_soft = video_kwargs.get("max_soft_tokens", _VIDEO_MAX_SOFT_TOKENS)
+        if video_max_soft is not None and video_max_soft not in _SUPPORTED_SOFT_TOKENS:
+            raise ValueError(
+                f"Unsupported max_soft_tokens={video_max_soft} for video. "
+                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
+            )
+        if not isinstance(video_max_soft, int):
+            video_max_soft = _VIDEO_MAX_SOFT_TOKENS
+        return video_max_soft
+
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Mapping[str, int] | None:
+        config = self.get_hf_config()
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            tokens_per_image = val + 2
+        else:
+            tokens_per_image = (
+                getattr(config.vision_config, "default_output_length", 256) + 2
+            )
+        tokens: dict[str, int] = {"image": tokens_per_image}
+        if config.audio_config is not None:
+            processor = self.get_hf_processor()
+            tokens["audio"] = processor.audio_seq_length + 2
+
+        video_kwargs = self._get_effective_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        max_frames = self.get_max_video_frames()
+        video_max_soft = self.get_video_max_soft_tokens()
+
+        # Token allocation per video frame verified against HF EmbeddingGemma2Processor:
+        # - Without timestamps: boi (1) + video_token * num_soft_tokens + eoi (1)
+        #   Total = num_soft_tokens + 2
+        # - With timestamps: timestamp prefix string (e.g. ' 01:23 ' = up to 7 tokens)
+        #   Total = num_soft_tokens + 2 + 7
+        add_ts = video_kwargs.get("add_timestamps", False)
+        ts_slack = 7 if add_ts else 0
+        tokens["video"] = max_frames * (video_max_soft + 2 + ts_slack)
+        return tokens
+
+    def get_video_frame_size_with_most_features(
+        self, overrides: VideoDummyOptions | None = None
+    ) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        unit = vision_config.patch_size * vision_config.pooling_kernel_size
+        max_soft_tokens = self.get_video_max_soft_tokens()
+        max_width = overrides.width if overrides and overrides.width else None
+        max_height = overrides.height if overrides and overrides.height else None
+        sizes = [
+            ImageSize(
+                width=min(
+                    unit * (max_soft_tokens // h), max_width or unit * max_soft_tokens
+                ),
+                height=min(unit * h, max_height or unit * max_soft_tokens),
+            )
+            for h in range(1, max_soft_tokens + 1)
+            if max_soft_tokens % h == 0
+        ]
+        return max(
+            sizes,
+            key=lambda size: (
+                self._compute_num_soft_tokens(size.width, size.height, max_soft_tokens),
+                -abs(
+                    size.width / size.height - _VIDEO_FRAME_WIDTH / _VIDEO_FRAME_HEIGHT
+                ),
+            ),
+        )
 
     def get_image_repl(  # type: ignore[override]
         self,
@@ -606,8 +642,7 @@ class EmbeddingGemma2DummyInputsBuilder(Gemma4DummyInputsBuilder):
         overrides=None,
     ) -> list[VideoItem]:
         num_frames = self.info.get_max_video_frames()
-        width = _VIDEO_FRAME_WIDTH
-        height = _VIDEO_FRAME_HEIGHT
+        width, height = self.info.get_video_frame_size_with_most_features(overrides)
         videos = super(Gemma4DummyInputsBuilder, self)._get_dummy_videos(
             width=width,
             height=height,
