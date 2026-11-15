@@ -769,6 +769,33 @@ def test_hybrid_fine_hash_lookup_is_not_limited_by_gpu_page_count():
         scheduler.close()
 
 
+@pytest.mark.parametrize(
+    ("hybrid", "prefix_match_unit", "configured", "expected"),
+    [
+        (True, 4, None, True),
+        (True, 4, False, False),
+        (True, None, None, False),
+        (False, None, None, False),
+    ],
+)
+def test_partial_hash_hits_default_on_for_mamba_hybrids(
+    hybrid, prefix_match_unit, configured, expected
+):
+    extra = {"mode": "embedded"}
+    if configured is not None:
+        extra["enable_partial_hash_hits"] = configured
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(extra, prefix_match_unit=prefix_match_unit),
+        _hybrid_kv_cache_config() if hybrid else _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("partial-default")),
+    )
+    try:
+        assert scheduler.enable_partial_hash_hits is expected
+    finally:
+        scheduler.close()
+
+
 def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config(
