@@ -87,6 +87,20 @@ class SchedulerConfig:
     and loads start only when a running slot is free.
     """
 
+    max_async_kv_loads_per_step: int | None = Field(default=None, ge=1)
+    """Maximum number of async KV connector loads (e.g. a P/D NIXL pull) that
+    start in one scheduling step. Each start allocates KV blocks for the whole
+    prompt on the main thread, and with data parallelism every rank waits for the
+    slowest step. `max_num_inflight_kv_loads` bounds how many loads are held;
+    this bounds how fast they start. `None` (default) means no limit.
+
+    Requests identified by the connector as async loads wait separately, so
+    this limit does not block ordinary waiting requests. Starting loads while
+    the running batch is full still requires `max_num_inflight_kv_loads`.
+
+    **Experimental**: this option may be changed or removed in a future release.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).
@@ -161,12 +175,22 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
-    """Multimodal encoder cache size, only used in V1.
+    encoder_cache_size: int | None = Field(default=None, ge=1)
+    """Multimodal encoder cache size in tokens, only used in V1, or None to
+    derive it from `max_num_batched_tokens`.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    This is a *capacity*: how many tokens of encoder output may stay resident,
+    including across requests, so a later request reusing the same image can skip
+    the encoder. It is unrelated to how much encoder work one step may do
+    (`max_num_encoder_input_tokens`), and deriving it from a per-step batch budget
+    caps cross-request reuse at `max_num_batched_tokens / tokens_per_item` items.
+    Size it as `in_flight_items * tokens_per_item` when a workload sends several
+    requests against the same image.
+
+    Raised to the largest single item if that would not fit. Costs GPU memory at
+    the model's multimodal embedding width, which is taken from the KV cache.
+
+    Resolved in `__post_init__`; never None afterwards."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
@@ -348,7 +372,8 @@ class SchedulerConfig:
             )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
+        if self.encoder_cache_size is None:
+            self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info_once(

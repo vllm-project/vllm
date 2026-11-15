@@ -437,6 +437,8 @@ STACK_IMAGE=vllm/vllm-openai-rocm:base-nightly RUNTIME=vllm/vllm-openai-rocm:bas
 Without `STACK_IMAGE` and `RUNTIME`, the ROCm stack and every dependency are built from source as well, which takes several hours.
 To compile vLLM only for your GPU, add for example `--set vllm-openai.args.ARCH=gfx942`.
 
+When building the ROCm stack from source, add for example `--set stack-rocm.args.FA_ROCM_ARCH=gfx942` to compile FlashAttention only for your GPU. Leaving `FA_ROCM_ARCH` empty uses the full `PYTORCH_ROCM_ARCH` list.
+
 To run vLLM with the custom-built Docker image:
 
 ```bash

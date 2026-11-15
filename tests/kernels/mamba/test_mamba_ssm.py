@@ -6,14 +6,19 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from tests.kernels.mamba.utils import selective_state_update_ref
+from tests.kernels.mamba.utils import (
+    requires_triton_stochastic_rounding,
+    selective_state_update_ref,
+)
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    convert_rs_fp16x2,
     selective_scan_fn,
     selective_state_update,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -392,13 +397,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="Stochastic rounding in triton is only supported"
-    " on compute capability 10.0 CUDA devices.",
-)
+@requires_triton_stochastic_rounding
 def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_rounds):
     device = DEVICE
     rtol, atol = 5e-3, 1e-1
@@ -439,6 +438,33 @@ def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_r
     assert state.dtype == torch.float16
     assert torch.allclose(state, state_ref.to(torch.float16), rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@triton.jit
+def _stochastic_round_kernel(x_ptr, out_ptr, seed, N, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    x = tl.load(x_ptr + offs, mask=offs < N)
+    rand_offsets = tl.program_id(0) * N + offs
+    rand = tl.randint(seed, rand_offsets)
+    y = convert_rs_fp16x2(x, rand)
+    tl.store(out_ptr + rand_offsets, y, mask=offs < N)
+
+
+@requires_triton_stochastic_rounding
+def test_stochastic_rounding_is_unbiased():
+    """Each draw must land on an fp16 neighbour of x and the mean over draws
+    must converge to x; round-to-nearest or misused random bits are biased."""
+    num_values, num_draws = 1024, 4096
+    set_random_seed(0)
+    x = torch.randn(num_values, device=DEVICE) * 4
+    out = torch.empty(num_draws, num_values, dtype=torch.float16, device=DEVICE)
+    _stochastic_round_kernel[(num_draws,)](x, out, 1234, num_values, BLOCK=1024)
+
+    ulp = torch.ldexp(torch.ones_like(x), torch.frexp(x).exponent - 11).clamp(2**-24)
+    err = (out.float() - x) / ulp
+    assert err.abs().max() < 1
+    assert (err.mean(dim=0).abs() < 1 / 16).all()
+    assert (err > 0).any() and (err < 0).any()
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
