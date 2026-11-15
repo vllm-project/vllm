@@ -50,7 +50,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     Deployment inputs are supplied at construction and stored as
     `self.moe_config`, `self.weight_key`, and `self.activation_key`. Priority
     and selection overrides can read these attributes without per-call inputs.
-    Subclasses needing additional inputs should override specific methods, and extend
+    Subclasses needing additional inputs should override methods, and extend
     the signature.
     """
 
@@ -129,6 +129,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         candidate support is checked with `self.weight_key` and
         `self.activation_key`. Automatic selection follows the order returned
         by `get_priority_backends()`.
+
+        Subclasses can override this method to pass in additional arguments
+        or different selection logic.
         """
         available_backends = self.get_priority_backends()
         requested = self.moe_config.moe_backend
