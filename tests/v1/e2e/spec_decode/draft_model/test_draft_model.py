@@ -19,6 +19,7 @@ from ..utils import (
     compute_acceptance_rate,
     evaluate_llm_for_gsm8k,
     get_instruct_coder_messages,
+    get_spec_decode_metric_value,
     get_test_prompts,
     greedy_sampling,
     stochastic_sampling,
@@ -117,6 +118,36 @@ def test_draft_model_realistic_example(vllm_runner):
         expected_acceptance_rate=0.5,  # ref: 0.62
     )
     assert_draft_model_correctness(args, vllm_runner)
+
+
+@single_gpu_only
+def test_draft_model_dynamic_k1_counts_one_draft_token(vllm_runner):
+    """A dynamic schedule that drafts one token must count one drafted token
+    per draft, not num_speculative_tokens."""
+    speculative_config = {
+        "model": "Qwen/Qwen3-0.6B",
+        "method": "draft_model",
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": [(1, 256, 1)],
+    }
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config=speculative_config,
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+        disable_log_stats=False,
+    ) as runner:
+        runner.llm.generate(
+            ["Count from 1 to 40:", "The alphabet is"],
+            SamplingParams(temperature=0, max_tokens=32),
+        )
+        metrics = runner.llm.get_metrics()
+    num_drafts = get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+    num_draft_tokens = get_spec_decode_metric_value(
+        metrics, "vllm:spec_decode_num_draft_tokens"
+    )
+    assert num_drafts > 0
+    assert num_draft_tokens == num_drafts
 
 
 @pytest.mark.parametrize(
