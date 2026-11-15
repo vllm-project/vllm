@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.amd.specialized_decode.levers import KDAK1, lever_on
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 if TYPE_CHECKING:
@@ -222,6 +223,7 @@ class WholeLayer(_Layer):
             onorm_eps=attn.o_norm.eps,
             lower_bound=attn.gate_lower_bound,
             write_idx=layer.block_write_idx if layer.is_block_write_layer else -1,
+            stream_states=lever_on(KDAK1),
         )
 
     def builds(self) -> list:

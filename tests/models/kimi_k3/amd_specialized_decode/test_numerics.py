@@ -271,6 +271,82 @@ def test_k1_matches_vllm_ops(
     assert _cos(core, ref["core"]) > COS_MIN, errs
 
 
+@needs_gfx950
+@pytest.mark.parametrize("S, L", [(8, 8), (16, 4), (64, 16)])
+@pytest.mark.parametrize("dim_first", [True, False])
+@pytest.mark.parametrize("nacc", [1, 3])
+def test_k1_stream_states_bit_exact(S: int, L: int, dim_first: bool, nacc: int) -> None:
+    """VLLM_K31_BEAT_KDAK1's K1 (non-temporal per-token state snapshots) only
+    changes the stores' cache policy: every output and state matches the
+    default build bit for bit. An equivalence check only: it cannot see the
+    cache policy itself (a build that dropped the NT store would pass too);
+    that is an ISA check (FLYDSL_DUMP_IR=1: the snapshot buffer_store carries
+    nt sc1 in the _ns kernel only)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        PROJ,
+        KdaPreBuild,
+        kda_pre,
+        scratch_bytes,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
+
+    nb = 4
+    w = _kda_inputs(nb, nacc, dim_first, S, L)
+
+    def run(stream_states: bool) -> dict:
+        key = KdaPreBuild(
+            tokens=S,
+            qlen=L,
+            nblocks=nb,
+            delta=True,
+            state_len=w["conv_state"].size(-1),
+            stream_states=stream_states,
+        )
+        out = {
+            "prefix": w["prefix"].clone(),
+            "blocks": w["blocks"].clone(),
+            "conv_state": w["conv_state"].clone(),
+            "rstate": w["rstate"].clone(),
+            "core": torch.zeros(S, PROJ, dtype=bf, device="cuda"),
+        }
+        health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device="cuda")
+        flags = torch.zeros(1, dtype=torch.int32, device="cuda")
+        kda_pre(
+            key,
+            prefix=out["prefix"],
+            delta=w["delta"],
+            blocks=out["blocks"],
+            ares_nw=w["ares_nw"],
+            ares_qk=w["ares_qk"],
+            in_nw=w["in_nw"],
+            w_in=w["w_in"],
+            w_fb=w["w_fb"],
+            conv_w=w["conv_w"],
+            conv_state=out["conv_state"],
+            a_log=w["a_log"],
+            dt_bias=w["dt_bias"],
+            on_w=w["on_w"],
+            rstate=out["rstate"],
+            st_idx=w["st_idx"],
+            num_acc=w["num_acc"],
+            core_out=out["core"],
+            scratch=torch.zeros(scratch_bytes(key), dtype=torch.uint8, device="cuda"),
+            layer=0,
+            epoch=torch.ones(1, dtype=torch.int32, device="cuda"),
+            health=health,
+            alarm=flags.data_ptr(),
+        )
+        torch.accelerator.synchronize()
+        assert not health.any() and not flags.any()
+        return out
+
+    ref, got = run(False), run(True)
+    # the snapshots really were written (and so compared)
+    assert not torch.equal(ref["rstate"], w["rstate"])
+    for name in ref:
+        assert torch.equal(got[name], ref[name]), name
+
+
 # ---------------------------------------------------------------- M1a (MLA)
 
 

@@ -9,6 +9,7 @@ cache. The DeepGEMM-only 32/64 index-head zero padding is dropped: the ROCm
 indexer kernels take the native head count.
 """
 
+import functools
 import math
 from typing import cast
 
@@ -246,10 +247,68 @@ direct_register_custom_op(
 )
 
 
+@functools.cache
+def _sampled_buffers(device, rows, width, k):
+    """Zero row starts and scratch for AITER's sampled top-k, kept for every
+    graph: Phase A clears what it shares before anything reads it. One per
+    shape on a device: two selects of a shape must not run concurrently
+    (indexers on two streams at once, e.g. overlapped micro-batches)."""
+    from aiter.ops.topk import topk_sampled_workspace_size
+    from aiter.utility.graph_alloc import persistent_alloc
+
+    with persistent_alloc(device):
+        starts = torch.zeros(rows, dtype=torch.int32, device=device)
+        scratch = torch.empty(
+            topk_sampled_workspace_size(rows, width, k),
+            dtype=torch.uint8,
+            device=device,
+        )
+    return starts, scratch
+
+
+@functools.cache
+def _sampled_serves(rows, width, k, device_index):
+    from aiter.ops.topk import topk_sampled_supports
+
+    # The shapes AITER measured `sampled` ahead on: few rows, wide pitch.
+    return (
+        rows <= 64
+        and width >= 131072
+        and 512 <= k <= 2048
+        and bool(topk_sampled_supports(rows, width, k, device_index))
+    )
+
+
 def _select(logits, lengths, out, values=None):
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import (
+        SAMPLED_TOPK,
+        lever_on,
+    )
+
     rows, width = logits.shape
     k = out.shape[1]
-    if values is not None:
+    if (
+        values is None
+        and lever_on(SAMPLED_TOPK)
+        and logits.stride(1) == 1
+        and _sampled_serves(rows, logits.stride(0), k, logits.get_device())
+    ):
+        from aiter.ops.topk import top_k_per_row_prefill_sampled
+
+        starts, scratch = _sampled_buffers(logits.device, rows, logits.stride(0), k)
+        top_k_per_row_prefill_sampled(
+            logits,
+            starts,
+            lengths,
+            out,
+            None,
+            rows,
+            logits.stride(0),
+            1,
+            k,
+            workspace=scratch,
+        )
+    elif values is not None:
         from aiter.ops.topk import top_k_per_row_decode
 
         top_k_per_row_decode(
@@ -287,6 +346,9 @@ def _fp4_indexer(
     k_norm_weight: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
     k_norm_eps: float = 0.0,
+    q_payload: torch.Tensor | None = None,
+    q_scales: torch.Tensor | None = None,
+    q_weights: torch.Tensor | None = None,
 ) -> None:
     metadata = get_forward_context().attn_metadata
     if not isinstance(metadata, dict):
@@ -309,7 +371,20 @@ def _fp4_indexer(
         return
     m = metadata[prefix]
     assert isinstance(m, DeepseekV32IndexerMetadata)
-    if fused_prep:
+    # q_payload: the caller (the specialized decode's D1a) already stored the
+    # keys, reset the top-k rows and quantized the query (MXFP4, with its FP32
+    # head weights times weight_scale) for one tile of every decode row.
+    prepped = q_payload is not None
+    if prepped:
+        assert q_scales is not None and q_weights is not None
+        # pure decode, every key and decode row the caller's; padding rows
+        # past them still get the reset
+        rows = q_payload.shape[0]
+        assert not m.num_prefills and m.num_decode_tokens == rows
+        assert m.slot_mapping.numel() == rows <= q.shape[0]
+        if q.shape[0] > rows:
+            out[rows : q.shape[0]].fill_(-1)
+    elif fused_prep:
         # k is the raw projection when k_norm_weight is set.
         store_keys_and_reset(
             k[: m.slot_mapping.numel()],
@@ -364,7 +439,11 @@ def _fp4_indexer(
             end = min(start + tile_rows, m.num_decode_tokens)
             row_ends = ends[start:end]
             quantized = None
-            if fused_prep:
+            if prepped and start == 0 and end == q_payload.shape[0]:
+                # the starts are decode rows' (0 .. end): the clamp is a no-op
+                quantized = (q_payload, q_scales)
+                tile_weights, rel_starts = q_weights, starts
+            elif fused_prep:
                 q_payload, q_scales, tile_weights, rel_starts = (
                     quantize_queries_and_weights(
                         q[start:end],
@@ -418,6 +497,9 @@ def _fp4_indexer_fake(
     k_norm_weight: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
     k_norm_eps: float = 0.0,
+    q_payload: torch.Tensor | None = None,
+    q_scales: torch.Tensor | None = None,
+    q_weights: torch.Tensor | None = None,
 ) -> None:
     return
 

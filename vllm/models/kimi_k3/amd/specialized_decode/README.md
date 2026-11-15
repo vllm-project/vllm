@@ -50,7 +50,16 @@ VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 
-There are no other options. `decode_backend=auto` (the default) runs vLLM's decode.
+There are no other required options. `decode_backend=auto` (the default) runs
+vLLM's decode.
+
+`latency_specialized` also turns on the c1 / c4 levers in `levers/`, each an env
+flag that defaults to 1 and is ignored without it: `VLLM_K31_BEAT_MARKOV`,
+`VLLM_K31_BEAT_DRAFTMETA`, `VLLM_K31_BEAT_K2SYNC`, `VLLM_K31_BEAT_EAGERPREP`,
+`VLLM_K31_BEAT_KDAK1`, `VLLM_K3_INDEXER_SAMPLED_TOPK` and
+`VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER` (the last only with `VLLM_KIMI_SD_DSA_PROLOGUE=1`,
+which defaults to 0, and `VLLM_K3_FUSED_INDEXER_PREP=1`). Set one to 0 to turn
+that lever off.
 
 ## Supported deployments
 
@@ -140,11 +149,19 @@ Everything lives in this folder. The model files only call in: `linear.py`
 `compute_logits`), `model.py` (`get_model_state_cls`) and `mla.py`
 (`skip_o_proj`). Nothing outside the model changes: M1a writes the query
 AITER's cprr decode pads to (e.g. 96 -> 128 heads), and `runtime/mla.py` hands
-it to `forward_mqa` in place of the backend's padding copy.
+it to `forward_mqa` in place of the backend's padding copy. The levers that
+touch vLLM's v1 engine (the DSpark speculator, the AITER MLA builders, the GPU
+model runner's sample) patch it at runtime from `levers/`, only once
+`latency_specialized` is set.
 
 ```text
 hooks.py         SpecializedDecodeMixin: the model-side hooks
 model_state.py   KimiK3ModelState: builds the executor after load, binds KV caches
+levers/          the c1 / c4 levers: the gate (lever_on), the v1 patches
+    dspark.py    DSpark fused Markov sampling, the draft layers for DRAFTMETA
+    mla.py       the bs1 MLA planner hook, the sparse MLA fused indptr
+    mla_bs1_meta.py  the closed-form bs=1 MLA planner
+    runner.py    the identity logits rows slice
 runtime/
     __init__.py  DecodeConfig, specialized_decode_config(), unsupported(),
                  m1_reasons()

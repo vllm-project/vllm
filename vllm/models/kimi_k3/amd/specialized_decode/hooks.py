@@ -29,9 +29,16 @@ class SpecializedDecodeMixin:
 
     def init_specialized_decode(self, config: DecodeConfig | None) -> None:
         """``config``: ``specialized_decode_config(vllm_config)``, None for the
-        stock decode."""
+        stock decode. The levers' gate (``levers``) follows it: on when set, off
+        when None (a stock model built after a specialized one in-process)."""
+        from vllm.models.kimi_k3.amd.specialized_decode import levers
+
         self.specialized_decode_config = config
         self.specialized_decode = None
+        if config is not None:
+            levers.activate()
+        else:
+            levers.deactivate()
 
     def build_specialized_decode(self) -> None:
         from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import (

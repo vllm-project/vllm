@@ -114,8 +114,11 @@ def test_query_weights_and_starts_match_unfused(tokens, tile, heads, heads_per_p
 
 @pytest.mark.parametrize("tokens", [4, 64, 192])
 @pytest.mark.parametrize("return_scores", [False, True])
-def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
-    """The registered op, eager reference vs fused prep under a FULL graph."""
+@pytest.mark.parametrize("prepped", [False, True])
+def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores, prepped):
+    """The registered op, eager reference vs fused prep under a FULL graph;
+    ``prepped``: the caller stored the keys, reset the rows and quantized the
+    query (the specialized decode's D1a), the op only scores and selects."""
     from vllm.config import VllmConfig
     from vllm.forward_context import set_forward_context
     from vllm.models.kimi_k3.amd import dsa  # noqa: F401
@@ -165,6 +168,15 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
     scale = HEADS**-0.5 * 128**-0.5
 
     def run(fused, cache, out, scores):
+        prep = {}
+        if fused and prepped:
+            # D1a's part, here with the Triton kernels it matches bit for bit;
+            # the op resets the padding rows past it
+            store_keys_and_reset(knorm(k)[:tokens], cache, slots, out[:tokens])
+            payload, q_scales, q_weights, _ = quantize_queries_and_weights(
+                q[:tokens], weights[:tokens], scale, starts, 0, tokens
+            )
+            prep = dict(q_payload=payload, q_scales=q_scales, q_weights=q_weights)
         torch.ops.vllm.kimi_fp4_indexer(
             q,
             k if fused else knorm(k),
@@ -179,9 +191,14 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
             k_norm_weight=knorm.weight if fused else None,
             k_norm_bias=knorm.bias if fused else None,
             k_norm_eps=EPS,
+            **prep,
         )
 
-    from vllm.models.kimi_k3.amd.ops.fp4_indexer import store_keys
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import (
+        quantize_queries_and_weights,
+        store_keys,
+        store_keys_and_reset,
+    )
 
     initial, cache = _cache(reqs * pages)
     store_keys(knorm(history), cache, torch.arange(reqs * width, device="cuda"))
@@ -217,3 +234,81 @@ def test_indexer_op_fused_prep_matches_unfused(tokens, return_scores):
             rtol=0,
             atol=0,
         )
+
+
+@pytest.mark.parametrize("width", [131072, 1 << 20])
+@pytest.mark.parametrize("length", [100, 2048, 40000, 360000])
+@pytest.mark.parametrize("rows", [1, 4, 8, 64])
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("pitched", [False, True])
+def test_sampled_select_matches_decode(monkeypatch, width, length, rows, tied, pitched):
+    """VLLM_K3_INDEXER_SAMPLED_TOPK (under latency_specialized): AITER's
+    sampled select under a graph picks the decode kernel's set, including rows
+    shorter than k. ``tied``: coarse logits (as MXFP4 scores are) with ties at
+    the k-th value, where either select may keep a different tied index: the
+    same values then. ``pitched``: the logits a column slice of a wider row
+    pitch."""
+    from vllm.models.kimi_k3.amd.dsa import _sampled_serves, _select
+    from vllm.models.kimi_k3.amd.specialized_decode import levers
+
+    monkeypatch.setattr(levers, "_active", True)  # latency_specialized's gate
+    cols = width // 2 if pitched else width
+    length = min(length, cols)
+    if not _sampled_serves(rows, width, TOPK, torch.accelerator.current_device_index()):
+        pytest.skip("sampled top-k not served on this GPU")
+    torch.manual_seed(length + rows)
+    buf = torch.full((rows, width), 1e20, device="cuda")  # poisoned tail
+    if tied:
+        buf[:, :length] = torch.randint(0, 8, (rows, length), device="cuda").float()
+    else:
+        s = torch.randn((rows, length, HEADS), device="cuda").relu_()
+        buf[:, :length] = (s * torch.randn((rows, 1, HEADS), device="cuda")).sum(-1)
+    logits = buf[:, :cols]
+    ends = torch.arange(length - rows + 1, length + 1, device="cuda")
+    ends = ends.clamp(min=1).to(torch.int32)
+
+    monkeypatch.setenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "0")
+    ref = torch.full((rows, TOPK), 9, device="cuda", dtype=torch.int32)
+    _select(logits, ends, ref)
+    monkeypatch.setenv("VLLM_K3_INDEXER_SAMPLED_TOPK", "1")
+    out = torch.full_like(ref, 9)
+    _select(logits, ends, out)  # warm up outside the capture
+    out.fill_(9)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _select(logits, ends, out)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    # each row: min(end, k) distinct indices below its end, -1 past them
+    live = ends.clamp(max=TOPK).long()
+    for sel in (out, ref):
+        idx = sel.sort(dim=1).values
+        valid = idx >= 0
+        torch.testing.assert_close(valid.sum(1), live, rtol=0, atol=0)
+        assert bool((idx[~valid] == -1).all())
+        assert bool((idx < ends[:, None]).all())
+        assert bool(((idx[:, 1:] != idx[:, :-1]) | ~valid[:, 1:]).all())
+    if not tied:
+        # Random logits can still tie at the k-th value (e.g. rows=64 at 128k);
+        # compare index sets only on rows whose k-th and (k+1)-th values differ.
+        masked = torch.where(
+            torch.arange(cols, device="cuda")[None] < ends[:, None],
+            logits,
+            float("-inf"),
+        )
+        kk = min(TOPK + 1, cols)
+        top = masked.topk(kk, dim=1).values
+        untied = (ends <= TOPK) | (top[:, TOPK - 1] != top[:, kk - 1])
+        torch.testing.assert_close(
+            out.sort(dim=1).values[untied],
+            ref.sort(dim=1).values[untied],
+            rtol=0,
+            atol=0,
+        )
+
+    def picked(sel):
+        v = logits.gather(1, sel.clamp(min=0).long())
+        return v.masked_fill(sel < 0, float("-inf")).sort(dim=1).values
+
+    torch.testing.assert_close(picked(out), picked(ref), rtol=0, atol=0)

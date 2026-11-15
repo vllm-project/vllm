@@ -69,7 +69,19 @@ def key_tuple(key, sources: str) -> tuple:
             )
         out.append((f.name, value))
     out.append(("sources", sources))
+    if k2sync():
+        # only when on: the default builds keep their keys
+        out.append(("k2sync", True))
     return tuple(out)
+
+
+def k2sync() -> bool:
+    """``VLLM_K31_BEAT_K2SYNC``: the cheap spin-wait polls (``sync._spin``) and
+    the router's bounded candidate ranking (``moe.stage_route``). Read at trace
+    time; in every build's key (``key_tuple``) when on."""
+    from vllm.models.kimi_k3.amd.specialized_decode.levers import K2SYNC, lever_on
+
+    return lever_on(K2SYNC)
 
 
 # The execution model every mono kernel is written for.

@@ -31,11 +31,19 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     traced,
     uniform,
 )
-from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import Space, note
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
+    Space,
+    k2sync,
+    note,
+)
 
 POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
 WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
+# (``plan.k2sync``) a pending wait checks the health word and its deadline this
+# often, not every poll: the poll loop is then the payload loads alone, and the
+# polling threads of every CTA stop hammering the one health word system-scope
+CHECK_POLLS = 64
 
 
 @traced
@@ -48,15 +56,18 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
     A CTA's first give-up is recorded in its ``health`` record; it then raises the
     output rank's flag for this rank (``alarm``) and drains that store before it
     sets FAILED, so no later store of this rank's can overtake the flag."""
-    t0 = memrealtime()
-    v = load_all()
-    why = fx.Int32(0)  # 1: timed out, 2: the rank had failed
-    while pending(v) & (why == 0):
-        rocdl.s_sleep(1)
+    if const_expr(k2sync()):
+        v, why = _spin_cheap(load_all, pending, health)
+    else:
+        t0 = memrealtime()
         v = load_all()
-        failed = ld_health(health, FAILED) != 0
-        late = memrealtime() - t0 > WAIT_TICKS
-        why = failed.select(fx.Int32(2), late.select(fx.Int32(1), fx.Int32(0)))
+        why = fx.Int32(0)  # 1: timed out, 2: the rank had failed
+        while pending(v) & (why == 0):
+            rocdl.s_sleep(1)
+            v = load_all()
+            failed = ld_health(health, FAILED) != 0
+            late = memrealtime() - t0 > WAIT_TICKS
+            why = failed.select(fx.Int32(2), late.select(fx.Int32(1), fx.Int32(0)))
     if why == 1:
         bid = fx.block_idx.x
         rec = (bid + 1) * RECORD_WORDS
@@ -76,6 +87,29 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
         rocdl.s_waitcnt(vmcnt=0)
         bo.buffer_store(fx.Int32(1), rsrc(health), FAILED, cache_modifier=CM_SYS)
     return v
+
+
+@traced
+def _spin_cheap(load_all, pending, health):
+    """(``plan.k2sync``) ``_spin``'s wait, its fail-stop and deadline checked
+    every CHECK_POLLS polls: a wait the data reaches within that many polls
+    checks nothing, and the deadline runs from the first check (WAIT_TICKS is
+    seconds, the polls microseconds). Returns (the words, why)."""
+    v = load_all()
+    why = fx.Int32(0)  # 1: timed out, 2: the rank had failed
+    polls = fx.Int32(0)
+    t0 = fx.Int64(0)
+    while pending(v) & (why == 0):
+        rocdl.s_sleep(1)
+        v = load_all()
+        polls = uniform(polls + 1)
+        if (polls & (CHECK_POLLS - 1)) == 0:
+            now = memrealtime()
+            t0 = (polls == CHECK_POLLS).select(now, t0)
+            failed = ld_health(health, FAILED) != 0
+            late = now - t0 > WAIT_TICKS
+            why = failed.select(fx.Int32(2), late.select(fx.Int32(1), fx.Int32(0)))
+    return v, why
 
 
 @traced
@@ -293,22 +327,25 @@ def poll_sent(mb, a, idxs, lives=None, rearm=True):
         if const_expr(lives is not None):
             lives = [lives[0], lives[0]]
 
+    one = const_expr(n == 1 and k2sync())
+
     def load_all():
-        return fx.Vector.from_elements(
-            [
-                fx.Int32(
-                    bo.buffer_load(
-                        rsrc(base),
-                        fx.Int32(i),
-                        vec_width=1,
-                        dtype=T.i32,
-                        cache_modifier=cm,
-                    )
+        words = [
+            fx.Int32(
+                bo.buffer_load(
+                    rsrc(base),
+                    fx.Int32(i),
+                    vec_width=1,
+                    dtype=T.i32,
+                    cache_modifier=cm,
                 )
-                for i in idxs
-            ],
-            fx.Int32,
-        )
+            )
+            # (``plan.k2sync``) a single word loaded once, kept twice
+            for i in (idxs[:1] if one else idxs)
+        ]
+        if const_expr(one):
+            words = [words[0], words[0]]
+        return fx.Vector.from_elements(words, fx.Int32)
 
     def pending(v):
         bad = None
