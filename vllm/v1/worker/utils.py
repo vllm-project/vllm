@@ -258,7 +258,7 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
@@ -1041,7 +1041,7 @@ def get_uniform_decode_token_count(
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 

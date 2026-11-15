@@ -611,7 +611,7 @@ def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None)
     return msg
 
 
-@dataclass
+@dataclass(slots=True)
 class TestMessage:
     """Test dataclass for verifying custom type serialization."""
 
