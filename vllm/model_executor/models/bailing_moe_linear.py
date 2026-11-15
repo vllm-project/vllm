@@ -32,7 +32,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
     BailingMoELinearAttention,
-    _build_rope_parameters,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
@@ -175,11 +174,12 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config) or {}
         # MLA rotates the full qk_rope_head_dim,
         # partial_rotary_factor is for the linear-attn head only.
         rope_parameters = {
-            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+            k: v
+            for k, v in (getattr(config, "rope_parameters", None) or {}).items()
+            if k != "partial_rotary_factor"
         }
         rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)

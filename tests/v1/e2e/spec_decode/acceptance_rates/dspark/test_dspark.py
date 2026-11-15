@@ -14,7 +14,7 @@ from ...utils import compute_acceptance_len, compute_acceptance_rate
 REGRESSION_TOLERANCE = 0.95
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DSparkCorrectnessConfig:
     model: str
     draft_model: str
