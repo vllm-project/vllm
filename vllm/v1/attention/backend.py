@@ -184,6 +184,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_alibi(cls, kv_cache_dtype: "CacheDType | None" = None) -> bool:
+        return False
+
+    @classmethod
     def supports_alibi_sqrt(cls) -> bool:
         return False
 
@@ -315,6 +319,7 @@ class AttentionBackend(ABC):
         use_dcp: bool = False,
         use_rswa: bool = False,
         use_hisparse: bool = False,
+        use_alibi: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -336,6 +341,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("non-MLA not supported")
         if has_sink and not cls.supports_sink():
             invalid_reasons.append("attention sinks not supported")
+        if use_alibi and not cls.supports_alibi(kv_cache_dtype):
+            invalid_reasons.append("ALiBi not supported")
         if use_sparse != cls.is_sparse():
             if use_sparse:
                 invalid_reasons.append("sparse not supported")
