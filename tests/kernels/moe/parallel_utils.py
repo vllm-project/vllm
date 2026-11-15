@@ -37,7 +37,7 @@ class GINNotAvailableError(RuntimeError):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ProcessGroupInfo:
     world_size: int
     world_local_size: int
@@ -123,12 +123,12 @@ def parallel_launch(
 ## DeepEP specific utils
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPHTArgs:
     num_local_experts: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPLLArgs:
     max_tokens_per_rank: int
     hidden_size: int
@@ -215,7 +215,7 @@ def make_deepep_a2a(
     return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class DeepEPV2Args:
     num_local_experts: int
     num_experts: int

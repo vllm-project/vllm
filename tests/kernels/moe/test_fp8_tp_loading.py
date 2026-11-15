@@ -310,3 +310,75 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
             f"unsharded_fi_vs_triton_l2={cross_backend_l2.item():.6f}"
         )
         assert relative_l2 < 0.01, relative_l2.item()
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
+    """After a dummy start, begin zeroes the padding of a padded layer."""
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
+
+    quant_config = (
+        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+        if static
+        else None
+    )
+    suffixes = ("weight",) if static else ("weight", "weight_scale_inv")
+    generator = torch.Generator().manual_seed(0)
+    checkpoint = {
+        name: (
+            torch.randn(2, 256, 256, generator=generator).to(torch.float8_e4m3fn),
+            torch.rand(2, 2, 2, generator=generator) + 2,
+        )
+        for name in ("w1", "w3", "w2")
+    }
+
+    def make_and_load(dummy: bool):
+        # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
+        layer = _make_fp8_tp_experts(
+            monkeypatch,
+            1,
+            0,
+            intermediate_size=256,
+            quant_config=quant_config,
+            config_overrides={"intermediate_size_per_partition": 384},
+        )
+        model = torch.nn.Module()
+        model.experts = layer
+        if dummy:
+            layer.e_score_correction_bias = torch.nn.Parameter(
+                torch.full((2,), 7.0), requires_grad=False
+            )
+            for p in layer.parameters():
+                p.data.fill_(7)
+            record_checkpoint_layout(model)
+            # Post-load processing may rewrite moe_config; the record stands.
+            layer.moe_config.intermediate_size_per_partition_unpadded = 384
+            begin_direct_reload(model)
+        else:
+            for p in layer.parameters():
+                p.data.zero_()
+        for name, tensors in checkpoint.items():
+            prefix = "w2" if name == "w2" else "w13"
+            for suffix, tensor in zip(suffixes, tensors):
+                param = getattr(layer, f"{prefix}_{suffix}")
+                assert param.weight_loader(
+                    param, tensor, f"{prefix}_{suffix}", name, 0, return_success=True
+                )
+        return layer
+
+    expected = make_and_load(dummy=False)
+    layer = make_and_load(dummy=True)
+    kept = {"e_score_correction_bias"}
+    if static:
+        kept |= {f"{w}_{s}_scale" for w in ("w13", "w2") for s in ("weight", "input")}
+    assert kept <= dict(layer.named_parameters()).keys()
+    for name, p in layer.named_parameters():
+        if name in kept:
+            assert torch.all(p == 7), name
+        else:
+            torch.testing.assert_close(
+                p.float(), getattr(expected, name).float(), rtol=0, atol=0
+            )

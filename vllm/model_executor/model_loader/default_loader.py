@@ -60,7 +60,7 @@ class DefaultModelLoader(BaseModelLoader):
     # default number of thread when enable multithread weight loading
     DEFAULT_NUM_THREADS = 8
 
-    @dataclasses.dataclass
+    @dataclasses.dataclass(slots=True)
     class Source:
         """A source for weights."""
 
@@ -335,6 +335,9 @@ class DefaultModelLoader(BaseModelLoader):
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
+                        ),
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(
@@ -347,6 +350,9 @@ class DefaultModelLoader(BaseModelLoader):
                         ),
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
+                        ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
                         ),
                     )
         else:
@@ -412,17 +418,13 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_weights_mapper = None
             return
 
-        # Derive from _language_model_names; fail-closed on shared HF roots
-        # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
-        weights_mapper = cast(
-            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
-        )
+        # Derive from _language_model_names. Qwen nested/flat keys are classified
+        # via the mapper when filtering shards.
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
-            getattr(model, "_language_model_names", None),
-            weights_mapper=weights_mapper,
+            getattr(model, "_language_model_names", None)
         )
-        self._encoder_only_weights_mapper = (
-            weights_mapper if self._encoder_only_lm_prefixes is not None else None
+        self._encoder_only_weights_mapper = cast(
+            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
         )
 
     def _init_ep_weight_filter(
