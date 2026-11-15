@@ -3383,10 +3383,10 @@ class Scheduler(SchedulerInterface):
         """Whether a pause of this mode may complete, as far as the scheduler
         is concerned (the engine core adds the device-side conditions).
 
-        mode     compute            outputs to flush   KV transfers (ledger)
-        keep     nothing scheduled  flushed            ignored: they outlive the pause
-        wait     drained            flushed            nothing pins a block
-        abort    drained            flushed            nothing pins a block (exports dropped)
+        mode   compute            outputs   KV transfers (ledger)
+        keep   nothing scheduled  flushed   ignored: they outlive the pause
+        wait   drained            flushed   nothing pins a block
+        abort  drained            flushed   nothing pins a block (exports dropped)
         keep+clear behaves like wait here: a cache reset needs every block back.
         """
         if self.finished_req_ids or self.dropped_streaming_updates:

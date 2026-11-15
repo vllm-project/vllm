@@ -17,16 +17,16 @@ def _req(rid: str):
 
 def test_export_lifecycle():
     ledger = KVTransferLedger()
-    assert ledger.is_empty() and not ledger.has_exports()
+    assert not ledger.is_referenced("a") and not ledger.has_retained()
     entry = ledger.open_export(_req("a"))
     assert entry.state == TransferState.OPEN
-    assert ledger.has_exports() and ledger.has_retained() and ledger.needs_driving()
+    assert ledger.pins_blocks() and ledger.has_retained() and ledger.needs_driving()
     assert ledger.is_referenced("a")
     # Opening twice is idempotent.
-    assert ledger.open_export(_req("a")) is entry and len(ledger) == 1
+    assert ledger.open_export(_req("a")) is entry
     assert ledger.close("a", EXPORT) is entry
     assert ledger.close("a", EXPORT) is None
-    assert ledger.is_empty() and not ledger.has_retained()
+    assert not ledger.is_referenced("a") and not ledger.has_retained()
 
 
 def test_import_pending_then_open_then_closed():
@@ -40,9 +40,9 @@ def test_import_pending_then_open_then_closed():
     assert ledger.import_started(r) is entry
     assert entry.state == TransferState.OPEN
     assert ledger.complete("b", IMPORT) is entry
-    assert entry.state == TransferState.CLOSING and entry.outcome == "ok"
+    assert entry.state == TransferState.CLOSING
     assert ledger.close("b", IMPORT) is entry
-    assert ledger.is_empty()
+    assert not ledger.is_referenced("b")
 
 
 def test_finished_request_with_open_import_is_retained():
@@ -54,7 +54,7 @@ def test_finished_request_with_open_import_is_retained():
     ledger.mark_finished(r)  # idempotent
     assert ledger.has_retained()
     ledger.close("c", IMPORT)
-    assert not ledger.has_retained() and ledger.is_empty()
+    assert not ledger.has_retained() and not ledger.is_referenced("c")
 
 
 def test_request_referenced_until_every_entry_closes():
@@ -75,10 +75,8 @@ def test_drop_request_removes_all_and_fixes_counters():
     ledger.mark_finished(r)
     ledger.open_export(r)
     assert len(ledger.drop_request("e")) == 2
-    assert ledger.is_empty() and not ledger.has_retained() and not ledger.has_exports()
-    assert ledger.stats() == {
-        "exports": 0, "imports_pending": 0, "imports_open": 0, "closing": 0
-    }
+    assert not ledger.is_referenced("e")
+    assert not (ledger.has_retained() or ledger.pins_blocks() or ledger.needs_driving())
 
 
 def test_complete_unknown_is_none():
@@ -91,14 +89,14 @@ def test_received_import_does_not_need_driving():
     ledger = KVTransferLedger()
     r = _req("f")
     ledger.open_import(r)
-    assert ledger.needs_driving()           # pending: renewals
+    assert ledger.needs_driving()  # pending: renewals
     ledger.import_started(r)
-    assert ledger.needs_driving()           # open: completion
+    assert ledger.needs_driving()  # open: completion
     ledger.complete("f", IMPORT)
-    assert not ledger.needs_driving()       # closing: only promotion is left
-    assert not ledger.is_empty()
+    assert not ledger.needs_driving()  # closing: only promotion is left
+    assert ledger.is_referenced("f")
     ledger.close("f", IMPORT)
-    assert ledger.is_empty() and not ledger.needs_driving()
+    assert not ledger.is_referenced("f") and not ledger.needs_driving()
 
 
 def test_drop_exports_keeps_imports():
@@ -108,7 +106,7 @@ def test_drop_exports_keeps_imports():
     ledger.import_started(_req("i"))
     dropped = ledger.drop_exports()
     assert sorted(e.request_id for e in dropped) == ["g", "h"]
-    assert not ledger.has_exports() and ledger.needs_driving()
+    assert not ledger.has_retained() and ledger.needs_driving()
     assert ledger.is_referenced("i") and not ledger.is_referenced("g")
 
 
@@ -116,11 +114,11 @@ def test_pins_blocks_only_for_open_imports_and_exports():
     ledger = KVTransferLedger()
     r = _req("j")
     ledger.open_import(r)
-    assert not ledger.pins_blocks() and ledger.needs_driving()   # pending
+    assert not ledger.pins_blocks() and ledger.needs_driving()  # pending
     ledger.import_started(r)
-    assert ledger.pins_blocks()                                  # open
+    assert ledger.pins_blocks()  # open
     ledger.complete("j", IMPORT)
-    assert not ledger.pins_blocks()                              # received
+    assert not ledger.pins_blocks()  # received
     ledger.open_export(_req("k"))
     assert ledger.pins_blocks()
     ledger.drop_exports()

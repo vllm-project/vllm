@@ -1085,7 +1085,9 @@ def test_keep_pause_without_clear_ignores_retained_exports():
     assert core._pending_pause is None
 
 
-@pytest.mark.parametrize("mode,clear_cache", [("keep", True), ("wait", True), ("abort", False)])
+@pytest.mark.parametrize(
+    "mode,clear_cache", [("keep", True), ("wait", True), ("abort", False)]
+)
 def test_other_pauses_wait_for_the_ledger(mode, clear_cache):
     core = _core_with_retained_exports()
     core.scheduler.finish_requests.return_value = []
@@ -1105,10 +1107,14 @@ def test_other_pauses_wait_for_the_ledger(mode, clear_cache):
 
 def test_pending_pause_waits_for_in_flight_compute_but_not_connector_batches():
     core = _core_with_retained_exports()
-    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=8), None)])
+    core.batch_queue = deque(
+        [(Future(), MagicMock(total_num_scheduled_tokens=8), None)]
+    )
     result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
     assert isinstance(result, Future) and not result.done()
-    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=0), None)])
+    core.batch_queue = deque(
+        [(Future(), MagicMock(total_num_scheduled_tokens=0), None)]
+    )
     core._maybe_finish_pause()
     assert result.result(timeout=0) is None
 
