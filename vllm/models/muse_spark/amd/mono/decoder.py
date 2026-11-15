@@ -63,7 +63,7 @@ KERNEL_CONFIG: dict[str, float] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoDims:
     """Per-rank tensor sizes of a TP = EP rank."""
 
@@ -455,7 +455,7 @@ def batch_refusal(
     return None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoKernels:
     """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`)."""
 

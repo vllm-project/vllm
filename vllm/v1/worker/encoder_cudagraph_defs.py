@@ -16,7 +16,7 @@ EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderItemSpec:
     """Description of a single encoder input item.
 
@@ -45,7 +45,7 @@ class EncoderItemSpec:
         return self.path_output_tokens.get(path, 0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EncoderCudaGraphPathConfig:
     """Capture policy for one independently replayable encoder path."""
 
@@ -58,7 +58,7 @@ class EncoderCudaGraphPathConfig:
     """Whether a batch may omit this path entirely."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
@@ -72,8 +72,8 @@ class EncoderCudaGraphConfig:
 
     buffer_keys: list[str]
     """Keys for the tensor buffers recorded into the CUDA graph.
-    Before replay the manager zeros then slice-copies new data
-    into these buffers."""
+    Before replay the manager copies new data into these buffers,
+    padding them as described in `padding_logics`."""
 
     out_hidden_size: int
     """Output hidden dim of the vision encoder.
@@ -83,10 +83,11 @@ class EncoderCudaGraphConfig:
         default_factory=dict
     )
     """Optional per-buffer replay padding/copy logic.
-    If absent for a key, the manager zeros the capture buffer and slice-copies
-    the replay buffer into it. A padding logic must write the whole capture
-    buffer: budgets share buffers, so rows it leaves untouched may hold another
-    budget's data."""
+    If absent for a key, the manager slice-copies the replay buffer into the
+    capture buffer and pads the tail with the last value for cumulative keys
+    (`cu_seqlens`, `cu_window_seqlens`) or with zeros otherwise. A padding
+    logic must write the whole capture buffer: budgets share buffers, so rows
+    it leaves untouched may hold another budget's data."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.
@@ -107,7 +108,7 @@ class EncoderCudaGraphConfig:
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:
     """Everything needed for one CUDA graph capture.
 
@@ -121,7 +122,7 @@ class EncoderCudaGraphCaptureInputs:
     `graph.replay()` call (buffer identity invariant)."""
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderCudaGraphReplayBuffers:
     """New buffer values for graph replay, computed by the model from
     actual batch inputs.
