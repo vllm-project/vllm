@@ -335,6 +335,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   and engine. Engines reuse the processed weights and scales, including
   fused-projection scales and output padding. This does not enable ModelOpt
   block FP8, FP8 MoE, or other FP8 linear backends.
+  Linear layers of serialized `fp8` checkpoints do not support CUDA IPC with
+  the Humming linear backend, which is the default for block-scaled FP8 on
+  compute capability 8.6 GPUs. Set another backend, such as
+  `--linear-backend marlin`, on both the daemon and engine.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

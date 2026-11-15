@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.kernels.linear import (
+    HummingFP8ScaledMMLinearKernel,
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
 )
@@ -241,8 +242,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
     """
 
-    supports_pre_processed_weights = True
-
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
@@ -282,6 +281,13 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        # Humming builds its layer config while it processes the weights.
+        return not isinstance(
+            getattr(self, "fp8_linear", None), HummingFP8ScaledMMLinearKernel
+        )
 
     def create_weights(
         self,
@@ -361,6 +367,11 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Pre-processed FP8 weights are not supported by the Humming "
+                    "linear backend"
+                )
             # Weights are already in runtime format; the only state tensor
             # export cannot carry is the `input_scale = None` stamp that dynamic
             # activation quantization relies on, since create_weights never
