@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""In-process auxiliary-output storage."""
+"""Worker-private cache of the routed-experts rows of retained KV blocks."""
 
 from __future__ import annotations
 

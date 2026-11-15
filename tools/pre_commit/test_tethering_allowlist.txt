@@ -18,6 +18,9 @@
 
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
+tests/distributed/aux_output_connector/test_object_store.py  # added with the aux-output object store, no job collects this path
+tests/distributed/aux_output_connector/test_objects.py  # added with the aux-output object store, no job collects this path
+tests/distributed/aux_output_connector/test_session_objects.py  # added with the aux-output object store, no job collects this path
 tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job

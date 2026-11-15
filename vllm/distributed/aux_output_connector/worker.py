@@ -18,15 +18,21 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     retained_objects,
 )
+from vllm.distributed.aux_output_connector.object_store import (
+    create_aux_object_store,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
-from vllm.distributed.aux_output_connector.store import (
+from vllm.distributed.aux_output_connector.row_cache import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
+)
+from vllm.distributed.aux_output_connector.session_objects import (
+    SessionObjectWriter,
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -41,7 +47,11 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class _WorkerRequestState:
+    request_id: str = ""
     aux_output_keys: list[str] = field(default_factory=list)
+    block_hash_hexes: list[str] = field(default_factory=list)
+    session: str | None = None
+    object_ids: dict[int, str] = field(default_factory=dict)
     pending_blocks: list[tuple[int, np.ndarray]] = field(default_factory=list)
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
@@ -98,6 +108,7 @@ class AuxOutputWorkerConnector:
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
+        self._object_writer: SessionObjectWriter | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -118,7 +129,9 @@ class AuxOutputWorkerConnector:
         vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
-        num_objects, hash_block_size = retained_objects(vllm_config, kv_cache_config)
+        num_objects, block_size, hash_block_size = retained_objects(
+            vllm_config, kv_cache_config
+        )
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = num_objects * block_nbytes
         self._store = BackgroundBlockObjectStore(
@@ -133,6 +146,15 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
+        aux_output_config = vllm_config.aux_output_config
+        if aux_output_config.object_store is not None:
+            self._object_writer = SessionObjectWriter(
+                create_aux_object_store(aux_output_config.object_store),
+                key_prefix=aux_output_config.object_key_prefix,
+                object_size=block_size,
+                hash_block_size=hash_block_size,
+                max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
+            )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -310,6 +332,14 @@ class AuxOutputWorkerConnector:
             ]
             if ready:
                 ready_batches.append((state.aux_output_keys, ready))
+                if state.session is not None and self._object_writer is not None:
+                    self._object_writer.add_blocks(
+                        state.request_id,
+                        state.session,
+                        state.block_hash_hexes,
+                        ready,
+                        state.object_ids,
+                    )
         if ready_batches or retain_keys or release_keys:
             publish_routed_experts(
                 store,
@@ -331,6 +361,8 @@ class AuxOutputWorkerConnector:
             for _, rows in state.pending_blocks:
                 buffer.release_block(rows)
             buffer.discard(request_id)
+            if self._object_writer is not None:
+                self._object_writer.discard(request_id)
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
@@ -367,16 +399,25 @@ class AuxOutputWorkerConnector:
                 self._buffer.reset()
                 self._requests.clear()
                 self._generation = metadata.generation
+            if self._object_writer is not None:
+                for session in metadata.released_sessions:
+                    self._object_writer.forget_session(session)
             for request_id, emit_start in metadata.requests.items():
                 state = self._requests.setdefault(
-                    request_id, _WorkerRequestState(emit_cursor=emit_start)
+                    request_id,
+                    _WorkerRequestState(request_id, emit_cursor=emit_start),
                 )
+                if metadata.sessions and request_id in metadata.sessions:
+                    state.session = metadata.sessions[request_id]
                 if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
+            for request_id, (first, ids) in (metadata.object_ids or {}).items():
+                state = self._requests[request_id]
+                state.object_ids.update(enumerate(ids, first))
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
@@ -384,6 +425,9 @@ class AuxOutputWorkerConnector:
                 state = self._requests[request_id]
                 keys = routed_experts_keys(block_hashes, str(self._generation))
                 state.aux_output_keys.extend(keys)
+                state.block_hash_hexes.extend(
+                    block_hash.hex() for block_hash in block_hashes
+                )
                 retained_keys.extend(keys)
                 block_batches.append((state, []))
             finished_now: list[str] = []
@@ -400,6 +444,11 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
+            if self._object_writer is not None:
+                try:
+                    self._object_writer.close()
+                finally:
+                    self._object_writer = None
             if self._store is not None:
                 try:
                     self._store.close()

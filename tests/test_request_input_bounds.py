@@ -126,6 +126,19 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     )
 
 
+def test_aux_session_rejects_routed_experts_prompt_start():
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    params = SamplingParams(aux_session="s", routed_experts_prompt_start=1)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+        InputProcessor.process_inputs(processor, "req", prompt, params, ("generate",))
+
+
 def _process_inputs_with_max_model_len(
     params: SamplingParams, max_model_len: int = 2048
 ):

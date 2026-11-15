@@ -312,6 +312,10 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Shared-object keys of a finished session request's routed experts.
+    # Appended last for array_like compatibility.
+    aux_output_keys: list[str] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

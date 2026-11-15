@@ -828,7 +828,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", buffer_constructor)
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
+        aux_output_config=SimpleNamespace(max_bytes=None, object_store=None),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),

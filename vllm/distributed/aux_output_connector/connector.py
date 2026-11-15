@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from vllm.distributed.aux_output_connector.sessions import SessionObjects
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_bytes_per_token,
 )
@@ -32,9 +33,9 @@ if TYPE_CHECKING:
 
 def retained_objects(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Number of hash-block objects whose routed experts the scheduler retains
-    and the worker stores, and the tokens per object."""
+    and the worker stores, the KV cache block size and the hash block size."""
     block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
     )
@@ -43,11 +44,12 @@ def retained_objects(
         object_nbytes = hash_block_size * get_routed_experts_bytes_per_token(
             vllm_config
         )
-        return max(max_bytes // object_nbytes, 1), hash_block_size
+        return max(max_bytes // object_nbytes, 1), block_size, hash_block_size
     num_blocks = kv_cache_config.num_blocks
     if vllm_config.kv_transfer_config is not None:
         num_blocks *= 2
-    return num_blocks * (block_size // hash_block_size), hash_block_size
+    num_objects = num_blocks * (block_size // hash_block_size)
+    return num_objects, block_size, hash_block_size
 
 
 @dataclass(slots=True)
@@ -70,6 +72,9 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    sessions: dict[str, str] | None = None
+    released_sessions: tuple[str, ...] = ()
+    object_ids: dict[str, tuple[int, list[str]]] | None = None
 
 
 @dataclass(slots=True)
@@ -85,6 +90,9 @@ class AuxOutputSchedulerConnector:
         self,
         kv_cache_manager: KVCacheManager,
         num_objects: int,
+        object_store: bool = False,
+        key_prefix: str = "",
+        session_idle_timeout_s: float = 3600.0,
     ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -104,6 +112,18 @@ class AuxOutputSchedulerConnector:
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
+        self._sessions = (
+            SessionObjects(
+                self._block_size,
+                self._hash_block_size,
+                key_prefix,
+                session_idle_timeout_s,
+                self._cached_block_id,
+                self._request_block_id,
+            )
+            if object_store
+            else None
+        )
 
     def build_connector_meta(
         self,
@@ -113,9 +133,18 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        sessions: dict[str, str] = {}
+        object_ids: dict[str, tuple[int, list[str]]] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            session = self._session(request)
+            if request_id not in self._sent_hash_counts:
+                self._sent_hash_counts[request_id] = 0
+                if session is not None:
+                    sessions[request_id] = session
+            self._schedule_objects(
+                request, session, request.num_computed_tokens + num_tokens, object_ids
+            )
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
@@ -123,6 +152,10 @@ class AuxOutputSchedulerConnector:
                 block_hashes_by_request[request_id] = packed
             self._loading.pop(request_id, None)
             assert request.sampling_params is not None
+            if session is not None:
+                assert self._sessions is not None
+                scheduled_requests[request_id] = self._sessions.emit_start(request)
+                continue
             # A P/D prefiller may cut the prompt short of the requested start.
             scheduled_requests[request_id] = max(
                 min(
@@ -141,6 +174,12 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+                self._schedule_objects(
+                    request,
+                    self._session(request),
+                    request.num_computed_tokens,
+                    object_ids,
+                )
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -156,11 +195,35 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            sessions or None,
+            self._sessions.take_released() if self._sessions is not None else (),
+            object_ids or None,
         )
         self._retained_hashes, self._released_hashes = [], []
         return metadata
 
+    def _schedule_objects(
+        self,
+        request: Request,
+        session: str | None,
+        end: int,
+        object_ids: dict[str, tuple[int, list[str]]],
+    ) -> None:
+        if self._sessions is None:
+            return
+        new_ids = self._sessions.schedule(request, session, end)
+        if new_ids is not None and new_ids[1]:
+            object_ids[request.request_id] = new_ids
+
+    def _session(self, request: Request) -> str | None:
+        if self._sessions is None or request.sampling_params is None:
+            return None
+        return request.sampling_params.aux_session
+
     def max_cache_hit(self, request: Request) -> int:
+        if (session := self._session(request)) is not None:
+            assert self._sessions is not None
+            return self._sessions.max_cache_hit(request, session)
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -201,6 +264,14 @@ class AuxOutputSchedulerConnector:
     def _gpu_cached(self, block_hash: BlockHash) -> list[KVCacheBlock] | None:
         return self._manager.block_pool.get_cached_block(block_hash, [self._group_id])
 
+    def _cached_block_id(self, block_hash: BlockHash) -> int | None:
+        blocks = self._gpu_cached(block_hash)
+        return None if blocks is None else blocks[0].block_id
+
+    def _request_block_id(self, request: Request, index: int) -> int | None:
+        blocks = self._manager.req_to_blocks.get(request.request_id, ())
+        return blocks[index].block_id if index < len(blocks) else None
+
     def _kv_blocks(
         self, hashes: Sequence[BlockHash]
     ) -> Iterator[tuple[ExternalBlockHash, Sequence[BlockHash]]]:
@@ -236,12 +307,26 @@ class AuxOutputSchedulerConnector:
             f"output_start={request_output.token_start}, "
             f"output_end={request_output.token_start + len(request_output.rows)}"
         )
-        return request_output.rows[:local_end]
+        rows = request_output.rows[:local_end]
+        if self._session(request) is None:
+            return rows
+        assert self._sessions is not None
+        return self._sessions.take_output(request, request_output.token_start, rows)
+
+    def take_object_keys(self, request: Request) -> list[str] | None:
+        """Keys of the objects a session request completed in its last
+        output."""
+        if self._session(request) is None:
+            return None
+        assert self._sessions is not None
+        return self._sessions.take_keys(request)
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
         self._loading.pop(request_id, None)
+        if self._sessions is not None:
+            self._sessions.finish(request)
         num_blocks = request.num_computed_tokens // self._block_size
         for block, keys in islice(self._kv_blocks(request.block_hashes), num_blocks):
             if block not in self._kv_cached and self._gpu_cached(keys[-1]):
@@ -280,5 +365,7 @@ class AuxOutputSchedulerConnector:
         self._sent_hash_counts.clear()
         self._finished_requests.clear()
         self._generation += 1
+        if self._sessions is not None:
+            self._sessions.reset()
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()

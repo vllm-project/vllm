@@ -154,6 +154,10 @@ pub struct EngineCoreOutput {
     /// engine has a `watermark_config`.
     #[serde(default)]
     pub watermarking: Option<bool>,
+    /// Shared-object keys of a finished session request's routed experts,
+    /// when `AuxOutputConfig.object_store` is set.
+    #[serde(default)]
+    pub aux_output_keys: Option<Vec<String>>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -594,6 +598,29 @@ mod tests {
     }
 
     #[test]
+    fn engine_core_output_decodes_aux_output_keys() {
+        let keys = vec!["job/s/ab".to_string(), "job/s/cd".to_string()];
+        let output = EngineCoreOutput {
+            request_id: "req-1".into(),
+            new_token_ids: vec![42],
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            aux_output_keys: Some(keys.clone()),
+            ..Default::default()
+        };
+        let fields = crate::protocol::decode_value(&encode_msgpack(&output).unwrap()).unwrap();
+        assert_eq!(
+            fields.as_array().unwrap().last(),
+            Some(&OpaqueValue::Array(
+                keys.iter().map(|key| key.as_str().into()).collect()
+            ))
+        );
+        let wire = (0, vec![fields]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output]);
+    }
+
+    #[test]
     fn engine_core_output_requires_valid_known_fields() {
         for fields in [
             vec![],
@@ -658,6 +685,7 @@ mod tests {
                             prompt_token_id_logprobs: None,
                             error: None,
                             watermarking: None,
+                            aux_output_keys: None,
                         },
                     ],
                     scheduler_stats: None,

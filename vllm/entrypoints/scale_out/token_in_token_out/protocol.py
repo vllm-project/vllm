@@ -522,6 +522,10 @@ class GenerateChoiceBase(BaseModel):
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+    # Shared-object keys of an `aux_session` request's routed experts; the
+    # rows are the objects in order, then `routed_experts`, truncated to
+    # `num_tokens - 1`.
+    aux_output_keys: list[str] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -556,6 +560,7 @@ class GenerateStreamChoiceBase(BaseModel):
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    aux_output_keys: list[str] | None = None
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None
