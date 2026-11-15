@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import ctypes
 import itertools
 import json
 import logging
@@ -52,6 +51,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     HeadMajorStoreLayout,
     KeyMetadata,
+    LayerRangeStoreLayout,
     MambaStoreLayout,
     PoolKey,
     RankLocalStoreLayout,
@@ -3543,21 +3543,26 @@ def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
     assert "@layers:1-2@" in keys[1]
 
 
-@pytest.mark.cpu_test
-def test_pp_stage_keys_name_their_layers(tmp_path, monkeypatch):
-    """A PP stage's keys name the layers it holds instead of its PP rank, so
-    an object holding every layer and a stage object holding some of them
-    never share a key, while PP=1 keys stay unchanged."""
+_PP_ATTENTION = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+
+
+@pytest.fixture
+def pp_stage_layouts(tmp_path, monkeypatch):
+    """Build the Store layouts of one PP stage. Stages of several instances
+    are built in one process: each sees its own lookup prefixes as every
+    stage's."""
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch)
     monkeypatch.setattr(worker, "get_pp_group", MagicMock())
-
-    def gather_prefixes(output, local, **kwargs):
-        output[:] = [local] * len(output)
-
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_gather_object",
+        lambda output, local, **_: output.__setitem__(
+            slice(None), [local] * len(output)
+        ),
+    )
     monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
@@ -3571,123 +3576,98 @@ def test_pp_stage_keys_name_their_layers(tmp_path, monkeypatch):
         ),
     )
 
-    keys = []
-    for pp_size, rank in ((1, 0), (2, 0), (2, 1)):
-        w = worker.MooncakeStoreWorker(
-            _make_vllm_config(rank=rank, pipeline_parallel_size=pp_size),
-            _make_kv_cache_config(),
+    def build(
+        pp_size: int,
+        rank: int,
+        extra_config: dict[str, object] | None = None,
+        *,
+        num_layers: int = 2,
+        groups=None,
+        draft_layers: tuple[str, ...] = (),
+        **config,
+    ):
+        """`groups` lists each KV cache group's spec and its layers over the
+        whole model; by default one attention group holds every layer. The
+        draft model's layers run on the last stage, in the first group."""
+        monkeypatch.setattr(
+            _FakeModelConfig, "get_total_num_hidden_layers", lambda _: num_layers
         )
-        keys.append(w.token_dbs[0].store_layout.key_for(0, BlockHash(b"h")))
+        monkeypatch.setattr(
+            worker, "_draft_layer_names", lambda _: frozenset(draft_layers)
+        )
+        stage = range(*worker.get_pp_indices(num_layers, rank, pp_size))
+        stage_groups = []
+        for spec, layers in groups or [(_PP_ATTENTION, range(num_layers))]:
+            names = {i: f"model.layers.{i}.self_attn.attn" for i in layers}
+            group = make_kv_cache_group(list(names.values()), spec)
+            for i in names.keys() - set(stage):
+                del group.kv_cache_specs[names[i]]
+            stage_groups.append(group)
+        if rank == pp_size - 1:
+            for name in draft_layers:
+                stage_groups[0].kv_cache_specs[name] = _PP_ATTENTION
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank,
+                pipeline_parallel_size=pp_size,
+                extra_config=extra_config,
+                **config,
+            ),
+            KVCacheConfig(
+                num_blocks=10, kv_cache_tensors=[], kv_cache_groups=stage_groups
+            ),
+        )
+        return [db.store_layout for db in w.token_dbs]
 
-    assert keys[0] == f"test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@{b'h'.hex()}"
-    assert "@layers:0-1@" in keys[1]
-    assert "@layers:1-2@" in keys[2]
-    assert len(set(keys)) == 3
+    return build
+
+
+def _layout_keys(layout) -> list[str]:
+    return [layout.key_for(shard, BlockHash(b"h")) for shard in layout.local_shard_ids]
+
+
+@pytest.mark.cpu_test
+def test_pp_stage_keys_name_their_layers(pp_stage_layouts):
+    """A PP stage's keys name the layers it holds instead of its PP rank, so
+    an object holding every layer and a stage object holding some of them
+    never share a key, while PP=1 keys stay unchanged."""
+    keys = [
+        _layout_keys(pp_stage_layouts(pp_size, rank)[0])
+        for pp_size, rank in ((1, 0), (2, 0), (2, 1))
+    ]
+
+    assert keys[0] == [f"test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@{b'h'.hex()}"]
+    assert "@layers:0-1@" in keys[1][0]
+    assert "@layers:1-2@" in keys[2][0]
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("store_config", "layout_cls"),
-    [({}, RankLocalStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
+    [({}, LayerRangeStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
 )
 def test_pp_sizes_share_layer_range_keys_across_pp_sizes(
-    tmp_path, monkeypatch, store_config, layout_cls
+    pp_stage_layouts, store_config, layout_cls
 ):
     """With pp_sizes=[1, 2], a PP=1 instance stores each block as one object
     per PP=2 stage, under the keys the PP=2 stages use, also with Store TP."""
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch)
-    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+    config = {"pp_sizes": [1, 2], **store_config}
+    (pp1,) = pp_stage_layouts(1, 0, config)
+    stages = [pp_stage_layouts(2, rank, config)[0] for rank in (0, 1)]
 
-    def gather_prefixes(output, local, **kwargs):
-        output[:] = [local] * len(output)
-
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
-        ),
-    )
-
-    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-
-    def layout(pp_size: int, rank: int):
-        kv_config = KVCacheConfig(
-            num_blocks=10,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                make_kv_cache_group(
-                    [
-                        f"model.layers.{i}.self_attn.attn"
-                        for i in range(rank * 2 // pp_size, (rank + 1) * 2 // pp_size)
-                    ],
-                    spec,
-                )
-            ],
-            prefix_cache_retention_interval=0,
-        )
-        w = worker.MooncakeStoreWorker(
-            _make_vllm_config(
-                rank=rank,
-                pipeline_parallel_size=pp_size,
-                extra_config={"pp_sizes": [1, 2], **store_config},
-            ),
-            kv_config,
-        )
-        store_layout = w.token_dbs[0].store_layout
-        assert type(store_layout) is layout_cls
-        return store_layout
-
-    pp1 = layout(1, 0)
-    stages = [layout(2, rank) for rank in (0, 1)]
-    block_hash = BlockHash(b"h")
-
-    assert [pp1.key_for(shard, block_hash) for shard in pp1.local_shard_ids] == [
-        stage.key_for(shard, block_hash)
-        for stage in stages
-        for shard in stage.local_shard_ids
-    ]
+    assert type(pp1) is layout_cls
+    assert _layout_keys(pp1) == _layout_keys(stages[0]) + _layout_keys(stages[1])
 
 
 @pytest.mark.cpu_test
-def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(tmp_path, monkeypatch):
+def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(
+    pp_stage_layouts, monkeypatch
+):
     """KV cache groups are formed over the whole model, so with pp_sizes each
     group of a PP=1 instance stores the objects the PP=2 stages store for it."""
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch)
-    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
-
-    def gather_prefixes(output, local, **kwargs):
-        output[:] = [local] * len(output)
-
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_hidden_layers", lambda _: 8)
     monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
-        ),
-    )
-    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     gdn = mamba_layer(
         block_size=16,
         shapes=((24, 3), (4, 2, 2)),
@@ -3696,36 +3676,18 @@ def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(tmp_path, monkeypatch)
         mamba_cache_mode="align",
     )
     # Layers 3 and 7 use full attention; the GDN layers form three groups.
-    groups = [(full, (3, 7)), (gdn, (0, 4)), (gdn, (1, 5)), (gdn, (2, 6))]
+    groups = [(_PP_ATTENTION, (3, 7)), (gdn, (0, 4)), (gdn, (1, 5)), (gdn, (2, 6))]
 
     def group_keys(pp_size: int, rank: int) -> list[list[str]]:
-        stage = range(rank * 8 // pp_size, (rank + 1) * 8 // pp_size)
-        kv_config = KVCacheConfig(
-            num_blocks=10,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                make_kv_cache_group(
-                    [f"model.layers.{i}.attn" for i in layers if i in stage], spec
-                )
-                for spec, layers in groups
-            ],
+        layouts = pp_stage_layouts(
+            pp_size,
+            rank,
+            {"pp_sizes": [1, 2]},
+            num_layers=8,
+            groups=groups,
+            prefix_match_unit=16,
         )
-        w = worker.MooncakeStoreWorker(
-            _make_vllm_config(
-                rank=rank,
-                pipeline_parallel_size=pp_size,
-                extra_config={"pp_sizes": [1, 2]},
-                prefix_match_unit=16,
-            ),
-            kv_config,
-        )
-        return [
-            [
-                db.store_layout.key_for(shard, BlockHash(b"h"))
-                for shard in db.store_layout.local_shard_ids
-            ]
-            for db in w.token_dbs
-        ]
+        return [_layout_keys(layout) for layout in layouts]
 
     pp1 = group_keys(1, 0)
     stages = [group_keys(2, rank) for rank in (0, 1)]
@@ -3736,58 +3698,15 @@ def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(tmp_path, monkeypatch)
 
 
 @pytest.mark.cpu_test
-def test_pp_sizes_lists_a_custom_partition(tmp_path, monkeypatch):
+def test_pp_sizes_lists_a_custom_partition(pp_stage_layouts, monkeypatch):
     """A PP size whose stages are set with VLLM_PP_LAYER_PARTITION is listed by
     its per-stage layer counts, so other PP sizes cut at its real boundaries.
     An instance whose partition is not listed refuses to start."""
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch)
-    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
-
-    def gather_prefixes(output, local, **kwargs):
-        output[:] = [local] * len(output)
-
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_hidden_layers", lambda _: 8)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
-        ),
-    )
-    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
 
     def keys(pp_size: int, rank: int, pp_sizes: list) -> list[str]:
-        stage = range(*worker.get_pp_indices(8, rank, pp_size))
-        kv_config = KVCacheConfig(
-            num_blocks=10,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                make_kv_cache_group(
-                    [f"model.layers.{i}.self_attn.attn" for i in stage], spec
-                )
-            ],
-            prefix_cache_retention_interval=0,
+        return _layout_keys(
+            pp_stage_layouts(pp_size, rank, {"pp_sizes": pp_sizes}, num_layers=8)[0]
         )
-        w = worker.MooncakeStoreWorker(
-            _make_vllm_config(
-                rank=rank,
-                pipeline_parallel_size=pp_size,
-                extra_config={"pp_sizes": pp_sizes},
-            ),
-            kv_config,
-        )
-        layout = w.token_dbs[0].store_layout
-        return [
-            layout.key_for(shard, BlockHash(b"h")) for shard in layout.local_shard_ids
-        ]
 
     pp1 = keys(1, 0, [1, [3, 5]])
     monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,5")
@@ -3801,173 +3720,62 @@ def test_pp_sizes_lists_a_custom_partition(tmp_path, monkeypatch):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
+    "pp_sizes", ["2", [], [0], [True], [1, [3, 4]], [[8, 0]], [[4, 4.0]]]
+)
+def test_pp_sizes_rejects_invalid_entries(pp_sizes):
+    """pp_sizes is a list of PP sizes or of per-stage layer counts that cover
+    the model's layers."""
+    with pytest.raises(ValueError, match="pp_sizes"):
+        worker._pp_partitions(pp_sizes, 8)
+
+
+@pytest.mark.cpu_test
+def test_pp_sizes_is_ignored_when_a_stage_lacks_a_group(pp_stage_layouts, caplog):
+    """A stage holding no layers of a KV cache group cannot share that group's
+    objects, so it warns and keeps one object per group, as without pp_sizes."""
+    groups = [(_PP_ATTENTION, range(8)), (_PP_ATTENTION, (0, 1))]
+
+    def keys(extra_config: dict[str, object] | None) -> list[str]:
+        (layout, _) = pp_stage_layouts(2, 1, extra_config, num_layers=8, groups=groups)
+        return _layout_keys(layout)
+
+    with caplog.at_level(logging.WARNING, logger=worker.logger.name):
+        ignored = keys({"pp_sizes": [1, 2, 4]})
+
+    assert "ignores pp_sizes" in caplog.text
+    assert ignored == keys(None)
+    assert len(ignored) == 1 and "@layers:4-8@" in ignored[0]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
     ("store_config", "layout_cls"),
-    [({}, RankLocalStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
+    [({}, LayerRangeStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
 )
 def test_pp_sizes_store_draft_model_layers_with_the_last_range(
-    tmp_path, monkeypatch, store_config, layout_cls
+    pp_stage_layouts, store_config, layout_cls
 ):
     """A draft model runs whole on the last PP stage and numbers its layers
     from 0. With pp_sizes its layers belong to the last layer range at every
     PP size, and with Store TP that range's keys tell instances with and
     without the draft model apart."""
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch)
-    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+    config = {"pp_sizes": [1, 2], **store_config}
+    draft = tuple(f"draft_model.model.layers.{i}.self_attn.attn" for i in range(2))
 
-    def gather_prefixes(output, local, **kwargs):
-        output[:] = [local] * len(output)
+    (pp1,) = pp_stage_layouts(1, 0, config, draft_layers=draft)
+    stages = [
+        pp_stage_layouts(2, rank, config, draft_layers=draft)[0] for rank in (0, 1)
+    ]
 
-    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
-        ),
-    )
-    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    draft = [f"draft_model.model.layers.{i}.self_attn.attn" for i in range(2)]
-
-    def layout(pp_size: int, rank: int, with_draft: bool = True):
-        names = [
-            f"model.layers.{i}.self_attn.attn"
-            for i in range(rank * 2 // pp_size, (rank + 1) * 2 // pp_size)
-        ]
-        if with_draft and rank == pp_size - 1:
-            names += draft
-        monkeypatch.setattr(
-            worker,
-            "_draft_layer_names",
-            lambda _: frozenset(draft if with_draft else ()),
-        )
-        kv_config = KVCacheConfig(
-            num_blocks=10,
-            kv_cache_tensors=[],
-            kv_cache_groups=[make_kv_cache_group(names, spec)],
-            prefix_cache_retention_interval=0,
-        )
-        w = worker.MooncakeStoreWorker(
-            _make_vllm_config(
-                rank=rank,
-                pipeline_parallel_size=pp_size,
-                extra_config={"pp_sizes": [1, 2], **store_config},
-            ),
-            kv_config,
-        )
-        store_layout = w.token_dbs[0].store_layout
-        assert type(store_layout) is layout_cls
-        return store_layout
-
-    def keys(store_layout) -> list[str]:
-        return [
-            store_layout.key_for(shard, BlockHash(b"h"))
-            for shard in store_layout.local_shard_ids
-        ]
-
-    pp1 = layout(1, 0)
-    stages = [layout(2, rank) for rank in (0, 1)]
-
-    last = len(pp1.range_objects.metadata) - 1
-    assert {
-        name for name, (r, _) in pp1.range_objects.layers.items() if r == last
-    } == set(stages[1].range_objects.layers)
-    assert keys(pp1) == keys(stages[0]) + keys(stages[1])
+    assert type(pp1) is layout_cls
+    assert {pp1.range_objects.layers[name][0] for name in draft} == {1}
+    assert _layout_keys(pp1) == _layout_keys(stages[0]) + _layout_keys(stages[1])
     if store_config:
-        with_draft, without_draft = keys(pp1), keys(layout(1, 0, with_draft=False))
-        first_range = len(keys(stages[0]))
+        with_draft = _layout_keys(pp1)
+        without_draft = _layout_keys(pp_stage_layouts(1, 0, config)[0])
+        first_range = len(_layout_keys(stages[0]))
         assert without_draft[:first_range] == with_draft[:first_range]
         assert set(without_draft[first_range:]).isdisjoint(with_draft[first_range:])
-
-
-@pytest.mark.cpu_test
-def test_layer_range_objects_follow_block_outermost_placement():
-    """A block-outermost buffer places a group's layers by KV cache spec, and
-    Store objects order their layers the same way: a stage stored as one
-    range keeps the single segment of the whole block, a split range takes one
-    segment per spec, and a layer-first buffer yields the same bytes."""
-    num_blocks, num_layers, block_size = 3, 4, 16
-    specs = {
-        module: AttentionSpec(
-            block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=None
-        )
-        for module, head_size in (
-            ("self_attn.attn", 24),
-            ("self_attn.indexer.k_cache", 8),
-        )
-    }
-    sizes = {"self_attn.attn": 48, "self_attn.indexer.k_cache": 16}
-    group = make_kv_cache_group_from_specs(
-        {
-            f"model.layers.{layer}.{module}": spec
-            for layer in range(num_layers)
-            for module, spec in specs.items()
-        }
-    )
-    block_bytes = num_layers * sum(sizes.values())
-    outermost = torch.empty(num_blocks * block_bytes, dtype=torch.uint8)
-    outer_views: dict[str, torch.Tensor] = {}
-    first_views: dict[str, torch.Tensor] = {}
-    offset = 0
-    for module, size in sizes.items():
-        for layer in range(num_layers):
-            name = f"model.layers.{layer}.{module}"
-            data = (
-                ((torch.arange(num_blocks * size) + 37 * len(outer_views)) % 251)
-                .to(torch.uint8)
-                .view(num_blocks, 1, 1, size)
-            )
-            outer_views[name] = outermost.as_strided(
-                data.shape, (block_bytes, size, size, 1), offset
-            )
-            outer_views[name].copy_(data)
-            first_views[name] = data.clone()
-            offset += size
-
-    def objects(views, layer_ranges) -> list[list[bytes]]:
-        metadata = KeyMetadata("test-model", 0, 0, 0, 0)
-        layout = RankLocalStoreLayout(
-            metadata,
-            block_size,
-            block_size,
-            None
-            if layer_ranges is None
-            else worker._group_range_objects(
-                metadata, group, layer_ranges, frozenset()
-            ),
-        )
-        names = group.layer_names
-        layout.register_kv_caches(
-            [views[name] for name in names], num_blocks, layer_names=names
-        )
-        shards = layout.local_shard_ids
-        addrs, lens, _ = layout.prepare_values(
-            [(0, block_size)] * len(shards), [1], shards
-        )
-        return [
-            [ctypes.string_at(addr, n) for addr, n in zip(row, row_lens)]
-            for row, row_lens in zip(addrs, lens)
-        ]
-
-    whole = objects(outer_views, ((0, num_layers),))
-    assert whole == objects(outer_views, None)
-    assert [len(segments) for segments in whole] == [1]
-    split = objects(outer_views, ((0, 2), (2, num_layers)))
-    assert [len(segments) for segments in split] == [2, 2]
-    for layer_ranges, outer in [
-        (((0, num_layers),), whole),
-        (((0, 2), (2, num_layers)), split),
-    ]:
-        assert [b"".join(s) for s in objects(first_views, layer_ranges)] == [
-            b"".join(s) for s in outer
-        ]
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])
@@ -6218,14 +6026,16 @@ def test_register_kv_caches_uses_transfer_group_memory_domain(extra_config):
     worker._group_tp_replication_factors = (
         worker._compute_group_tp_replication_factors()
     )
-    worker.store_tp_size, namespace, plans = worker._select_store_layout(extra_config)
+    worker.store_tp_size, store_format, plans = worker._select_store_layout(
+        extra_config
+    )
     worker.token_dbs = worker._build_token_databases(
-        KeyMetadata("test-model", 0, 0, 0, 0, store_namespace=namespace), plans
+        KeyMetadata("test-model", 0, 0, 0, 0), plans
     )
     assert worker.store_tp_size is None
     assert isinstance(worker.token_dbs[0].store_layout, RankLocalStoreLayout)
     if extra_config:
-        assert "@store_format:rank_local_tp1" in namespace
+        assert store_format.startswith("rank_local_tp1")
     source = torch.zeros(host_num_blocks, page_size, dtype=torch.uint8)
     indexer = torch.zeros(gpu_num_blocks, page_size, dtype=torch.uint8)
 

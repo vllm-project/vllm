@@ -214,15 +214,12 @@ class LayerRangeObjects:
 
 
 def _object_order(
-    range_objects: LayerRangeObjects | None,
+    range_objects: LayerRangeObjects,
     num_caches: int,
     layer_names: Sequence[str] | None,
-) -> list[tuple[int, int]] | None:
+) -> list[tuple[int, int]]:
     """(Cache index, range index) of each KV cache tensor in Store object
-    order, or None without layer ranges. The views of one layer keep their
-    order."""
-    if range_objects is None:
-        return None
+    order. The views of one layer keep their order."""
     if layer_names is None or len(layer_names) != num_caches:
         raise ValueError("Store layer ranges need the layer name of each KV cache")
     slots = [range_objects.layers[name] for name in layer_names]
@@ -232,32 +229,48 @@ def _object_order(
     return [(index, slots[index][0]) for index in order]
 
 
-class RankLocalStoreLayout(StoreLayout):
-    """Historical rank-local Store payload layout.
+def _layer_block_segments(
+    cache: torch.Tensor, num_blocks: int
+) -> tuple[list[tuple[int, int, int]], bool]:
+    """Gapless byte runs of one layer's block, as (address in block 0, block
+    stride, length), and whether the block is one such run."""
+    cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
+    element_size = cache.element_size()
+    if not block_compact:
+        # One run per head, copying only that head's block (in a
+        # block-outermost buffer the block stride spans every head).
+        segments = []
+        for head_idx in range(cache.shape[1]):
+            head_cache = cache[:, head_idx]
+            assert is_non_overlapping_and_dense(head_cache[0])
+            segments.append(
+                (
+                    head_cache.data_ptr(),
+                    head_cache.stride(0) * element_size,
+                    head_cache[0].numel() * element_size,
+                )
+            )
+        return segments, False
+    # Up to the last byte of this layer's block: a grouped manager block can
+    # be compact yet gapped by kernel-block tail padding.
+    block = cache[0]
+    block_bytes = (
+        sum((n - 1) * s for n, s in zip(block.shape, block.stride())) + 1
+    ) * element_size
+    return [(cache.data_ptr(), cache.stride(0) * element_size, block_bytes)], True
 
-    With `range_objects`, each block is stored as one object per layer range
-    instead of one object holding all of this rank's layers. An object holds
-    its layers' bytes in Store object order, so instances whose PP stages
-    split the layers at the same points share it if their KV cache layouts
-    order a layer's block the same way.
-    """
+
+class RankLocalStoreLayout(StoreLayout):
+    """Historical rank-local Store payload layout."""
 
     def __init__(
         self,
         metadata: KeyMetadata,
         block_size: int,
         hash_block_size: int,
-        range_objects: LayerRangeObjects | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
-        self.range_objects = range_objects
-        # One store shard per layer range, or a single shard for all layers.
-        self._shard_metadata = (
-            list(range_objects.metadata) if range_objects is not None else [metadata]
-        )
-        self._key_prefixes = [PoolKey.build_prefix(m) for m in self._shard_metadata]
-        # Regions each layer-range shard stores, with several ranges.
-        self._shard_regions: list[np.ndarray] | None = None
+        self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_stride: list[int] = []
         # Bytes at the start of each block that are stored: up to the last
@@ -267,10 +280,11 @@ class RankLocalStoreLayout(StoreLayout):
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
-        return tuple(range(len(self._shard_metadata)))
+        return (0,)
 
     def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
-        return PoolKey.build_key_string(self._key_prefixes[shard_id], chunk_hash.hex())
+        assert shard_id == 0
+        return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
 
     def lookup_key_prefixes(
         self,
@@ -278,14 +292,13 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> tuple[str, ...]:
         return tuple(
             PoolKey.build_prefix(
-                metadata,
+                self.metadata,
                 tp_rank=tp_rank,
                 pcp_rank=pcp_rank,
                 dcp_rank=dcp_rank,
                 pp_rank=pp_rank,
             )
             for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
-            for metadata in self._shard_metadata
         )
 
     def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
@@ -301,24 +314,11 @@ class RankLocalStoreLayout(StoreLayout):
         num_blocks: int,
         layer_names: Sequence[str] | None = None,
     ) -> None:
-        """Build descriptors from the local KV cache tensors. With layer
-        ranges, every region must hold layers of a single range, and a range's
-        object is its layers' bytes in Store object order, in a layer-first or
-        a block-outermost buffer; in a block-outermost buffer, adjacent layers
-        share one segment."""
-        order = _object_order(self.range_objects, len(kv_caches), layer_names)
-        if order is None:
-            order = [(index, 0) for index in range(len(kv_caches))]
         # Map each region's base address to its entry in the parallel lists.
         region_index: dict[int, int] = {}
-        # Last segment of each (buffer address, layer range) in a
-        # block-outermost buffer.
-        range_segments: dict[tuple[int, int], int] = {}
         base_addrs: list[int] = []
         block_strides: list[int] = []
         block_lens: list[int] = []
-        region_ranges: list[set[int]] = []
-        range_index = 0
 
         def add_region(addr: int, block_stride: int, block_len: int) -> None:
             assert 0 < block_len <= block_stride
@@ -328,93 +328,32 @@ class RankLocalStoreLayout(StoreLayout):
                 base_addrs.append(addr)
                 block_strides.append(block_stride)
                 block_lens.append(block_len)
-                region_ranges.append({range_index})
             else:
                 # Several views can share a region (e.g. the layers of a
                 # block-outermost buffer); keep the bytes up to the last one.
                 block_lens[index] = max(block_lens[index], block_len)
-                region_ranges[index].add(range_index)
 
-        def add_layer_segment(
-            storage_addr: int, block_stride: int, addr: int, length: int
-        ) -> None:
-            # Extend the range's previous segment only when this layer starts
-            # where it ends, so padding between layers is never stored.
-            index = range_segments.get((storage_addr, range_index))
-            if index is not None and base_addrs[index] + block_lens[index] == addr:
-                block_lens[index] += length
-                return
-            range_segments[storage_addr, range_index] = len(base_addrs)
-            base_addrs.append(addr)
-            block_strides.append(block_stride)
-            block_lens.append(length)
-            region_ranges.append({range_index})
-
-        for cache_index, cache_range in order:
-            range_index = cache_range
-            cache, block_compact = group_compact_kernel_blocks(
-                kv_caches[cache_index], num_blocks
-            )
+        for cache in kv_caches:
+            segments, block_compact = _layer_block_segments(cache, num_blocks)
             storage = cache.untyped_storage()
-            storage_addr = storage.data_ptr()
-            storage_len = storage.nbytes()
-            # Up to the last byte of this layer's block: a grouped manager
-            # block can be compact yet gapped by kernel-block tail padding.
-            block = cache[0]
-            block_bytes = (
-                sum((n - 1) * s for n, s in zip(block.shape, block.stride())) + 1
-            ) * cache.element_size()
-            if not block_compact:
-                # One region per head, copying only that head's block (in a
-                # block-outermost buffer the block stride spans every head).
-                for head_idx in range(cache.shape[1]):
-                    head_cache = cache[:, head_idx]
-                    assert is_non_overlapping_and_dense(head_cache[0])
-                    add_region(
-                        head_cache.data_ptr(),
-                        head_cache.stride(0) * head_cache.element_size(),
-                        head_cache[0].numel() * head_cache.element_size(),
-                    )
-            elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
-                if self.range_objects is not None:
-                    add_layer_segment(
-                        storage_addr,
-                        storage_len // num_blocks,
-                        cache.data_ptr(),
-                        block_bytes,
-                    )
-                    continue
+            addr, block_stride, block_len = segments[0]
+            if block_compact and block_stride * num_blocks == storage.nbytes():
                 # Block-outermost buffer: each block holds every layer, so the
                 # whole storage is one region. In block 0 this layer's data
-                # starts at cache.data_ptr() - storage_addr and spans
-                # block_bytes, so the block is used up to that end; the
-                # region keeps the end of its last layer.
+                # starts at addr - storage.data_ptr() and spans block_len, so
+                # the block is used up to that end; the region keeps the end
+                # of its last layer.
                 add_region(
-                    storage_addr,
-                    storage_len // num_blocks,
-                    cache.data_ptr() - storage_addr + block_bytes,
+                    storage.data_ptr(),
+                    block_stride,
+                    addr - storage.data_ptr() + block_len,
                 )
             else:
-                add_region(
-                    cache.data_ptr(),
-                    cache.stride(0) * cache.element_size(),
-                    block_bytes,
-                )
+                for segment in segments:
+                    add_region(*segment)
         self.kv_caches_base_addr = base_addrs
         self.block_stride = block_strides
         self.block_len = block_lens
-        # With one range, every region belongs to its object.
-        if len(self._shard_metadata) > 1:
-            shard_regions: list[list[int]] = [[] for _ in self._shard_metadata]
-            for region, ranges in enumerate(region_ranges):
-                if len(ranges) != 1:
-                    raise ValueError(
-                        "A KV cache region holds layers of several Store layer ranges"
-                    )
-                shard_regions[ranges.pop()].append(region)
-            self._shard_regions = [
-                np.asarray(regions, dtype=np.int64) for regions in shard_regions
-            ]
 
     def prepare_values(
         self,
@@ -424,7 +363,9 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> tuple[list[list[int]], list[list[int]], list[int]]:
         if not chunks:
             return [], [], []
-        assert len(chunks) == len(shard_ids)
+        assert len(chunks) == len(shard_ids) and all(
+            shard_id == 0 for shard_id in shard_ids
+        )
         base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
         length = len(self.block_stride)
         stride = np.asarray(
@@ -444,34 +385,137 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
+        addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
-        if self._shard_regions is None:
-            assert all(shard_id == 0 for shard_id in shard_ids)
-            addrs = base[None, :] + bids[:, None] * stride[None, :]
-            # A chunk spanning several consecutive blocks also copies the
-            # padding between them.
-            sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
-            return addrs.tolist(), sizes.tolist(), bids.tolist()
+        # A chunk spanning several consecutive blocks also copies the
+        # padding between them.
+        sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
+        return addrs.tolist(), sizes.tolist(), bids.tolist()
 
-        # Each layer-range shard covers only its own regions.
-        shard_array = np.asarray(shard_ids, dtype=np.int64)
-        addr_rows: list[list[int]] = [[] for _ in range(n)]
-        size_rows: list[list[int]] = [[] for _ in range(n)]
-        for shard_id, regions in enumerate(self._shard_regions):
-            rows = np.flatnonzero(shard_array == shard_id)
+
+class LayerRangeStoreLayout(RankLocalStoreLayout):
+    """Rank-local Store payload stored as one object per layer range.
+
+    An object holds its layers' bytes in Store object order, without the
+    padding between layers, so instances whose PP stages split the layers at
+    the same points share it if their KV cache layouts order a layer's block
+    the same way.
+    """
+
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        hash_block_size: int,
+        range_objects: LayerRangeObjects,
+    ) -> None:
+        super().__init__(metadata, block_size, hash_block_size)
+        self.range_objects = range_objects
+        self._key_prefixes = [PoolKey.build_prefix(m) for m in range_objects.metadata]
+        # Per range: block-0 addresses and block strides of its segments as
+        # arrays, and their lengths.
+        self._range_segments: list[tuple[np.ndarray, np.ndarray, list[int]]] = []
+
+    @property
+    def local_shard_ids(self) -> tuple[StoreShardId, ...]:
+        return tuple(range(len(self._key_prefixes)))
+
+    def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
+        return PoolKey.build_key_string(self._key_prefixes[shard_id], chunk_hash.hex())
+
+    def lookup_key_prefixes(
+        self,
+        rank_namespaces: Sequence[RankNamespace],
+    ) -> tuple[str, ...]:
+        return tuple(
+            PoolKey.build_prefix(
+                metadata,
+                tp_rank=tp_rank,
+                pcp_rank=pcp_rank,
+                dcp_rank=dcp_rank,
+                pp_rank=pp_rank,
+            )
+            for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
+            for metadata in self.range_objects.metadata
+        )
+
+    def register_kv_caches(
+        self,
+        kv_caches: Sequence[torch.Tensor],
+        num_blocks: int,
+        layer_names: Sequence[str] | None = None,
+    ) -> None:
+        """A range's object is the byte runs of its layers in Store object
+        order. Runs that follow each other in one buffer, such as the layers
+        of one KV cache spec in a block-outermost buffer, form one segment."""
+        # Segments as [address, block stride, length, buffer address].
+        ranges: list[list[list[int]]] = [[] for _ in self._key_prefixes]
+        for cache_index, range_index in _object_order(
+            self.range_objects, len(kv_caches), layer_names
+        ):
+            cache = kv_caches[cache_index]
+            buffer = cache.untyped_storage().data_ptr()
+            segments = ranges[range_index]
+            for addr, block_stride, length in _layer_block_segments(cache, num_blocks)[
+                0
+            ]:
+                last = segments[-1] if segments else None
+                if last and last[1:] == [block_stride, addr - last[0], buffer]:
+                    last[2] += length
+                else:
+                    segments.append([addr, block_stride, length, buffer])
+        self._range_segments = []
+        for segments in ranges:
+            addrs, strides, lengths, _ = zip(*segments, strict=True)
+            assert all(0 < n <= s for n, s in zip(lengths, strides))
+            self._range_segments.append(
+                (
+                    np.asarray(addrs, dtype=np.int64),
+                    np.asarray(strides, dtype=np.int64),
+                    list(lengths),
+                )
+            )
+        self.kv_caches_base_addr = [s[0] for segments in ranges for s in segments]
+        self.block_stride = [s[1] for segments in ranges for s in segments]
+        self.block_len = [s[2] for segments in ranges for s in segments]
+
+    def prepare_values(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        shard_ids: Sequence[StoreShardId],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        if not chunks:
+            return [], [], []
+        if len(chunks) != len(shard_ids):
+            raise ValueError("Each Store chunk must have one shard ID")
+        n = len(chunks)
+        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+        assert np.all(spans % self.hash_block_size == 0)
+        # Other ranges' layers can lie between a range's blocks, so a chunk
+        # cannot run from one block into the next.
+        if np.any(spans > self.block_size):
+            raise ValueError("A Store layer range chunk cannot span blocks")
+        bids = np.fromiter(
+            (block_ids[i] for i in (starts // self.block_size).tolist()),
+            dtype=np.int64,
+            count=n,
+        )
+        shards = np.asarray(shard_ids, dtype=np.int64)
+        addrs: list[list[int]] = [[] for _ in range(n)]
+        sizes: list[list[int]] = [[] for _ in range(n)]
+        for shard_id, (base, stride, lengths) in enumerate(self._range_segments):
+            rows = np.flatnonzero(shards == shard_id)
             if rows.size == 0:
                 continue
-            addrs = base[None, regions] + bids[rows, None] * stride[None, regions]
-            sizes = (
-                stride[None, regions] * (block_counts[rows, None] - 1)
-                + blen[None, regions]
-            )
-            for row, row_addrs, row_sizes in zip(
-                rows.tolist(), addrs.tolist(), sizes.tolist(), strict=True
-            ):
-                addr_rows[row] = row_addrs
-                size_rows[row] = row_sizes
-        return addr_rows, size_rows, bids.tolist()
+            shard_addrs = base[None, :] + bids[rows, None] * stride[None, :]
+            for row, row_addrs in zip(rows.tolist(), shard_addrs.tolist()):
+                addrs[row] = row_addrs
+                sizes[row] = list(lengths)
+        if not all(addrs):
+            raise ValueError("Store shard is not a layer range of this layout")
+        return addrs, sizes, bids.tolist()
 
 
 class TPShardedStoreLayout(StoreLayout):
@@ -812,9 +856,11 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         Store object order."""
         if len(kv_caches) != len(self.layer_specs):
             raise ValueError("Store layout needs one KV cache tensor per layer spec")
-        order = _object_order(self.range_objects, len(kv_caches), layer_names)
-        if order is None:
-            order = [(index, 0) for index in range(len(kv_caches))]
+        order = (
+            [(index, 0) for index in range(len(kv_caches))]
+            if self.range_objects is None
+            else _object_order(self.range_objects, len(kv_caches), layer_names)
+        )
         templates: list[list[tuple[list[int], list[int], list[int]]]] = [
             [
                 ([], [], [])

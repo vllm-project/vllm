@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     HeadMajorStoreLayout,
     KeyMetadata,
     LayerRangeObjects,
+    LayerRangeStoreLayout,
     MambaStoreLayout,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
@@ -409,7 +410,7 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
     ]
     metadata = KeyMetadata("test-model", 0, 0, 0, 0)
     names = [*_layer_names(range(4)), "draft_model.model.layers.0.self_attn.attn"]
-    layout = RankLocalStoreLayout(
+    layout = LayerRangeStoreLayout(
         metadata,
         BLOCK_SIZE,
         BLOCK_SIZE,
@@ -429,6 +430,9 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
         [cache.data_ptr() + block_bytes for cache in caches[:2]],
     ]
     assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
+    # Other ranges' layers can lie between the blocks of a range.
+    with pytest.raises(ValueError, match="cannot span blocks"):
+        layout.prepare_values([(0, 2 * BLOCK_SIZE)], [1, 2], [0])
 
 
 @pytest.mark.parametrize(
@@ -474,7 +478,7 @@ def test_rank_local_layer_ranges_split_a_block_outermost_buffer(
     def objects(caches: list[torch.Tensor]) -> list[list[bytes]]:
         metadata = KeyMetadata("test-model", 0, 0, 0, 0)
         names = _layer_names(range(num_layers))
-        layout = RankLocalStoreLayout(
+        layout = LayerRangeStoreLayout(
             metadata,
             16,
             16,
@@ -640,10 +644,12 @@ def test_tp_shared_layout_round_trip_across_tp_sizes(
             torch.testing.assert_close(layer, expected)
 
 
-def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
+@pytest.mark.parametrize("batches", [1, 9], ids=["small_batch", "vectorized"])
+def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes(batches: int):
     """PP=2 x TP=1 stages store one object per layer range and head shard, and
     a PP=1 x TP=2 instance with the same ranges loads them into its layers.
-    The ranges hold one and two layers, so its slots differ in length."""
+    The ranges hold one and two layers, so its slots differ in length. Batches
+    above 16 chunks take the vectorized path."""
     block_size = 16
     layer_ranges = ((0, 1), (1, 3))
     block_hash = BlockHash(b"h")
@@ -708,14 +714,10 @@ def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
             ),
         )
         layout.register_kv_caches(layers, 1, layer_names=names)
-        shard_ids = layout.local_shard_ids
+        shard_ids = layout.local_shard_ids * batches
         addrs, sizes, _ = layout.prepare_values(
             [(0, block_size)] * len(shard_ids), [0], shard_ids
         )
-        # Batches above 16 chunks take the vectorized path.
-        assert layout.prepare_values(
-            [(0, block_size)] * len(shard_ids) * 9, [0], shard_ids * 9
-        ) == (addrs * 9, sizes * 9, [0] * len(shard_ids) * 9)
         for shard_id, shard_addrs, shard_sizes in zip(
             shard_ids, addrs, sizes, strict=True
         ):
