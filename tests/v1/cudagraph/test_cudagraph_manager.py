@@ -54,6 +54,7 @@ def _create_vllm_config() -> MagicMock:
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = 8192
     vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
@@ -324,6 +325,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
+    max_model_len: int = 8192,
 ) -> MagicMock:
     if decode_sizes is None:
         # The deprecated shared sizes set both kinds of graphs.
@@ -342,6 +344,7 @@ def _create_decode_vllm_config(
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs
     )
@@ -1007,15 +1010,18 @@ def test_cudagraph_candidates_skip_sizes_exceeding_max_model_len(monkeypatch):
         [1, 8, 512],
         num_speculative_tokens=0,
         max_num_seqs=1,
+        max_model_len=448,
     )
-    vllm_config.model_config = SimpleNamespace(max_model_len=448)
 
-    manager = gpu_cudagraph_utils.CudaGraphManager(
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_lens={1: 1},
-    )
+    with patch.object(gpu_cudagraph_utils.logger, "warning") as warning:
+        manager = gpu_cudagraph_utils.CudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            decode_query_lens={1: 1},
+        )
+    warning.assert_called_once()
+    assert warning.call_args.args[1:] == ([512], 448)
 
     all_descs = [desc for descs in manager._capture_descs.values() for desc in descs]
     assert all(desc.num_tokens <= 448 for desc in all_descs)
