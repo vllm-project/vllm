@@ -1284,6 +1284,8 @@ You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
+
 #### Image Embedding Inputs
 
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.

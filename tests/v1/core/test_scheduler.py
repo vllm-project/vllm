@@ -25,6 +25,7 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
@@ -57,17 +58,19 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.engine import CheckpointState, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
@@ -87,7 +90,8 @@ from .utils import (
     create_requests,
     create_scheduler,
     mock_kv,
-    new_sliding_window_spec,
+    new_kv_cache_group,
+    new_sliding_window_layer,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -113,10 +117,8 @@ def test_mamba_decode_checkpoint_publication(
         num_speculative_tokens=num_speculative_tokens or None,
         speculative_method="ngram_gpu",
         block_size=block_size,
-        kv_cache_spec=MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
             mamba_cache_mode="align",
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
@@ -315,15 +317,20 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def _aux_output_connector(scheduler: Scheduler) -> AuxOutputSchedulerConnector:
+    manager = scheduler.kv_cache_manager
+    return AuxOutputSchedulerConnector(
+        manager, retained_objects(scheduler.vllm_config, manager.kv_cache_config)[0]
+    )
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2])
 def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {
@@ -354,9 +361,7 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
 
 def test_routed_experts_hashes_follow_scheduled_tokens():
     scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     (request,) = create_requests(
         num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
     )
@@ -424,12 +429,11 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
 ):
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        kv_cache_spec=(
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=1,
-                dtype=torch.float32,
+        kv_cache_layer_config=(
+            SlidingWindowManager.layer_config(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
                 sliding_window=sliding_window,
             )
             if sliding_window
@@ -446,7 +450,7 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
         scheduler.add_request(first)
         scheduler.schedule()
         scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
-    connector = AuxOutputSchedulerConnector(scheduler.kv_cache_manager, Mock())
+    connector = _aux_output_connector(scheduler)
     connector.max_cache_hit = Mock(return_value=max_cache_hit)
     scheduler.aux_output_connector = connector
     scheduler.add_request(second)
@@ -458,9 +462,7 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
 
 def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
-        scheduler.kv_cache_manager
-    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
     first, second, third = create_requests(num_requests=3, num_tokens=64)
     for request in (first, second):
         scheduler.add_request(request)
@@ -1380,10 +1382,8 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         enable_prefix_caching=True,
         cache_aware_admission_window=4,
         cache_aware_admission_threshold=0.0,
-        kv_cache_spec=MambaSpec(
-            block_size=16,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
             mamba_cache_mode="align",
         ),
     )
@@ -2641,9 +2641,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
-    scheduler.aux_output_connector = Mock(
-        wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
-    )
+    scheduler.aux_output_connector = Mock(wraps=_aux_output_connector(scheduler))
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -2988,45 +2986,60 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
-def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
+def _run_spec_verify_steps(
+    scheduler, rounds, num_drafted_per_round=None, num_verified_per_round=None
+):
     """Drive prefill + one draft/verify step per round for a single request.
 
     `rounds` is a list of `(spec_token_ids, output_token_ids)` -- one verify
-    step each. `num_invalid_per_round` optionally injects the grammar-invalid
-    draft count structured-output decoding would set on the verify output.
+    step each. `num_drafted_per_round` and `num_verified_per_round`
+    optionally set the drafted and verified draft counts the model runner
+    reports.
     Returns the request.
     """
     [req] = create_requests(num_requests=1, num_tokens=1)
     scheduler.add_request(req)
     rid = req.request_id
 
-    def _mk_output(sampled):
+    def _mk_output(sampled, num_drafted=None, num_verified=None):
         return ModelRunnerOutput(
             req_ids=[rid],
             sampled_token_ids=sampled,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            num_drafted_tokens_per_req=None if num_drafted is None else [num_drafted],
+            num_verified_tokens_per_req=(
+                None if num_verified is None else [num_verified]
+            ),
         )
 
     # Prefill: sample one token.
     scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
-    for i, (spec, out) in enumerate(rounds):
+    drafted = num_drafted_per_round or [None] * len(rounds)
+    verified = num_verified_per_round or [None] * len(rounds)
+    for (spec, out), num_drafted, num_verified in zip(rounds, drafted, verified):
         scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
         output = scheduler.schedule()
-        if num_invalid_per_round is not None and num_invalid_per_round[i]:
-            output.num_invalid_spec_tokens = {rid: num_invalid_per_round[i]}
-        scheduler.update_from_output(output, _mk_output([out]))
+        model_output = _mk_output([out], num_drafted, num_verified)
+        scheduler.update_from_output(output, model_output)
     return req
 
 
-def test_per_request_spec_decode_detailed_records_per_step():
+@pytest.mark.parametrize(
+    "drafted_per_step, verified_per_step", [(None, None), ([3, 3, 2], [3, 2, 1])]
+)
+def test_per_request_spec_decode_detailed_records_per_step(
+    drafted_per_step, verified_per_step
+):
     scheduler = create_scheduler(
         num_speculative_tokens=3,
         per_request_spec_decode_metrics="detailed",
     )
     # Three verify steps for one request; num_accepted = len(output) - 1, so the
-    # outputs below accept 3, 1, then 0 drafts across the steps.
+    # outputs below accept 3, 1, then 0 drafts across the steps. The model
+    # runner reports how many draft tokens the drafter proposed and how many
+    # of them it verified.
     req = _run_spec_verify_steps(
         scheduler,
         [
@@ -3034,30 +3047,46 @@ def test_per_request_spec_decode_detailed_records_per_step():
             ([5, 6, 7], [5, 8]),  # accept 1
             ([9, 10, 11], [12]),  # accept 0
         ],
+        num_drafted_per_round=drafted_per_step,
+        num_verified_per_round=verified_per_step,
     )
     payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
     assert payload["per_step_accepted"] == [3, 1, 0]
-    assert payload["per_step_drafted"] == [3, 3, 3]
+    assert payload["per_step_drafted"] == (drafted_per_step or [3, 3, 3])
+    assert payload["per_step_verified"] == (verified_per_step or [3, 3, 3])
     assert payload["num_spec_steps"] == 3
 
 
-def test_per_request_spec_decode_subtracts_invalid_drafts():
-    # Grammar-invalidated drafts (num_invalid_spec_tokens, set by structured
-    # output) are excluded from the proposed count, mirroring the aggregate.
+def test_spec_decode_stats_keep_batch_after_empty_draft():
+    # A request whose drafter proposed no draft tokens (e.g. ngram_gpu without
+    # a match) must not reset the stats of other requests in the batch.
     scheduler = create_scheduler(
-        num_speculative_tokens=3,
-        per_request_spec_decode_metrics="summary",
+        async_scheduling=True, num_speculative_tokens=2, speculative_method="ngram_gpu"
     )
-    # One verify step: 3 drafted, 1 grammar-invalid, output accepts 2.
-    req = _run_spec_verify_steps(
-        scheduler,
-        [([1, 2, 3], [1, 2, 5])],
-        num_invalid_per_round=[1],
-    )
-    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
-    assert payload["num_draft_tokens"] == 2  # 3 drafted - 1 invalid
-    assert payload["num_accepted_draft_tokens"] == 2  # len([1,2,5]) - 1
-    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
+    requests = create_requests(num_requests=2, num_tokens=1)
+    req_ids = [req.request_id for req in requests]
+    for req in requests:
+        scheduler.add_request(req)
+
+    def _mk_output(sampled, num_drafted=None):
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            sampled_token_ids=sampled,
+            num_drafted_tokens_per_req=num_drafted,
+            num_verified_tokens_per_req=num_drafted,
+        )
+
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([[0], [0]]))
+    # Async scheduling schedules placeholder draft slots for both requests.
+    output = scheduler.schedule()
+    model_output = _mk_output([[1, 9], [5]], num_drafted=[2, 0])
+    engine_outputs = scheduler.update_from_output(output, model_output)
+
+    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 2
+    assert stats.num_draft_tokens == 2
+    assert stats.num_verified_tokens == 2
+    assert stats.num_accepted_tokens == 1
 
 
 def test_per_request_spec_decode_acceptance_disabled_by_default():
@@ -4441,9 +4470,9 @@ def create_scheduler_with_priority(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6853,12 +6882,11 @@ def _create_encoder_decoder_scheduler(
     """Create a scheduler configured for encoder-decoder cross-attention
     block allocation testing.
 
-    Constructs a scheduler with both FullAttentionSpec (self-attention) and
-    CrossAttentionSpec (cross-attention) KV cache groups, then patches it
+    Constructs a scheduler with both FullAttentionManager (self-attention) and
+    CrossAttentionManager (cross-attention) KV cache groups, then patches it
     to behave as an encoder-decoder model.
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
-    from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
     model_config = ModelConfig(
         model="facebook/opt-125m",
@@ -6893,23 +6921,24 @@ def _create_encoder_decoder_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["self_attn_layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["cross_attn_layer"],
-                CrossAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CrossAttentionManager.config(),
             ),
         ],
     )
@@ -8127,7 +8156,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     s = create_scheduler(
         num_blocks=64,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=True),
-        kv_cache_spec=spec,
+        kv_cache_layer_config=spec,
         num_speculative_tokens=num_spec_tokens,
     )
     s.recompute_kv_load_failures = True
@@ -8204,7 +8233,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     [
         (None, None),
         (None, 2),
-        (new_sliding_window_spec(sliding_window=64), None),
+        (new_sliding_window_layer(sliding_window=64), None),
     ],
     ids=["full", "full_spec_decode", "sliding_window"],
 )
@@ -8269,27 +8298,26 @@ def _create_hybrid_mamba_connector_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["fa"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
-    register_all_kvcache_specs(vllm_config)
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
@@ -8392,7 +8420,7 @@ def test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs(
     manager = scheduler.kv_cache_manager
     _, mamba_ids = _seed_hybrid_prefix(manager, 4, block_size)
     manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
-    connector = AuxOutputSchedulerConnector(manager, scheduler.connector)
+    connector = _aux_output_connector(scheduler)
     connector.max_cache_hit = Mock(return_value=max_cache_hit)
     scheduler.aux_output_connector = connector
     [replay] = create_requests(

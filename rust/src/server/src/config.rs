@@ -425,6 +425,9 @@ pub struct Config {
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
     pub disable_request_id_randomization: bool,
+    /// Keep the API server running after the LLM becomes permanently unhealthy
+    /// (`VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`).
+    pub keep_alive_on_engine_death: bool,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when
