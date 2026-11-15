@@ -96,6 +96,12 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
+# Flag builds UCX and UCC from source into /opt/ucx and /opt/ucc, and builds the
+# vllm._ucc_C extension against them (for --dp-cpu-backend ucc)
+ARG INSTALL_UCC=false
+ARG UCX_VERSION=1.22.0
+ARG UCC_VERSION=1.9.0
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
@@ -364,6 +370,42 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash tools/build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
+#################### UCC BUILD IMAGE ####################
+# UCX and UCC for the optional vllm._ucc_C extension. UCC publishes no binary
+# packages, so both are built from source. The install is staged under
+# /ucc-dist (empty unless INSTALL_UCC=true), which later stages copy to /.
+FROM base AS ucc-build
+ARG INSTALL_UCC
+ARG UCX_VERSION
+ARG UCC_VERSION
+ARG max_jobs=2
+RUN set -eux; \
+    mkdir -p /ucc-dist; \
+    if [ "${INSTALL_UCC}" = "true" ]; then \
+        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
+        dnf clean all; \
+        rm -rf /var/cache/dnf; \
+        git clone --depth 1 --branch "v${UCX_VERSION}" \
+            https://github.com/openucx/ucx.git /tmp/ucx; \
+        cd /tmp/ucx && ./autogen.sh \
+            && ./configure --prefix=/opt/ucx --enable-mt --disable-debug \
+                --disable-assertions --disable-params-check --enable-optimizations \
+                --with-verbs --with-mlx5-dv --with-rdmacm \
+                --without-cuda --without-rocm --without-java --without-go \
+            && make -j"${max_jobs}" && make install; \
+        git clone --depth 1 --branch "v${UCC_VERSION}" \
+            https://github.com/openucx/ucc.git /tmp/ucc; \
+        cd /tmp/ucc && ./autogen.sh \
+            && ./configure --prefix=/opt/ucc --with-ucx=/opt/ucx \
+                --without-cuda --without-rocm \
+            && make -j"${max_jobs}" && make install; \
+        rm -rf /tmp/ucx /tmp/ucc; \
+        mkdir -p /ucc-dist/opt /ucc-dist/etc/ld.so.conf.d; \
+        cp -a /opt/ucx /opt/ucc /ucc-dist/opt/; \
+        printf "/opt/ucx/lib\n/opt/ucc/lib\n" > /ucc-dist/etc/ld.so.conf.d/ucc.conf; \
+    fi
+#################### UCC BUILD IMAGE ####################
+
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
 
@@ -434,6 +476,10 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 # Use dummy version for csrc-build wheel (only .so files are extracted, version doesn't matter)
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
 
+# UCX/UCC for vllm._ucc_C (nothing is copied unless INSTALL_UCC=true)
+ARG INSTALL_UCC
+COPY --from=ucc-build /ucc-dist/ /
+
 # Use existing torch for nightly and Rubin prerelease builds
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ] || \
@@ -462,6 +508,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) \
+        && if [ "${INSTALL_UCC}" = "true" ]; then export UCC_HOME=/opt/ucc; fi \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -480,6 +527,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
+        if [ "${INSTALL_UCC}" = "true" ]; then export UCC_HOME=/opt/ucc; fi && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -812,6 +860,10 @@ RUN apt-get update -y \
     && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
+
+# UCX/UCC runtime libraries for vllm._ucc_C (nothing unless INSTALL_UCC=true)
+COPY --from=ucc-build /ucc-dist/ /
+RUN if [ -f /etc/ld.so.conf.d/ucc.conf ]; then ldconfig; fi
 
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
