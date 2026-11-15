@@ -23,12 +23,12 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 MODEL_NAME = "openai-community/gpt2"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -53,12 +53,12 @@ class MockModelConfig:
         return self.hidden_size
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -136,7 +136,7 @@ class TestValidatePrompt:
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
 
-        with pytest.raises(ValueError, match="at least one prompt"):
+        with pytest.raises(VLLMValidationError, match="at least one prompt"):
             renderer.render_prompts(_preprocess_prompt(renderer.model_config, []))
 
     def test_invalid_type(self):
@@ -541,7 +541,7 @@ class TestRenderPrompt:
 class TestMaxTokensNotReservation:
     """Regression tests for GitHub issue #42474.
 
-    ``max_tokens`` must be treated as an upper bound on generation length, not
+    `max_tokens` must be treated as an upper bound on generation length, not
     as a hard reservation that is subtracted from the available input space.
     """
 

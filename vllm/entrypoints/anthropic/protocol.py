@@ -3,6 +3,7 @@
 """Pydantic models for Anthropic API protocol."""
 
 import time
+from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -26,6 +27,30 @@ class AnthropicErrorResponse(BaseModel):
 
     type: Literal["error"] = "error"
     error: AnthropicError
+
+
+# Anthropic SDKs dispatch on ``error.type``, which must use Anthropic's own
+# vocabulary rather than vLLM's internal/Python error class names.
+_ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
+    HTTPStatus.BAD_REQUEST.value: "invalid_request_error",
+    HTTPStatus.UNAUTHORIZED.value: "authentication_error",
+    HTTPStatus.FORBIDDEN.value: "permission_error",
+    HTTPStatus.NOT_FOUND.value: "not_found_error",
+    HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value: "request_too_large",
+    HTTPStatus.TOO_MANY_REQUESTS.value: "rate_limit_error",
+    # vLLM reports overload (e.g. QueueOverflowError) as HTTP 503.
+    HTTPStatus.SERVICE_UNAVAILABLE.value: "overloaded_error",
+}
+
+
+def translate_error_type(status_code: int) -> str:
+    """Translate an HTTP status code to Anthropic's `error.type` vocabulary."""
+    error_type = _ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code)
+    if error_type is not None:
+        return error_type
+    if status_code >= HTTPStatus.INTERNAL_SERVER_ERROR.value:
+        return "api_error"
+    return "invalid_request_error"
 
 
 class AnthropicUsage(BaseModel):
@@ -108,11 +133,28 @@ class AnthropicMessage(BaseModel):
 class AnthropicTool(BaseModel):
     """Tool definition."""
 
+    type: Literal["custom"] | None = None
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
     strict: bool | None = None
     defer_loading: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_anthropic_defined_tools(cls, data: Any) -> Any:
+        # Anthropic-defined tools (web_search_*, code_execution_*, bash_*,
+        # text_editor_*, ...) carry a versioned ``type`` and no input_schema.
+        # Reject them by name here, before field validation would report a
+        # missing input_schema and point the client at the wrong problem.
+        if isinstance(data, dict):
+            tool_type = data.get("type")
+            if tool_type not in (None, "custom"):
+                raise ValueError(
+                    f"tool type {tool_type!r} is not supported; only custom "
+                    "tools with an input_schema are supported"
+                )
+        return data
 
     @field_validator("input_schema")
     @classmethod
@@ -166,7 +208,7 @@ class AnthropicJsonOutputFormat(BaseModel):
 
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
-# reasoning_effort sent to the chat template for thinking.type=disabled.
+# reasoning_effort sent to the chat template when upfront thinking is disabled.
 AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
 AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
 AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
@@ -182,7 +224,7 @@ class AnthropicOutputConfig(BaseModel):
 class AnthropicThinkingConfigEnabled(BaseModel):
     """Extended thinking with a fixed token budget.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["enabled"]
@@ -197,17 +239,29 @@ class AnthropicThinkingConfigDisabled(BaseModel):
 class AnthropicThinkingConfigAdaptive(BaseModel):
     """Extended thinking whose depth the model chooses.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["adaptive"]
     display: AnthropicThinkingDisplay | None = None
 
 
+class AnthropicThinkingConfigBetweenTools(BaseModel):
+    """Thinking that is off up front but may resume between tool calls.
+
+    vLLM maps this to disabled thinking. It cannot force a model to emit
+    progress notes between tool calls; any reasoning the model emits is still
+    returned as thinking blocks.
+    """
+
+    type: Literal["between_tools"]
+
+
 AnthropicThinkingConfig = Annotated[
     AnthropicThinkingConfigEnabled
     | AnthropicThinkingConfigDisabled
-    | AnthropicThinkingConfigAdaptive,
+    | AnthropicThinkingConfigAdaptive
+    | AnthropicThinkingConfigBetweenTools,
     Field(discriminator="type"),
 ]
 
@@ -273,6 +327,13 @@ class AnthropicMessagesRequest(BaseModel):
             "Whether to apply the engine's configured watermark to this request."
         ),
     )
+    min_tokens: int = Field(
+        default=0,
+        description=(
+            "Minimum number of tokens to generate before EOS or a stop "
+            "sequence can end the response."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -308,7 +369,13 @@ class AnthropicMessagesRequest(BaseModel):
     @field_validator("max_tokens")
     @classmethod
     def validate_max_tokens(cls, v):
-        if v <= 0:
+        if v == 0:
+            raise ValueError(
+                "max_tokens=0 (prompt-cache pre-warming) is not supported: "
+                "vLLM samples at least one token per request, so use "
+                "max_tokens=1 to warm the cache"
+            )
+        if v < 0:
             raise ValueError("max_tokens must be positive")
         return v
 

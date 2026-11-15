@@ -39,7 +39,7 @@ pub(super) fn collect_tensors(
         ..
     } = preprocessed;
 
-    let primary_value = KwargValue::from_f32_array(encoder_input, float_dtype)?;
+    let primary_value = KwargValue::from_f32_array(encoder_input.into_f32(), float_dtype)?;
 
     let mut tensors = HashMap::new();
     tensors.insert(primary_key.to_string(), primary_value);

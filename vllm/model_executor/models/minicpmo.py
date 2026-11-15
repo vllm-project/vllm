@@ -372,19 +372,11 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-        max_audios = mm_counts.get("audio", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_audio_tokens = self.get_max_audio_tokens() * max_audios
-        max_total_frames = self.get_max_video_frames(
-            seq_len - max_image_tokens - max_audio_tokens
-        )
+        max_total_frames = self.get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -661,7 +653,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
 
         encoder_states: tuple[torch.Tensor, ...] = ()
 
-        for idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             encoder_states = encoder_states + (hidden_states,)
             to_drop = False
             if self.training:

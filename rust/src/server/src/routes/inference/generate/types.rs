@@ -8,12 +8,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
 use validator::Validate;
-use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
+use super::features::MultiModalFeatures;
+use crate::routes::openai::utils::metrics::{
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, Normalizable, StreamOptions, StringOrArray, Usage,
+};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -31,11 +37,19 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrA
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
-    /// Stop strings. Not supported yet: the route does not detokenize.
+    /// Stop strings, matched against the decoded output text. The output's
+    /// token IDs end with the token that completes the match.
     pub stop: Option<StringOrArray>,
-    /// Whether to include the matched stop string in the output. Only
-    /// meaningful with `stop`.
+    /// Whether the stop string belongs to the output text. With token IDs
+    /// only, it decides whether a terminal stop token's text is matched
+    /// against `stop`, as in Python.
     pub include_stop_str_in_output: Option<bool>,
+    /// Whether to decode the output, which `stop` requires. Only token IDs are
+    /// returned either way.
+    pub detokenize: Option<bool>,
+    /// Whether special tokens are left out of the text matched against
+    /// `stop`.
+    pub skip_special_tokens: Option<bool>,
     /// Decode token IDs to replay instead of sampling, gated by
     /// `--enable-trace-replay` in Python. Not supported.
     pub trace_decode_token_ids: Option<Vec<u32>>,
@@ -64,6 +78,9 @@ pub struct GenerateRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
+    /// Multimodal items already preprocessed by render, aligned with the
+    /// expanded placeholders in `token_ids`.
+    pub features: Option<MultiModalFeatures>,
     pub return_token_ids: Option<bool>,
     pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
@@ -80,13 +97,26 @@ pub struct GenerateRequest {
 impl Normalizable for GenerateRequest {}
 
 /// Response level of the generate API, mirroring Python's `OutputMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GenerateOutputMode {
     /// Token IDs only. The default when absent.
+    #[default]
     Tokens,
-    /// Token IDs plus detokenized text and decoded logprobs. Not supported.
+    /// Token IDs plus detokenized text and logprobs with decoded token
+    /// strings.
     Text,
+}
+
+/// Output logprobs of one choice, shaped by the response level.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(super) enum GenerateChoiceLogProbs {
+    /// `tokens`: integer token IDs, as Python's `GenerateLogProbs`.
+    Tokens(GenerateLogProbs),
+    /// `text`: decoded token strings with `bytes`, as Python's
+    /// `ChatCompletionLogProbs`.
+    Text(ChatLogProbs),
 }
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
@@ -96,7 +126,12 @@ pub enum GenerateOutputMode {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<GenerateLogProbs>,
+    /// The detokenized output, at the `text` level only. Excludes a matched
+    /// stop string unless `include_stop_str_in_output` is set, while
+    /// `token_ids` keeps every generated token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub logprobs: Option<GenerateChoiceLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
@@ -112,7 +147,9 @@ pub(super) struct GenerateResponseChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
-    pub logprobs: Option<GenerateLogProbs>,
+    /// The text delta since the previous chunk, at the `text` level only.
+    pub text: Option<String>,
+    pub logprobs: Option<GenerateChoiceLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
@@ -129,6 +166,8 @@ pub(super) struct GenerateResponseStreamChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateStreamResponse {
     pub request_id: String,
+    /// Python serializes it on every chunk.
+    pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -140,6 +179,12 @@ pub(super) struct GenerateStreamResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponse {
     pub request_id: String,
+    pub model: String,
+    pub created: u64,
+    /// Always present, as in Python, which reports token counts and cached
+    /// prompt tokens here for disaggregated serving.
+    pub usage: Usage,
+    pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
     /// Base64 `.npy` float32 array, as Python `numpy2base64` encodes it.
@@ -156,91 +201,17 @@ pub(super) struct PerRequestMetrics<T> {
     pub speculative_decoding: T,
 }
 
-/// Mirrors the Python vLLM `SpeculativeDecodingMetrics` class.
-///
-/// Derived from the raw engine accumulator the same way as Python
-/// `RequestSpecDecodeMetrics.to_dict`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct SpeculativeDecodingMetrics {
-    pub mean_acceptance_length: f64,
-    pub draft_acceptance_rate: f64,
-    pub acceptance_histogram: Vec<u64>,
-    pub num_spec_steps: u64,
-    pub num_accepted_draft_tokens: u64,
-    pub num_draft_tokens: u64,
-    pub num_spec_tokens: u64,
-    pub per_step_accepted: Option<Vec<u64>>,
-    pub per_step_drafted: Option<Vec<u64>>,
-}
-
-impl From<RequestSpecDecodeMetrics> for SpeculativeDecodingMetrics {
-    fn from(raw: RequestSpecDecodeMetrics) -> Self {
-        let num_spec_steps: u64 = raw.histogram.iter().sum();
-        let num_accepted_draft_tokens: u64 =
-            (0u64..).zip(&raw.histogram).map(|(accepted, count)| accepted * count).sum();
-        let ratio = |num: u64, den: u64| {
-            if den == 0 {
-                0.0
-            } else {
-                num as f64 / den as f64
-            }
-        };
-        let detailed = !raw.per_step_accepted.is_empty();
-        Self {
-            mean_acceptance_length: if num_spec_steps == 0 {
-                1.0
-            } else {
-                1.0 + ratio(num_accepted_draft_tokens, num_spec_steps)
-            },
-            draft_acceptance_rate: ratio(num_accepted_draft_tokens, raw.num_draft_tokens),
-            acceptance_histogram: raw.histogram,
-            num_spec_steps,
-            num_accepted_draft_tokens,
-            num_draft_tokens: raw.num_draft_tokens,
-            num_spec_tokens: raw.num_spec_tokens,
-            per_step_accepted: detailed.then_some(raw.per_step_accepted),
-            per_step_drafted: detailed.then_some(raw.per_step_drafted),
-        }
-    }
-}
-
-/// Streaming form omits detailed fields when summary metrics are requested.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct StreamingSpeculativeDecodingMetrics {
-    pub mean_acceptance_length: f64,
-    pub draft_acceptance_rate: f64,
-    pub acceptance_histogram: Vec<u64>,
-    pub num_spec_steps: u64,
-    pub num_accepted_draft_tokens: u64,
-    pub num_draft_tokens: u64,
-    pub num_spec_tokens: u64,
-    pub per_step_accepted: Option<Vec<u64>>,
-    pub per_step_drafted: Option<Vec<u64>>,
-}
-
-impl From<SpeculativeDecodingMetrics> for StreamingSpeculativeDecodingMetrics {
-    fn from(metrics: SpeculativeDecodingMetrics) -> Self {
-        Self {
-            mean_acceptance_length: metrics.mean_acceptance_length,
-            draft_acceptance_rate: metrics.draft_acceptance_rate,
-            acceptance_histogram: metrics.acceptance_histogram,
-            num_spec_steps: metrics.num_spec_steps,
-            num_accepted_draft_tokens: metrics.num_accepted_draft_tokens,
-            num_draft_tokens: metrics.num_draft_tokens,
-            num_spec_tokens: metrics.num_spec_tokens,
-            per_step_accepted: metrics.per_step_accepted,
-            per_step_drafted: metrics.per_step_drafted,
-        }
-    }
-}
-
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct PlaceholderRangeInfo {
+/// Mirrors the Python vLLM `PlaceholderRangeInfo` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
+    /// Which placeholder positions receive embeddings, for models with sparse
+    /// masks such as Qwen-VL; omitted means all.
+    pub is_embed: Option<Vec<bool>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one

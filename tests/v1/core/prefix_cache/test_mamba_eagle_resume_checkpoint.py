@@ -6,9 +6,9 @@ Full attention hits where it holds a key; EAGLE prunes one hash unit off that
 candidate and drops it. Mamba materializes state only on its own block grid, so
 the pruned position holds nothing and the hit floors back a whole Mamba block.
 
-Gated by ``CacheConfig.enable_mamba_shared_prefix_checkpoint``. Every test here
-drives the real ``Scheduler._mamba_block_aligned_split`` and the real
-``KVCacheManager``; no chunk boundary is hard-coded.
+Gated by `CacheConfig.enable_mamba_shared_prefix_checkpoint`. Every test here
+drives the real `Scheduler._mamba_block_aligned_split` and the real
+`KVCacheManager`; no chunk boundary is hard-coded.
 """
 
 from dataclasses import replace
@@ -55,9 +55,9 @@ def _manager(
 
 
 def _stub(manager, block_size, hash_block_size, *, block_drop=True):
-    """``self`` for the real ``Scheduler._mamba_block_aligned_split``.
+    """`self` for the real `Scheduler._mamba_block_aligned_split`.
 
-    Derives both gates exactly as ``Scheduler.__init__`` does, so a manager that
+    Derives both gates exactly as `Scheduler.__init__` does, so a manager that
     cannot honour the junction stop also stops the split from making one.
     """
     partial_hit = (
@@ -71,6 +71,7 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         # The EAGLE adjustments key on the block-drop bit, not plain use_eagle:
         # they exist only to compensate for the drop.
         use_eagle_block_drop=block_drop,
+        num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,
@@ -81,7 +82,7 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
 
 
 def _prefill(manager, stub, request, *, external=0) -> list[int]:
-    """Schedule ``request`` to completion the way ``Scheduler.schedule()`` does.
+    """Schedule `request` to completion the way `Scheduler.schedule()` does.
 
     Returns the chunk ends. Every boundary comes from the real splitter, so no
     test in this file hard-codes one.
@@ -124,8 +125,8 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
 def _orphaned_full_attention_tail(manager, stub, prompt_len):
     """Produce the state a KV connector leaves behind, which creates a junction.
 
-    NIXL reports ``num_prompt_tokens - 1`` external computed tokens for Mamba
-    models (``nixl/base_scheduler.py::_get_remote_prefill_token_count``), so the
+    NIXL reports `num_prompt_tokens - 1` external computed tokens for Mamba
+    models (`nixl/base_scheduler.py::_get_remote_prefill_token_count`), so the
     producer starts past its own tail stop: full attention still registers a
     partial tail the Mamba group has no state for.
     """
@@ -221,10 +222,10 @@ def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
 
 
 def _armed_configs():
-    """``(block_size, hash_block_size)`` pairs the junction path can arm on.
+    """`(block_size, hash_block_size)` pairs the junction path can arm on.
 
     The prefix match unit must divide every group's block size and be strictly
-    smaller, or ``enable_partial_hash_hits`` is False and the path is inert.
+    smaller, or `enable_partial_hash_hits` is False and the path is inert.
     """
     for block_size in (16, 128, 512):
         for hash_block_size in (4, 32):
@@ -336,10 +337,10 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
 
     Two axes decide whether the manager can honour the junction stop the
     scheduler makes for it, and both fail silently -- as lost reuse, not as an
-    error. ``is_eagle_group`` annotation: the manager takes the EAGLE drop per
+    error. `is_eagle_group` annotation: the manager takes the EAGLE drop per
     group while the scheduler flag is model-wide, so on an annotated model the
-    Mamba group can be outside ``eagle_group_ids``. Multi-module MTP: the
-    coordinator hands the manager ``num_computed - num_reprefillable``, not the
+    Mamba group can be outside `eagle_group_ids`. Multi-module MTP: the
+    coordinator hands the manager `num_computed - num_reprefillable`, not the
     chunk end. In either case the junction stop displaces the block-boundary
     stop and the check-point it replaced is never written.
     """
