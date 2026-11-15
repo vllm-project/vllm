@@ -1703,7 +1703,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
-        aux_hidden_states: list[torch.Tensor] | None = None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         shard_metadata = None
         global_input_batch = input_batch
@@ -1730,7 +1729,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.prepare_hidden_output(
-                global_input_batch, hidden_states, aux_hidden_states, logits
+                global_input_batch,
+                sample_hidden_states,
             )
 
         # A diffusion prefill has no logit rows even when a bitmask row
@@ -2270,7 +2270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output, aux_hidden_states
+            hidden_states, input_batch, grammar_output
         )
 
         if self.pp_handler is not None:

@@ -13,38 +13,30 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 
 
-def invalid_request(case):
-    params = SamplingParams(
-        n=2 if case == "n" else 1,
-        stop="END" if case == "stop" else None,
-        extra_args={
-            "hidden_state_capture": {"start": 0, "end": 1, "collection_id": "test"}
-        },
-    )
-    if case == "aux":
-        assert params.extra_args is not None
-        params.extra_args["hidden_state_capture"].update(
-            aux_layer_ids=[1], hidden_layout="aux_final"
-        )
-    if case in ("absolute_window", "response_window"):
-        assert params.extra_args is not None
-        params.extra_args["hidden_state_capture"].update(
-            start=64 if case == "absolute_window" else 63,
-            end=65 if case == "absolute_window" else 64,
-            coordinate="absolute" if case == "absolute_window" else "response",
-        )
+def invalid_request(**kwargs):
     return EngineCoreRequest(
         request_id="capture",
         prompt_token_ids=[100, 200],
-        sampling_params=params,
+        sampling_params=SamplingParams(aux_outputs=("hidden_states",), **kwargs),
         pooling_params=None,
         mm_features=None,
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
-        arrival_time=0.0,
-        resumable=case == "resumable",
+        arrival_time=0,
     )
+
+
+INVALID = [
+    {"hidden_states_end": 65},
+    {"hidden_states_start": -1},
+    {"hidden_states_start": 64},
+    {"presence_penalty": 1},
+    {"frequency_penalty": 1},
+    {"repetition_penalty": 1.1},
+    {"logit_bias": {1: 1}},
+    {"top_k": 512},
+]
 
 
 def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
@@ -55,44 +47,22 @@ def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
         max_model_len=64,
         max_num_seqs=2,
         async_scheduling=False,
-        kv_sharing_fast_prefill=True,
-        aux_output_config={"enable_hidden_states": True},
+        enable_return_hidden_states=True,
     ) as runner:
-        for case in (
-            "n",
-            "stop",
-            "resumable",
-            "aux",
-            "absolute_window",
-            "response_window",
-        ):
+        for kwargs in INVALID:
             with pytest.raises(VLLMValidationError):
                 runner.llm.llm_engine.add_request(
-                    "capture", invalid_request(case), SamplingParams()
+                    "capture", invalid_request(**kwargs), SamplingParams()
                 )
-        with pytest.raises(VLLMValidationError, match="kv-sharing-fast-prefill"):
-            runner.llm.generate(
-                {"prompt_token_ids": [100, 200, 300]},
-                SamplingParams(
-                    max_tokens=1,
-                    extra_args={
-                        "hidden_state_capture": {
-                            "start": 0,
-                            "end": 1,
-                            "coordinate": "absolute",
-                            "collection_id": "fast-prefill",
-                        }
-                    },
-                ),
-                use_tqdm=False,
-            )
         output = runner.llm.generate(
-            "Hello", SamplingParams(max_tokens=1), use_tqdm=False
-        )
-        assert len(output[0].outputs[0].token_ids) == 1
+            {"prompt_token_ids": [100, 200]},
+            SamplingParams(max_tokens=2, aux_outputs=("hidden_states",)),
+            use_tqdm=False,
+        )[0]
+        assert len(output.outputs[0].hidden_states) == len(output.outputs[0].token_ids)
 
 
-def test_async_capture_admission_with_real_engine(monkeypatch):
+def test_async_capture_delivers_only_in_terminal_output(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     async def run():
@@ -103,73 +73,37 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
                 max_model_len=64,
                 max_num_seqs=2,
                 async_scheduling=False,
-                aux_output_config={"enable_hidden_states": True},
+                enable_return_hidden_states=True,
             )
         )
         try:
-            for case in (
-                "n",
-                "stop",
-                "resumable",
-                "aux",
-                "absolute_window",
-                "response_window",
-            ):
+            for kwargs in INVALID:
                 with pytest.raises(VLLMValidationError):
                     await engine.add_request(
-                        "capture", invalid_request(case), SamplingParams()
+                        "capture", invalid_request(**kwargs), SamplingParams()
                     )
-
-            async def stream():
-                raise AssertionError("input must not be consumed")
-                yield
-
-            inputs = stream()
-            try:
-                with pytest.raises(VLLMValidationError, match="Input streaming"):
-                    await engine.add_request(
-                        "capture", inputs, invalid_request("stop").params
-                    )
-            finally:
-                await inputs.aclose()
-            outputs = [
-                output
-                async for output in engine.generate(
-                    "Hello", SamplingParams(max_tokens=1), "valid"
-                )
-            ]
-            assert len(outputs[-1].outputs[0].token_ids) == 1
             for kind in (RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY):
-                params = SamplingParams(
-                    temperature=0,
-                    max_tokens=8,
-                    min_tokens=8,
-                    ignore_eos=True,
-                    output_kind=kind,
-                    extra_args={
-                        "hidden_state_capture": {
-                            "start": 0,
-                            "end": 2,
-                            "min_rows": 2,
-                            "collection_id": "delivery",
-                        }
-                    },
-                )
                 outputs = [
                     output
                     async for output in engine.generate(
-                        "Hello", params, f"delivery-{kind}"
+                        {"prompt_token_ids": [100, 200]},
+                        SamplingParams(
+                            temperature=0,
+                            max_tokens=8,
+                            min_tokens=8,
+                            ignore_eos=True,
+                            output_kind=kind,
+                            aux_outputs=("hidden_states",),
+                            hidden_states_start=2,
+                            hidden_states_end=4,
+                        ),
+                        f"delivery-{kind}",
                     )
                 ]
-                captures = [
-                    output.aux_outputs.hidden_state_capture
-                    for output in outputs
-                    if output.aux_outputs is not None
-                ]
-                assert len(captures) == 1
-                assert captures[0] is not None
-                assert captures[0].hidden_states.shape[0] == 2
                 assert outputs[-1].finished
+                assert all(o.outputs[0].hidden_states is None for o in outputs[:-1])
+                rows = outputs[-1].outputs[0].hidden_states
+                assert rows is not None and rows.shape[0] == 2
         finally:
             engine.shutdown()
 

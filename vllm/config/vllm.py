@@ -1283,7 +1283,7 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
-        if self.aux_output_config.enable_hidden_states:
+        if self.aux_output_config.enable_return_hidden_states:
             from vllm.distributed.aux_output_connector.hidden_states import (
                 verify_hidden_config,
             )

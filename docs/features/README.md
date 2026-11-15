@@ -6,8 +6,8 @@
 
 ## Training Data Capture
 
-See [windowed hidden-state capture](windowed_hidden_states.md)
-for request-local training features returned through the Python and HTTP APIs.
+See [hidden-state outputs](../training/hidden_states.md)
+for generated-position training features returned through the Python and HTTP APIs.
 
 ## Compatibility Matrix
 

@@ -382,7 +382,7 @@ class InputProcessor:
     def _validate_aux_outputs(
         self, params: SamplingParams, prompt_len: int, resumable: bool
     ) -> None:
-        if params.extra_args:
+        if params.aux_outputs:
             from vllm.distributed.aux_output_connector.hidden_states import (
                 validate_capture_request,
             )

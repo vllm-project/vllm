@@ -1,782 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-"""Request-local, position-based capture of model output hidden states.
-
-A capture plan names one absolute row range ``[start, end)``; row ``p`` is the
-hidden state that predicts token ``p + 1``. Rows before ``prompt_len - 1`` form
-the ``prompt`` segment (teacher scoring) and settle as soon as they are
-computed. Later rows form the ``output`` segment (generation windows) and
-settle with accepted tokens. Rows outside the range are never copied.
-"""
+"""Inline, sampling-following lm_head inputs at generated positions."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from pathlib import PurePosixPath, PureWindowsPath
-from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 from vllm.exceptions import VLLMValidationError
-from vllm.sampling_params import SamplingParams
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.aux_output_connector.connector import (
-        AuxOutputConnectorMetadata,
-        AuxRequestOutput,
-    )
-    from vllm.v1.request import Request
+    from vllm.sampling_params import SamplingParams
     from vllm.v1.worker.gpu.input_batch import InputBatch
-    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
-CAPTURE_KEY = "hidden_state_capture"
-HIDDEN_STATES = "hidden_states"
-LOGPROBS = "logprobs"
-LOGPROB_TOKEN_IDS = "logprob_token_ids"
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class CaptureSegment:
-    kind: Literal["prompt", "output"]
-    start_abs: int
-    end_abs: int
-
-
-@dataclass(frozen=True)
-class HiddenStateCapturePlan:
-    request_id: str
+class HiddenStatePlan:
     prompt_len: int
-    window_start_abs: int
-    window_end_abs: int
-    collection_id: str
-    min_rows: int = 1
-    aux_layer_ids: tuple[int, ...] = ()
-    hidden_layout: str = "final"
-    logprob_topk: int = 0
-
-    def __post_init__(self) -> None:
-        for name in (
-            "prompt_len",
-            "window_start_abs",
-            "window_end_abs",
-            "min_rows",
-            "logprob_topk",
-        ):
-            if type(getattr(self, name)) is not int:
-                raise ValueError(f"{name} must be an integer")
-        if any(type(layer) is not int or layer < 0 for layer in self.aux_layer_ids):
-            raise ValueError("aux_layer_ids must contain nonnegative integers")
-        if (
-            self.prompt_len < 1
-            or self.window_start_abs < 0
-            or self.window_start_abs >= self.window_end_abs
-            or self.min_rows < 1
-            or self.min_rows > self.window_end_abs - self.window_start_abs
-            or self.logprob_topk < 0
-        ):
-            raise ValueError("Invalid hidden-state capture plan")
-        if self.hidden_layout not in ("final", "aux_final", "dflash_aux"):
-            raise ValueError("Invalid hidden-state layout")
-        if bool(self.aux_layer_ids) != (self.hidden_layout != "final"):
-            raise ValueError("Hidden-state layout does not match auxiliary layers")
-        if len(set(self.aux_layer_ids)) != len(self.aux_layer_ids):
-            raise ValueError("Duplicate auxiliary hidden-state layers")
-        if self.logprob_topk and self.window_start_abs < self.output_start:
-            raise ValueError(
-                "logprob_topk only supports output rows; use "
-                "prompt_logprob_token_ids for prompt rows"
-            )
-
-    @property
-    def output_start(self) -> int:
-        return self.prompt_len - 1
-
-    @property
-    def segments(self) -> tuple[CaptureSegment, ...]:
-        start, end = self.window_start_abs, self.window_end_abs
-        split = self.output_start
-        segments = []
-        if start < split:
-            segments.append(CaptureSegment("prompt", start, min(end, split)))
-        if end > split:
-            segments.append(CaptureSegment("output", max(start, split), end))
-        return tuple(segments)
-
-    @property
-    def includes_final_layer(self) -> bool:
-        return self.hidden_layout != "dflash_aux"
-
-    @classmethod
-    def from_window(
-        cls,
-        request_id: str,
-        prompt_len: int,
-        start: int,
-        end: int,
-        collection_id: str,
-        *,
-        coordinate: Literal["response", "absolute"] = "response",
-        min_rows: int = 1,
-        aux_layer_ids: tuple[int, ...] = (),
-        hidden_layout: str | None = None,
-        logprob_topk: int = 0,
-    ) -> HiddenStateCapturePlan:
-        if coordinate == "response":
-            offset = prompt_len - 1
-        elif coordinate == "absolute":
-            offset = 0
-        else:
-            raise ValueError(f"Unknown hidden-state coordinate: {coordinate}")
-        return cls(
-            request_id=request_id,
-            prompt_len=prompt_len,
-            window_start_abs=start + offset,
-            window_end_abs=end + offset,
-            collection_id=collection_id,
-            min_rows=min_rows,
-            aux_layer_ids=aux_layer_ids,
-            hidden_layout=hidden_layout or ("aux_final" if aux_layer_ids else "final"),
-            logprob_topk=logprob_topk,
-        )
-
-
-@dataclass
-class HiddenStateCaptureChunk:
-    positions: np.ndarray
-    tensors: dict[str, torch.Tensor]
-    copied_bytes: int = 0
-    copy_ms: float = 0.0
-    logits_contract: dict[str, Any] | None = None
-
-    @property
-    def hidden_states(self) -> torch.Tensor:
-        return self.tensors[HIDDEN_STATES]
-
-    @property
-    def logprobs(self) -> torch.Tensor | None:
-        return self.tensors.get(LOGPROBS)
-
-    @property
-    def logprob_token_ids(self) -> torch.Tensor | None:
-        return self.tensors.get(LOGPROB_TOKEN_IDS)
-
-    def accepted(self, end: int) -> HiddenStateCaptureChunk:
-        """Keep rows whose predicted token has been delivered."""
-        keep = self.positions < end
-        if keep.all():
-            return self
-        index = torch.from_numpy(keep)
-        return replace(
-            self,
-            positions=self.positions[keep],
-            tensors={name: value[index] for name, value in self.tensors.items()},
-        )
-
-    @classmethod
-    def concat(cls, chunks: list[HiddenStateCaptureChunk]) -> HiddenStateCaptureChunk:
-        if len(chunks) == 1:
-            return chunks[0]
-        names = chunks[0].tensors
-        return cls(
-            positions=np.concatenate([chunk.positions for chunk in chunks]),
-            tensors={
-                name: torch.cat([chunk.tensors[name] for chunk in chunks])
-                for name in names
-            },
-            copied_bytes=sum(chunk.copied_bytes for chunk in chunks),
-            copy_ms=sum(chunk.copy_ms for chunk in chunks),
-            logits_contract=chunks[-1].logits_contract,
-        )
-
-
-def drop_incompatible_aux_plans(
-    plans: dict[str, HiddenStateCapturePlan],
-    req_ids: list[str],
-    available_layer_ids: tuple[int, ...],
-    aux_hidden_states: list[torch.Tensor] | None,
-) -> dict[str, str]:
-    """Disable captures whose requested auxiliary layout cannot be produced."""
-    errors: dict[str, str] = {}
-    for req_id in req_ids:
-        plan = plans.get(req_id)
-        if plan is None or not plan.aux_layer_ids:
-            continue
-        if (
-            aux_hidden_states is None
-            or plan.aux_layer_ids != available_layer_ids
-            or len(aux_hidden_states) != len(available_layer_ids)
-        ):
-            plans.pop(req_id)
-            errors[req_id] = "aux_layers_unavailable"
-    return errors
-
-
-def capture_scheduled_hidden_states(
-    plans: dict[str, HiddenStateCapturePlan],
-    req_ids: list[str],
-    query_start_loc: np.ndarray,
-    num_computed_tokens: np.ndarray,
-    hidden_states: torch.Tensor,
-    aux_hidden_states: Sequence[torch.Tensor] = (),
-    *,
-    logits: torch.Tensor,
-    cu_num_logits: np.ndarray,
-    settled_ends: dict[str, int] | None = None,
-    errors: dict[str, str] | None = None,
-) -> dict[str, HiddenStateCaptureChunk]:
-    """Own window rows before graph buffers are reused, excluding settled history."""
-    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
-
-    chunks: dict[str, HiddenStateCaptureChunk] = {}
-    for index, req_id in enumerate(req_ids):
-        plan = plans.get(req_id)
-        if plan is None:
-            continue
-        row_offset, row_end = map(int, query_start_loc[index : index + 2])
-        num_rows = row_end - row_offset
-        start = int(num_computed_tokens[index])
-        first = max(start, plan.window_start_abs, (settled_ends or {}).get(req_id, 0))
-        end = min(start + num_rows, plan.window_end_abs)
-        if first >= end:
-            continue
-        first_row = row_offset + first - start
-        end_row = row_offset + end - start
-        if plan.aux_layer_ids:
-            parts = [state[first_row:end_row] for state in aux_hidden_states]
-            if plan.includes_final_layer:
-                parts.append(hidden_states[first_row:end_row])
-            states = torch.cat(parts, dim=-1)
-        else:
-            states = hidden_states[first_row:end_row]
-        tensors = {HIDDEN_STATES: states.detach().clone()}
-        if plan.logprob_topk:
-            logit_start, logit_end = map(int, cu_num_logits[index : index + 2])
-            # MRV2 places each request's logits on its query suffix.
-            query_logit_start = row_end - (logit_end - logit_start)
-            if first_row < query_logit_start:
-                if errors is not None:
-                    errors[req_id] = "logits_rows_unavailable"
-                continue
-            selected_start = logit_start + first_row - query_logit_start
-            scores = logits[
-                selected_start : selected_start + end_row - first_row
-            ].float()
-            _, token_ids = scores.topk(plan.logprob_topk, dim=-1)
-            tensors[LOGPROBS] = compute_token_logprobs(scores, token_ids)
-            tensors[LOGPROB_TOKEN_IDS] = token_ids
-        chunks[req_id] = HiddenStateCaptureChunk(
-            positions=np.arange(first, end, dtype=np.int64),
-            tensors=tensors,
-            copied_bytes=sum(t.numel() * t.element_size() for t in tensors.values()),
-        )
-    return chunks
-
-
-@dataclass
-class HiddenStateCaptureResult:
-    hidden_positions: np.ndarray
-    tensors: dict[str, torch.Tensor]
-    hidden_position_start: int
-    hidden_position_end: int
-    hidden_window_start: int
-    hidden_window_end: int
-    hidden_layout: str
-    layer_ids: tuple[int, ...]
-    includes_final_layer: bool
-    collection_id: str
-    segments: tuple[CaptureSegment, ...] = ()
-    copied_bytes: int = 0
-    copy_ms: float = 0.0
-    # LogitsProcessor parameters for rebuilding logits from the final layer:
-    # logits = soft_cap(h @ W_head.T)[:, :vocab_size] * logit_scale.
-    logits_contract: dict[str, Any] | None = None
-
-    @property
-    def hidden_states(self) -> torch.Tensor:
-        return self.tensors[HIDDEN_STATES]
-
-    @property
-    def logprobs(self) -> torch.Tensor | None:
-        return self.tensors.get(LOGPROBS)
-
-    @property
-    def logprob_token_ids(self) -> torch.Tensor | None:
-        return self.tensors.get(LOGPROB_TOKEN_IDS)
-
-
-@dataclass
-class HiddenStateCaptureBuffer:
-    plan: HiddenStateCapturePlan
-    chunks: list[HiddenStateCaptureChunk] = field(default_factory=list)
-    copied_bytes: int = 0
-    copy_ms: float = 0.0
-    error: str | None = None
-    settled_end: int = 0
-    logits_contract: dict[str, Any] | None = None
-
-    def add(self, chunk: HiddenStateCaptureChunk) -> None:
-        self.copied_bytes += chunk.copied_bytes
-        self.copy_ms += chunk.copy_ms
-        if chunk.logits_contract is not None:
-            self.logits_contract = chunk.logits_contract
-        if chunk.positions.size:
-            self.chunks.append(chunk)
-            self.settled_end = max(self.settled_end, int(chunk.positions.max()) + 1)
-
-    def finish(self) -> HiddenStateCaptureResult | None:
-        plan = self.plan
-        prompt_end = min(plan.window_end_abs, plan.output_start)
-        if not self.chunks:
-            if plan.window_start_abs < prompt_end:
-                self.error = "prompt_rows_unavailable"
-            return None
-        positions = np.concatenate([chunk.positions for chunk in self.chunks])
-        if plan.window_start_abs < prompt_end and not np.array_equal(
-            positions[positions < prompt_end],
-            np.arange(plan.window_start_abs, prompt_end),
-        ):
-            self.error = "prompt_rows_unavailable"
-            return None
-        names = self.chunks[0].tensors
-        if len(positions) < self.plan.min_rows:
-            return None
-        tensors = (
-            self.chunks[0].tensors
-            if len(self.chunks) == 1
-            else {
-                name: torch.cat([chunk.tensors[name] for chunk in self.chunks])
-                for name in names
-            }
-        )
-        return HiddenStateCaptureResult(
-            hidden_positions=positions,
-            tensors={name: tensors[name] for name in sorted(names)},
-            hidden_position_start=int(positions[0]),
-            hidden_position_end=int(positions[-1]) + 1,
-            hidden_window_start=plan.window_start_abs,
-            hidden_window_end=plan.window_end_abs,
-            hidden_layout=plan.hidden_layout,
-            layer_ids=plan.aux_layer_ids,
-            includes_final_layer=plan.includes_final_layer,
-            collection_id=plan.collection_id,
-            segments=plan.segments,
-            copied_bytes=self.copied_bytes,
-            copy_ms=self.copy_ms,
-            logits_contract=self.logits_contract if plan.includes_final_layer else None,
-        )
-
-    def update(
-        self,
-        chunk: HiddenStateCaptureChunk | None,
-        accepted_end: int,
-        *,
-        stopped: bool,
-        error: str | None = None,
-    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
-        """Settle returned rows; prompt rows are always below accepted_end."""
-        if error is not None:
-            self.error = error
-        if self.error is not None:
-            return None, self.error
-        if chunk is not None:
-            self.add(chunk.accepted(accepted_end))
-        if not stopped and accepted_end < self.plan.window_end_abs:
-            return None, None
-        result = self.finish()
-        if self.error is not None:
-            return None, self.error
-        if result is not None:
-            return result, None
-        reason = (
-            "ended_before_window"
-            if stopped and accepted_end <= self.plan.window_start_abs
-            else "insufficient_rows"
-        )
-        return None, reason
-
-
-def capture_plan(
-    params: SamplingParams, request_id: str, prompt_len: int
-) -> HiddenStateCapturePlan | None:
-    spec = (params.extra_args or {}).get(CAPTURE_KEY)
-    if spec is None:
-        return None
-    try:
-        if not isinstance(spec, Mapping):
-            raise ValueError("capture specification must be a mapping")
-        spec = dict(spec)
-        spec["aux_layer_ids"] = tuple(spec.get("aux_layer_ids", ()))
-        if "start" in spec or "end" in spec:
-            return HiddenStateCapturePlan.from_window(
-                request_id=request_id, prompt_len=prompt_len, **spec
-            )
-        # Legacy asdict(plan) callers supplied their own prompt length.
-        # Preserve response offsets when binding the actual engine prompt.
-        client_prompt_len = spec.pop("prompt_len")
-        spec.pop("request_id", None)
-        spec["window_start_abs"] += prompt_len - client_prompt_len
-        spec["window_end_abs"] += prompt_len - client_prompt_len
-        return HiddenStateCapturePlan(
-            request_id=request_id, prompt_len=prompt_len, **spec
-        )
-    except (TypeError, ValueError, KeyError) as exc:
-        raise VLLMValidationError(
-            f"Invalid hidden capture specification: {exc}"
-        ) from exc
-
-
-def prompt_capture_start(params: SamplingParams, prompt_len: int) -> int | None:
-    """First prompt row a capture needs, which must not be a prefix-cache hit."""
-    if CAPTURE_KEY not in (params.extra_args or {}):
-        return None
-    plan = capture_plan(params, "", prompt_len)
-    if plan is None or plan.window_start_abs >= plan.output_start:
-        return None
-    return plan.window_start_abs
-
-
-def validate_capture_request(
-    params: SamplingParams,
-    prompt_len: int,
-    config: VllmConfig,
-    resumable: bool = False,
-) -> None:
-    plan = capture_plan(params, "", prompt_len)
-    if plan is None:
-        return
-    if not config.aux_output_config.enable_hidden_states:
-        raise VLLMValidationError(
-            "Hidden capture requires aux_output_config.enable_hidden_states"
-        )
-    if params.n != 1 or params.stop or resumable:
-        raise VLLMValidationError(
-            "Hidden capture requires n=1, no stop strings or streaming input"
-        )
-    if plan.aux_layer_ids:
-        speculative = config.speculative_config
-        if speculative is None or not speculative.uses_aux_hidden_states:
-            raise VLLMValidationError(
-                "Auxiliary hidden capture requires an auxiliary-layer speculator"
-            )
-        configured_layers = speculative.aux_hidden_state_layer_ids
-        if configured_layers and plan.aux_layer_ids != tuple(
-            sorted(set(configured_layers))
-        ):
-            raise VLLMValidationError(
-                "Requested auxiliary layers do not match the configured target layers"
-            )
-    if plan.logprob_topk > config.model_config.get_vocab_size():
-        raise VLLMValidationError("logprob_topk exceeds the model vocabulary")
-    maximum = config.model_config.max_logprobs
-    if maximum != -1 and plan.logprob_topk > maximum:
-        raise VLLMValidationError("logprob_topk exceeds max_logprobs")
-    rows = plan.window_end_abs - plan.window_start_abs
-    if (
-        plan.window_start_abs < plan.output_start
-        and config.cache_config.kv_sharing_fast_prefill
-    ):
-        raise VLLMValidationError(
-            "Prompt hidden capture is incorrect with --kv-sharing-fast-prefill; "
-            "disable it for scoring"
-        )
-    if plan.window_end_abs > config.model_config.max_model_len:
-        raise VLLMValidationError("Hidden capture window exceeds max_model_len")
-    hidden_width = config.model_config.get_hidden_size() * (
-        len(plan.aux_layer_ids) + plan.includes_final_layer
-    )
-    element_size = torch.empty((), dtype=config.model_config.dtype).element_size()
-    payload_bytes = rows * (hidden_width * element_size + plan.logprob_topk * 12)
-    if payload_bytes * config.scheduler_config.max_num_seqs > (
-        config.aux_output_config.max_hidden_capture_bytes
-    ):
-        raise VLLMValidationError(
-            "Hidden capture exceeds max_hidden_capture_bytes budget"
-        )
-
-
-class HiddenCaptureCarry:
-    """Hold copied rows until a step emits output for their request.
-
-    The scheduler settles auxiliary outputs only on steps that emit tokens, so
-    rows from intermediate prefill chunks wait here for the sampling chunk.
-    """
-
-    def __init__(self) -> None:
-        self._chunks: dict[str, list[HiddenStateCaptureChunk]] = {}
-        self._errors: dict[str, str] = {}
-
-    def empty(self) -> bool:
-        return not self._chunks and not self._errors
-
-    def release(
-        self,
-        chunks: dict[str, HiddenStateCaptureChunk],
-        errors: dict[str, str],
-        emitted: Iterable[str],
-        logits_contract: dict[str, Any] | None = None,
-    ) -> dict[str, tuple[HiddenStateCaptureChunk | None, str | None]]:
-        for request_id, chunk in chunks.items():
-            self._chunks.setdefault(request_id, []).append(chunk)
-        for request_id, error in errors.items():
-            self._errors.setdefault(request_id, error)
-        released: dict[str, tuple[HiddenStateCaptureChunk | None, str | None]] = {}
-        for request_id in emitted:
-            parts = self._chunks.pop(request_id, None)
-            release_error = self._errors.pop(request_id, None)
-            if parts is None and release_error is None:
-                continue
-            released_chunk = None
-            if parts is not None:
-                released_chunk = HiddenStateCaptureChunk.concat(parts)
-                released_chunk.logits_contract = logits_contract
-            released[request_id] = (released_chunk, release_error)
-        return released
-
-    def discard(self, request_ids: Iterable[str]) -> None:
-        for request_id in request_ids:
-            self._chunks.pop(request_id, None)
-            self._errors.pop(request_id, None)
-
-    def clear(self) -> None:
-        self._chunks.clear()
-        self._errors.clear()
-
-
-@dataclass
-class PendingHiddenOutput:
-    owner: HiddenStateWorker
-    req_ids: list[str]
-    chunks: dict[str, HiddenStateCaptureChunk]
-    errors: dict[str, str] = field(default_factory=dict)
-    gpu_tensors: list[torch.Tensor] = field(default_factory=list)
-    num_sampled: np.ndarray | None = None
-
-    def enqueue_cpu_copy(self, num_sampled: np.ndarray) -> None:
-        self.num_sampled = num_sampled
-        for chunk in self.chunks.values():
-            started = perf_counter()
-            for name, tensor in chunk.tensors.items():
-                self.gpu_tensors.append(tensor)
-                cpu = torch.empty_like(tensor, device="cpu", pin_memory=True)
-                cpu.copy_(tensor, non_blocking=True)
-                chunk.tensors[name] = cpu
-            chunk.copy_ms = (perf_counter() - started) * 1000
-
-    def process_output(
-        self,
-    ) -> dict[str, tuple[HiddenStateCaptureChunk | None, str | None]]:
-        assert self.num_sampled is not None, "hidden capture copy was not enqueued"
-        emitted = [
-            request_id
-            for request_id, num_sampled in zip(
-                self.req_ids, self.num_sampled, strict=True
-            )
-            if num_sampled > 0
-        ]
-        return self.owner.carry.release(
-            self.chunks, self.errors, emitted, self.owner.logits_contract
-        )
-
-
-def _supports_logits_reconstruction(
-    model_type: type[torch.nn.Module],
-    processor_type: type,
-    compute_logits: Callable[..., Any] | None,
-    *,
-    quantization: str | None,
-    lora_enabled: bool,
-    model_state_cls: type[ModelState],
-) -> bool:
-    from vllm.model_executor.layers.logits_processor import LogitsProcessor
-    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-    from vllm.v1.worker.gpu.model_states.interface import ModelState
-
-    return (
-        model_type is Qwen3ForCausalLM
-        and processor_type is LogitsProcessor
-        and compute_logits is Qwen3ForCausalLM.compute_logits
-        and quantization is None
-        and not lora_enabled
-        and model_state_cls.compute_sample_logits is ModelState.compute_sample_logits
-    )
-
-
-def _public_capture_model_name(name: str | list[str] | None) -> str | None:
-    if isinstance(name, list):
-        name = name[0] if name else None
-    if name and (
-        PurePosixPath(name).is_absolute()
-        or PureWindowsPath(name).is_absolute()
-        or name.startswith(".")
-    ):
-        return None
-    return name
-
-
-def _logits_contract(
-    model: torch.nn.Module, config: VllmConfig
-) -> dict[str, Any] | None:
-    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-    from vllm.v1.worker.gpu.model_states import resolve_model_state_cls
-
-    if type(model) is not Qwen3ForCausalLM:
-        return None
-    processor = model.logits_processor
-    if not _supports_logits_reconstruction(
-        type(model),
-        type(processor),
-        getattr(model.compute_logits, "__func__", None),
-        quantization=config.model_config.quantization,
-        lora_enabled=config.lora_config is not None,
-        model_state_cls=resolve_model_state_cls(config, model),
-    ):
-        return None
-    hf_config = config.model_config.hf_text_config
-    tied = bool(getattr(hf_config, "tie_word_embeddings", False))
-    return {
-        "served_model_name": _public_capture_model_name(
-            config.model_config.served_model_name
-        ),
-        "revision": config.model_config.revision,
-        "lm_head_weight": "model.embed_tokens.weight" if tied else "lm_head.weight",
-        "vocab_size": int(processor.org_vocab_size),
-        "logit_scale": float(processor.scale),
-        "soft_cap": None if processor.soft_cap is None else float(processor.soft_cap),
-        "tie_word_embeddings": tied,
-    }
-
-
-class HiddenStateWorker:
-    def __init__(self, model: torch.nn.Module, config: VllmConfig) -> None:
-        self.plans: dict[str, HiddenStateCapturePlan] = {}
-        self.settled_ends: dict[str, int] = {}
-        self.pending: PendingHiddenOutput | None = None
-        self.carry = HiddenCaptureCarry()
-        self.logits_contract = _logits_contract(model, config)
-        layers: tuple[int, ...] = ()
-        if (
-            config.speculative_config is not None
-            and config.speculative_config.uses_aux_hidden_states
-        ):
-            layers = (
-                config.speculative_config.aux_hidden_state_layer_ids
-                or model.get_eagle3_default_aux_hidden_state_layers()
-            )
-        self.layer_ids: tuple[int, ...] = tuple(sorted(set(layers)))
-
-    def begin_step(self, metadata: AuxOutputConnectorMetadata) -> None:
-        finished = metadata.finished_requests + metadata.finished_hidden_requests
-        for request_id in finished:
-            self.plans.pop(request_id, None)
-            self.settled_ends.pop(request_id, None)
-        self.carry.discard(finished)
-        self.plans.update(metadata.hidden_plans)
-        self.settled_ends.update(metadata.hidden_settled_ends)
-
-    def prepare(
-        self,
-        batch: InputBatch,
-        hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        logits: torch.Tensor,
-    ) -> None:
-        if not self.plans and self.carry.empty():
-            self.pending = None
-            return
-        errors = drop_incompatible_aux_plans(
-            self.plans, batch.req_ids, self.layer_ids, aux_hidden_states
-        )
-        chunks = capture_scheduled_hidden_states(
-            self.plans,
-            batch.req_ids,
-            batch.query_start_loc_np,
-            batch.num_computed_tokens_np,
-            hidden_states,
-            aux_hidden_states or (),
-            logits=logits,
-            cu_num_logits=batch.cu_num_logits_np,
-            settled_ends=self.settled_ends,
-            errors=errors,
-        )
-        self.pending = PendingHiddenOutput(self, list(batch.req_ids), chunks, errors)
-
-    def take_pending(self) -> PendingHiddenOutput | None:
-        pending, self.pending = self.pending, None
-        return pending
-
-    def close(self) -> None:
-        self.plans.clear()
-        self.settled_ends.clear()
-        self.carry.clear()
-        self.pending = None
-
-
-class HiddenStateScheduler:
-    def __init__(self) -> None:
-        self.buffers: dict[str, HiddenStateCaptureBuffer] = {}
-        self.done: set[str] = set()
-        self.finished: set[str] = set()
-
-    def build_metadata(
-        self, scheduled: dict[str, int], requests: dict[str, Request]
-    ) -> tuple[dict[str, HiddenStateCapturePlan], dict[str, int], tuple[str, ...]]:
-        plans, settled_ends = {}, {}
-        for request_id in scheduled:
-            if request_id in self.done:
-                continue
-            request = requests[request_id]
-            params = request.sampling_params
-            if params is None or not (params.extra_args or {}).get(CAPTURE_KEY):
-                continue
-            if request_id not in self.buffers:
-                plan = capture_plan(params, request_id, request.num_prompt_tokens)
-                assert plan is not None
-                self.buffers[request_id] = HiddenStateCaptureBuffer(plan)
-            buffer = self.buffers[request_id]
-            plans[request_id] = buffer.plan
-            settled_ends[request_id] = max(
-                buffer.settled_end, buffer.plan.window_start_abs
-            )
-        finished, self.finished = tuple(self.finished), set()
-        return plans, settled_ends, finished
-
-    def take_output(
-        self, request: Request, output: AuxRequestOutput | None, stopped: bool
-    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
-        """Settle rows on a step that emits output for the request."""
-        request_id = request.request_id
-        buffer = self.buffers.get(request_id)
-        if buffer is None:
-            return None, None
-        result, reason = buffer.update(
-            None if output is None else output.hidden_chunk,
-            request.num_prompt_tokens - 1 + request.num_output_tokens,
-            stopped=stopped,
-            error=None if output is None else output.hidden_error,
-        )
-        if result is not None or reason is not None:
-            self.done.add(request_id)
-            self.finished.add(request_id)
-            self.buffers.pop(request_id)
-        return result, reason
-
-    def request_finished(self, request: Request) -> None:
-        self.finished.add(request.request_id)
-        if request.is_finished():
-            self.buffers.pop(request.request_id, None)
-            self.done.discard(request.request_id)
+    start: int
+    end: int | None
+
+    def select(self, step_start: int, step_end: int) -> tuple[int, int]:
+        start = max(step_start, self.prompt_len - 1, self.start)
+        end = step_end if self.end is None else min(step_end, self.end)
+        return start, max(start, end)
 
 
 def verify_hidden_config(config: VllmConfig) -> None:
     if not config.use_v2_model_runner or config.device_config.device_type != "cuda":
-        raise ValueError("Windowed hidden capture requires the CUDA Model Runner V2")
+        raise ValueError("Hidden states require the CUDA Model Runner V2")
     if config.scheduler_config.async_scheduling:
-        raise ValueError("Windowed hidden capture requires async_scheduling=False")
+        raise ValueError("Hidden states require async_scheduling=False")
     parallel = config.parallel_config
     if (
         parallel.pipeline_parallel_size > 1
@@ -785,15 +46,186 @@ def verify_hidden_config(config: VllmConfig) -> None:
         or parallel.enable_batch_sharded_sampling
     ):
         raise ValueError(
-            "Windowed hidden capture does not support PP, CP or batch-sharded sampling"
+            "Hidden states do not support PP, CP or batch-sharded sampling"
         )
-    model = config.model_config
-    if model.is_encoder_decoder or model.is_diffusion:
-        raise ValueError("Windowed hidden capture requires a causal decoder model")
+    if config.model_config.is_encoder_decoder or config.model_config.is_diffusion:
+        raise ValueError("Hidden states require a causal decoder model")
     if (
-        config.speculative_config
+        config.speculative_config is not None
         and config.speculative_config.enable_adaptive_verification
     ):
+        raise ValueError("Hidden states do not support adaptive verification")
+    if config.lora_config is not None or config.model_config.quantization is not None:
         raise ValueError(
-            "Windowed hidden capture does not support adaptive verification"
+            "Inline hidden states currently require an unquantized model without LoRA"
         )
+
+
+def validate_capture_request(
+    params: SamplingParams,
+    prompt_len: int,
+    config: VllmConfig,
+    resumable: bool = False,
+) -> None:
+    if not params.aux_outputs:
+        return
+    if tuple(params.aux_outputs) != ("hidden_states",):
+        raise VLLMValidationError("aux_outputs supports only ('hidden_states',)")
+    if not config.aux_output_config.enable_return_hidden_states:
+        raise VLLMValidationError("Hidden states require --enable-return-hidden-states")
+    start, end = params.hidden_states_start, params.hidden_states_end
+    limit = config.model_config.max_model_len
+    if (
+        type(start) is not int
+        or not 0 <= start < limit
+        or (end is not None and (type(end) is not int or not start < end <= limit))
+    ):
+        raise VLLMValidationError(
+            "Hidden-state range must satisfy 0 <= start < end <= max_model_len"
+        )
+    if resumable:
+        raise VLLMValidationError("Hidden states do not support streaming input")
+    if (
+        params.presence_penalty != 0
+        or params.frequency_penalty != 0
+        or params.repetition_penalty != 1
+        or params.logit_bias
+    ):
+        raise VLLMValidationError(
+            "Hidden states do not support penalties or logit_bias"
+        )
+    masked = (
+        params.top_p < 1
+        or params.min_p > 0
+        or params.allowed_token_ids
+        or params.bad_words
+        or params.structured_outputs is not None
+    )
+    if params.top_k > 256 or (masked and params.top_k <= 0):
+        raise VLLMValidationError(
+            "Truncated or masked hidden-state requests require 1 <= top_k <= 256"
+        )
+    maximum = min(prompt_len - 1 + (params.max_tokens or limit), limit - 1)
+    if end is not None:
+        maximum = min(maximum, end)
+    rows = max(0, maximum - max(start, prompt_len - 1))
+    size = torch.empty((), dtype=config.model_config.dtype).element_size()
+    nbytes = rows * config.model_config.get_hidden_size() * size
+    if nbytes > config.aux_output_config.max_hidden_capture_bytes:
+        raise VLLMValidationError(
+            "Hidden states exceed max_hidden_capture_bytes per completion"
+        )
+
+
+def hidden_states_metadata(
+    model: torch.nn.Module, config: VllmConfig
+) -> dict[str, Any]:
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+    from vllm.v1.worker.gpu.model_states import resolve_model_state_cls
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    if type(model) is not Qwen3ForCausalLM:
+        raise ValueError("Inline hidden states currently support Qwen3ForCausalLM only")
+    processor = model.logits_processor
+    state_cls = resolve_model_state_cls(config, model)
+    if (
+        type(processor) is not LogitsProcessor
+        or processor.logits_as_input
+        or state_cls.compute_sample_logits is not ModelState.compute_sample_logits
+    ):
+        raise ValueError("Model logits path does not expose the exact lm_head input")
+    tied = bool(
+        getattr(config.model_config.hf_text_config, "tie_word_embeddings", False)
+    )
+    return {
+        "revision": config.model_config.revision,
+        "hidden_size": config.model_config.get_hidden_size(),
+        "hidden_dtype": str(config.model_config.dtype).removeprefix("torch."),
+        "head_dtype": str(
+            processor.head_dtype or config.model_config.dtype
+        ).removeprefix("torch."),
+        "vocab_size": int(processor.org_vocab_size),
+        "logit_scale": float(processor.scale),
+        "soft_cap": processor.soft_cap,
+        "transform_order": ["projection", "vocab_trim", "soft_cap", "scale"],
+        "tie_word_embeddings": tied,
+        "lm_head_weight": "model.embed_tokens.weight" if tied else "lm_head.weight",
+        "codec": "raw",
+    }
+
+
+@dataclass
+class PendingHiddenOutput:
+    request_ids: list[str]
+    # request id -> (selected absolute start, full step end, owned GPU rows)
+    snapshots: dict[str, tuple[int, int, torch.Tensor]]
+    empty: torch.Tensor
+    rows: dict[str, torch.Tensor] = field(default_factory=dict)
+    num_sampled: np.ndarray | None = None
+    num_rejected: np.ndarray | None = None
+
+    def enqueue_cpu_copy(
+        self, num_sampled: np.ndarray, num_rejected: np.ndarray
+    ) -> None:
+        self.num_sampled, self.num_rejected = num_sampled, num_rejected
+        for request_id, (_, _, rows) in self.snapshots.items():
+            if not len(rows):
+                self.rows[request_id] = self.empty
+                continue
+            cpu = torch.empty_like(rows, device="cpu", pin_memory=True)
+            cpu.copy_(rows, non_blocking=True)
+            self.rows[request_id] = cpu
+
+    def process_output(self) -> dict[str, tuple[int, torch.Tensor]]:
+        assert self.num_sampled is not None and self.num_rejected is not None
+        outputs = {}
+        for index, request_id in enumerate(self.request_ids):
+            if request_id not in self.snapshots or self.num_sampled[index] == 0:
+                continue
+            start, step_end, _ = self.snapshots[request_id]
+            # Rejection is relative to the original logits range, before windowing.
+            accepted_end = step_end - int(self.num_rejected[index])
+            outputs[request_id] = (
+                start,
+                self.rows[request_id][: max(0, accepted_end - start)],
+            )
+        return outputs
+
+
+class HiddenStateCapturer:
+    def __init__(self, model: torch.nn.Module, config: VllmConfig) -> None:
+        self.metadata = hidden_states_metadata(model, config)
+        logger.info("Inline hidden-state metadata: %s", self.metadata)
+        self.plans: dict[str, HiddenStatePlan] = {}
+        self.pending: PendingHiddenOutput | None = None
+        self.empty = torch.empty(
+            (0, self.metadata["hidden_size"]), dtype=config.model_config.dtype
+        )
+
+    def prepare(self, batch: InputBatch, sample_hidden_states: torch.Tensor) -> None:
+        if not self.plans:
+            self.pending = None
+            return
+        snapshots = {}
+        for index, request_id in enumerate(batch.req_ids):
+            plan = self.plans.get(request_id)
+            if plan is None:
+                continue
+            first, last = batch.cu_num_logits_np[index : index + 2]
+            step_end = int(
+                batch.num_computed_tokens_np[index] + batch.num_scheduled_tokens[index]
+            )
+            start, end = plan.select(step_end - int(last - first), step_end)
+            offset = int(first) + start - (step_end - int(last - first))
+            rows = sample_hidden_states[offset : offset + end - start].clone()
+            snapshots[request_id] = (start, step_end, rows)
+        self.pending = (
+            PendingHiddenOutput(list(batch.req_ids), snapshots, self.empty)
+            if snapshots
+            else None
+        )
+
+    def take_pending(self) -> PendingHiddenOutput | None:
+        pending, self.pending = self.pending, None
+        return pending

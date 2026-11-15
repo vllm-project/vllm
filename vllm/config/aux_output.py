@@ -14,13 +14,13 @@ class AuxOutputConfig:
     enable_return_routed_experts: bool = False
     """Capture and return routed-experts auxiliary outputs."""
 
-    enable_hidden_states: bool = False
-    """Allow request-local windowed hidden-state capture (MRV2 CUDA only)."""
+    enable_return_hidden_states: bool = False
+    """Allow requests to return generated-position lm_head inputs."""
 
     max_hidden_capture_bytes: int = Field(default=256 * 1024**2, gt=0)
-    """Upper bound on retained hidden/logprob payload bytes across max_num_seqs.
-    Admission reserves the requested window size for each possible active request.
-    Temporary model logits and allocator caches are not included."""
+    """Maximum raw hidden-state bytes returned by one completion in inline mode.
+    Concurrent completions, concatenation and HTTP encoding need additional memory.
+    """
 
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or ``None`` to derive it from the KV cache capacity.
@@ -29,7 +29,7 @@ class AuxOutputConfig:
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts or self.enable_hidden_states
+        return self.enable_return_routed_experts or self.enable_return_hidden_states
 
     def compute_hash(self) -> str:
         """Hash AuxOutput settings that alter the model forward graph."""

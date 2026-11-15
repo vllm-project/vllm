@@ -16,10 +16,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
-    RoutedExpertsRequestOutput,
 )
 from vllm.distributed.aux_output_connector.hidden_states import (
-    HiddenStateWorker,
+    HiddenStateCapturer,
     PendingHiddenOutput,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
@@ -60,12 +59,13 @@ class _WorkerRequestState:
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
-    connector: RoutedExpertsWorkerConnector
+    connector: AuxOutputWorkerConnector
     request_ids: list[str]
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     # GPU snapshot taken on the main stream.
-    routed_experts_gpu: torch.Tensor
+    routed_experts_gpu: torch.Tensor | None
+    hidden: PendingHiddenOutput | None = None
     # Filled by enqueue_cpu_copy on the output copy stream.
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
@@ -77,15 +77,27 @@ class PendingAuxOutput:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled
         self.num_rejected = num_rejected
-        self.routed_experts = self.routed_experts_gpu.to(
-            "cpu", non_blocking=True
-        ).numpy()
+        if self.routed_experts_gpu is not None:
+            self.routed_experts = self.routed_experts_gpu.to(
+                "cpu", non_blocking=True
+            ).numpy()
+        if self.hidden is not None:
+            self.hidden.enqueue_cpu_copy(num_sampled, num_rejected)
 
-    def process_output(self) -> dict[str, RoutedExpertsRequestOutput]:
-        return self.connector.process_output(self)
+    def process_output(self) -> dict[str, AuxRequestOutput]:
+        outputs = (
+            self.connector.process_output(self)
+            if self.routed_experts_gpu is not None
+            else {}
+        )
+        if self.hidden is not None:
+            for request_id, (start, rows) in self.hidden.process_output().items():
+                output = outputs.setdefault(request_id, AuxRequestOutput())
+                output.hidden_start, output.hidden_states = start, rows
+        return outputs
 
 
-class RoutedExpertsWorkerConnector:
+class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
     def __init__(
@@ -95,10 +107,17 @@ class RoutedExpertsWorkerConnector:
         model: torch.nn.Module,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+        capturer = None
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            capturer = RoutedExpertsCapturer(
+                max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
+            )
+            bind_routed_experts_capturer(model, capturer)
+        self._hidden = (
+            HiddenStateCapturer(model, vllm_config)
+            if vllm_config.aux_output_config.enable_return_hidden_states
+            else None
         )
-        bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
         self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
@@ -117,7 +136,7 @@ class RoutedExpertsWorkerConnector:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if self._capturer is None or not get_tp_group().is_first_rank:
             return
 
         vllm_config = self._vllm_config
@@ -144,10 +163,29 @@ class RoutedExpertsWorkerConnector:
             vllm_config.max_concurrent_batches,
         )
 
+    def prepare_hidden_output(
+        self,
+        input_batch: InputBatch,
+        sample_hidden_states: torch.Tensor,
+    ) -> None:
+        if self._hidden is not None and get_tp_group().is_first_rank:
+            self._hidden.prepare(input_batch, sample_hidden_states)
+
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
+        hidden = None if self._hidden is None else self._hidden.take_pending()
         if self._buffer is None or self._step_metadata is None:
-            return None
+            if hidden is None:
+                return None
+            return PendingAuxOutput(
+                self,
+                list(input_batch.req_ids),
+                input_batch.num_computed_tokens_np,
+                input_batch.query_start_loc_np,
+                None,
+                hidden,
+            )
+        assert self._capturer is not None
 
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
@@ -158,6 +196,7 @@ class RoutedExpertsWorkerConnector:
             token_starts=input_batch.num_computed_tokens_np,
             query_start_loc=query_start_loc,
             routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            hidden=hidden,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -168,9 +207,7 @@ class RoutedExpertsWorkerConnector:
                 self._requests[request_id].pending_outputs += 1
         return pending_output
 
-    def process_output(
-        self, pending: PendingAuxOutput
-    ) -> dict[str, RoutedExpertsRequestOutput]:
+    def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
         """Commit one consumed R3 snapshot and build request outputs.
 
         Request teardown deferred by begin_step is completed here once no
@@ -194,9 +231,7 @@ class RoutedExpertsWorkerConnector:
                 self._teardown(teardown)
             return outputs
 
-    def _commit_output(
-        self, pending: PendingAuxOutput
-    ) -> dict[str, RoutedExpertsRequestOutput]:
+    def _commit_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
         buffer = self._buffer
         store = self._store
         assert buffer is not None and store is not None
@@ -214,7 +249,7 @@ class RoutedExpertsWorkerConnector:
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
         block_batches = []
-        outputs: dict[str, RoutedExpertsRequestOutput] = {}
+        outputs: dict[str, AuxRequestOutput] = {}
 
         # Use the ModelRunner's actual batch boundaries rather than rebuilding them.
         for request_id, token_start, start, end, sampled, rejected in zip(
@@ -265,7 +300,7 @@ class RoutedExpertsWorkerConnector:
 
             if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = RoutedExpertsRequestOutput(
+                    outputs[request_id] = AuxRequestOutput(
                         emit_start, rows[emit_start - capture_start :]
                     )
                     state.emit_cursor = token_end
@@ -296,7 +331,7 @@ class RoutedExpertsWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = RoutedExpertsRequestOutput(emit_start, rows)
+            outputs[request_id] = AuxRequestOutput(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
 
@@ -350,6 +385,8 @@ class RoutedExpertsWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
+        if self._hidden is not None:
+            self._hidden.plans = {} if metadata is None else metadata.hidden_plans
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
@@ -416,93 +453,6 @@ class RoutedExpertsWorkerConnector:
                     self._store.close()
                 finally:
                     self._store = None
-
-
-class PendingCombinedAuxOutput:
-    def __init__(
-        self, routed: PendingAuxOutput | None, hidden: PendingHiddenOutput | None
-    ) -> None:
-        self.routed = routed
-        self.hidden = hidden
-
-    def enqueue_cpu_copy(
-        self, num_sampled: np.ndarray, num_rejected: np.ndarray
-    ) -> None:
-        if self.routed is not None:
-            self.routed.enqueue_cpu_copy(num_sampled, num_rejected)
-        if self.hidden is not None:
-            self.hidden.enqueue_cpu_copy(num_sampled)
-
-    def process_output(self) -> dict[str, AuxRequestOutput]:
-        outputs = (
-            {}
-            if self.routed is None
-            else {
-                request_id: AuxRequestOutput(routed_experts=routing)
-                for request_id, routing in self.routed.process_output().items()
-            }
-        )
-        if self.hidden is not None:
-            for request_id, (chunk, error) in self.hidden.process_output().items():
-                output = outputs.setdefault(request_id, AuxRequestOutput())
-                output.hidden_chunk, output.hidden_error = chunk, error
-        return outputs
-
-
-class AuxOutputWorkerConnector:
-    """Compose windowed hidden capture with optional routed-experts output."""
-
-    def __init__(self, *, vllm_config: VllmConfig, model: torch.nn.Module) -> None:
-        self._routing = (
-            RoutedExpertsWorkerConnector(vllm_config=vllm_config, model=model)
-            if vllm_config.aux_output_config.enable_return_routed_experts
-            else None
-        )
-        self._hidden = (
-            HiddenStateWorker(model, vllm_config)
-            if vllm_config.aux_output_config.enable_hidden_states
-            and get_tp_group().is_first_rank
-            else None
-        )
-
-    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
-        if self._routing is not None:
-            self._routing.initialize_output_storage(kv_cache_config)
-
-    def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
-        if self._hidden is not None and metadata is not None:
-            self._hidden.begin_step(metadata)
-        if self._routing is not None:
-            self._routing.begin_step(metadata)
-
-    def prepare_hidden_output(
-        self,
-        batch: InputBatch,
-        hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        logits: torch.Tensor,
-    ) -> None:
-        if self._hidden is not None:
-            self._hidden.prepare(batch, hidden_states, aux_hidden_states, logits)
-
-    def prepare_output(
-        self, input_batch: InputBatch
-    ) -> PendingCombinedAuxOutput | None:
-        routed = (
-            self._routing.prepare_output(input_batch)
-            if self._routing is not None
-            else None
-        )
-        hidden = None if self._hidden is None else self._hidden.take_pending()
-        if routed is None and hidden is None:
-            return None
-        return PendingCombinedAuxOutput(routed, hidden)
-
-    def close(self) -> None:
-        if self._hidden is not None:
-            self._hidden.close()
-        if self._routing is not None:
-            self._routing.close()
 
 
 def get_aux_output_connector(

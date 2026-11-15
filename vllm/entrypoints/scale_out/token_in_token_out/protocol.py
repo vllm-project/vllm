@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.aux_outputs import HiddenStatesResponse
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     PerRequestMetrics,
@@ -496,7 +497,7 @@ class GenerateLogProbs(BaseModel):
     content: list[GenerateLogProbsContent] | None = None
 
 
-class GenerateChoiceBase(BaseModel):
+class GenerateChoiceBase(HiddenStatesResponse, BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
     index: int
@@ -543,7 +544,7 @@ class GenerateTextChoice(GenerateChoiceBase):
     """Logprobs with decoded token strings and `bytes`."""
 
 
-class GenerateStreamChoiceBase(BaseModel):
+class GenerateStreamChoiceBase(HiddenStatesResponse, BaseModel):
     """Fields shared by every `output_mode` of a streaming choice."""
 
     index: int

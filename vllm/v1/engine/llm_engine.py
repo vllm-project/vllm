@@ -106,6 +106,11 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            hidden_states_config=(
+                vllm_config.model_config
+                if vllm_config.aux_output_config.enable_return_hidden_states
+                else None
+            ),
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)

@@ -19,6 +19,10 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.aux_outputs import (
+    HiddenStatesRequest,
+    HiddenStatesResponse,
+)
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -112,7 +116,7 @@ class ChatCompletionLogProbs(OpenAIBaseModel):
     content: list[ChatCompletionLogProbsContent] | None = None
 
 
-class ChatCompletionResponseChoice(OpenAIBaseModel):
+class ChatCompletionResponseChoice(HiddenStatesResponse, OpenAIBaseModel):
     index: int
     # ``SerializeAsAny`` lets pydantic honor subclasses of ``ChatMessage``
     # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereChatMessage``)
@@ -167,7 +171,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     metrics: PerRequestMetrics | None = None
 
 
-class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
+class ChatCompletionResponseStreamChoice(HiddenStatesResponse, OpenAIBaseModel):
     index: int
     # ``SerializeAsAny`` lets pydantic honor subclasses of ``DeltaMessage``
     # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereDeltaMessage``)
@@ -234,7 +238,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
-class ChatCompletionRequest(OpenAIBaseModel):
+class ChatCompletionRequest(HiddenStatesRequest, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
@@ -821,6 +825,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            aux_outputs=self.aux_outputs,
+            hidden_states_start=self.hidden_states_start,
+            hidden_states_end=self.hidden_states_end,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 

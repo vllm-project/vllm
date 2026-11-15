@@ -11,17 +11,12 @@ from itertools import chain, islice
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
-from vllm.distributed.aux_output_connector.hidden_states import (
-    HiddenStateCaptureChunk,
-    HiddenStateCapturePlan,
-    HiddenStateScheduler,
-)
-from vllm.distributed.aux_output_connector.outputs import AuxOutputs
+from vllm.distributed.aux_output_connector.hidden_states import HiddenStatePlan
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 if TYPE_CHECKING:
-    from vllm.config import AuxOutputConfig
     from vllm.distributed.kv_events import ExternalBlockHash
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -50,32 +45,28 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
-    hidden_plans: dict[str, HiddenStateCapturePlan] = field(default_factory=dict)
-    finished_hidden_requests: tuple[str, ...] = ()
-    hidden_settled_ends: dict[str, int] = field(default_factory=dict)
-
-
-@dataclass
-class RoutedExpertsRequestOutput:
-    token_start: int
-    rows: np.ndarray
+    hidden_plans: dict[str, HiddenStatePlan] = field(default_factory=dict)
 
 
 @dataclass
 class AuxRequestOutput:
-    routed_experts: RoutedExpertsRequestOutput | None = None
-    hidden_chunk: HiddenStateCaptureChunk | None = None
-    hidden_error: str | None = None
+    token_start: int = 0
+    rows: np.ndarray | None = None
+    hidden_start: int = 0
+    hidden_states: torch.Tensor | None = None
 
 
-class RoutedExpertsSchedulerConnector:
-    """Build routing metadata and settle accepted expert rows."""
+class AuxOutputSchedulerConnector:
+    """Build worker metadata without owning auxiliary output payloads or stores."""
 
     def __init__(
         self,
         kv_cache_manager: KVCacheManager,
         kv_connector: KVConnectorBase_V1 | None = None,
+        *,
+        enable_routed_experts: bool = True,
     ) -> None:
+        self._routing = enable_routed_experts
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -103,6 +94,32 @@ class RoutedExpertsSchedulerConnector:
         requests: dict[str, Request],
     ) -> AuxOutputConnectorMetadata:
         """Build one step's incremental worker metadata."""
+        hidden_plans = {}
+        for request_id in scheduler_output.num_scheduled_tokens:
+            request = requests[request_id]
+            params = request.sampling_params
+            if (
+                params is not None
+                and params.aux_outputs
+                and (
+                    request.num_output_tokens == 0
+                    or params.hidden_states_end is None
+                    or request.num_tokens - 1 < params.hidden_states_end
+                )
+            ):
+                hidden_plans[request_id] = HiddenStatePlan(
+                    request.num_prompt_tokens,
+                    params.hidden_states_start,
+                    params.hidden_states_end,
+                )
+        if not self._routing:
+            return AuxOutputConnectorMetadata(
+                0,
+                {},
+                {},
+                (),
+                hidden_plans=hidden_plans,
+            )
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
@@ -150,9 +167,12 @@ class RoutedExpertsSchedulerConnector:
             self._pack_hashes(self._released_hashes),
         )
         self._retained_hashes, self._released_hashes = [], []
+        metadata.hidden_plans = hidden_plans
         return metadata
 
-    def max_cache_hit(self, request: Request) -> int:
+    def max_cache_hit(self, request: Request) -> int | None:
+        if not self._routing:
+            return None
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -165,12 +185,18 @@ class RoutedExpertsSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if not self._routing:
+            return num_external
         num_hit = num_local + num_external
-        if num_hit % self._block_size == 0 and num_hit <= self.max_cache_hit(request):
+        limit = self.max_cache_hit(request)
+        assert limit is not None
+        if num_hit % self._block_size == 0 and num_hit <= limit:
             return num_external
         return 0
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if not self._routing:
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), num_tokens // self._block_size
         )
@@ -203,35 +229,35 @@ class RoutedExpertsSchedulerConnector:
     def take_output(
         self,
         request: Request,
-        output: RoutedExpertsRequestOutput | None,
-    ) -> np.ndarray | None:
-        """Return the accepted R3 rows for one scheduled request."""
-        assert output is not None, (
+        output: dict[str, AuxRequestOutput] | None,
+    ) -> tuple[np.ndarray | None, torch.Tensor | None]:
+        """Settle the rows against the request's accepted output tokens."""
+        request_output = (output or {}).get(request.request_id)
+        hidden = None
+        if request_output is not None and request_output.hidden_states is not None:
+            rows = request_output.hidden_states
+            end = max(0, request.num_tokens - 1 - request_output.hidden_start)
+            hidden = rows[:end]
+        if not self._routing:
+            return None, hidden
+        assert request_output is not None and request_output.rows is not None, (
             f"auxiliary output worker output is missing {request.request_id}"
         )
-        request_id = request.request_id
-        request_output = output
-        token_end = request.num_tokens - 1
-        local_end = token_end - request_output.token_start
+        local_end = request.num_tokens - 1 - request_output.token_start
         if local_end < 0:
             assert not request.is_finished(), (
-                "finished auxiliary output output has no accepted token range: "
-                f"request={request_id}, token_end={token_end}, "
-                f"output_start={request_output.token_start}, "
-                "output_end="
-                f"{request_output.token_start + len(request_output.rows)}"
+                "finished auxiliary output output has no accepted token range"
             )
-            return None
+            return None, hidden
         assert local_end <= len(request_output.rows), (
-            "auxiliary output worker output has an invalid token range: "
-            f"request={request_id}, token_end={token_end}, "
-            f"output_start={request_output.token_start}, "
-            f"output_end={request_output.token_start + len(request_output.rows)}"
+            "auxiliary output worker output has an invalid token range"
         )
-        return request_output.rows[:local_end]
+        return request_output.rows[:local_end], hidden
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if not self._routing:
+            return
         request_id = request.request_id
         self._loading.pop(request_id, None)
         num_blocks = request.num_computed_tokens // self._block_size
@@ -274,90 +300,3 @@ class RoutedExpertsSchedulerConnector:
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
-
-
-class AuxOutputSchedulerConnector:
-    """Compose routing and hidden capture without changing either policy."""
-
-    def __init__(
-        self,
-        kv_cache_manager: KVCacheManager,
-        kv_connector: KVConnectorBase_V1 | None,
-        aux_config: AuxOutputConfig,
-    ) -> None:
-        self._routing = (
-            RoutedExpertsSchedulerConnector(kv_cache_manager, kv_connector)
-            if aux_config.enable_return_routed_experts
-            else None
-        )
-        self._hidden = (
-            HiddenStateScheduler() if aux_config.enable_hidden_states else None
-        )
-
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput, requests: dict[str, Request]
-    ) -> AuxOutputConnectorMetadata:
-        metadata = (
-            self._routing.build_connector_meta(scheduler_output, requests)
-            if self._routing is not None
-            else AuxOutputConnectorMetadata(
-                0, {}, {}, tuple(scheduler_output.finished_req_ids)
-            )
-        )
-        if self._hidden is not None:
-            (
-                metadata.hidden_plans,
-                metadata.hidden_settled_ends,
-                metadata.finished_hidden_requests,
-            ) = self._hidden.build_metadata(
-                scheduler_output.num_scheduled_tokens, requests
-            )
-        return metadata
-
-    def max_cache_hit(self, request: Request) -> int | None:
-        return (
-            self._routing.max_cache_hit(request) if self._routing is not None else None
-        )
-
-    def cap_external_hit(
-        self, request: Request, num_local: int, num_external: int
-    ) -> int:
-        return (
-            self._routing.cap_external_hit(request, num_local, num_external)
-            if self._routing is not None
-            else num_external
-        )
-
-    def request_loading(self, request: Request, num_tokens: int) -> None:
-        if self._routing is not None:
-            self._routing.request_loading(request, num_tokens)
-
-    def take_outputs(
-        self,
-        request: Request,
-        output: dict[str, AuxRequestOutput] | None,
-        stopped: bool,
-    ) -> tuple[np.ndarray | None, AuxOutputs | None]:
-        request_output = (output or {}).get(request.request_id)
-        routing = None
-        if self._routing is not None:
-            routing = self._routing.take_output(
-                request,
-                None if request_output is None else request_output.routed_experts,
-            )
-        aux_outputs = None
-        if self._hidden is not None:
-            result, reason = self._hidden.take_output(request, request_output, stopped)
-            if result is not None or reason is not None:
-                aux_outputs = AuxOutputs(result, reason)
-        return routing, aux_outputs
-
-    def request_finished(self, request: Request) -> None:
-        if self._routing is not None:
-            self._routing.request_finished(request)
-        if self._hidden is not None:
-            self._hidden.request_finished(request)
-
-    def reset(self) -> None:
-        if self._routing is not None:
-            self._routing.reset()

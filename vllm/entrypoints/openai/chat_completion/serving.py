@@ -12,6 +12,7 @@ from typing import Any, Final, cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.aux_outputs import hidden_states_response_fields
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -806,6 +807,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else:
                         # Send the finish response for each request.n only once
                         choice_data = ChatCompletionResponseStreamChoice(
+                            **hidden_states_response_fields(output),
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
@@ -817,6 +819,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             weight_versions=(
                                 output.weight_versions
                                 if request.return_weight_versions
+                                or output.hidden_states is not None
                                 else None
                             ),
                         )
@@ -1081,6 +1084,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                **hidden_states_response_fields(output),
                 weight_versions=(
                     output.weight_versions if request.return_weight_versions else None
                 ),

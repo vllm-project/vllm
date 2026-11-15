@@ -8,13 +8,10 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
-import pybase64 as base64
-import torch
 from fastapi import Request
 
-from vllm.distributed.aux_output_connector.hidden_states import HiddenStateCaptureResult
-from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.aux_outputs import hidden_states_response_fields
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     RequestResponseMetadata,
@@ -28,15 +25,12 @@ from vllm.entrypoints.generate.base.serving import (
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
-    CaptureSegmentResponse,
-    CaptureTensor,
     CompletionLogProbs,
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
-    HiddenStateCaptureResponse,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -59,42 +53,6 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
-
-
-def _capture_tensor(tensor: torch.Tensor) -> CaptureTensor:
-    tensor = tensor.contiguous()
-    return CaptureTensor(
-        data=base64.b64encode(tensor.view(torch.uint8).numpy().tobytes()).decode(
-            "ascii"
-        ),
-        dtype=str(tensor.dtype).removeprefix("torch."),
-        shape=list(tensor.shape),
-    )
-
-
-def _capture_response(
-    result: HiddenStateCaptureResult, request_id: str
-) -> HiddenStateCaptureResponse:
-    return HiddenStateCaptureResponse(
-        tensors={name: _capture_tensor(t) for name, t in result.tensors.items()},
-        hidden_positions=result.hidden_positions.tolist(),
-        hidden_position_start=result.hidden_position_start,
-        hidden_position_end=result.hidden_position_end,
-        hidden_window_start=result.hidden_window_start,
-        hidden_window_end=result.hidden_window_end,
-        hidden_layout=result.hidden_layout,
-        layer_ids=list(result.layer_ids),
-        includes_final_layer=result.includes_final_layer,
-        request_id=request_id,
-        collection_id=result.collection_id,
-        copied_bytes=result.copied_bytes,
-        copy_ms=result.copy_ms,
-        segments=[
-            CaptureSegmentResponse(kind=s.kind, start=s.start_abs, end=s.end_abs)
-            for s in result.segments
-        ],
-        logits_contract=result.logits_contract,
-    )
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -485,6 +443,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         model=model_name,
                         choices=[
                             CompletionResponseStreamChoice(
+                                **hidden_states_response_fields(output),
                                 index=i,
                                 text=delta_text,
                                 logprobs=logprobs,
@@ -499,6 +458,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 weight_versions=(
                                     output.weight_versions
                                     if request.return_weight_versions
+                                    or output.hidden_states is not None
                                     else None
                                 ),
                             )
@@ -676,16 +636,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     else None
                 )
 
-                aux = final_res.aux_outputs or AuxOutputs()
                 choice_data = CompletionResponseChoice(
-                    hidden_state_capture=(
-                        _capture_response(
-                            aux.hidden_state_capture, final_res.request_id
-                        )
-                        if aux.hidden_state_capture is not None
-                        else None
-                    ),
-                    hidden_capture_skip_reason=aux.hidden_capture_skip_reason,
                     index=len(choices),
                     text=output_text,
                     logprobs=logprobs,
@@ -699,9 +650,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    **hidden_states_response_fields(output),
                     weight_versions=(
                         output.weight_versions
                         if request.return_weight_versions
+                        or output.hidden_states is not None
                         else None
                     ),
                 )
