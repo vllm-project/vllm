@@ -104,10 +104,21 @@ def get_checkpoint_quant_keys(
         NotImplementedError: If the checkpoint format can not be determined.
 
     """
+    import torch
+
     from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        FP8_DTYPE,
+        GroupShape,
+        QuantKey,
+        ScaleDesc,
+        is_layer_skipped,
+        kMxfp8Static,
+    )
 
     if isinstance(quant_config, QuarkConfig):
         weight_key, activation_key, _ = quant_config.get_quant_method_target(
@@ -121,6 +132,24 @@ def get_checkpoint_quant_keys(
         if issubclass(layer_type, RoutedExperts):
             return quant_config.routed_expert_weight_key(), None
         return kMxfp8Static, None
+    if (
+        isinstance(quant_config, Fp8Config)
+        and issubclass(layer_type, LinearBase)
+        and quant_config.is_checkpoint_fp8_serialized
+        and quant_config.weight_block_size is not None
+        and getattr(quant_config, "is_scale_e8m0", False)
+    ):
+        if is_layer_skipped(
+            prefix,
+            quant_config.ignored_layers,
+            quant_config.packed_modules_mapping,
+            match_mode=quant_config.ignored_layers_match_mode,
+        ):
+            return None, None
+        scale = ScaleDesc(
+            torch.float8_e8m0fnu, True, GroupShape(*quant_config.weight_block_size)
+        )
+        return QuantKey(FP8_DTYPE, scale, symmetric=True), None
     raise NotImplementedError(
         f"Cannot determine the checkpoint format of {type(quant_config).__name__}."
     )

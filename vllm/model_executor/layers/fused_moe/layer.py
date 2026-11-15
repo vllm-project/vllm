@@ -382,6 +382,7 @@ def FusedMoEFactory(
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
         shared_expert_prefix=shared_expert_prefix,
+        num_fused_shared_experts=num_fused_shared_experts,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.kernel_routing_method_type,

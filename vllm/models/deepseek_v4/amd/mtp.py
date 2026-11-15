@@ -40,8 +40,11 @@ from vllm.models.deepseek_v4.quant_config import align_mtp_quant_config
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .mega_moe import finalize_mega_moe_weights
-from .model import DeepseekV4DecoderLayer, DeepseekV4ForCausalLM
+from .model import (
+    DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
+    redirect_fused_shared_expert_name,
+)
 
 logger = init_logger(__name__)
 
@@ -299,18 +302,10 @@ class DeepSeekV4MTP(nn.Module):
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        if any(
-            getattr(
-                layer.mtp_block.ffn,
-                "is_fused_shared_expert_enabled",
-                False,
-            )
+        self.fuse_shared_experts = any(
+            getattr(layer.mtp_block.ffn, "is_fused_shared_expert_enabled", False)
             for layer in self.model.layers.values()
-        ):
-            raise NotImplementedError(
-                "DeepSeek-V4 MTP fused shared experts are not supported yet; "
-                "please open an issue."
-            )
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -396,16 +391,14 @@ class DeepSeekV4MTP(nn.Module):
             return name
 
         # Pre-compute expert mapping ONCE.
-        first_layer = next(iter(self.model.layers.values()))
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
-            routed_experts_prefix=(
-                "" if first_layer.mtp_block.ffn.use_mega_moe else "routed_experts"
-            ),
+            num_experts=self.config.n_routed_experts
+            + (self.config.n_shared_experts if self.fuse_shared_experts else 0),
+            routed_experts_prefix="routed_experts",
         )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
@@ -436,6 +429,10 @@ class DeepSeekV4MTP(nn.Module):
 
             if spec_layer != self.model.mtp_start_layer_idx and ".layers" not in name:
                 continue
+            if self.fuse_shared_experts:
+                name = redirect_fused_shared_expert_name(
+                    name, self.config.n_routed_experts
+                )
             if name.endswith(".scale"):
                 suffix = (
                     expert_scale_suffix
@@ -509,9 +506,6 @@ class DeepSeekV4MTP(nn.Module):
                     continue
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        finalize_mega_moe_weights(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

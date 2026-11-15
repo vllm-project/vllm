@@ -1370,6 +1370,8 @@ class FusedMoEConfig:
     # Routes are adjusted between routing and expert execution.
     require_decomposed_backend: bool = False
     shared_expert_prefix: str | None = None
+    # Shared experts held in the routed slots after this rank's routed experts.
+    num_fused_shared_experts: int = 0
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is

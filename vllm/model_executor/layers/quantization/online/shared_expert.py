@@ -14,15 +14,7 @@ from vllm.model_executor.layers.quantization.online.requantization import (
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_checkpoint_quant_keys,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    MXFP8_BLOCK_SIZE,
-    MXFP8_SCALE_DTYPE,
-    MXFP8_VALUE_DTYPE,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kMxfp8Static,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import set_weight_attrs
 
 SharedExpertQuantizer = Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
@@ -148,15 +140,20 @@ class OnlineSharedExpertLoader:
                 f"{list(ONLINE_SHARED_EXPERT_DEQUANTIZERS)}, got {checkpoint_key}. "
                 "Disable FSE or open an issue."
             )
-        # NOTE: The staging layout is MXFP8's, the only quantized format in
+        # NOTE: The staging layout is FP8 with E8M0 scales over `group_shape`
+        # blocks, the format of every quantized key in
         # ONLINE_SHARED_EXPERT_DEQUANTIZERS.
-        is_mxfp8 = checkpoint_key == kMxfp8Static
-        if is_mxfp8 and (
-            hidden_size % MXFP8_BLOCK_SIZE or intermediate_size % MXFP8_BLOCK_SIZE
+        group_shape = (
+            None if checkpoint_key is None else checkpoint_key.scale.group_shape
+        )
+        if group_shape is not None and any(
+            size % block
+            for size in (hidden_size, intermediate_size)
+            for block in group_shape
         ):
             raise ValueError(
-                "MXFP8 shared experts require hidden/intermediate sizes "
-                f"divisible by {MXFP8_BLOCK_SIZE}."
+                f"{checkpoint_key} shared experts require hidden/intermediate "
+                f"sizes divisible by {tuple(group_shape)}."
             )
 
         def register(name: str, shape: tuple[int, ...], dtype: torch.dtype, **attrs):
@@ -172,16 +169,17 @@ class OnlineSharedExpertLoader:
             ("w13", w13_rows, hidden_size),
             ("w2", hidden_size, intermediate_size),
         ):
-            shape = (self.num_fused_shared_experts, rows)
-            weight_dtype = MXFP8_VALUE_DTYPE if is_mxfp8 else params_dtype
-            register(f"online_{stem}_weight", (*shape, cols), weight_dtype)
-            if is_mxfp8:
-                register(
-                    f"online_{stem}_weight_scale",
-                    (*shape, cols // MXFP8_BLOCK_SIZE),
-                    MXFP8_SCALE_DTYPE,
-                    quant_method=FusedMoeWeightScaleSupported.GROUP.value,
-                )
+            n = self.num_fused_shared_experts
+            if group_shape is None:
+                register(f"online_{stem}_weight", (n, rows, cols), params_dtype)
+                continue
+            register(f"online_{stem}_weight", (n, rows, cols), torch.float8_e4m3fn)
+            register(
+                f"online_{stem}_weight_scale",
+                (n, rows // group_shape.row, cols // group_shape.col),
+                torch.uint8,
+                quant_method=FusedMoeWeightScaleSupported.GROUP.value,
+            )
 
     def dequantize_staging(
         self, layer: torch.nn.Module

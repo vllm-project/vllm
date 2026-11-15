@@ -934,11 +934,6 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
         offload_config=None,
     )
     monkeypatch.setattr(deepseek_v4_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(
-        deepseek_v4_model.envs,
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
-        True,
-    )
     monkeypatch.setattr(deepseek_v4_model, "on_gfx950", lambda: True)
     monkeypatch.setattr(
         deepseek_v4_model.rocm_aiter_ops,
@@ -1047,6 +1042,22 @@ def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
         (
             "layers.6.ffn.shared_experts.w2.scale",
             "model.layers.6.ffn.experts.4.w2.weight_scale_inv",
+        ),
+    ]:
+        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
+        assert _redirect_shared_expert_name(mapped, fuse_by_layer, 4) == expected
+
+    # MXFP4 routed experts register `.weight_scale`; unfused shared experts
+    # alias it to their `.weight_scale_inv` at load.
+    mapper = _make_deepseek_v4_weights_mapper("fp4", fuse_shared_experts=True)
+    for raw, expected in [
+        (
+            "layers.5.ffn.shared_experts.w2.scale",
+            "model.layers.5.ffn.shared_experts.down_proj.weight_scale",
+        ),
+        (
+            "layers.6.ffn.shared_experts.w1.scale",
+            "model.layers.6.ffn.experts.4.w1.weight_scale",
         ),
     ]:
         [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
