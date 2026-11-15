@@ -405,6 +405,9 @@ class NixlPullConnector(NixlBaseConnector):
         assert self.connector_worker is not None
         self.connector_worker.restore_kv_caches()
 
+    def holds_blocks_only_for_remote_readers(self) -> bool:
+        return True
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self.connector_worker, NixlPullConnectorWorker)
