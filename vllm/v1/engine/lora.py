@@ -43,29 +43,26 @@ class DPLoRACoordinator:
         dist.all_gather_object(values, value, group=self.engine.dp_group)
         return values
 
+    def _worker_errors(self, method: str, *args: Any) -> list[str]:
+        results = self.engine.model_executor.collective_rpc(method, args=args)
+        return [
+            error
+            for rank_errors in self._gather(results)
+            for error in rank_errors
+            if error is not None
+        ]
+
     def _commit(self, candidate: DPLoRASlots) -> None:
         payload = candidate.payload()
         if payload == self.state.payload():
             self.state = candidate
             return
-        error = None
-        try:
-            self.engine.model_executor.collective_rpc(
-                "prepare_dp_loras", args=(payload,)
-            )
-        except Exception as exc:
-            error = str(exc)
-        errors = self._gather(error)
-        if any(errors):
+        errors = self._worker_errors("prepare_dp_loras", payload)
+        if errors:
             self.engine.model_executor.collective_rpc("abort_dp_loras")
             raise ValueError(f"DP LoRA preparation failed: {errors}")
-        error = None
-        try:
-            self.engine.model_executor.collective_rpc("commit_dp_loras")
-        except Exception as exc:
-            error = str(exc)
-        errors = self._gather(error)
-        if any(errors):
+        errors = self._worker_errors("commit_dp_loras")
+        if errors:
             # Every worker retains the previous CPU models until commit succeeds.
             # Roll back successful peers as well as any partially written worker.
             self.engine.model_executor.collective_rpc("rollback_dp_loras")
@@ -148,14 +145,21 @@ class DPLoRACoordinator:
         selected = [
             requests[i] for i in sorted(allowed) if i in requests and i not in invalid
         ]
-        candidate = deepcopy(self.state)
-        try:
-            candidate.acquire(selected, allowed)
-            self._commit(candidate)
-        except ValueError as exc:
-            failed = {r.lora_int_id for r in selected}
-            self._reject(local, failed, str(exc))
-            allowed -= failed
+        resident = {
+            slot.request.lora_int_id for slot in self.state.slots if slot is not None
+        }
+        for request in selected:
+            adapter_id = request.lora_int_id
+            if adapter_id in resident:
+                continue
+            candidate = deepcopy(self.state)
+            try:
+                candidate.acquire([request], allowed)
+                self._commit(candidate)
+            except ValueError as exc:
+                self._reject(local, {adapter_id}, str(exc))
+                allowed.discard(adapter_id)
+        self.state.acquire([r for r in selected if r.lora_int_id in allowed], allowed)
         self.engine.scheduler.set_allowed_loras(allowed)
 
         for key in list(self.pending):

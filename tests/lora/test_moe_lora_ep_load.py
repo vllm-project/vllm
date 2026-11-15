@@ -174,7 +174,7 @@ def _make_moe_lora_checkpoint(root):
     model_path = root / "model"
     model.save_pretrained(model_path)
     paths = []
-    for adapter_id in (1, 2):
+    for adapter_id in (1, 2, 3):
         path = root / f"adapter_{adapter_id}"
         path.mkdir()
         (path / "adapter_config.json").write_text(
@@ -193,6 +193,8 @@ def _make_moe_lora_checkpoint(root):
         for layer in range(2):
             for expert in range(4):
                 for proj in ("gate_proj", "up_proj", "down_proj"):
+                    if adapter_id == 3 and proj == "down_proj":
+                        continue
                     prefix = (
                         f"base_model.model.model.layers.{layer}.mlp."
                         f"experts.{expert}.{proj}"
@@ -215,6 +217,7 @@ async def _check_lora_slots_dp_ep(model_path, paths, *, preload=True):
 
     from vllm import SamplingParams
     from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.exceptions import GenerationError
     from vllm.lora.request import LoRARequest
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -338,6 +341,45 @@ async def _check_lora_slots_dp_ep(model_path, paths, *, preload=True):
         before = await layout()
         with pytest.raises(Exception, match="DP LoRA preparation failed"):
             await engine.add_lora(LoRARequest("missing", 4, "/missing/adapter"))
+        assert await layout() == before
+        with pytest.raises(Exception, match="DP LoRA commit failed"):
+            await engine.add_lora(LoRARequest("incomplete", 4, paths[2]))
+        assert await layout() == before
+
+        # A failed on-demand load must not abort another adapter's requests.
+        await engine.pause_generation(mode="keep", clear_cache=False)
+        collectors = []
+        for rank, adapter in enumerate(
+            (requests[1], LoRARequest("missing", 4, "/missing/adapter"))
+        ):
+            collectors.append(
+                await engine.add_request(
+                    request_id=f"load-failure-{rank}",
+                    prompt={"prompt_token_ids": prompts[0]},
+                    params=SamplingParams(
+                        temperature=0,
+                        max_tokens=3,
+                        ignore_eos=True,
+                        detokenize=False,
+                        output_kind=RequestOutputKind.FINAL_ONLY,
+                    ),
+                    lora_request=adapter,
+                    data_parallel_rank=rank,
+                )
+            )
+        assert await engine.is_paused()
+        await engine.resume_generation()
+        good, bad = await asyncio.wait_for(
+            asyncio.gather(
+                *(collector.get() for collector in collectors), return_exceptions=True
+            ),
+            timeout=60,
+        )
+        assert isinstance(good, RequestOutput)
+        assert good.outputs[0].token_ids == reference[1, 0][0]
+        assert good.outputs[0].finish_reason == "length"
+        assert isinstance(bad, GenerationError)
+        assert "DP LoRA preparation failed" in str(bad)
         assert await layout() == before
 
         # Only the remote rank has a queued request: its weights are protected.

@@ -1597,11 +1597,21 @@ class Worker(WorkerBase):
     def get_lora_slot_ids(self) -> list[int | None]:
         return self.model_runner.lora_manager.get_slot_ids()
 
-    def prepare_dp_loras(self, payload: bytes) -> None:
-        self.model_runner.lora_manager.prepare_dp_loras(payload)
+    def prepare_dp_loras(self, payload: bytes) -> str | None:
+        try:
+            self.model_runner.lora_manager.prepare_dp_loras(payload)
+        except Exception as exc:
+            logger.exception("Failed to prepare DP LoRA adapters")
+            return repr(exc)
+        return None
 
-    def commit_dp_loras(self) -> None:
-        self.model_runner.lora_manager.commit_dp_loras()
+    def commit_dp_loras(self) -> str | None:
+        try:
+            self.model_runner.lora_manager.commit_dp_loras()
+        except Exception as exc:
+            logger.exception("Failed to commit DP LoRA adapters")
+            return repr(exc)
+        return None
 
     def finalize_dp_loras(self) -> None:
         self.model_runner.lora_manager.finalize_dp_loras()
