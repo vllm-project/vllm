@@ -893,6 +893,10 @@ def fused_topk_topp_sample(
 
     topk_enabled = k is not None
     topp_enabled = p is not None
+    assert topk_enabled or topp_enabled, (
+        "fused_topk_topp_sample requires at least one of k or p to be active; "
+        "unfiltered requests must be routed to gumbel_sample directly."
+    )
 
     if k is not None:
         assert k.ndim == 1 and k.shape[0] == batch_size

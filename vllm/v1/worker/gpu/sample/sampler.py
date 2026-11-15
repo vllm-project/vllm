@@ -343,7 +343,9 @@ class Sampler:
                 )
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
-        elif not (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES):
+        elif (top_k is not None or top_p is not None) and not (
+            return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        ):
             # Fast path: fused in-register top-k / top-p Gumbel sampling
             sampled = fused_topk_topp_sample(
                 logits=processed_logits,
@@ -356,7 +358,8 @@ class Sampler:
             )
         else:
             # Fallback path when callers explicitly require post-processed logits
-            # (e.g. for PROCESSED_LOGPROBS_MODES logprobs computation).
+            # (e.g. for PROCESSED_LOGPROBS_MODES logprobs computation) or when
+            # requests are unfiltered (no top_k or top_p active).
             processed_logits = apply_top_k_top_p(
                 processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
             )

@@ -296,15 +296,27 @@ def verify_bit_for_bit(
                 )
 
                 # Candidate: Fused Sampler (in-register 0 HBM writeback)
-                fused_tokens = fused_topk_topp_sample(
-                    proc_logits.clone(),
-                    sc.expanded_idx_mapping,
-                    sc.temp,
-                    sc.seeds,
-                    sc.pos,
-                    k=sc.k,
-                    p=sc.p,
-                )
+                if sc.k is not None or sc.p is not None:
+                    fused_tokens = fused_topk_topp_sample(
+                        proc_logits.clone(),
+                        sc.expanded_idx_mapping,
+                        sc.temp,
+                        sc.seeds,
+                        sc.pos,
+                        k=sc.k,
+                        p=sc.p,
+                    )
+                else:
+                    fused_tokens = gumbel_sample(
+                        proc_logits.clone(),
+                        sc.expanded_idx_mapping,
+                        sc.temp,
+                        sc.seeds,
+                        sc.pos,
+                        apply_temperature=False,
+                        is_drafting=False,
+                        use_fp64=False,
+                    )
 
                 match = torch.equal(stock_tokens, fused_tokens)
                 tag = f"B={b:<3} V={v // 1000:>3}k | {sc.name:<16}"
@@ -398,17 +410,30 @@ def run_latency_benchmarks(
                 stock_med = sorted(stock_times)[len(stock_times) // 2]
 
                 # --- 2. Fused Triton ---
+                has_filter = sc.k is not None or sc.p is not None
                 reset_fused_buffer_cache()
                 for _ in range(warmup_iters):
-                    _ = fused_topk_topp_sample(
-                        proc_logits.clone(),
-                        sc.expanded_idx_mapping,
-                        sc.temp,
-                        sc.seeds,
-                        sc.pos,
-                        k=sc.k,
-                        p=sc.p,
-                    )
+                    if has_filter:
+                        _ = fused_topk_topp_sample(
+                            proc_logits.clone(),
+                            sc.expanded_idx_mapping,
+                            sc.temp,
+                            sc.seeds,
+                            sc.pos,
+                            k=sc.k,
+                            p=sc.p,
+                        )
+                    else:
+                        _ = gumbel_sample(
+                            proc_logits.clone(),
+                            sc.expanded_idx_mapping,
+                            sc.temp,
+                            sc.seeds,
+                            sc.pos,
+                            apply_temperature=False,
+                            is_drafting=False,
+                            use_fp64=False,
+                        )
                 torch.cuda.synchronize()
 
                 fused_times = []
@@ -416,15 +441,27 @@ def run_latency_benchmarks(
                     flush_l2_cache(device=device)
                     l_in = proc_logits.clone()
                     start_ev.record()
-                    _ = fused_topk_topp_sample(
-                        l_in,
-                        sc.expanded_idx_mapping,
-                        sc.temp,
-                        sc.seeds,
-                        sc.pos,
-                        k=sc.k,
-                        p=sc.p,
-                    )
+                    if has_filter:
+                        _ = fused_topk_topp_sample(
+                            l_in,
+                            sc.expanded_idx_mapping,
+                            sc.temp,
+                            sc.seeds,
+                            sc.pos,
+                            k=sc.k,
+                            p=sc.p,
+                        )
+                    else:
+                        _ = gumbel_sample(
+                            l_in,
+                            sc.expanded_idx_mapping,
+                            sc.temp,
+                            sc.seeds,
+                            sc.pos,
+                            apply_temperature=False,
+                            is_drafting=False,
+                            use_fp64=False,
+                        )
                     end_ev.record()
                     end_ev.synchronize()
                     fused_times.append(start_ev.elapsed_time(end_ev))
