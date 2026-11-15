@@ -900,6 +900,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+    def holds_blocks_only_for_remote_readers(self) -> bool:
+        return True
+
     def request_finished(
         self,
         request: "Request",

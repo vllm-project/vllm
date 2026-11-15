@@ -6731,6 +6731,36 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+@pytest.mark.parametrize("remote_readers_only", [True, False])
+def test_abort_drops_only_remote_read_exports(monkeypatch, remote_readers_only):
+    scheduler = create_scheduler(use_kv_connector=True)
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    num_free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    # The connector keeps the blocks after the request finishes, either for a
+    # remote reader only or also for something local such as an async save.
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "holds_blocks_only_for_remote_readers",
+        lambda: remote_readers_only,
+    )
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert scheduler.ledger.pins_blocks()
+
+    dropped = scheduler.drop_retained_exports()
+    freed = scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
+    assert dropped == int(remote_readers_only)
+    assert freed == remote_readers_only
+    assert scheduler.ledger.pins_blocks() != remote_readers_only
+    assert (request.request_id in scheduler.requests) != remote_readers_only
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(

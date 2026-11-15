@@ -101,11 +101,14 @@ def test_received_import_does_not_need_driving():
 
 def test_drop_exports_keeps_imports():
     ledger = KVTransferLedger()
-    ledger.open_export(_req("g"))
-    ledger.open_export(_req("h"))
+    ledger.open_export(_req("g"), droppable=True)
+    ledger.open_export(_req("h"), droppable=True)
+    ledger.open_export(_req("s"))  # e.g. an async save: not droppable
     ledger.import_started(_req("i"))
     dropped = ledger.drop_exports()
     assert sorted(e.request_id for e in dropped) == ["g", "h"]
+    assert ledger.is_referenced("s") and ledger.pins_blocks()
+    ledger.close("s", EXPORT)
     assert not ledger.has_retained() and ledger.needs_driving()
     assert ledger.is_referenced("i") and not ledger.is_referenced("g")
 
@@ -119,7 +122,7 @@ def test_pins_blocks_only_for_open_imports_and_exports():
     assert ledger.pins_blocks()  # open
     ledger.complete("j", IMPORT)
     assert not ledger.pins_blocks()  # received
-    ledger.open_export(_req("k"))
+    ledger.open_export(_req("k"), droppable=True)
     assert ledger.pins_blocks()
     ledger.drop_exports()
     assert not ledger.pins_blocks()

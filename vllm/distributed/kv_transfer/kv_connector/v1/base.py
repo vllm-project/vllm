@@ -731,6 +731,14 @@ class KVConnectorBase_V1(ABC):
         """Whether pending transfers can release blocks instead of preemption."""
         return False
 
+    def holds_blocks_only_for_remote_readers(self) -> bool:
+        """Whether every delayed free this connector requests (from
+        `request_finished()` or `register_finished_partial_tail()`) only keeps
+        blocks for a remote engine to read. If so, an abort-mode pause may
+        free them without waiting; otherwise (e.g. an async save in flight)
+        the pause waits for the connector to report them finished."""
+        return False
+
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
         the engine main loop to keep stepping (e.g. a P-side request whose

@@ -51,6 +51,9 @@ class TransferEntry:
     state: TransferState
     # The request finished (e.g. was aborted) while the entry was open.
     request_finished: bool = False
+    # EXPORT only: the blocks are kept only for a remote reader, so an abort
+    # may free them without waiting for the connector.
+    droppable: bool = False
 
     @property
     def request_id(self) -> str:
@@ -70,12 +73,18 @@ class KVTransferLedger:
 
     # ---- open ------------------------------------------------------------
 
-    def open_export(self, request: Request) -> TransferEntry:
-        """A finished request's blocks are kept for a remote reader."""
+    def open_export(self, request: Request, droppable: bool = False) -> TransferEntry:
+        """A finished request's blocks are kept for a remote reader or a
+        connector's async save. `droppable`: only a remote reader needs them."""
         key = (request.request_id, TransferDirection.EXPORT)
         entry = self._entries.get(key)
         if entry is None:
-            entry = TransferEntry(request, TransferDirection.EXPORT, TransferState.OPEN)
+            entry = TransferEntry(
+                request,
+                TransferDirection.EXPORT,
+                TransferState.OPEN,
+                droppable=droppable,
+            )
             self._entries[key] = entry
             self._num_exports += 1
         return entry
@@ -141,9 +150,14 @@ class KVTransferLedger:
         return entry
 
     def drop_exports(self) -> list[TransferEntry]:
-        """Forget every export: the engine stops holding blocks for remote
-        readers (abort). The caller frees the blocks."""
-        keys = [k for k in self._entries if k[1] == TransferDirection.EXPORT]
+        """Forget every droppable export: the engine stops holding blocks for
+        remote readers (abort). The caller frees the blocks. Other exports
+        stay until the connector reports them finished."""
+        keys = [
+            k
+            for k, e in self._entries.items()
+            if k[1] == TransferDirection.EXPORT and e.droppable
+        ]
         return [e for k in keys if (e := self.close(*k)) is not None]
 
     def mark_finished(self, request: Request) -> None:

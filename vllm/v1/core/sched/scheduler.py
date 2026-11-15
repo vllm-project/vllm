@@ -3206,13 +3206,15 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         self._unreserve_parked(request)
         self._set_kv_fetch_stage(request, None)
-        connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        kv_delay_free, kv_xfer_params = self._connector_finished(request)
+        connector_delay_free_blocks = kv_delay_free
 
         # EC Connector: mirror the KV hook. The contract requires firing
         # before the encoder cache is freed so the connector can inspect
         # per-request state (e.g. which mm_hashes it recorded during
         # save_caches()) and emit ec_transfer_params for the response body.
         ec_xfer_params: dict[str, Any] | None = None
+        ec_delay_free = False
         if self.ec_connector is not None:
             ec_delay_free, ec_xfer_params = self.ec_connector.request_finished(request)
             connector_delay_free_blocks |= ec_delay_free
@@ -3226,7 +3228,14 @@ class Scheduler(SchedulerInterface):
 
         if connector_delay_free_blocks:
             # A remote reader (or an async save) still needs the blocks.
-            self.ledger.open_export(request)
+            self.ledger.open_export(
+                request,
+                droppable=(
+                    not ec_delay_free
+                    and self.connector is not None
+                    and self.connector.holds_blocks_only_for_remote_readers()
+                ),
+            )
         if delay_free_blocks:
             # An import is in flight; its completion frees the blocks.
             self.ledger.mark_finished(request)
@@ -3371,8 +3380,10 @@ class Scheduler(SchedulerInterface):
 
     def drop_retained_exports(self) -> int:
         """Stop holding finished requests' blocks for remote readers: free them
-        now. Used by abort-mode pauses. A completion the connector reports
-        later for one of them is ignored (no entry). Returns the count."""
+        now. Used by abort-mode pauses. Exports a connector also holds for
+        other reasons (e.g. an async save) are kept. A completion the connector
+        reports later for a dropped one is ignored (no entry). Returns the
+        count."""
         entries = self.ledger.drop_exports()
         for entry in entries:
             if entry.request.request_id in self.requests:
@@ -3386,7 +3397,8 @@ class Scheduler(SchedulerInterface):
         mode   compute            outputs   KV transfers (ledger)
         keep   nothing scheduled  flushed   ignored: they outlive the pause
         wait   drained            flushed   nothing pins a block
-        abort  drained            flushed   nothing pins a block (exports dropped)
+        abort  drained            flushed   nothing pins a block (remote-read
+                                            exports dropped)
         keep+clear behaves like wait here: a cache reset needs every block back.
         """
         if self.finished_req_ids or self.dropped_streaming_updates:
