@@ -834,6 +834,9 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    # The metadata class ``build`` creates (and builds the block mask of). A
+    # subclass may name its own, e.g. one with another ``get_mask_mod``.
+    metadata_cls: ClassVar[type[FlexAttentionMetadata]] = FlexAttentionMetadata
 
     def __init__(
         self,
@@ -1100,7 +1103,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 logical_mask_mod = self.custom_logical_mask_mod
             sliding_window = self.sliding_window
 
-        out = FlexAttentionMetadata(
+        out = self.metadata_cls(
             causal=common_attn_metadata.causal,
             logical_mask_mod=logical_mask_mod,
             sliding_window=sliding_window,

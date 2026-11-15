@@ -58,8 +58,11 @@ class EncoderOnlyAttention(Attention):
         scale: float,
         cache_config: CacheConfig | None = None,
         attn_type: str | None = None,
+        attn_backend: type[AttentionBackend] | None = None,
         **kwargs,
     ):
+        """`attn_backend` replaces the selected backend (e.g. a model's own
+        subclass); it is wrapped for non-causal metadata like the default."""
         dtype = torch.get_default_dtype()
 
         if cache_config is not None:
@@ -67,14 +70,12 @@ class EncoderOnlyAttention(Attention):
         else:
             kv_cache_dtype = "auto"
 
-        underlying_attn_backend = get_attn_backend(
+        underlying_attn_backend = attn_backend or get_attn_backend(
             head_size,
             dtype,
             kv_cache_dtype,
             attn_type=AttentionType.ENCODER_ONLY,
         )
-
-        attn_backend = create_encoder_only_attention_backend(underlying_attn_backend)
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_ONLY, (
@@ -86,7 +87,7 @@ class EncoderOnlyAttention(Attention):
             head_size=head_size,
             scale=scale,
             cache_config=cache_config,
-            attn_backend=attn_backend,
+            attn_backend=create_encoder_only_attention_backend(underlying_attn_backend),
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,
         )

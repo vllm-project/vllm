@@ -1662,3 +1662,17 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def register_model_config(
+    architecture: str, config_cls: type[VerifyAndUpdateConfig]
+) -> None:
+    """Register the config hook of an architecture (e.g. from a plugin), as
+    `MODELS_CONFIG_MAP` does for in-tree models."""
+    existing = MODELS_CONFIG_MAP.get(architecture)
+    if existing is not None and existing is not config_cls:
+        raise ValueError(
+            f"Architecture {architecture} already has the config hook "
+            f"{existing.__name__}"
+        )
+    MODELS_CONFIG_MAP[architecture] = config_cls
