@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -13,6 +16,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 # Ordered by priority.
 _SUPPORTED_BACKENDS = (
@@ -77,15 +83,52 @@ def _mxfp8_backend_to_kernel_cls(
 
 
 class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
-    """MXFP8 MoE backend selection for one deployment configuration."""
+    """MXFP8 MoE backend selection for one deployment configuration.
+
+    Class-based view of the MXFP8 MoE kernel oracle (part of #37753).
+    Methods delegate to module-level helpers where needed, following
+    the same pattern as UnquantizedMoEKernelOracle.
+    """
 
     name = "Mxfp8"
     placeholder_backend = Fp8MoeBackend.NONE
+
+    def backend_enum_cls(self) -> type[Fp8MoeBackend]:
+        return Fp8MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[Fp8MoeBackend]:
+        return prioritize_humming(list(_SUPPORTED_BACKENDS))
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return _mxfp8_backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> Fp8MoeBackend:
+        return map_mxfp8_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
+        # MXFP8 uses fixed quant keys; ignore caller-provided values.
+        return select_mxfp8_moe_backend(moe_config)
+
+
+def map_mxfp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
+    """Map user's MoEBackend to Fp8MoeBackend for MXFP8."""
+    backend = _BACKEND_NAME_MAP.get(runner_backend)
+    if backend is None:
+        raise ValueError(
+            f"moe_backend='{runner_backend}' is not supported for "
+            f"MXFP8 MoE. Expected one of "
+            f"{list(_BACKEND_NAME_MAP.keys())}."
+        )
+    return backend
 
 
 def _select_kernel_cls(
@@ -109,29 +152,22 @@ def select_mxfp8_moe_backend(
         class for requantization sources, which have no kernel.
 
     """
-    # TODO: migrate to oracle base method.
     source = Mxfp8MoEKernelOracle.maybe_skip_for_requantization_source()
     if source is not None:
         return source
 
+    oracle = Mxfp8MoEKernelOracle(config, kMxfp8Static, kMxfp8Dynamic)
+    available_backends = oracle.get_priority_backends(config)
+
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        backend = _BACKEND_NAME_MAP.get(runner_backend)
-        if backend is None:
-            raise ValueError(
-                f"moe_backend='{runner_backend}' is not supported for "
-                f"MXFP8 MoE. Expected one of "
-                f"{list(_BACKEND_NAME_MAP.keys())}."
-            )
-        return backend, _select_kernel_cls(backend, config)
+        backend = oracle.map_backend(runner_backend)
+        return oracle.return_or_raise(backend, available_backends)
 
     # Auto-select: pick the first supported backend.
-    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
-    for backend in backends:
-        try:
-            experts_cls = _select_kernel_cls(backend, config)
-        except ValueError:
-            continue
-        return backend, experts_cls
+    for backend in available_backends:
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            return backend, kernel_cls
 
     raise ValueError("No MXFP8 MoE backends available.")
