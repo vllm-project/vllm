@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import torch
 
 
-@dataclass
+@dataclass(slots=True)
 class LoRAKernelMeta:
     token_lora_mapping: torch.Tensor
     token_indices_sorted_by_lora_ids: torch.Tensor

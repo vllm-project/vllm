@@ -1920,7 +1920,7 @@ class MLACommonBackend(AttentionBackend):
 class MLACommonPrefillMetadata:
     """Prefill Specific Metadata"""
 
-    @dataclass
+    @dataclass(slots=True)
     class ContextChunk:
         """One workspace-sized slice of paged context for a run of prefills."""
 
@@ -1951,7 +1951,7 @@ class MLACommonPrefillMetadata:
         def num_requests(self) -> int:
             return self.request_slice.stop - self.request_slice.start
 
-    @dataclass
+    @dataclass(slots=True)
     class ChunkedContextMetadata:
         context_lens: torch.Tensor
         workspace: torch.Tensor
@@ -2031,7 +2031,7 @@ M = TypeVar("M", bound=MLACommonMetadata)
 A = TypeVar("A", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class MLADims:
     q_lora_rank: int | None
     kv_lora_rank: int
@@ -2216,7 +2216,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _ContextChunkPlan:
     """Request-space layout of one context chunk, before tensors are built."""
 
