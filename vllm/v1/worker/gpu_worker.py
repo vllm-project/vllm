@@ -148,6 +148,32 @@ def _min_across_ranks(value: int) -> int:
     return all_reduce_int(get_world_group().cpu_group, value)
 
 
+def _require_extensible_kv_cache_agreement(flag: bool) -> None:
+    """Fail loudly when workers disagree on `enable_extensible_kv_cache`.
+
+    The flag gates a world-group all-reduce in `initialize_from_config`: a rank
+    that resolved it differently takes the other branch and waits there instead
+    of raising, so the mismatch shows up as a silent hang after weight loading
+    rather than an error. Workers that do not run identical vLLM builds resolve
+    different defaults for it, which is exactly how this was observed.
+    """
+    group = get_world_group().cpu_group
+    if group.size() == 1:
+        return
+    enabled = int(flag)
+    lo = all_reduce_int(group, enabled, ReduceOp.MIN)
+    hi = all_reduce_int(group, enabled, ReduceOp.MAX)
+    if lo != hi:
+        raise RuntimeError(
+            "enable_extensible_kv_cache differs across workers "
+            f"(min={lo}, max={hi}); all workers must agree, otherwise the "
+            "block-count all-reduce in initialize_from_config deadlocks. "
+            "Check that every worker runs the same vLLM build, or set "
+            "--enable-extensible-kv-cache/--disable-extensible-kv-cache "
+            "explicitly."
+        )
+
+
 def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     return (
@@ -969,6 +995,9 @@ class Worker(WorkerBase):
             else self._maybe_get_memory_pool_context(tag="runtime")
         )
         with runtime_pool:
+            _require_extensible_kv_cache_agreement(
+                self.cache_config.enable_extensible_kv_cache
+            )
             if self.cache_config.enable_extensible_kv_cache:
                 self.model_runner.initialize_kv_cache(
                     kv_cache_config,
