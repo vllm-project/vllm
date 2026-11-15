@@ -95,7 +95,7 @@ if _prefix_lm_fa_available() and not _fa4_available():
         create_vllm_config,
     )
     from vllm.config import set_current_vllm_config
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
 if _prefix_lm_fa_available():
     from vllm.v1.attention.backends.triton_attn import (
@@ -993,7 +993,7 @@ def test_triton_prefix_lm_matches_dense_reference(head_size: int, with_decode: b
         randomize_blocks=True,
     )
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
