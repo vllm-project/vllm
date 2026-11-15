@@ -41,12 +41,12 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -713,7 +713,7 @@ class DotsOCRForCausalLM(
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
+            self.language_model: Qwen3ForCausalLM = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=self.config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -838,10 +838,10 @@ class DotsOCRForCausalLM(
         # Document pages are usually large, so padding tiny images up to 64
         # tokens costs little.
         min_budget = 64
-        # Max: 512. Budgets grow by 2x, so an image just above a budget is
-        # padded by up to ~2x. Measured on RTX 3090/4090 and A100, padding to
-        # budgets above 512 costs more than the graph saves, so larger batches
-        # fall back to eager. Override with encoder_cudagraph_token_budgets.
+        # Retain the conservative 512-token default from the original
+        # measurements. Larger defaults need new benchmarks with the manager's
+        # finer budgets and shared buffers. Override with
+        # encoder_cudagraph_token_budgets.
         max_budget = min(
             512,
             vllm_config.scheduler_config.max_num_batched_tokens,

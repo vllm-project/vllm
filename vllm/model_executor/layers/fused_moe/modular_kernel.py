@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    check_activation_quant_fallback,
 )
 from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
@@ -140,7 +141,7 @@ class FusedMoEActivationFormat(Enum):
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
-@dataclass
+@dataclass(slots=True)
 class ExpertTokensMetadata:
     """Metadata regarding expert-token routing."""
 
@@ -493,6 +494,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        a1_scale: torch.Tensor | None = None,
     ) -> PrepareMonolithicResultType:
         """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
@@ -502,6 +504,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
             defer input quantization to the FusedMoEExpertsModular
+        - a1_scale: The scales of `a1` when the caller already quantized it.
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -664,15 +667,16 @@ class FusedMoEExperts(ABC):
         def _make_reason(reason: str) -> str:
             return f"kernel does not support {reason}"
 
+        executed_key = cls.executed_activation_key(weight_key, activation_key)
         if not cls._supports_current_device():
             return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
-        elif not cls._supports_quant_scheme(weight_key, activation_key):
+        elif not cls._supports_quant_scheme(weight_key, executed_key):
             return False, _make_reason(
-                f"quantization scheme {weight_key}x{activation_key}"
+                f"quantization scheme {weight_key}x{executed_key}"
             )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason(
@@ -687,7 +691,7 @@ class FusedMoEExperts(ABC):
         elif moe_config.require_decomposed_backend and cls.is_monolithic():
             return False, _make_reason("routes adjusted after routing")
         elif not cls._supports_routing_method(
-            moe_config.routing_method, weight_key, activation_key
+            moe_config.routing_method, weight_key, executed_key
         ):
             return False, _make_reason(f"routing method {moe_config.routing_method}")
         elif not cls._supports_router_logits_dtype(
@@ -707,6 +711,10 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif reason := check_activation_quant_fallback(
+            cls.__name__, activation_key, executed_key
+        ):
+            return False, reason
         return True, None
 
     @staticmethod
@@ -724,6 +732,17 @@ class FusedMoEExperts(ABC):
         non-gated MoE models like Nemotron-Nano.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_key`. Weight-only kernels return None; `is_supported_config`
+        then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids, the
+        fallback."""
+        return activation_key
 
     @staticmethod
     @abstractmethod
@@ -1241,7 +1260,7 @@ class FusedMoEKernelModularImpl:
         Returns the workspace tensors, output tensor, and whether the output
         uses a prepare/finalize-provided allocation.
         """
-        assert M_full > 0 and M_chunk > 0
+        assert M_full >= 0 and M_chunk >= 0
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
@@ -1283,7 +1302,8 @@ class FusedMoEKernelModularImpl:
         # externally aliased. The workspace manager profiles and locks a
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
-        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        # Idle collective ranks still need the workspace manager initialized.
+        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
@@ -1439,13 +1459,9 @@ class FusedMoEKernelModularImpl:
             a1q, w1, w2, topk_ids
         )
 
-        # This happens when none of the tokens from the all2all reach this
-        # EP rank. Also, note that this is only relevant for CUDAGraph
-        # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
-        # low-latency kernels are always batched and can never run into
-        # the tensor.numel() == 0 case.
-        if M_full == 0:
+        # After dispatch, an EP rank may have no work. With passthrough,
+        # dispatch happens inside the experts, so idle ranks must participate.
+        if M_full == 0 and not self.moe_parallel_config.use_passthrough_all2all:
             out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
             return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
@@ -1730,10 +1746,12 @@ class FusedMoEKernelMonolithicImpl:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
+        `a1q_scale` is given when the caller already quantized `hidden_states`.
         """
         # Only experts with _supports_hash_routing() accept these.
         hash_kwargs: dict[str, Any] = {}
@@ -1747,6 +1765,7 @@ class FusedMoEKernelMonolithicImpl:
             router_logits=router_logits,
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+            a1_scale=a1q_scale,
         )
 
         routing_replay_out = None
@@ -1932,6 +1951,7 @@ class FusedMoEKernel:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1950,6 +1970,7 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            a1q_scale=a1q_scale,
         )
 
     def supports_precomputed_routing(self) -> bool:

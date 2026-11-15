@@ -168,8 +168,7 @@ guide: |
     --tool-call-parser hy_v3 \
     --reasoning-parser hy_v3 \
     --enable-auto-tool-choice \
-    --served-model-name hy3-preview \
-    --gpu-memory-utilization 0.90
+    --served-model-name hy3-preview
   ```
 
   MTP (recommended on AMD for lower latency, same flags as the NVIDIA path):
@@ -182,8 +181,7 @@ guide: |
     --tool-call-parser hy_v3 \
     --reasoning-parser hy_v3 \
     --enable-auto-tool-choice \
-    --served-model-name hy3-preview \
-    --gpu-memory-utilization 0.90
+    --served-model-name hy3-preview
   ```
 
   ### Serving on 8×H200 or 8×H20-3e(141GB)

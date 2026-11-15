@@ -1646,6 +1646,69 @@ class TestMessagesFullConverter:
         assert result.content[0].text == ""
 
 
+class TestZeroTokenPrewarm:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_zero_token_request_is_rejected_by_messages_route(self, stream):
+        app, handler = TestCacheSalt._make_api_app()
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 0,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": stream,
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        message = response.json()["error"]["message"]
+        assert "max_tokens=0" in message
+        assert "max_tokens=1" in message
+        handler.create_messages.assert_not_awaited()
+
+    def test_negative_max_tokens_are_rejected_by_messages_route(self):
+        app, handler = TestCacheSalt._make_api_app()
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": -1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert "max_tokens must be positive" in response.json()["error"]["message"]
+        handler.create_messages.assert_not_awaited()
+
+    def test_positive_max_tokens_still_reaches_messages_handler(self):
+        app, handler = TestCacheSalt._make_api_app()
+        handler.create_messages.side_effect = None
+        handler.create_messages.return_value = AnthropicMessagesResponse(
+            id="msg-positive",
+            content=[],
+            model="test-model",
+            usage={"input_tokens": 1, "output_tokens": 0},
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK
+        handler.create_messages.assert_awaited_once()
+
+
 # ======================================================================
 # cache_salt pass-through (Issue #46688)
 # ======================================================================
