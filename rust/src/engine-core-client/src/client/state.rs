@@ -51,12 +51,14 @@ enum LoraPhase {
 ///
 /// These counters come from `scheduler_stats` on the normal engine output path
 /// and are the preferred routing signal once available.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EngineLoadSnapshot {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EngineLoadSnapshot {
     /// Requests still counted on the scheduler's waiting side.
-    waiting: usize,
+    pub waiting: usize,
     /// Requests currently counted on the scheduler's running side.
-    running: usize,
+    pub running: usize,
+    /// Fraction of this engine's KV cache blocks in use; `1.0` means 100%.
+    pub kv_cache_usage: f64,
 }
 
 #[derive(Debug, Default)]
@@ -329,8 +331,22 @@ impl RequestRegistry {
             EngineLoadSnapshot {
                 waiting: stats.num_waiting_reqs as usize,
                 running: stats.num_running_reqs as usize,
+                kv_cache_usage: stats.kv_cache_usage,
             },
         )
+    }
+
+    /// Snapshot the latest scheduler-side load of every connected engine,
+    /// keyed by engine index. Engines that have not reported scheduler stats
+    /// yet map to `None`.
+    pub fn load_snapshots(&self) -> BTreeMap<u32, Option<EngineLoadSnapshot>> {
+        self.routing_per_engine
+            .iter()
+            .filter_map(|(engine_id, state)| {
+                let index = engine_id.engine_index()?;
+                Some((index, state.last_scheduler_stats))
+            })
+            .collect()
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.
@@ -916,6 +932,7 @@ mod tests {
             last_scheduler_stats: Some(EngineLoadSnapshot {
                 waiting: 0,
                 running: 2,
+                kv_cache_usage: 0.0,
             }),
             ..Default::default()
         };
@@ -930,6 +947,7 @@ mod tests {
             last_scheduler_stats: Some(EngineLoadSnapshot {
                 waiting: 3,
                 running: 2,
+                kv_cache_usage: 0.0,
             }),
             ..Default::default()
         };
@@ -950,14 +968,16 @@ mod tests {
             0,
             EngineLoadSnapshot {
                 waiting: 3,
-                running: 2
+                running: 2,
+                kv_cache_usage: 0.0,
             }
         ));
         assert!(registry.apply_scheduler_counts(
             1,
             EngineLoadSnapshot {
                 waiting: 0,
-                running: 1
+                running: 1,
+                kv_cache_usage: 0.0,
             }
         ));
 
@@ -987,6 +1007,7 @@ mod tests {
                     EngineLoadSnapshot {
                         waiting: 0,
                         running,
+                        kv_cache_usage: 0.0,
                     },
                 );
             }
@@ -1017,6 +1038,7 @@ mod tests {
                     EngineLoadSnapshot {
                         waiting: 0,
                         running: 0,
+                        kv_cache_usage: 0.0,
                     },
                 );
             }
@@ -1037,6 +1059,7 @@ mod tests {
         let snapshot = EngineLoadSnapshot {
             waiting: 0,
             running: 10,
+            kv_cache_usage: 0.0,
         };
         registry.apply_scheduler_counts(0, snapshot);
         registry.apply_scheduler_counts(
@@ -1044,6 +1067,7 @@ mod tests {
             EngineLoadSnapshot {
                 waiting: 0,
                 running: 12,
+                kv_cache_usage: 0.0,
             },
         );
         for index in 0..4 {
@@ -1063,6 +1087,7 @@ mod tests {
                 EngineLoadSnapshot {
                     waiting: 0,
                     running: 0,
+                    kv_cache_usage: 0.0,
                 },
             );
         }
@@ -1085,6 +1110,7 @@ mod tests {
                 EngineLoadSnapshot {
                     waiting: 0,
                     running: 10,
+                    kv_cache_usage: 0.0,
                 },
             );
         }
@@ -1108,6 +1134,7 @@ mod tests {
             EngineLoadSnapshot {
                 waiting: 0,
                 running: 0,
+                kv_cache_usage: 0.0,
             },
         );
         registry.apply_scheduler_counts(
@@ -1115,6 +1142,7 @@ mod tests {
             EngineLoadSnapshot {
                 waiting: 0,
                 running: 1,
+                kv_cache_usage: 0.0,
             },
         );
 
@@ -1144,6 +1172,7 @@ mod tests {
             EngineLoadSnapshot {
                 waiting: 0,
                 running: 0,
+                kv_cache_usage: 0.0,
             },
         );
 
@@ -1154,6 +1183,7 @@ mod tests {
             EngineLoadSnapshot {
                 waiting: 0,
                 running: 1,
+                kv_cache_usage: 0.0,
             },
         );
         // `new` is admitted after that snapshot, so only it is counted on top.

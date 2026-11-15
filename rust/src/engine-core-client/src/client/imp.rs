@@ -19,7 +19,8 @@ use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    EngineLoadSnapshot, OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver,
+    UtilityRegistry,
 };
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
@@ -221,6 +222,13 @@ impl ClientInner {
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot the latest scheduler-side load of every connected engine,
+    /// keyed by engine index. Engines that have not reported scheduler stats
+    /// yet map to `None`.
+    pub fn load_snapshots(&self) -> BTreeMap<u32, Option<EngineLoadSnapshot>> {
+        self.request_reg.lock().load_snapshots()
     }
 
     /// Snapshot the adapter names of tracked LoRA requests as

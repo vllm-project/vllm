@@ -46,6 +46,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::SchedulerStats;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
@@ -2250,6 +2251,139 @@ async fn control_reports_server_and_model_info() {
     assert!(!model.supports_multimodal);
     assert!(model.reasoning_parser.is_empty());
     assert!(model.tool_call_parser.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_get_load_reports_scheduler_stats() {
+    let mut ready = default_ready_response();
+    ready.num_gpu_blocks = 100;
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            EngineId::from_engine_index(0),
+            ready,
+            Arc::new(FakeTextBackend::default()),
+            None,
+            |_, push| {
+                boxed_test_future(async move {
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 0,
+                            scheduler_stats: Some(Box::new(SchedulerStats {
+                                num_running_reqs: 3,
+                                num_waiting_reqs: 2,
+                                kv_cache_usage: 0.25,
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    // Scheduler stats are pushed asynchronously; poll until the first one
+    // has been applied.
+    let load = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let load = client
+                .get_load(pb::GetLoadRequest {
+                    include_per_rank: true,
+                })
+                .await
+                .expect("get load")
+                .into_inner();
+            if load.running_requests.is_some() {
+                break load;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("engine should report scheduler stats");
+
+    assert_eq!(load.instance_id, "test-instance");
+    assert!(load.timestamp_unix_nanos > 0);
+    assert_eq!(load.running_requests, Some(3));
+    assert_eq!(load.waiting_requests, Some(2));
+    assert_eq!(load.used_kv_blocks, Some(25));
+    assert_eq!(load.total_kv_blocks, 100);
+    assert_eq!(load.ranks.len(), 1);
+    let rank = &load.ranks[0];
+    assert_eq!(rank.data_parallel_rank, 0);
+    assert_eq!(rank.running_requests, Some(3));
+    assert_eq!(rank.waiting_requests, Some(2));
+    assert_eq!(rank.used_kv_blocks, Some(25));
+    assert_eq!(rank.total_kv_blocks, 100);
+
+    let load = client
+        .get_load(pb::GetLoadRequest {
+            include_per_rank: false,
+        })
+        .await
+        .expect("get load without ranks")
+        .into_inner();
+    assert!(load.ranks.is_empty());
+    assert_eq!(load.running_requests, Some(3));
+    assert_eq!(load.total_kv_blocks, 100);
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_get_load_leaves_dynamic_fields_unset_without_scheduler_stats() {
+    let mut ready = default_ready_response();
+    ready.num_gpu_blocks = 100;
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-load-idle".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend::default()),
+            None,
+            |_, _| boxed_test_future(async {}),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    let load = client
+        .get_load(pb::GetLoadRequest {
+            include_per_rank: true,
+        })
+        .await
+        .expect("get load")
+        .into_inner();
+    assert_eq!(load.instance_id, "test-instance");
+    assert_eq!(load.running_requests, None);
+    assert_eq!(load.waiting_requests, None);
+    assert_eq!(load.used_kv_blocks, None);
+    assert_eq!(load.total_kv_blocks, 100);
+    assert_eq!(load.ranks.len(), 1);
+    let rank = &load.ranks[0];
+    assert_eq!(rank.data_parallel_rank, 0);
+    assert_eq!(rank.running_requests, None);
+    assert_eq!(rank.total_kv_blocks, 100);
 
     server_task.abort();
 }
