@@ -59,6 +59,7 @@ from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
+from .prefix_token_cache import PrefixTokenCache
 
 if TYPE_CHECKING:
     from collections.abc import Set
@@ -1060,6 +1061,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+
+        if self.tokenizer is not None:
+            self._prefix_token_cache = PrefixTokenCache.maybe_create(self.tokenizer)
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         # Skip for mock configs

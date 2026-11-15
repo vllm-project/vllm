@@ -127,6 +127,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("num_cpu_blocks must be a positive integer")
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
+        # Requeue a finished request's CPU prefix by last use and free CPU
+        # blocks tail first, so the CPU tier evicts like an LRU of its size.
+        cpu_lru_eviction = bool(extra_config.get("cpu_lru_eviction", False))
 
         kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
         if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
@@ -184,13 +187,15 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",
+            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s, "
+            "cpu_lru_eviction=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
             "lazy" if lazy_offload else "eager",
             kv_offload_backend,
             disk_path or "none",
+            cpu_lru_eviction,
         )
         if num_cpu_blocks is not None:
             logger.info(
@@ -220,6 +225,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache if disk_mode else False,
                 num_cpu_blocks=num_cpu_blocks,
                 aligned_num_cpu_blocks=aligned_num_cpu_blocks,
+                cpu_lru_eviction=cpu_lru_eviction,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
