@@ -6,16 +6,21 @@ import pytest
 import torch
 
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    CircularBufferManager,
+    CrossAttentionManager,
+    FullAttentionManager,
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CircularBufferSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheSpec,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
@@ -27,6 +32,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     make_kv_cache_config,
+    make_kv_cache_group,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -526,14 +532,13 @@ def test_host_buffer_save_hybrid_mamba_align_copies_new_blocks():
     assert len(ssm_saved) == len(set(ssm_saved)) > 1
 
 
-@pytest.mark.parametrize("group_kind", ["uniform_type", "chunked_local"])
+@pytest.mark.parametrize("group_kind", ["mixed_head_sizes", "chunked_local"])
 def test_host_buffer_save_resaves_straddling_block_of_other_attention_groups(
     group_kind: str,
 ):
-    """A UniformTypeKVCacheSpecs group (layers with different head sizes)
-    reaches the scheduler as one of its layer specs, and chunked local
-    attention blocks hold token positions too. Both are saved by position, so
-    the block straddling the chunk boundary is copied again."""
+    """A full attention group whose layers have different head sizes, and a
+    chunked local attention group, hold token positions too. Both are saved by
+    position, so the block straddling the chunk boundary is copied again."""
     block_size, num_tokens, token_budget = 16, 40, 24
     vllm_config = create_vllm_config(
         block_size=block_size,
@@ -541,26 +546,26 @@ def test_host_buffer_save_resaves_straddling_block_of_other_attention_groups(
         kv_role="kv_producer",
     )
     layer_spec = dict(block_size=block_size, num_kv_heads=4, dtype=torch.float16)
-    if group_kind == "uniform_type":
-        spec = UniformTypeKVCacheSpecs.from_specs(
+    if group_kind == "mixed_head_sizes":
+        group = KVCacheGroup.from_layers(
             {
-                "layer0": FullAttentionSpec(head_size=16, **layer_spec),
-                "layer1": FullAttentionSpec(head_size=32, **layer_spec),
+                "layer0": FullAttentionManager.layer_config(
+                    AttentionSpec(head_size=16, **layer_spec)
+                ),
+                "layer1": FullAttentionManager.layer_config(
+                    AttentionSpec(head_size=32, **layer_spec)
+                ),
             }
         )
-        assert spec is not None
     else:
-        spec = ChunkedLocalAttentionSpec(
-            head_size=16, attention_chunk_size=64, **layer_spec
+        group = make_kv_cache_group(
+            ["layer0", "layer1"],
+            AttentionSpec(head_size=16, **layer_spec),
+            ChunkedLocalAttentionManager,
+            ChunkedLocalAttentionManager.config(attention_chunk_size=64),
         )
     kv_cache_config = generate_scheduler_kv_cache_config(
-        [
-            KVCacheConfig(
-                num_blocks=100,
-                kv_cache_tensors=[],
-                kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
-            )
-        ]
+        [KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=[group])]
     )
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
     connector_scheduler = scheduler.get_kv_connector().connector_scheduler
@@ -589,34 +594,59 @@ _ATTN = dict(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16)
 _MAMBA = dict(block_size=16, shapes=((16,),), dtypes=(torch.float16,))
 
 
+def _group(
+    spec: KVCacheSpec, manager_cls: type[SingleTypeKVCacheManager], **params
+) -> KVCacheGroup:
+    return make_kv_cache_group(
+        ["layer"], spec, manager_cls, manager_cls.config(**params)
+    )
+
+
 @pytest.mark.parametrize(
-    ("spec", "rule"),
+    ("group", "rule"),
     [
-        (FullAttentionSpec(**_ATTN), ("position", 32)),
-        (FullAttentionSpec(**_ATTN, dcp_sharded=False), ("position", 16)),
-        (SlidingWindowSpec(**_ATTN, sliding_window=64), ("position", 32)),
-        (ChunkedLocalAttentionSpec(**_ATTN, attention_chunk_size=64), ("position", 32)),
-        (MambaSpec(**_MAMBA, num_speculative_blocks=2), ("ssm_state", 2)),
-        (MambaSpec(**_MAMBA, mamba_cache_mode="align"), ("allocated", 0)),
+        (_group(AttentionSpec(**_ATTN), FullAttentionManager), ("position", 32)),
+        (
+            _group(AttentionSpec(**_ATTN, dcp_sharded=False), FullAttentionManager),
+            ("position", 16),
+        ),
+        (
+            _group(AttentionSpec(**_ATTN), SlidingWindowManager, sliding_window=64),
+            ("position", 32),
+        ),
+        (
+            _group(
+                AttentionSpec(**_ATTN),
+                ChunkedLocalAttentionManager,
+                attention_chunk_size=64,
+            ),
+            ("position", 32),
+        ),
+        (
+            _group(MambaSpec(**_MAMBA), MambaManager, num_speculative_blocks=2),
+            ("ssm_state", 2),
+        ),
+        (
+            _group(MambaSpec(**_MAMBA), MambaManager, mamba_cache_mode="align"),
+            ("allocated", 0),
+        ),
     ],
 )
-def test_host_buffer_save_rule(spec, rule):
+def test_host_buffer_save_rule(group, rule):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         host_buffer_save_rule,
     )
 
-    assert host_buffer_save_rule(spec, dcp_size=2) == rule
+    assert host_buffer_save_rule(group, dcp_size=2) == rule
 
 
-@pytest.mark.parametrize(
-    "spec", [CircularBufferSpec(**_ATTN), CrossAttentionSpec(**_ATTN)]
-)
-def test_host_buffer_save_rule_rejects_unknown_spec(spec):
+@pytest.mark.parametrize("manager_cls", [CircularBufferManager, CrossAttentionManager])
+def test_host_buffer_save_rule_rejects_unknown_manager(manager_cls):
     """A KV cache group with no host-buffer save rule fails loudly instead of
     falling back to copying whatever blocks were allocated."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         host_buffer_save_rule,
     )
 
-    with pytest.raises(NotImplementedError, match=type(spec).__name__):
-        host_buffer_save_rule(spec, dcp_size=1)
+    with pytest.raises(NotImplementedError, match=manager_cls.__name__):
+        host_buffer_save_rule(_group(AttentionSpec(**_ATTN), manager_cls), dcp_size=1)

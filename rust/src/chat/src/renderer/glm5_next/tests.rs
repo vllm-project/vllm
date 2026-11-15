@@ -13,7 +13,7 @@ use super::writer::{ControlTokenizer, Glm5PromptWriter};
 use super::{Glm5NextChatRenderer, encoding};
 use crate::renderer::hf::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
 use crate::request::{
-    ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
+    ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
 };
 use crate::{AssistantContentBlock, AssistantToolCall, ChatRenderer, EffortValue};
 
@@ -287,6 +287,43 @@ fn continue_final_message_matches_existing_hf_renderer() {
                 "{name}: {final_message:?}"
             );
         }
+    }
+}
+
+/// A tool search result made of tool references expands into the referenced
+/// deferred tools' definitions, as the checkpoint templates do.
+#[test]
+fn tool_references_expand_like_existing_hf_renderer() {
+    let native = Glm5NextChatRenderer::default();
+    let mut request = tool_request(1);
+    request.messages[3] =
+        ChatMessage::tool_response(vec![ChatContentPart::tool_reference("lookup")], "call_0");
+    for tools in [
+        &mut request.tool_context.initial_tools,
+        &mut request.tool_context.effective_tools,
+    ] {
+        tools[0].defer_loading = Some(true);
+    }
+    for (name, template) in CHECKPOINT_TEMPLATES {
+        let prompt = native.render(&request).unwrap().prompt;
+        for content_format in [
+            ChatTemplateContentFormatOption::OpenAi,
+            ChatTemplateContentFormatOption::Auto,
+        ] {
+            let hf =
+                HfChatRenderer::new(Some(template.into()), HashMap::new(), None, content_format)
+                    .unwrap();
+            assert_eq!(
+                prompt,
+                hf.render(&request).unwrap().prompt,
+                "{name} {content_format:?}"
+            );
+        }
+        let prompt = prompt.into_text().unwrap();
+        assert!(
+            prompt.contains("<tool_response><tools>\n{\"name\": \"lookup\""),
+            "{name}: {prompt}"
+        );
     }
 }
 

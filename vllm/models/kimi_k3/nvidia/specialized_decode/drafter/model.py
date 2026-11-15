@@ -139,6 +139,10 @@ def install_draft_fold(attn) -> None:
     from .attention import draft_forward_mqa
 
     if not attn.non_causal_multi_token_decode:
+        # A causal draft block: the TP decode folds its shared context
+        # (attention.causal_folded_decode), and DraftDcp serves it under DCP.
+        attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]
+        attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
         return
     attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
     attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]

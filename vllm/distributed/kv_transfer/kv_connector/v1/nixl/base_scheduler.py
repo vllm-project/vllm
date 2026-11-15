@@ -34,18 +34,17 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
@@ -56,27 +55,30 @@ logger = init_logger(__name__)
 HostBufferSaveRule = tuple[Literal["position", "ssm_state", "allocated"], int]
 
 
-def host_buffer_save_rule(spec: KVCacheSpec, dcp_size: int) -> HostBufferSaveRule:
-    """Return how host-buffer save selects `spec`'s blocks for each chunk.
+def host_buffer_save_rule(group: "KVCacheGroup", dcp_size: int) -> HostBufferSaveRule:
+    """Return how host-buffer save selects `group`'s blocks for each chunk.
 
-    Raises NotImplementedError for a spec it has no rule for, rather than
+    Raises NotImplementedError for a manager it has no rule for, rather than
     copying blocks that may not hold the chunk's KV.
     """
-    if isinstance(
-        spec, (FullAttentionSpec, SlidingWindowSpec, ChunkedLocalAttentionSpec)
+    manager_cls = group.manager_cls
+    if issubclass(
+        manager_cls,
+        (FullAttentionManager, SlidingWindowManager, ChunkedLocalAttentionManager),
     ):
         # Blocks map to token positions.
-        return "position", spec.block_size * (dcp_size if spec.dcp_sharded else 1)
-    if isinstance(spec, MambaSpec):
-        if spec.mamba_cache_mode == "align":
+        return "position", group.block_size * (dcp_size if group.dcp_sharded else 1)
+    if isinstance(params := group.manager_config.params, MambaManager.Params):
+        if params.mamba_cache_mode == "align":
             # "align" groups null and relocate state blocks, so the state slot
             # can't be found by position: copy the blocks allocated this step.
             return "allocated", 0
         # Each chunk rewrites the state in place: copy its slot once the last
         # chunk has written it.
-        return "ssm_state", spec.num_speculative_blocks
+        return "ssm_state", params.num_speculative_blocks
     raise NotImplementedError(
-        f"NIXL host-buffer save has no rule for {type(spec).__name__} KV cache groups"
+        "NIXL host-buffer save has no rule for KV cache groups managed by "
+        f"{manager_cls.__name__}"
     )
 
 
@@ -127,14 +129,13 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -172,8 +173,8 @@ class NixlBaseConnectorScheduler:
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -187,8 +188,8 @@ class NixlBaseConnectorScheduler:
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            g.manager_config.params.num_speculative_blocks
+            if isinstance(g.manager_config.params, MambaManager.Params)
             else None
             for g in kv_cache_config.transfer_groups
         ]
@@ -482,12 +483,10 @@ class NixlBaseConnectorScheduler:
     @cached_property
     def _save_rules(self) -> list[HostBufferSaveRule]:
         """Host-buffer save rule per KV cache group, before transfer-group
-        selection. The scheduler's config has no UniformTypeKVCacheSpecs:
-        generate_scheduler_kv_cache_config replaces each with one of its layer
-        specs."""
+        selection."""
         dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
         return [
-            host_buffer_save_rule(g.kv_cache_spec, dcp_size)
+            host_buffer_save_rule(g, dcp_size)
             for g in self.kv_cache_config.kv_cache_groups
         ]
 
