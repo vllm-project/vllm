@@ -65,6 +65,9 @@ from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_ATTN_IMPL,
     VLLM_MLA_ATTN_IMPL,
 )
+from vllm.model_executor.models.transformers.position_embeddings import (
+    find_position_embedding,
+)
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
@@ -436,31 +439,22 @@ class Base(
         if (layers := self._decoder_layers) is None:
             raise ValueError(f"Could not identify the decoder layers of {type(module)}")
         # attrgetter in case the module is nested (e.g. "text_model.layers")
-        module_list_idx = next(
-            i for i, name in enumerate(names) if attrgetter(name)(module) is layers
-        )
-
-        # Only consider position tables on the decoder containing the layers.
-        # A nested encoder or attention module can have its own position tables.
-        parent, _, _ = names[module_list_idx].rpartition(".")
+        layer_name = next(name for name in names if attrgetter(name)(module) is layers)
+        parent, _, _ = layer_name.rpartition(".")
         decoder = module.get_submodule(parent)
-        input_embeddings = set(self.model.get_input_embeddings().modules())
-        position_embeddings = {
-            maybe_prefix(parent, name)
-            for name, table in decoder.named_children()
-            if name in {"wpe", "embed_positions", "position_embeddings"}
-            and isinstance(table, nn.Embedding)
-            and table not in input_embeddings
-            and table.weight.requires_grad
-            and table.embedding_dim == self.text_config.hidden_size
-        }
+        position_name = find_position_embedding(
+            decoder, self.model.get_input_embeddings(), layers
+        )
+        if position_name is not None:
+            position_name = maybe_prefix(parent, position_name)
+            if not self.pp_group.is_first_rank:
+                # Incoming hidden states already include the learned positions.
+                attrsetter(position_name)(module, _MissingPositionEmbedding())
+            names = [name for name in names if name != position_name]
 
         # Layers before module list
+        module_list_idx = names.index(layer_name)
         for name in names[:module_list_idx]:
-            if not self.pp_group.is_first_rank and name in position_embeddings:
-                # Incoming hidden states already include the learned positions.
-                attrsetter(name)(module, _MissingPositionEmbedding())
-                continue
             if (
                 self.pp_group.is_first_rank
                 or (self._get_tie_word_embeddings() and self.pp_group.is_last_rank)
