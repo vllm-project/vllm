@@ -146,6 +146,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
+    VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
@@ -200,6 +202,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_STRICT_QUANT_SCHEME: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1368,6 +1371,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
+    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
+    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
+    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
+    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
+    "VLLM_FP8_MOE_REQUANT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
+    ),
+    "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT_ACT",
+        "a8w4",
+        ["a8w4", "a4w4", "a16w4"],
+        case_sensitive=False,
+    ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
@@ -1729,8 +1745,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
-    # fuse this into routing; the existing backend opt-in is still required.
+    # treats topk_id == -1 as a skip sentinel. Grouped routers apply it too;
+    # on ROCm AITER only with the model's opt-in under DeepEP v2.
     # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
     # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
@@ -1774,6 +1790,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+    ),
+    # Forbid kernels that run a different activation quantization than the
+    # checkpoint or quantization config requests (e.g. Marlin running FP8 W8A8
+    # layers as W8A16). Otherwise such fallbacks are allowed with a warning.
+    "VLLM_STRICT_QUANT_SCHEME": lambda: bool(
+        int(os.getenv("VLLM_STRICT_QUANT_SCHEME", "0"))
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(

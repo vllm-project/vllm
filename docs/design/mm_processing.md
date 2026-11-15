@@ -80,6 +80,8 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 | name                       | Architecture                               | Example HF Models                                     |
 | -------------------------- | ------------------------------------------ | ----------------------------------------------------- |
+| `deepseek-v4`              | `DeepseekV4ForConditionalGeneration`       | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`            |
+| `deepseek-v4.1`            | `DeepseekV41ForCausalLM`                   | `deepseek-ai/DeepSeek-V4.1-Flash`                     |
 | `gemma-3`                  | `Gemma3ForConditionalGeneration`           | `google/gemma-3-4b-it`, etc.                          |
 | `gemma-4`                  | `Gemma4ForConditionalGeneration`           | `google/gemma-4-E2B-it`, etc.                         |
 | `glm-4v`                   | `Glm4vForConditionalGeneration`            | `zai-org/GLM-4.1V-9B-Thinking`, etc.                  |
@@ -91,6 +93,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `kimi-k3`                  | `KimiK3ForConditionalGeneration`           | `moonshotai/Kimi-K3`                                  |
 | `llama-nemotron-vl-embed`  | `LlamaNemotronVLForEmbedding`              | `nvidia/llama-nemotron-embed-vl-1b-v2`                |
 | `llama-nemotron-vl-rerank` | `LlamaNemotronVLForSequenceClassification` | `nvidia/llama-nemotron-rerank-vl-1b-v2`               |
+| `llava-onevision`          | `LlavaOnevisionForConditionalGeneration`   | `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.     |
 | `mistral3`                 | `Mistral3ForConditionalGeneration`         | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
 | `nano-nemotron-vl`         | `NemotronH_Nano_VL_V2`                     | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`          |
 | `nano-nemotron-omni`       | `NemotronH_Nano_Omni_Reasoning_V3`         | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` |
@@ -99,6 +102,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `qwen2-vl`                 | `Qwen2VLForConditionalGeneration`          | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
 | `qwen2.5-omni`             | `Qwen2_5OmniModel`                         | `Qwen/Qwen2.5-Omni-3B`, etc.                          |
 | `qwen2.5-vl`               | `Qwen2_5_VLForConditionalGeneration`       | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
+| `qwen3-omni`               | `Qwen3OmniMoeForConditionalGeneration`     | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc.              |
 | `qwen3-vl`                 | `Qwen3VLForConditionalGeneration`          | `Qwen/Qwen3-VL-4B-Instruct`, etc.                     |
 | `qwen3-vl-moe`             | `Qwen3VLMoeForConditionalGeneration`       | `Qwen/Qwen3-VL-30B-A3B-Instruct`, etc.                |
 | `qwen3.5`                  | `Qwen3_5ForConditionalGeneration`          | `Qwen/Qwen3.5-0.8B`, etc.                             |

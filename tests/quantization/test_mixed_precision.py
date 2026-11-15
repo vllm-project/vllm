@@ -24,13 +24,13 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and versio
 ) >= version.parse("0.8.99")
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model_id: str
     tp: int
 
 
-@dataclass
+@dataclass(slots=True)
 class EvaluationConfig:
     model_name: str
 
