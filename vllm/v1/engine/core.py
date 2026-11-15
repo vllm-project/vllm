@@ -111,6 +111,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
+from vllm.v1.kv_identity import KVIdentity, KVIdentityTracker, is_known_kv_identity
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -124,6 +125,19 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+# Worker methods that change weights, for the KV identity. Custom worker
+# extensions cannot be detected; see docs/features/kv_identity.md.
+_WEIGHT_CHANGING_METHODS = frozenset(
+    {
+        "reload_weights",
+        "reset_weights",
+        "start_weight_update",
+        "start_draft_weight_update",
+        "update_weights",
+        "finish_weight_update",
+    }
+)
 
 
 class EngineCore:
@@ -281,6 +295,69 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+    def _set_kv_identity(self, vllm_config: VllmConfig) -> None:
+        checkpoint_digests: list[dict[str, str] | None] = self.collective_rpc(
+            "get_checkpoint_digest"
+        )
+        self._kv_identity = KVIdentityTracker(vllm_config, checkpoint_digests)
+        # Whether a weight update session targets the draft model.
+        self._draft_weight_update = False
+        identity = self._kv_identity.identity
+        vllm_config.cache_config.kv_identity = identity.digest
+        vllm_config.cache_config.kv_identity_components = identity.components
+        self.collective_rpc(
+            "set_kv_identity", args=(identity.digest, identity.components)
+        )
+        logger.info("KV identity: %s %s", identity.digest, identity.components)
+
+    def _change_kv_identity(self, identity: KVIdentity) -> None:
+        """Publish the identity of changed weights."""
+        cache_config = self.vllm_config.cache_config
+        if identity.digest == cache_config.kv_identity or (
+            not is_known_kv_identity(identity.digest)
+            and not is_known_kv_identity(cache_config.kv_identity)
+        ):
+            return
+        cache_config.kv_identity = identity.digest
+        cache_config.kv_identity_components = identity.components
+        self.collective_rpc(
+            "set_kv_identity", args=(identity.digest, identity.components)
+        )
+        logger.info("KV identity: %s %s", identity.digest, identity.components)
+
+    def _weight_rpc(
+        self,
+        method: str,
+        timeout: float | None,
+        args: tuple,
+        kwargs: dict[str, Any] | None,
+    ) -> list:
+        """Run a worker method that changes weights, keeping the KV identity
+        unknown from before the change until the new weights are identified."""
+        if method == "start_draft_weight_update":
+            result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+            self._draft_weight_update = True
+            return result
+        if self._draft_weight_update and method in (
+            "update_weights",
+            "finish_weight_update",
+        ):
+            result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+            if method == "finish_weight_update":
+                self._draft_weight_update = False
+            return result
+        if method == "start_weight_update":
+            self._draft_weight_update = False
+        self._change_kv_identity(self._kv_identity.unknown())
+        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        kwargs = kwargs or {}
+        weights_iterator = kwargs.get("weights_iterator", args[0] if args else None)
+        if method == "reload_weights" and weights_iterator is None:
+            self._change_kv_identity(
+                self._kv_identity.reloaded(self.collective_rpc("get_checkpoint_digest"))
+            )
+        return result
+
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -386,6 +463,8 @@ class EngineCore:
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
+        # Before the KV connectors start, which check it.
+        self._set_kv_identity(vllm_config)
         self.model_executor.initialize_from_config(kv_cache_configs)
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
@@ -1111,6 +1190,9 @@ class EngineCore:
             raise RuntimeError(
                 f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
             )
+        if level >= 2:
+            # The weights are discarded until reloaded or updated.
+            self._change_kv_identity(self._kv_identity.unknown())
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(
@@ -1246,10 +1328,15 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        if isinstance(method, str) and method in _WEIGHT_CHANGING_METHODS:
+            return self._weight_rpc(method, timeout, args, kwargs)
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version
+        # The caller vouches for the version of complete weights only.
+        if not any(self.collective_rpc("has_incomplete_weight_update")):
+            self._change_kv_identity(self._kv_identity.versioned(weight_version))
 
     def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
@@ -2093,6 +2180,15 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    def get_kv_identity(self) -> tuple[int, dict[str, Any]]:
+        """The current KV identity and its components, with this engine's DP
+        rank."""
+        cache_config = self.vllm_config.cache_config
+        return self.engine_index, {
+            "kv_identity": cache_config.kv_identity,
+            "components": cache_config.kv_identity_components,
+        }
+
     def _config_hash(self) -> str | None:
         """`hash_config()` of the initialized config, the hash part of a
         frontend's `system_fingerprint`. Like the frontend, never fail startup
@@ -2161,6 +2257,8 @@ class EngineCoreProc(EngineCore):
             ),
             prefix_hash_config=self.prefix_hash_config,
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
+            kv_identity=self.vllm_config.cache_config.kv_identity,
+            kv_identity_components=self.vllm_config.cache_config.kv_identity_components,
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
         )
