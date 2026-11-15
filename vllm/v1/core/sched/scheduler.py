@@ -1859,7 +1859,7 @@ class Scheduler(SchedulerInterface):
         # scheduled again, so a consumer never prices it from the old value.
         if (
             self.scheduler_config.enable_prefill_progress
-            and request.prefill_progress_left is not None
+            and request.prefill_progress_step > 0
         ):
             request.prefill_progress_left = None
             request.prefill_progress_step = 0
@@ -2272,17 +2272,18 @@ class Scheduler(SchedulerInterface):
         """This step's report, or None when it is not due yet."""
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = max(0, request.num_tokens - computed)
-        if remaining <= 0:
-            # Reaching zero is a state change, not a sample: it is never
-            # throttled, and it ends this request's reporting.
-            request.prefill_progress_left = None
-            return PrefillProgress(
-                request_id=request.request_id, remaining_prefill_tokens=0
-            )
         if request.prefill_progress_step == 0:
             request.prefill_progress_step = max(
                 1,
                 -(-remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST),
+            )
+        if remaining <= 0:
+            # Reaching zero is a state change, not a sample: it is never
+            # throttled. ``step`` stays set so a later preemption still knows
+            # this request was reporting.
+            request.prefill_progress_left = None
+            return PrefillProgress(
+                request_id=request.request_id, remaining_prefill_tokens=0
             )
         last = request.prefill_progress_left
         if last is not None and 0 <= last - remaining < request.prefill_progress_step:

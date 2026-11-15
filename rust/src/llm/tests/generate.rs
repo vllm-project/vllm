@@ -284,8 +284,10 @@ async fn generate_streams_outputs() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
-    let mut request = sample_generate_request("req-delta", 3);
-    let mut stream = llm.generate(request).await.unwrap();
+    let mut stream = llm
+        .generate(sample_generate_request("req-delta", 3))
+        .await
+        .unwrap();
     let internal_id = stream.request_id().to_string();
 
     let progress = stream.next().await.unwrap().unwrap();

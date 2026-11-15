@@ -1951,8 +1951,13 @@ def test_preemption_reports_the_work_it_requeues_and_yields_to_a_newer_one():
     )
     assert reported(outputs) == [request.num_tokens]
 
-    # It resumes before the queued snapshot is flushed and reports for itself,
-    # so the older, larger value must not be appended after the newer one.
+    # Let it run again so the second preemption has a running request, then
+    # resume it before the queued snapshot is flushed: the report it makes for
+    # itself replaces the older, larger one instead of following it.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+    )
     preempt()
     outputs = scheduler.update_from_output(
         scheduler.schedule(),
