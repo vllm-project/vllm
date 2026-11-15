@@ -79,11 +79,12 @@ def test_tokenize_request_rejects_over_limit_requests():
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        over_limit = "hello " * 10
         response = requests.post(
             remote_server.url_for("tokenize"),
-            json={"model": MODEL_NAME, "prompt": over_limit},
+            json={"model": MODEL_NAME, "prompt": "hello " * 10},
         )
 
     assert response.status_code == 400, response.text
-    assert "max_tokenize_tokens" in response.text or "max token" in response.text.lower()
+    error = response.json()["error"]
+    assert error["param"] == "input_tokens"
+    assert "maximum context length" in error["message"]
