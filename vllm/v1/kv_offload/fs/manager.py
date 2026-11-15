@@ -19,8 +19,8 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.common import FSLoadStoreSpec
 from vllm.v1.kv_offload.fs.lookup import FsAsyncLookupManager
-from vllm.v1.kv_offload.fs.worker import FSLoadStoreSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 DEFAULT_INDEX_SIZE = 100_000

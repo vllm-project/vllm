@@ -4,7 +4,6 @@
 
 from typing_extensions import override
 
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingManager,
@@ -13,28 +12,18 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.fs.factory import FSWorkerFactory
 from vllm.v1.kv_offload.fs.manager import DEFAULT_INDEX_SIZE, FSOffloadingManager
-
-# Backend name -> FSOffloadingWorker qualname, resolved only when selected.
-# Each backend is constructed as
-# cls(file_mapper=, block_size_factor=, device=, extra_config=).
-_FS_BACKENDS: dict[str, str] = {
-    "gds": "vllm.v1.kv_offload.fs.gds.worker.GDSOffloadingWorker",
-}
 
 
 class FSOffloadingSpec(OffloadingSpec):
     """Offloads KV directly between device memory and files, with the worker
-    backend picked by the fs_backend key."""
+    backend picked by the fs_backend key (see FSWorkerFactory)."""
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
-        self.backend: str = self.extra_config.get("fs_backend", "gds")
-        if self.backend not in _FS_BACKENDS:
-            raise ValueError(
-                f"Unknown fs_backend {self.backend!r}; "
-                f"expected one of {sorted(_FS_BACKENDS)}"
-            )
+        # Fail at startup, on the scheduler too, if the backend is unknown.
+        FSWorkerFactory.get_worker_cls(self.extra_config)
         root_dir = self.extra_config.get("root_dir")
         if not root_dir:
             raise ValueError("root_dir must be specified in kv_connector_extra_config")
@@ -67,11 +56,10 @@ class FSOffloadingSpec(OffloadingSpec):
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         if self._worker is None:
-            worker_cls = resolve_obj_by_qualname(_FS_BACKENDS[self.backend])
-            self._worker = worker_cls(
+            self._worker = FSWorkerFactory.create_worker(
+                self.extra_config,
                 file_mapper=self.file_mapper,
-                block_size_factor=self.blocks_per_chunk,
+                blocks_per_file=self.blocks_per_chunk,
                 device=kv_caches.tensors[0].tensor.device,
-                extra_config=self.extra_config,
             )
         return self._worker
