@@ -17,7 +17,9 @@ def _config(supports_mm_inputs, is_multimodal_model=True):
             is_hybrid=False,
         ),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1, prefill_context_parallel_size=1
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            dbo_schedule="dispatch-combine-overlap",
         ),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
         is_mm_encoder_only=False,

@@ -110,7 +110,7 @@ When a batch of images arrives, the manager replays the **smallest** budget that
 For each graph replay:
 
 1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
-2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
+2. Slice-copy the replay values into the pre-allocated `input_buffers`. By default the tail is zero-filled, except for cumulative offsets (`cu_seqlens`, `cu_window_seqlens`), which repeat their last value so padded sequences are empty. Models can override this per buffer with `EncoderCudaGraphConfig.padding_logics`.
 3. Replay the CUDA Graph.
 4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays of every budget on the path).
 

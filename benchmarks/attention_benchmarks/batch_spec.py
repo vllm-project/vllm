@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import regex as re
 
 
-@dataclass
+@dataclass(slots=True)
 class BatchRequest:
     """Represents a single request in a batch."""
 

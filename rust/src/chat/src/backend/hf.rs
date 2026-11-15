@@ -494,7 +494,7 @@ mod tests {
             r#"{"model_type":"deepseek_v4"}"#,
             "{}",
         );
-        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+        let processor = crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
             .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
 
         let mut request = request_with_user_text("hello");
@@ -535,7 +535,7 @@ mod tests {
             let backend = backend_for_selection(Auto, config_json, TOKENIZER_CONFIG);
             let mut request = request_with_user_text("hello");
             request.chat_options.chat_template = Some(TEMPLATE.to_string());
-            crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
                 .prepare_for_tokenization(request)
                 .await
                 .unwrap_err()

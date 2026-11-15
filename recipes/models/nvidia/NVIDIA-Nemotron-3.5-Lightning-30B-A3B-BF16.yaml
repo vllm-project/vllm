@@ -161,8 +161,6 @@ variants:
           - "none"
           - "--async-scheduling"
           - "--enable-chunked-prefill"
-          - "--gpu-memory-utilization"
-          - "0.8"
           - "--load-format"
           - "instanttensor"
           - "--safetensors-load-strategy"
