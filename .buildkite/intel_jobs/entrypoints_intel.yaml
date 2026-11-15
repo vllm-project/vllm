@@ -50,8 +50,25 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    pytest -v -s entrypoints/llm/test_generate.py &&
-    pytest -v -s entrypoints/llm/offline_mode'
+    pytest -v -s entrypoints/llm/test_generate.py'
+
+- label: ":intel: (BMG) Entrypoints Offline Mode"
+  key: entrypoints-offline-mode-intel-k8s
+  timeout_in_minutes: 45
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/llm
+  commands:
+  - cd tests
+  - pytest -v -s entrypoints/llm/offline_mode
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server)"
   key: entrypoints-integration-api-server-intel
