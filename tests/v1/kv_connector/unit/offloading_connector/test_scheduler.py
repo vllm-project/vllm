@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from itertools import chain, repeat
 from types import SimpleNamespace
@@ -2543,24 +2543,28 @@ def test_scheduler_reports_allocation_failure(request_runner):
     assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 2
 
 
+def _consume_at_most(capacities: Iterable[int]):
+    """A prepare_store that handles only as many leading keys as fit."""
+    capacities = iter(capacities)
+
+    def prepare_store(keys, req_context, trigger):
+        num_consumed_keys = min(next(capacities), len(keys))
+        output = generate_store_output(keys[:num_consumed_keys])
+        output.num_consumed_keys = num_consumed_keys
+        return output
+
+    return prepare_store
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_store_beyond_manager_capacity_continues_on_later_steps(
     request_runner, async_scheduling: bool
 ):
     """A request with more unstored chunks than the manager can hold is still
-    offloaded: each step offers what fits and later steps offer the rest.
+    offloaded: the manager takes what fits and later steps offer the rest.
 
-    Offering everything at once is rejected as a whole, on every step. A step
-    on which nothing fits defers the store instead of failing it.
+    A step on which nothing fits is not a failure while the request runs.
     """
-    capacities = chain([2, 0], repeat(2))
-    capacity = 0
-
-    def max_storable_chunks():
-        nonlocal capacity
-        capacity = next(capacities)
-        return capacity
-
     block_size = 4
     runner = request_runner(
         block_size=block_size,
@@ -2568,9 +2572,8 @@ def test_store_beyond_manager_capacity_continues_on_later_steps(
         async_scheduling=async_scheduling,
     )
     runner.new_request(token_ids=[0] * (6 * block_size))
-    runner.manager.max_storable_chunks.side_effect = max_storable_chunks
-    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
-        generate_store_output(keys) if len(keys) <= capacity else None
+    runner.manager.prepare_store.side_effect = _consume_at_most(
+        chain([2, 0], repeat(2))
     )
 
     runner.run(
@@ -2580,6 +2583,50 @@ def test_store_beyond_manager_capacity_continues_on_later_steps(
 
     reduced = _reduce_kv_connector_stats(runner)
     assert not reduced.get(_ConnectorMetricName.ALLOCATION_FAILURE)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_chunks_left_unstored_by_a_finished_request_are_reported(
+    request_runner, async_scheduling: bool
+):
+    """A finished request is not offered again, so its leftover is a loss."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (6 * block_size))
+    runner.manager.prepare_store.side_effect = _consume_at_most(chain([2], repeat(0)))
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1))
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_partially_stored_handoff_is_reported():
+    """A hand-off is offered once, so keys the manager leaves are a loss."""
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    _as_mock(scheduler.manager.prepare_store).side_effect = _consume_at_most([1])
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 28)]},
+        )
+    )
+    jobs = _partial_tail_store_jobs(scheduler, output)
+
+    [job] = jobs.values()
+    assert job.src_spec.block_ids.tolist() == [12]
+    reduced = scheduler._connector_stats.reduce()
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

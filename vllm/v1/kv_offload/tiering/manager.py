@@ -984,8 +984,10 @@ class TieringOffloadingManager(OffloadingManager):
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
         if request_level_tiers:
             keys_to_store_set = set(primary_result.keys_to_store)
+            # Keys the primary tier did not consume are offered again.
+            consumed_keys = list(keys)[: primary_result.num_consumed_keys]
             keys_already_in_primary = tuple(
-                k for k in keys if k not in keys_to_store_set
+                k for k in consumed_keys if k not in keys_to_store_set
             )
             if keys_already_in_primary:
                 self._cascade_existing_chunks_to_request_level_tiers(
@@ -993,13 +995,6 @@ class TieringOffloadingManager(OffloadingManager):
                 )
 
         return primary_result
-
-    @override
-    def max_storable_chunks(self) -> int:
-        # Like prepare_store(): completed transfers unpin primary chunks.
-        self._processed_jobs_this_step = True
-        self._process_finished_jobs()
-        return self.primary_tier.max_storable_chunks()
 
     def _cascade_existing_chunks_to_request_level_tiers(
         self,

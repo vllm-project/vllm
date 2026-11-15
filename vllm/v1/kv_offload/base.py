@@ -205,6 +205,9 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
+    # Number of leading offered keys the manager handled. The connector offers
+    # the rest again. None means all of them.
+    num_consumed_keys: int | None = None
 
 
 @dataclass
@@ -422,21 +425,12 @@ class OffloadingManager(ABC):
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result.
+            were evicted as a result. A manager short on room may handle
+            only the leading keys and report it in num_consumed_keys.
             None is returned if the blocks cannot be stored.
 
         """
         pass
-
-    def max_storable_chunks(self) -> int | None:
-        """Upper bound on the keys a single prepare_store call can allocate now.
-
-        Returns:
-            The number of chunks that are free or evictable, or None if the
-            manager does not bound a store.
-
-        """
-        return None
 
     def complete_store(
         self,

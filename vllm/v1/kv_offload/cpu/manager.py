@@ -273,10 +273,14 @@ class CPUOffloadingManager(OffloadingManager):
         *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
-        return self._prepare_store(keys, req_context)
+        return self._prepare_store(keys, req_context, allow_partial=True)
 
     def _prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        allow_partial: bool = False,
     ) -> PrepareStoreOutput | None:
         keys = list(keys)
         state = self._get_request_cache_access(req_context)
@@ -287,6 +291,7 @@ class CPUOffloadingManager(OffloadingManager):
         # aged out; the threshold applies only to new store candidates.
         keys_to_store: list[OffloadKey] = []
         ready_existing_keys: list[OffloadKey] = []
+        evictable_existing_keys: set[OffloadKey] = set()
         for key in keys:
             chunk = self._policy.get(key)
             if chunk is None:
@@ -294,6 +299,8 @@ class CPUOffloadingManager(OffloadingManager):
             else:
                 if chunk.is_ready:
                     ready_existing_keys.append(key)
+                if chunk.ref_cnt == 0:
+                    evictable_existing_keys.add(key)
 
         if self.counts is not None:
             admitted_keys: list[OffloadKey] = []
@@ -332,6 +339,26 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
         self.allocation_sizes_in_current_batch.append(len(keys_to_store))
+
+        num_consumed_keys: int | None = None
+        if allow_partial:
+            # Offered chunks are not evicted, so they are not room for the offer.
+            num_storable_keys = (
+                self._get_num_free_chunks()
+                + self._num_evictable_cache_chunks
+                - len(evictable_existing_keys)
+            )
+            if len(keys_to_store) > num_storable_keys:
+                num_consumed_keys = keys.index(keys_to_store[num_storable_keys])
+                del keys_to_store[num_storable_keys:]
+                if not keys_to_store:
+                    return PrepareStoreOutput(
+                        keys_to_store=[],
+                        store_spec=self._get_load_store_spec([], []),
+                        evicted_keys=[],
+                        num_consumed_keys=num_consumed_keys,
+                    )
+
         num_chunks_to_evict = len(keys_to_store) - self._get_num_free_chunks()
 
         to_evict: list[OffloadKey] = []
@@ -383,11 +410,8 @@ class CPUOffloadingManager(OffloadingManager):
             keys_to_store=keys_to_store,
             store_spec=store_spec,
             evicted_keys=to_evict,
+            num_consumed_keys=num_consumed_keys,
         )
-
-    @override
-    def max_storable_chunks(self) -> int:
-        return self._get_num_free_chunks() + self._num_evictable_cache_chunks
 
     @override
     def complete_store(

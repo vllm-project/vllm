@@ -998,18 +998,24 @@ class TestTieringOffloadingManager:
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
-    def test_max_storable_chunks_counts_chunks_of_finished_cascades(
-        self, manager_setup
-    ):
-        """Finished cascades unpin primary chunks before the bound is taken."""
-        chunks = to_keys(range(5))
-        self._start_request()
+    def test_partial_primary_store_is_passed_through(self, manager_setup, monkeypatch):
+        """Only the keys the primary tier consumed are cascaded as existing."""
         trigger = StoreTrigger.ON_COMPUTE
-        assert self.manager.prepare_store(chunks, _CTX, trigger=trigger) is not None
-        self.manager.complete_store(chunks, _CTX, trigger=trigger)
-        assert self.primary_tier.max_storable_chunks() == 0
+        self._start_request()
+        self.manager.prepare_store(to_keys(range(3)), _CTX, trigger=trigger)
+        self.manager.complete_store(to_keys(range(3)), _CTX, trigger=trigger)
+        self._simulate_on_schedule_end()
+        ctx = self._make_request_level_request(monkeypatch, "req_partial")
 
-        assert self.manager.max_storable_chunks() == 5
+        # 2 free chunks, and the offered resident chunks are not evicted.
+        result = self.manager.prepare_store(
+            to_keys([0, 3, 4, 5, 1, 2]), ctx, trigger=trigger
+        )
+
+        assert result is not None
+        assert result.keys_to_store == to_keys([3, 4])
+        assert result.num_consumed_keys == 3
+        assert self._cascaded_keys_for("req_partial") == [set(to_keys([0]))]
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
