@@ -1965,6 +1965,26 @@ def test_preemption_reports_the_work_it_requeues_and_yields_to_a_newer_one():
     )
     assert reported(outputs) == [48]
 
+    # Once it is decoding there is no prefill work left to report.
+    while request.num_computed_tokens < request.num_tokens:
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
+        )
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[7]]),
+    )
+    assert request.num_output_tokens > 0
+    preempt()
+    output = scheduler.schedule()
+    output.num_scheduled_tokens.clear()
+    assert reported(
+        scheduler.update_from_output(
+            output, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
+        )
+    ) == []
+
 
 def test_update_from_output_routes_sampling_masks_by_request():
     """Each request receives the sampler row at its own batch index."""

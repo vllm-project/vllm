@@ -1860,6 +1860,7 @@ class Scheduler(SchedulerInterface):
         if (
             self.scheduler_config.enable_prefill_progress
             and request.prefill_progress_step > 0
+            and request.num_output_tokens == 0
         ):
             request.prefill_progress_left = None
             request.prefill_progress_step = 0
