@@ -174,6 +174,9 @@ def _run_kernel(
     kernel = make_unquantized_moe_kernel(
         quant_config, moe_config, backend, FlashInferCuteDSLSm90Experts
     )
+    kernel.fused_experts.process_weights_after_loading(
+        SimpleNamespace(expert_map=expert_map)
+    )
     output = kernel.apply(
         hidden_states=a,
         w1=w13,
@@ -325,8 +328,9 @@ def test_flashinfer_cutedsl_sm90_moe_router_weight_on_input():
 
 @pytest.mark.parametrize("strategy", ["linear", "round_robin"])
 def test_flashinfer_cutedsl_sm90_requires_linear_expert_placement(strategy: str):
-    """The kernel addresses a contiguous expert shard, so another placement
-    is refused when the weights are processed."""
+    """The kernel addresses a contiguous expert shard, whose offset comes from
+    the expert map; another placement is refused when the weights are
+    processed."""
     e, ep_size, ep_rank = 8, 3, 1
     num_local, expert_map, _ = determine_expert_map(
         ep_size, ep_rank, e, expert_placement_strategy=strategy
@@ -338,6 +342,7 @@ def test_flashinfer_cutedsl_sm90_requires_linear_expert_placement(strategy: str)
     layer = SimpleNamespace(expert_map=expert_map)
     if strategy == "linear":
         experts.process_weights_after_loading(layer)
+        assert experts.local_expert_offset == 3
     else:
         with pytest.raises(ValueError, match="linear expert placement"):
             experts.process_weights_after_loading(layer)

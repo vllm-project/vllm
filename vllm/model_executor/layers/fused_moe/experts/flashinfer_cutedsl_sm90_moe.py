@@ -42,23 +42,13 @@ _KERNEL_ACTIVATION: dict[MoEActivation, str] = {
 }
 
 
-def flashinfer_cutedsl_sm90_local_expert_offset(
-    moe_parallel_config: FusedMoEParallelConfig, num_experts: int
-) -> int:
-    """Global id of this rank's first expert under the linear expert placement
-    (the first `num_experts % ep_size` ranks hold one expert more)."""
-    base, remainder = divmod(num_experts, moe_parallel_config.ep_size)
-    rank = moe_parallel_config.ep_rank
-    return rank * base + min(rank, remainder)
-
-
 class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
     """bf16/fp16 MoE experts on FlashInfer's SM90 CuTe-DSL kernels.
 
     The kernel applies the top-k weights and reduces internally. Expert
     parallelism uses the kernel's contiguous local shard
-    (`local_expert_offset`), i.e. the linear expert placement. Expert biases
-    are not supported.
+    (`local_expert_offset`, taken from the layer's expert map), i.e. the
+    linear expert placement. Expert biases are not supported.
     """
 
     def __init__(
@@ -75,9 +65,7 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
         )
         self.topk = moe_config.experts_per_token
         self.local_num_experts = moe_config.num_local_experts
-        self.local_expert_offset = flashinfer_cutedsl_sm90_local_expert_offset(
-            moe_config.moe_parallel_config, moe_config.num_experts
-        )
+        self.local_expert_offset = 0
 
     @staticmethod
     def is_supported_config(
@@ -105,10 +93,10 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
         expert_map = getattr(layer, "expert_map", None)
         if expert_map is None:
             return
+        local_experts = torch.where(expert_map >= 0)[0]
+        offset = int(local_experts[0]) if local_experts.numel() > 0 else 0
         expected = torch.full_like(expert_map, -1)
-        expected[
-            self.local_expert_offset : self.local_expert_offset + self.local_num_experts
-        ] = torch.arange(
+        expected[offset : offset + self.local_num_experts] = torch.arange(
             self.local_num_experts, dtype=expert_map.dtype, device=expert_map.device
         )
         if not torch.equal(expert_map, expected):
@@ -117,6 +105,7 @@ class FlashInferCuteDSLSm90Experts(mk.FusedMoEExpertsModular):
                 "placement; use --expert-placement-strategy linear or another "
                 "MoE backend."
             )
+        self.local_expert_offset = offset
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
