@@ -46,6 +46,7 @@ from vllm.models.muse_spark.amd.mono.decoder import (
     config_refusals,
     deployment_refusals,
     fused_attention_layers,
+    grid_refusals,
     kv_cache_refusal,
     layer_refusals,
 )
@@ -270,18 +271,35 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     assert built_buckets(1) == [8]
     assert built_buckets(3) == [8, 16, 32]
     assert built_buckets(16) == built_buckets(128) == [8, 16, 32, 64, 96, 128]
+    # TP 4 has the builds up to 32 rows: larger steps run stock.
+    assert built_buckets(1, 4) == [8]
+    assert built_buckets(3, 4) == built_buckets(128, 4) == [8, 16, 32]
 
 
-def test_kv_cache_guard_accepts_only_dense_bf16_lbhnc() -> None:
+def test_grid_guard_accepts_256_cus_and_tp4_on_128_cus() -> None:
+    assert grid_refusals(256, 8) == grid_refusals(256, 4) == []
+    assert grid_refusals(128, 4) == []
+    assert grid_refusals(128, 8) == ["tensor_parallel_size=8 on 128 CUs (kernel: (4,))"]
+    assert grid_refusals(80, 4) == ["80 CUs (kernel: 256, 128)"]
+
+
+def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:
     lbhnc = torch.empty(10, 2, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lbhnc, 2) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=False) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=True) == "kv:torch.bfloat16"
     lhbnc = torch.empty(2, 10, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2).startswith("kv:stride")
-    fp8 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e4m3fn, device="meta")
-    assert kv_cache_refusal(fp8, 2).startswith("kv:torch.float8")
+    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2, False).startswith("kv:stride")
+    # vLLM allocates an fp8 cache as uint8; the backend views it as e4m3.
+    for dtype in (torch.uint8, torch.float8_e4m3fn):
+        fp8 = torch.empty(10, 2, 16, 128, dtype=dtype, device="meta")
+        assert kv_cache_refusal(fp8, 2, kv_fp8=True) is None
+        assert kv_cache_refusal(fp8, 2, kv_fp8=False) == f"kv:{dtype}"
+    e5m2 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e5m2, device="meta")
+    assert kv_cache_refusal(e5m2, 2, kv_fp8=True) == "kv:torch.float8_e5m2"
     block32 = torch.empty(10, 2, 32, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(block32, 2).startswith("kv:shape")
-    assert kv_cache_refusal(torch.empty(0, dtype=torch.bfloat16), 2) == "kv:unbound"
+    assert kv_cache_refusal(block32, 2, False).startswith("kv:shape")
+    unbound = torch.empty(0, dtype=torch.bfloat16)
+    assert kv_cache_refusal(unbound, 2, False) == "kv:unbound"
 
 
 def test_config_guard_accepts_only_the_checkpoint_shape() -> None:
@@ -313,21 +331,26 @@ def _moe_parallel(use_ep: bool = True, ep_size: int = 8, ep_rank: int = 3):
     )
 
 
-def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
+def test_deployment_guard_accepts_only_tep8_or_tep4_with_dspark(checkpoints) -> None:
     tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
     tep8 = _vllm_config(tiny, dspark, tp=8)
     assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
+    for cache_dtype in ("fp8", "fp8_e4m3"):
+        fp8 = _vllm_config(tiny, dspark, tp=8, cache_dtype=cache_dtype)
+        assert deployment_refusals(fp8, 3, 8, _moe_parallel()) == []
+    tep4 = _vllm_config(tiny, dspark, tp=4)
+    assert deployment_refusals(tep4, 3, 4, _moe_parallel(ep_size=4)) == []
 
-    tp4 = _vllm_config(tiny, dspark, tp=4, expert_placement_strategy="round_robin")
-    tp4.parallel_config.enable_expert_parallel = False
-    assert deployment_refusals(tp4, 3, 4, _moe_parallel(use_ep=False)) == [
-        "tensor_parallel_size=4 (kernel: 8)",
+    tp2 = _vllm_config(tiny, dspark, tp=2, expert_placement_strategy="round_robin")
+    tp2.parallel_config.enable_expert_parallel = False
+    assert deployment_refusals(tp2, 1, 2, _moe_parallel(use_ep=False)) == [
+        "tensor_parallel_size=2 (kernel: (4, 8))",
         "expert parallelism off (needs --enable-expert-parallel)",
         "expert placement round_robin",
         "MoE layers not expert parallel",
     ]
 
-    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8")
+    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8_e5m2")
     no_draft.lora_config = LoRAConfig()
     no_draft.model_config.enable_sleep_mode = True
     no_draft.weight_transfer_config = WeightTransferConfig()
@@ -336,7 +359,7 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
         "LoRA on",
         "sleep mode on",
         "weight transfer on",
-        "kv_cache_dtype=fp8 (kernel: bf16)",
+        "kv_cache_dtype=fp8_e5m2 (kernel: bf16, fp8_e4m3)",
     ]
 
 
@@ -507,7 +530,8 @@ def test_fused_attention_layers_follow_the_window(tiny_model) -> None:
 _K3_HEAD = (
     "attn_o attn_g stream_pre w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
     "w13 w13s w2 w2s w_post w_pp w_pff alpha beta w_in w_qkvg stream_out xn_out "
-    "part_out q_out g_out k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "part_out q_out g_out k_cache v_cache slots cos_sin pos k_scale v_scale scratch "
+    "epoch health tl"
 )
 _HA_HEAD = (
     "attn_o attn_g stream_in w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
@@ -516,15 +540,16 @@ _HA_HEAD = (
 _HM_HEAD = "h ids sc w13 w13s w2 w2s w_post part_out scratch epoch health tl"
 _HB_HEAD = (
     "part w_pp w_pff alpha beta w_in w_qkvg stream_out sfull_out q_out g_out "
-    "k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "k_cache v_cache slots cos_sin pos k_scale v_scale scratch epoch health tl"
 )
 _REPLICAS = " w13r w13sr w2r w2sr eptab"
-_DESC_WORDS = 10
+_DESC_WORDS = 12
 
 
-def _params(head: str, world_size: int, tail: str) -> list[str]:
-    """A launch's parameters in order."""
-    return head.split() + [f"peer{r}" for r in range(world_size)] + tail.split()
+def _params(head: str, tail: str) -> list[str]:
+    """A launch's parameters in order: 8 peer slots at every group size (a smaller
+    group passes 0 for the others)."""
+    return head.split() + [f"peer{r}" for r in range(8)] + tail.split()
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
@@ -552,6 +577,7 @@ class StockLaunches:
     def __init__(self, model, dims: MonoDims, bnd: int) -> None:
         self.model, self.dims, self.bnd = model, dims, bnd
         self.calls: list[tuple[str, dict]] = []
+        self.built: list[tuple[str, _Key]] = []
         self.pending: dict[int, dict] = {}
         self.kernels = MonoKernels(
             *(_Kernel(self, name) for name in ("k3", "k5", "k5m")), _AttnFrag()
@@ -580,13 +606,14 @@ class StockLaunches:
         if not fused:
             return _device_view(attn_o, (rows, d.q_rows), torch.bfloat16)
         words = _device_view(attn_o, (_DESC_WORDS,), torch.int64).tolist()
-        md, _, kv_cache, _ = _attention_context(layer)
+        md, attn, kv_cache, _ = _attention_context(layer)
         assert words[1:5] == [
             kv_cache.data_ptr(),
             kv_cache.stride(0),
             md.block_table.data_ptr(),
             md.seq_lens.data_ptr(),
         ]
+        assert words[10:] == [attn._k_scale.data_ptr(), attn._v_scale.data_ptr()]
         assert words[8] == nreq
         q = _device_view(words[0], (rows, d.q_rows), torch.bfloat16)
         out = _device_view(words[5], (rows, d.q_rows), torch.bfloat16)
@@ -604,10 +631,12 @@ class StockLaunches:
         )
         stream = _device_view(a["stream"], (rows, d.hidden_size), torch.float32)
         positions = _device_view(b["pos"], (rows,), torch.int64)
-        _, _, kv_cache, slots = _attention_context(nxt)
+        _, attn, kv_cache, slots = _attention_context(nxt)
         assert b["k_cache"] == kv_cache.data_ptr()
         assert b["v_cache"] == kv_cache.stride(0)
         assert b["slots"] == slots.data_ptr()
+        assert b["k_scale"] == attn._k_scale.data_ptr()
+        assert b["v_scale"] == attn._v_scale.data_ptr()
         rope = nxt.self_attn.rotary_emb
         if rope is not None:
             assert b["cos_sin"] == rope.cos_sin_cache.data_ptr()
@@ -631,6 +660,8 @@ class _Key:
     next_rope: bool = True
     attn: str = ""
     bnd: int = 0
+    kv_fp8: bool = False
+    grid: int = 256
 
 
 class _Kernel:
@@ -649,19 +680,21 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn=""):
-        return _Key(S, W, next_rope, attn, self.owner.bnd if self.name == "k5" else 0)
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False, grid=256):
+        bnd = self.owner.bnd if self.name == "k5" else 0
+        return _Key(S, W, next_rope, attn, bnd, kv_fp8, grid)
 
     def build(self, key: _Key):
-        o, w = self.owner, key.W
+        o = self.owner
+        o.built.append((self.name, key))
         if self.name == "k3":
-            params = _params(_K3_HEAD, w, "layer rank g_stride" + _REPLICAS)
+            params = _params(_K3_HEAD, "layer rank g_stride" + _REPLICAS)
             return o.launcher("k3", params, lambda a: _run_k3(o, key, a))
         if self.name == "k5m":
-            params = _params(_HM_HEAD, w, "layer rank nrows" + _REPLICAS)
+            params = _params(_HM_HEAD, "layer rank nrows" + _REPLICAS)
             return o.launcher("hm", params, lambda a: None)
-        ha = _params(_HA_HEAD, w, "layer rank g_stride s_full nrows")
-        hb = _params(_HB_HEAD, w, "layer rank so_stride so_off gather nrows")
+        ha = _params(_HA_HEAD, "layer rank g_stride s_full nrows")
+        hb = _params(_HB_HEAD, "layer rank so_stride so_off gather nrows")
 
         def run_ha(a):
             o.pending[a["layer"]] = a | {"fused": bool(key.attn)}
@@ -682,7 +715,9 @@ class _AttnFrag:
         return 4096
 
     @staticmethod
-    def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
+    def vllm_desc(
+        q, kv_cache, block_table, seq_lens, out, part, nreq, scale, k_scale, v_scale
+    ):
         return [
             q.data_ptr(),
             kv_cache.data_ptr(),
@@ -694,6 +729,8 @@ class _AttnFrag:
             block_table.stride(0),
             nreq,
             0,
+            k_scale.data_ptr(),
+            v_scale.data_ptr(),
         ]
 
 
@@ -793,7 +830,12 @@ class Step:
 
 
 def _run_mono(
-    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+    tiny: TinyModel,
+    step: Step,
+    bnd: int,
+    buckets: list[int],
+    mode=CUDAGraphMode.NONE,
+    grid: int = 256,
 ):
     """The step with the monokernel attached, on the stock launches."""
     from vllm.distributed import get_tp_group
@@ -808,8 +850,9 @@ def _run_mono(
         dims=tiny.dims,
         buckets=buckets,
         fused_attention=fused_attention_layers(
-            tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
+            tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS, grid=grid
         ),
+        grid=grid,
     )
     try:
         return launches, step.run(tiny, mode)
@@ -859,6 +902,24 @@ def test_mono_step_matches_the_stock_loop(
     assert kernels == ({"k3"} if num_reqs <= 2 else {"ha", "hm", "hb"})
     assert [a["layer"] for name, a in launches.calls if name in ("k3", "hb")] == list(
         range(FIRST_LAYER, LAST_LAYER + 1)
+    )
+    _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+@pytest.mark.parametrize(("num_reqs", "bnd"), [(1, 0), (2, 0), (4, 3)])
+def test_mono_step_on_a_128_cta_grid(tiny_model, num_reqs, bnd) -> None:
+    """On 128 CUs (MI350P) every build is the 128-CTA one and the fused
+    attention is off; the launches and their arguments are the same."""
+    tiny_model.lm.set_aux_hidden_state_layers((14, 30, 46, 58, 62))
+    step = Step(tiny_model, [ROWS_PER_REQUEST] * num_reqs, seed=num_reqs)
+    stock = step.run(tiny_model)
+    launches, mono = _run_mono(tiny_model, step, bnd, [8, 16, 32], grid=128)
+    assert launches.built
+    assert {key.grid for _, key in launches.built} == {128}
+    assert not any(key.attn for _, key in launches.built)
+    assert {name for name, _ in launches.calls} == (
+        {"k3"} if num_reqs <= 2 else {"ha", "hm", "hb"}
     )
     _assert_same_step(stock, mono)
 
