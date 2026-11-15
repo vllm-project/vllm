@@ -247,8 +247,13 @@ def _fused_moe_lora_one_shot_kernel(
     safe_offs_r = tl.where(rank_mask, offs_r, 0)
     offs_k = tl.arange(0, BLOCK_K)
 
-    offs_x_row = offs_token // token_mapping_factor
-    x_ptrs = x_ptr + offs_x_row[:, None] * stride_xm + offs_k[None, :] * stride_xk
+    # Clamp x row index to a safe range. Padded positions in
+    # sorted_token_ids have sentinel values (>= num_valid_tokens) that
+    # would compute out-of-bounds addresses. The mask already zeros
+    # these loads, so clamping the address is safe and prevents illegal
+    # memory access on GPUs that trap OOB address computation.
+    safe_offs_x_row = tl.where(token_mask, offs_token // token_mapping_factor, 0)
+    x_ptrs = x_ptr + safe_offs_x_row[:, None] * stride_xm + offs_k[None, :] * stride_xk
     a_ptrs = A_base + offs_k[:, None] * stride_A_k + safe_offs_r[None, :] * stride_A_r
 
     tmp = tl.zeros((BLOCK_M, BLOCK_R), dtype=tl.float32)
@@ -632,8 +637,7 @@ def _fused_moe_lora_small_batch_kernel(
             A_base = cur_A_ptr + lora_id * stride_A_lora + expert_id * stride_A_expert
             B_base = cur_B_ptr + lora_id * stride_B_lora + expert_id * stride_B_expert
 
-            x_row = pair_idx // token_mapping_factor
-            x_row_ptr = x_ptr + x_row * stride_xm
+            x_row_ptr = x_ptr + (pair_idx // token_mapping_factor) * stride_xm
 
             # SHRINK GEMV (once per program; reused across n_tiles_per_program
             # expand tiles below). Sum-reduction over BLOCK_K with fp32
@@ -1064,8 +1068,13 @@ def _fused_moe_lora_kernel(
         # Shrink path - load hidden states based on order defined in
         # 'sorted_token_ids_ptr' then store them in c_ptr in this same sorted order
         tl.static_assert(a_desc is None, "a_desc must be none")
+        # Clamp the a row index to a safe range. Padded positions in
+        # sorted_token_ids carry sentinels (>= num_valid_tokens) that would
+        # compute out-of-bounds addresses. The load below is masked, so it
+        # already returns zeros there; clamping keeps the address in bounds.
+        safe_a_rows = tl.where(token_mask, offs_token // token_mapping_factor, 0)
         a_ptrs = cur_a_ptr + (
-            offs_token[:, None] // token_mapping_factor * stride_am
+            safe_a_rows[:, None] * stride_am
             + offs_k[None, :] * stride_ak
         )
 
