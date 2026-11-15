@@ -531,6 +531,7 @@ def test_rust_frontend_uses_pulled_object_storage_model(
     import subprocess as subprocess_mod
 
     from vllm.entrypoints.launchers.cli_args import make_arg_parser
+
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
