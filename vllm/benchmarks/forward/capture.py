@@ -13,6 +13,7 @@ KV blocks the step writes, so state the forward mutates in place (e.g.
 compressor state) is the same on every replay.
 """
 
+import functools
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -104,6 +105,14 @@ def _new_capture(vllm_config: Any, mode: str) -> _Capture:
     ):
         return _BreakableCapture(pool=torch.cuda.graph_pool_handle())
     return torch.cuda.CUDAGraph()
+
+
+@functools.cache
+def _capture_stream() -> torch.cuda.Stream:
+    """One capture stream for every case, as serving captures on one stream. A
+    new stream per case cycles through PyTorch's fixed stream pool; once it
+    wrapped, later cases hit illegal memory accesses or NaNs."""
+    return torch.cuda.Stream()
 
 
 @contextmanager
@@ -432,7 +441,7 @@ class ForwardBench:
         if world.world_size > 1:
             # Initialize the communicator outside capture.
             torch.distributed.all_reduce(flag, group=world.device_group)
-        with graph_capture(self.device) as capture_context:
+        with graph_capture(self.device, _capture_stream()) as capture_context:
             stream = capture_context.stream
             # Some kernels set up per-stream state on first use, outside capture.
             eager = self._real_rows(_first_tensor(self._run_model())).clone()
