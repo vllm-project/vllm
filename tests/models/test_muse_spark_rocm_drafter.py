@@ -197,7 +197,7 @@ def tiny_draft(tmp_path_factory):
     )
     from vllm.models.muse_spark.amd.dspark import MuseSparkDSparkForCausalLM
     from vllm.utils.torch_utils import set_default_torch_dtype
-    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
 
     root = tmp_path_factory.mktemp("muse_spark_dspark")
@@ -239,12 +239,11 @@ def tiny_draft(tmp_path_factory):
                         )
             lm.process_weights_after_loading()
             assert lm.mono is None  # --monokernel off in this config
-            spec = SlidingWindowSpec(
+            spec = AttentionSpec(
                 block_size=16,
                 num_kv_heads=TINY_DSPARK["num_key_value_heads"],
                 head_size=64,
                 dtype=torch.bfloat16,
-                sliding_window=2048,
             )
             yield TinyDraft(lm, vllm_config, spec)
         cleanup_dist_env_and_memory()
