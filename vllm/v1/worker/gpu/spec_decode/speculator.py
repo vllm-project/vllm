@@ -732,7 +732,10 @@ class DraftModelSpeculator(BaseSpeculator):
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        self.temperature.copy_(temperature)
+        if self.speculative_config.draft_temperature is None:
+            self.temperature.copy_(temperature)
+        else:
+            self.temperature.fill_(self.speculative_config.draft_temperature)
         self.seeds.copy_(seeds)
         # idx_mapping == -1 marks a row the drafter must not act on: sampling
         # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows

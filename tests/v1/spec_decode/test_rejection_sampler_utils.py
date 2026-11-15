@@ -77,12 +77,13 @@ def _build_rejection_sample_inputs(
     num_speculative_steps: int,
     temperature: float,
     num_trials: int,
+    draft_temperature: float | None = None,
 ) -> dict:
     """Build rejection_sample kwargs from a fixed target and draft distribution.
 
     target_logits_1d must already have temperature applied (the sampler applies
     sampling params before verification), whereas draft_logits_1d must not:
-    rejection_sample divides the draft logits by the temperature on load.
+    rejection_sample divides the draft logits by the draft temperature on load.
     """
     device = target_logits_1d.device
     vocab_size = target_logits_1d.shape[0]
@@ -95,8 +96,9 @@ def _build_rejection_sample_inputs(
     )
 
     scaled_draft_logits_1d = draft_logits_1d.float()
-    if temperature > 0:
-        scaled_draft_logits_1d = scaled_draft_logits_1d / temperature
+    draft_temp = temperature if draft_temperature is None else draft_temperature
+    if draft_temp > 0:
+        scaled_draft_logits_1d = scaled_draft_logits_1d / draft_temp
     draft_probs = torch.softmax(scaled_draft_logits_1d, dim=0)
     draft_tokens = torch.multinomial(
         draft_probs.expand(num_trials, -1), K, replacement=True
@@ -121,7 +123,7 @@ def _build_rejection_sample_inputs(
     )
     seed = torch.arange(num_trials, dtype=torch.int64, device=device)
 
-    return dict(
+    inputs: dict = dict(
         target_logits=target_logits,
         draft_logits=draft_logits,
         draft_sampled=draft_sampled,
@@ -133,6 +135,9 @@ def _build_rejection_sample_inputs(
         temperature=temp_tensor,
         seed=seed,
     )
+    if draft_temperature is not None:
+        inputs["draft_temperature"] = draft_temperature
+    return inputs
 
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
@@ -662,6 +667,48 @@ NARROW_VOCAB_SIZE = 16
 NARROW_NUM_TRIALS = 200_000
 
 
+@pytest.mark.parametrize("draft_temperature", [0.5, 2.0])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_draft_temperature_matches_rescaled_proposals(
+    draft_temperature: float, use_block_verification: bool
+):
+    """An override must affect q consistently, without changing target sampling.
+
+    Powers of two make the reference cache rescaling exact in float32, so
+    every emitted token and accepted length must match, including greedy rows.
+    """
+    torch.manual_seed(42)
+    K, num_trials = 3, 128
+    target = torch.randn(NARROW_VOCAB_SIZE, device="cuda")
+    draft = -target
+    inputs = _build_rejection_sample_inputs(
+        target, draft, K, temperature=1.0, num_trials=num_trials
+    )
+    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device="cuda").repeat(
+        num_trials // 4
+    )
+    inputs["temperature"] = temperatures
+    target_scales = torch.where(temperatures > 0, temperatures, 1.0)
+    inputs["target_logits"] /= target_scales.repeat_interleave(K + 1).unsqueeze(1)
+    inputs["draft_temperature"] = draft_temperature
+    inputs["draft_sampled"] = _gumbel_drafted_tokens(inputs, draft, num_trials, K)
+
+    sampled, num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=K, use_block_verification=use_block_verification
+    )
+
+    inputs.pop("draft_temperature")
+    inputs["draft_logits"] = (
+        inputs["draft_logits"] * target_scales[:, None, None] / draft_temperature
+    )
+    expected, expected_num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=K, use_block_verification=use_block_verification
+    )
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    emitted = torch.arange(K + 1, device="cuda")[None, :] < num_sampled[:, None]
+    torch.testing.assert_close(sampled[emitted], expected[emitted], rtol=0, atol=0)
+
+
 def _gumbel_drafted_tokens(
     inputs: dict,
     draft_logits_1d: torch.Tensor,
@@ -685,7 +732,11 @@ def _gumbel_drafted_tokens(
         .view(num_trials, k + 1)[:, :k]
         .reshape(-1)
         .contiguous(),
-        inputs["temperature"],
+        (
+            inputs["temperature"]
+            if inputs.get("draft_temperature") is None
+            else torch.full_like(inputs["temperature"], inputs["draft_temperature"])
+        ),
         inputs["seed"],
         inputs["pos"].view(num_trials, k + 1)[:, :k].reshape(-1).contiguous(),
         apply_temperature=True,
@@ -697,7 +748,10 @@ def _gumbel_drafted_tokens(
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
-def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int):
+@pytest.mark.parametrize("draft_temperature", [None, 0.5, 2.0])
+def test_gumbel_drafted_rejection_sample_is_unbiased(
+    num_speculative_steps: int, draft_temperature: float | None
+):
     """The proposal and the residual resample must not share a noise vector.
 
     Draws proposals on the same (seed, pos) stream the sampler verifies and
@@ -730,6 +784,7 @@ def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int)
         num_speculative_steps,
         temperature=1.0,
         num_trials=NARROW_NUM_TRIALS,
+        draft_temperature=draft_temperature,
     )
     inputs["draft_sampled"] = _gumbel_drafted_tokens(
         inputs, draft_logits_1d, NARROW_NUM_TRIALS, num_speculative_steps
@@ -1190,6 +1245,7 @@ def test_verify_rejects_unproposed_drafts():
         may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K
+    rejection_sampler.draft_temperature = None
     rejection_sampler.synthetic_conditional_rates = None
     rejection_sampler.use_block_verification = True
     rejection_sampler.fly_window_size = 0

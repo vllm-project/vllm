@@ -32,6 +32,7 @@ def _run_prepare(
     draft_dcp_size: int | None = None,
     num_scheduled_tokens: int = 4,
     attn_groups: list | None = None,
+    draft_temperature: float | None = None,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -90,6 +91,7 @@ def _run_prepare(
 
     draft = SimpleNamespace(
         vllm_config=VllmConfig(),
+        speculative_config=SimpleNamespace(draft_temperature=draft_temperature),
         input_buffers=input_buffers,
         context_positions=context_positions,
         _context_slot_mappings=context_slot_mapping.unsqueeze(0),
@@ -157,8 +159,21 @@ def _run_prepare(
         sample_pos=sample_pos.cpu(),
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
+        target_temperature=input_temperature.cpu(),
         seeds=seeds.cpu(),
     )
+
+
+@pytest.mark.parametrize("draft_temperature", [0.0, 0.5])
+def test_prepare_dflash_inputs_overrides_only_draft_temperature(draft_temperature):
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        draft_temperature=draft_temperature,
+    )
+
+    assert out.temperature[2].item() == draft_temperature
+    assert out.target_temperature[2].item() == 1.0
 
 
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])

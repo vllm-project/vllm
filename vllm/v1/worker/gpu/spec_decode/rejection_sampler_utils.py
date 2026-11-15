@@ -132,7 +132,7 @@ def _compute_global_logprobs_and_logsumexp(
     logit_idx,
     req_state_idx,
     draft_step,
-    temp,
+    draft_temp,
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
@@ -184,7 +184,7 @@ def _compute_global_logprobs_and_logsumexp(
                 mask=mask,
                 other=float("-inf"),
             ).to(tl.float32)
-            / temp
+            / draft_temp
         )
         draft_lse = _compute_global_logsumexp(
             draft_local_max_ptr,
@@ -249,6 +249,7 @@ def _compute_local_logits_stats_kernel(
     num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
 
@@ -259,6 +260,10 @@ def _compute_local_logits_stats_kernel(
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if DRAFT_TEMPERATURE is None:
+        draft_temp = temp
+    else:
+        draft_temp = tl.full((), DRAFT_TEMPERATURE, tl.float32)
 
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -316,7 +321,7 @@ def _compute_local_logits_stats_kernel(
                     mask=mask,
                     other=float("-inf"),
                 ).to(tl.float32)
-                / temp
+                / draft_temp
             )
             draft_max, draft_sumexp = _compute_max_and_sumexp(draft_logits)
             tl.store(
@@ -366,6 +371,7 @@ def _compute_cumulative_log_p_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -373,6 +379,10 @@ def _compute_cumulative_log_p_kernel(
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_draft_tokens = end_idx - start_idx - 1
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if DRAFT_TEMPERATURE is None:
+        draft_temp = temp
+    else:
+        draft_temp = tl.full((), DRAFT_TEMPERATURE, tl.float32)
     if temp == 0.0:
         return
 
@@ -390,7 +400,7 @@ def _compute_cumulative_log_p_kernel(
                     logit_idx,
                     req_state_idx,
                     step,
-                    temp,
+                    draft_temp,
                     target_logits_ptr,
                     target_logits_stride,
                     target_local_max_ptr,
@@ -454,6 +464,7 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     # Adaptive verification can end before num_speculative_steps.
@@ -473,6 +484,10 @@ def _compute_local_residual_mass_kernel(
 
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if DRAFT_TEMPERATURE is None:
+        draft_temp = temp
+    else:
+        draft_temp = tl.full((), DRAFT_TEMPERATURE, tl.float32)
     if temp == 0.0:
         return
 
@@ -485,7 +500,7 @@ def _compute_local_residual_mass_kernel(
         logit_idx,
         req_state_idx,
         draft_step_idx,
-        temp,
+        draft_temp,
         target_logits_ptr,
         target_logits_stride,
         target_local_max_ptr,
@@ -578,6 +593,7 @@ def _rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
+    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -586,6 +602,10 @@ def _rejection_kernel(
     num_draft_tokens = end_idx - start_idx - 1
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if DRAFT_TEMPERATURE is None:
+        draft_temp = temp
+    else:
+        draft_temp = tl.full((), DRAFT_TEMPERATURE, tl.float32)
     is_greedy = temp == 0.0
 
     accepted_length = tl.zeros((), tl.int64)
@@ -684,7 +704,7 @@ def _rejection_kernel(
                         logit_idx,
                         req_state_idx,
                         i,
-                        temp,
+                        draft_temp,
                         target_logits_ptr,
                         target_logits_stride,
                         target_local_max_ptr,
@@ -876,6 +896,7 @@ def _resample_kernel(
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
     SKIP_MASKED_BLOCKS: tl.constexpr,
+    DRAFT_TEMPERATURE: tl.constexpr = None,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -885,6 +906,10 @@ def _resample_kernel(
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if DRAFT_TEMPERATURE is None:
+        draft_temp = temp
+    else:
+        draft_temp = tl.full((), DRAFT_TEMPERATURE, tl.float32)
     is_bonus = resample_token_idx == end_idx - 1
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. No resampling needed because
@@ -960,7 +985,7 @@ def _resample_kernel(
                 mask=mask,
                 other=float("-inf"),
             ).to(tl.float32)
-            / temp
+            / draft_temp
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
@@ -1158,6 +1183,7 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
+    draft_temperature: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     draft_logits = None
@@ -1265,6 +1291,7 @@ def rejection_sample(
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        DRAFT_TEMPERATURE=draft_temperature,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1301,6 +1328,7 @@ def rejection_sample(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=has_draft_logits,
+            DRAFT_TEMPERATURE=draft_temperature,
             num_warps=1,
         )
 
@@ -1339,6 +1367,7 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                DRAFT_TEMPERATURE=draft_temperature,
             )
         else:
             local_residual_mass = None
@@ -1395,6 +1424,7 @@ def rejection_sample(
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
         num_warps=1,
+        DRAFT_TEMPERATURE=draft_temperature,
     )
 
     # Resample the rejected/bonus tokens.
@@ -1445,6 +1475,7 @@ def rejection_sample(
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
         SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
+        DRAFT_TEMPERATURE=draft_temperature,
     )
 
     # Insert the resampled tokens into the output sampled.
