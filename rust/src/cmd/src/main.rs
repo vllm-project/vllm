@@ -7,6 +7,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::process::{ExitCode, ExitStatus};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
@@ -14,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 use vllm_mm_cache::MmProcessorShmCache;
+use vllm_tracing::LogLevel;
 
-use crate::cli::{BenchCommand, Cli, Command};
+use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -96,9 +98,12 @@ fn main() -> ExitCode {
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    vllm_tracing::init_tracing(process_label);
-
-    let cli = Cli::parse();
+    // Parsing warns about no-op arguments before `--log-level` is known.
+    let cli = {
+        let _guard = vllm_tracing::set_default_tracing(process_label, LogLevel::from_env());
+        Cli::parse()
+    };
+    vllm_tracing::init_tracing(process_label, cli.log_level(), cli.log_formatter());
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
@@ -129,6 +134,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Serve(args) => {
             args.check_mm_shm_cache_support().map_err(anyhow::Error::msg)?;
+            let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {
@@ -142,7 +148,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     engine_count = args.managed_engine.data_parallel_size,
                     "running Rust frontend without a managed local Python engine"
                 );
-                let config = args.to_frontend_config(handshake_address);
+                let config = args.to_frontend_config(handshake_address, &topology);
                 return vllm_server::serve(config, shutdown_signal()).await;
             }
 
@@ -158,14 +164,25 @@ async fn async_main(cli: Cli) -> Result<()> {
                 .transpose()
                 .context("failed to create the shm multi-modal processor cache")?;
 
-            let mut engine_config = args.to_managed_engine_config(handshake_port);
+            // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
+            // external DP LB, another node's frontend serves only its engines' second
+            // handshake, on a local IPC endpoint.
+            let client_handshake_address = (!args.headless
+                && topology.frontend_engine_start_index() != 0)
+                .then(frontend_ipc_handshake_address);
+            let mut engine_config = args.to_managed_engine_config(
+                handshake_port,
+                &topology,
+                client_handshake_address.clone(),
+            );
             if let Some(cache) = &mm_cache {
                 engine_config.envs.push((
                     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME.to_string(),
                     cache.shm_name().to_string(),
                 ));
             }
-            let handshake_address = engine_config.handshake_address();
+            let handshake_address =
+                client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
 
             let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
@@ -181,7 +198,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let mut config = args.to_frontend_config(handshake_address);
+                let mut config = args.to_frontend_config(handshake_address, &topology);
                 config.mm_processor_cache = mm_cache.clone();
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
@@ -217,15 +234,22 @@ async fn async_main(cli: Cli) -> Result<()> {
             // Regardless of the shutdown reason, broadcast shutdown signal here to ensure
             // that all serving tasks are notified.
             shutdown.cancel();
+            let shutdown_deadline = Instant::now() + shutdown_timeout;
 
-            // Shutdown begins. Terminate the managed engine first.
-            engine.shutdown(shutdown_timeout).await?;
+            // Wait for the API server to drain in-flight requests while the engine
+            // keeps serving them, then stop the engine with the remaining budget, as
+            // `vllm serve` does. Data parallel engines that drain on their own exit
+            // one by one, and the first exit would fail the requests still running
+            // on the others.
+            let serve_result = if matches!(shutdown_reason, ShutdownReason::Server(_)) {
+                Ok(())
+            } else {
+                serve_task.await.context("serve task join failed").and_then(|result| result)
+            };
+            let remaining = shutdown_deadline.saturating_duration_since(Instant::now());
+            engine.shutdown(remaining).await?;
             info!("managed engine shut down gracefully");
-            // Wait for the API server to shut down gracefully by draining in-flight
-            // requests.
-            if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
-                serve_task.await.context("serve task join failed")??;
-            }
+            serve_result?;
 
             match shutdown_reason {
                 ShutdownReason::Signal => Ok(()),

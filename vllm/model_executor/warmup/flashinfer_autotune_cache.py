@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer autotune cache helpers."""
 
-import hashlib
 import os
 import tempfile
 from contextlib import suppress
@@ -11,11 +10,12 @@ from typing import TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, replace
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -30,32 +30,65 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
 
 
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
     vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    config_hash = vllm_config.compute_hash(include_version=False)
-    return hashlib.sha256(config_hash.encode()).hexdigest()
+    factors = vllm_config.compile_factors(include_version=False)
+    # DP runs with padding skip tune TRT-LLM MoE's precomputed-routing ops
+    # instead of the logits ops; a cache from before lacks them, and a hit
+    # skips all tuning.
+    if (
+        vllm_config.parallel_config.data_parallel_size > 1
+        and envs.VLLM_MOE_SKIP_PADDING
+        and not envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        and any(
+            isinstance(m, RoutedExperts) and m.supports_precomputed_routing
+            for m in runner.get_model().modules()
+        )
+    ):
+        factors = {**factors, "moe_routed": True}
+    return hash_factors(factors)
+
+
+def flashinfer_autotune_root() -> Path:
+    """Root directory of the FlashInfer autotune cache (no runner needed)."""
+    override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+    if override_dir:
+        return Path(override_dir).expanduser()
+    from flashinfer.jit import env as flashinfer_jit_env
+
+    flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    return (
+        Path(envs.VLLM_CACHE_ROOT)
+        / "flashinfer_autotune_cache"
+        / flashinfer_workspace.parent.name
+        / flashinfer_workspace.name
+    )
+
+
+def flashinfer_autotune_filename(dp_rank: int, rank: int) -> str:
+    """Per-rank cache filename, shared by the engine reader and D2D exchange."""
+    return f"autotune_configs_dp{dp_rank}_rank{rank}.json"
 
 
 def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
-    override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
-    if override_dir:
-        root = Path(override_dir).expanduser()
-    else:
-        from flashinfer.jit import env as flashinfer_jit_env
-
-        flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
-        root = (
-            Path(envs.VLLM_CACHE_ROOT)
-            / "flashinfer_autotune_cache"
-            / flashinfer_workspace.parent.name
-            / flashinfer_workspace.name
-        )
-
-    output_dir = root / flashinfer_autotune_cache_hash(runner)
+    output_dir = flashinfer_autotune_root() / flashinfer_autotune_cache_hash(runner)
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / "autotune_configs.json"
+
+
+def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    """The per-rank variant of `resolve_flashinfer_autotune_file`."""
+    from vllm.distributed.parallel_state import get_world_group
+
+    path = resolve_flashinfer_autotune_file(runner)
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    return path.with_name(
+        flashinfer_autotune_filename(dp_rank, get_world_group().rank_in_group)
+    )
 
 
 def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
@@ -96,10 +129,10 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
 def resolve_flashinfer_autotune_v2_root() -> Path | None:
     """Placement root for FlashInfer's managed autotune store.
 
-    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    Unlike `resolve_flashinfer_autotune_file`, no vLLM-side identity
     (config hash, flashinfer version, arch) is folded into the path: the
     managed store keys entries per op and hashes the software/hardware
-    environment itself. ``None`` selects FlashInfer's default root.
+    environment itself. `None` selects FlashInfer's default root.
     """
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     return Path(override_dir).expanduser() if override_dir else None

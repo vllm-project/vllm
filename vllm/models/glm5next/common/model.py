@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -17,14 +19,22 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.mhc.flashinfer_mega import (
+    MEGA_MHC_KERNEL,
+    mega_mhc_supported,
+    split_mhc_fn,
+)
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -76,6 +86,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -92,6 +104,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
+from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
@@ -100,7 +113,17 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+
 logger = init_logger(__name__)
+
+# Fewest tokens per step on one GPU from which FlashInfer's fused mHC kernel
+# beats TileLang, by compute capability; other GPUs keep TileLang. Measured
+# with benchmarks/kernels/benchmark_mhc_flashinfer_mega.py.
+_MEGA_MHC_MIN_TOKENS = {107: 5, 103: 512}
 
 
 def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
@@ -224,7 +247,7 @@ class Glm5NextMoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        apply_routed_scale_to_output: bool = False,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -275,12 +298,21 @@ class Glm5NextMoE(nn.Module):
         )
 
         swiglu_limit = config.swiglu_limit
+        vllm_config = get_current_vllm_config()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.is_fused_shared_expert_enabled = False
-        if config.n_shared_experts is not None:
+        if config.n_shared_experts is not None and not self.use_mega_moe:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             ) and _fused_shared_experts_tuned(parallel_config)
-        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
+        # MegaMoE owns the shared-expert weights itself.
+        if (
+            config.n_shared_experts is None
+            or self.is_fused_shared_expert_enabled
+            or self.use_mega_moe
+        ):
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -295,6 +327,10 @@ class Glm5NextMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
                 swiglu_limit=swiglu_limit,
             )
+
+        if self.use_mega_moe:
+            self._init_mega_moe_experts(vllm_config, config, quant_config, prefix)
+            return
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
@@ -311,7 +347,7 @@ class Glm5NextMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -325,11 +361,86 @@ class Glm5NextMoE(nn.Module):
             swiglu_limit=swiglu_limit,
         )
 
+    def _init_mega_moe_experts(
+        self,
+        vllm_config: VllmConfig,
+        config: Glm5NextTextConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
+        """DeepGEMM MegaMoE, BF16xBF16 for an unquantized checkpoint and
+        FP8xFP8 for a block-FP8 one: the kernel dispatches, runs the routed and
+        shared experts and combines across the EP group."""
+        from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+            MegaMoEActivation,
+        )
+        from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+
+        if not vllm_config.parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires expert parallel. Enable it with "
+                "--enable-expert-parallel, or pick a different moe backend."
+            )
+        if self.tp_size != 1:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires tensor_parallel_size=1 (DP + EP)."
+            )
+        if (config.n_group or 1) > 1 or (config.topk_group or 1) > 1:
+            raise NotImplementedError("GLM-5.3 MegaMoE requires one expert group.")
+        weight_block_size = getattr(quant_config, "weight_block_size", None)
+        if quant_config is not None and weight_block_size is None:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires a BF16 or a block-FP8 checkpoint "
+                "(quantization_config.weight_block_size)."
+            )
+        if self.n_physical_experts % self.ep_size != 0:
+            raise ValueError(
+                f"n_physical_experts={self.n_physical_experts} must be divisible "
+                f"by ep_size={self.ep_size}."
+            )
+        self.mega_renormalize = config.norm_topk_prob
+        self.mega_scoring_func = config.scoring_func
+        self.experts = Glm5NextMegaMoEExperts(
+            vllm_config,
+            num_experts=self.n_physical_experts,
+            num_local_experts=self.n_local_physical_experts,
+            experts_start_idx=self.physical_expert_start,
+            num_logical_experts=self.n_logical_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            weight_block_size=None
+            if weight_block_size is None
+            else tuple(weight_block_size),
+            num_shared_experts=config.n_shared_experts or 0,
+            activation=MegaMoEActivation("swiglu", clamp=config.swiglu_limit),
+            prefix=f"{prefix}.experts",
+        )
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe and self.experts.weight_block_size is not None:
+            self.experts.requantize_block_fp8()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
+        if self.use_mega_moe:
+            router_logits, _ = self.gate(hidden_states)
+            bias = self.gate.e_score_correction_bias
+            topk_weights, topk_ids = fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                scoring_func=self.mega_scoring_func,
+                e_score_correction_bias=bias.data if bias is not None else None,
+                topk=self.experts.top_k,
+                renormalize=self.mega_renormalize,
+                indices_type=torch.int64,
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+            return self.experts(hidden_states, topk_weights, topk_ids)
+
         num_tokens, hidden_dim = hidden_states.shape
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
@@ -409,6 +520,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
+                # MTP draft steps reuse each token slot's top-k, which
+                # ShardQ's compact per-rank layout would break.
+                shardq_eligible=not is_mtp_layer,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -450,6 +564,12 @@ class Glm5NextDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        # The BF16 pieces of hc_*_fn when FlashInfer's fused kernel serves this
+        # GPU; made after loading, refreshed in place.
+        self.use_mega_mhc = False
+        self.mega_mhc_min_tokens = 0
+        self.hc_attn_fn_split: torch.Tensor | None = None
+        self.hc_ffn_fn_split: torch.Tensor | None = None
         if self.mhc and not is_mtp_layer:
             # mhc config
             self.mhc_num_residual_streams = config.hc_mult
@@ -477,6 +597,28 @@ class Glm5NextDecoderLayer(nn.Module):
             )
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+
+            capability = current_platform.get_device_capability()
+            min_tokens = _MEGA_MHC_MIN_TOKENS.get(
+                -1 if capability is None else capability.to_int()
+            )
+            if min_tokens is not None and mega_mhc_supported(self.hidden_size, n):
+                self.use_mega_mhc = True
+                self.mega_mhc_min_tokens = min_tokens
+                logger.info_once(
+                    "GLM-5.3 mHC uses FlashInfer mega mHC from %d tokens per step.",
+                    self.mega_mhc_min_tokens,
+                )
+                # Weight updates rewrite hc_*_fn in place through these loaders,
+                # which rewrite the BF16 pieces in place too.
+                self.hc_attn_fn.weight_loader = self._load_hc_attn_fn
+                self.hc_ffn_fn.weight_loader = self._load_hc_ffn_fn
+                if vllm_config.kernel_config.enable_jit_warmup:
+                    MEGA_MHC_KERNEL.register_warmup(
+                        max_num_batched_tokens=(
+                            vllm_config.scheduler_config.max_num_batched_tokens
+                        )
+                    )
 
             self.mhc_pre_op = MHCPreOp()
             self.mhc_post_op = MHCPostOp()
@@ -525,6 +667,24 @@ class Glm5NextDecoderLayer(nn.Module):
                     hidden_size=self.hidden_size,
                     hc_mult=self.n,
                 )
+
+    def _load_hc_attn_fn(self, param: torch.Tensor, loaded_weight: torch.Tensor):
+        default_weight_loader(param, loaded_weight)
+        # Layerwise reload also runs loaders on meta tensors, to count them.
+        if self.hc_attn_fn_split is not None and not param.is_meta:
+            split_mhc_fn(param, out=self.hc_attn_fn_split)
+
+    def _load_hc_ffn_fn(self, param: torch.Tensor, loaded_weight: torch.Tensor):
+        default_weight_loader(param, loaded_weight)
+        if self.hc_ffn_fn_split is not None and not param.is_meta:
+            split_mhc_fn(param, out=self.hc_ffn_fn_split)
+
+    def split_hc_fns(self) -> None:
+        """Make, or rewrite in place, the BF16 pieces of hc_attn_fn and hc_ffn_fn."""
+        if not self.use_mega_mhc:
+            return
+        self.hc_attn_fn_split = split_mhc_fn(self.hc_attn_fn, self.hc_attn_fn_split)
+        self.hc_ffn_fn_split = split_mhc_fn(self.hc_ffn_fn, self.hc_ffn_fn_split)
 
     def forward(
         self,
@@ -589,6 +749,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 self.hc_attn_base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
+                fn_split=self.hc_attn_fn_split,
             )
 
         # Attention needs the full token sequence; mHC above ran on the SP
@@ -615,6 +776,7 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
+            fn_split=self.hc_ffn_fn_split,
         )
 
         # Fully Connected
@@ -677,7 +839,29 @@ class Glm5NextDecoderLayer(nn.Module):
         hc_base: torch.Tensor,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
+        fn_split: torch.Tensor | None = None,
     ):
+        # The model runs eagerly under CUDA graphs, so the token count is a
+        # concrete int and each captured size keeps its branch.
+        if self.use_mega_mhc and residual.shape[0] >= self.mega_mhc_min_tokens:
+            assert fn_split is not None and norm_weight is not None
+            return torch.ops.vllm.mhc_fused_post_pre_flashinfer_mega(
+                x,
+                residual,
+                post,
+                comb,
+                hc_fn,
+                fn_split,
+                hc_scale,
+                hc_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.mhc_post_mult_value,
+                self.mhc_sinkhorn_iterations,
+                norm_weight,
+                norm_eps,
+            )
         return self.mhc_fused_post_pre_op(
             x=x,
             residual=residual,
@@ -705,6 +889,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
         self.config = config
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
 
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
@@ -749,8 +936,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers, Glm5NextMoE, "mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm5NextMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -779,10 +968,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
     ) -> torch.Tensor:
         """Completed residual stream entering a layer, as one hidden vector.
 
-        mHC layers defer their final ``hc_post`` into the next layer's fused
-        pre-op, so ``hidden_states`` holds the raw layer output while the
+        mHC layers defer their final `hc_post` into the next layer's fused
+        pre-op, so `hidden_states` holds the raw layer output while the
         widened stream is completed here and contracted back to
-        ``hidden_size``. Non-mHC layers already return the summed stream.
+        `hidden_size`. Non-mHC layers already return the summed stream.
         """
         if post is None:
             return hidden_states
@@ -856,6 +1045,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def split_mhc_fns(self) -> None:
+        for layer in self._active_layers:
+            if isinstance(layer, Glm5NextDecoderLayer):
+                layer.split_hc_fns()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -874,6 +1068,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
+            # KDA: fuse the q, k, v short convs into one conv1d
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
         ]
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
@@ -890,15 +1088,18 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 0,
             )
             num_fused_shared = _num_fused_shared_experts(
-                self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+                self.config.n_shared_experts,
+                bool(self.fused_shared_expert_layers),
             )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
+                # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
+                routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
             )
         else:
             expert_params_mapping = []
@@ -926,7 +1127,18 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.is_fused_shared_expert_enabled:
+            if self.use_mega_moe and ".shared_experts." in name:
+                mlp = self.get_submodule(name.partition(".shared_experts.")[0])
+                loaded_params.add(
+                    mlp.experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
+            # Only parse the layer index when FSE is enabled.
+            if (
+                "mlp.shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
@@ -1069,6 +1281,23 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+        self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        from ..nvidia.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1081,6 +1310,11 @@ class Glm5NextForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -1129,12 +1363,26 @@ class Glm5NextForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        decode = self.specialized_decode
+        if decode is not None:
+            logits = decode.compute_logits(
+                self.logits_processor, self.lm_head, hidden_states
+            )
+            if logits is not None:
+                return logits
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        for module in self.modules():
+            if isinstance(module, Glm5NextMoE):
+                module.finalize_mega_moe_weights()
+        # Every load format ends here, including the ones that skip loaders.
+        self.model.split_mhc_fns()
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1236,6 +1484,26 @@ class Glm5NextForConditionalGeneration(
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
 
+    def get_model_state_cls(self) -> "type[ModelState]":
+        return self.language_model.get_model_state_cls()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        decode = self.language_model.specialized_decode
+        if decode is not None and intermediate_tensors is None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
             layer.mlp
@@ -1270,6 +1538,10 @@ class Glm5NextForConditionalGeneration(
             moe.n_physical_experts = num_physical_experts
             moe.n_redundant_experts = self.num_redundant_experts
             moe.experts.update_expert_map()
+
+    def process_weights_after_loading(self) -> None:
+        # The loader calls only the outermost model's hook.
+        self.language_model.process_weights_after_loading()
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
@@ -1333,7 +1605,7 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
 
 def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
     """Expert slots the fused MoE appends for the shared expert; must match the
-    ``num_fused_shared_experts`` that ``FusedMoE`` allocates."""
+    `num_fused_shared_experts` that `FusedMoE` allocates."""
     if not enabled or n_shared_experts is None:
         return 0
     if n_shared_experts > 1:
@@ -1347,7 +1619,7 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
-    """Point a checkpoint ``mlp.shared_experts.*`` tensor at the fused MoE's
+    """Point a checkpoint `mlp.shared_experts.*` tensor at the fused MoE's
     shared-expert slot, which follows the routed experts; other names are
     returned unchanged."""
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
@@ -1390,8 +1662,8 @@ def _dequant_fp8_block(
 ) -> torch.Tensor:
     """Dequantize a block-FP8 (e4m3) weight with per-block scale to BF16.
 
-    Unlike ``scaled_dequantize`` this tolerates a non-divisible (partial last
-    block) shape by zero-padding to a multiple of ``block_size`` before the
+    Unlike `scaled_dequantize` this tolerates a non-divisible (partial last
+    block) shape by zero-padding to a multiple of `block_size` before the
     scale broadcast and trimming back afterwards (e.g. kv_a_proj_with_mqa is
     576 rows = 4*128 + 64).
     """
@@ -1431,10 +1703,10 @@ def _try_load_fp8_attn_proj(
     """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / o_proj to BF16 on load.
 
     The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
-    but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
-    DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
+    but the model holds them in BF16 (`fused_qkv_a_proj` is always BF16 via
+    DeepSeekV2FusedQkvAProjLinear; `o_proj` is excluded by
     modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
+    `weight_scale_inv` param) we dequantize; otherwise we return False so the
     normal stacked/direct path loads the FP8 tensor as-is.
     """
     matched = None

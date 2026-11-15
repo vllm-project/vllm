@@ -90,6 +90,9 @@ pre-commit install
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
+For package archive hashes, compiled requirements, and GitHub Actions commit
+pins, see [Dependency Hash Pinning](ci/dependency_hashes.md).
+
 When running ShellCheck or markdownlint directly, or configuring an editor
 integration, use the configuration files in `tools/pre_commit/`:
 `--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
@@ -101,6 +104,13 @@ integration, use the configuration files in `tools/pre_commit/`:
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
+    ```
+
+    Hook revisions in `.pre-commit-config.yaml` are pinned to commit SHAs. To bump them, use:
+
+    ```bash
+    pre-commit autoupdate --freeze               # bumps all hooks
+    pre-commit autoupdate --freeze --repo <url>  # bumps one hook
     ```
 
 ### Documentation
@@ -260,8 +270,24 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
-  It helps vLLM users understand and utilize the new features or changes.
+- Document user-visible changes in the same PR; see
+  [Documenting User-Visible Changes](#documenting-user-visible-changes).
+
+### Documenting User-Visible Changes
+
+If a PR changes what users can run, configure, or observe, update the rendered
+docs in the same PR; code comments, tests, and PR descriptions alone are not
+found by users or their agents. CLI arguments, config fields, and environment
+variables are documented in their docstring, `help=` text, or
+`environment_variables` comment, which generate the reference pages. Everything
+else goes on its page under `docs/` (feature, model, hardware, deprecation),
+linked from its index. Lead with what it is, how to enable it, and the default,
+using the names users search for.
+
+To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
+three times, limited in turn to web search, GitHub, and a local checkout (before
+merge: the docs preview and the PR branch). If it cannot find and quote the
+docs, fix the docs.
 
 ### Adding or Changing Kernels
 
@@ -344,6 +370,11 @@ review process:
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
+- A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
+  `tools/vllm-rocm/therock_wheels.py` fails `pre-commit` until a maintainer
+  with write access comments `/ci rocm cache`, which copies the ROCm base image
+  the PR's CI built into `rocm/vllm-ci` so `main` reuses it after the merge, or
+  `/ci rocm nocache` to skip that. Then re-run the failed `pre-commit` check.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

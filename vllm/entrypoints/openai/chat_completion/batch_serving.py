@@ -3,12 +3,16 @@
 
 import asyncio
 import time
+from collections import Counter
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 from fastapi import Request
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    get_echo_content,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -16,7 +20,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatMessage,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_completion_tokens_details,
+    _make_prompt_tokens_details,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
@@ -29,6 +38,11 @@ from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+def _sum_or_none(counts: list[int | None]) -> int | None:
+    """Sum per-prompt counts; `None` unless every prompt reported one."""
+    return None if None in counts else sum(count or 0 for count in counts)
 
 
 class OpenAIServingChatBatch(OpenAIServingChat):
@@ -58,8 +72,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (single_requests, all_conversations, engine_prompts) on
             success — one entry per conversation — or an ErrorResponse on
-            failure. The renderer adjusts ``single_requests`` in place, so
-            sampling must read them rather than rebuilding from ``request``.
+            failure. The renderer adjusts `single_requests` in place, so
+            sampling must read them rather than rebuilding from `request`.
 
         """
         error_check_ret = await self._check_model(request)
@@ -136,7 +150,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
+        lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
         max_model_len = self.model_config.max_model_len
@@ -154,6 +168,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 self.override_max_tokens,
             )
             single_request = single_requests[i]
+            lora_request = self._maybe_get_adapters(
+                single_request, supports_default_mm_loras=True
+            )
             sampling_params = single_request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
@@ -203,6 +220,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             tokenizer,
             request_metadata,
             self.parser_cls,
+            mm_token_counts=[_get_mm_token_counts(p) for p in engine_prompts],
         )
 
     async def chat_completion_full_generator_batch(
@@ -215,15 +233,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         parser_cls: type[Parser] | None = None,
+        mm_token_counts: list[dict[str, int]] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
         Fans out N generators (one per conversation in the batch), collects
         the final output for each, and assembles a single
-        ``ChatCompletionResponse`` whose ``choices`` are indexed 0,...,N-1.
+        `ChatCompletionResponse` whose `choices` are indexed 0,...,N-1.
 
         Tool-use and streaming are rejected upstream by the
-        ``check_batch_mode`` validator, so neither needs to be handled here.
+        `check_batch_mode` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
         final_results: dict[int, RequestOutput] = {}
@@ -236,6 +255,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         choices: list[ChatCompletionResponseChoice] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        total_reasoning_tokens = 0
+        cached_tokens: list[int | None] = []
+        cache_creation_tokens: list[int | None] = []
 
         for prompt_idx in range(len(generators)):
             final_res = final_results.get(prompt_idx)
@@ -254,6 +276,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             total_completion_tokens += sum(
                 len(output.token_ids) for output in final_res.outputs
             )
+            cached_tokens.append(final_res.num_cached_tokens)
+            cache_creation_tokens.append(final_res.num_cache_creation_tokens)
 
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
@@ -288,6 +312,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         request=single_request,
                         model_output_token_ids=output.token_ids,
                     )
+                    total_reasoning_tokens += parser.count_reasoning_tokens(
+                        output.token_ids
+                    )
                     if not request.include_reasoning:
                         reasoning = None
                 else:
@@ -303,18 +330,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
                 if request.echo:
-                    conversation = all_conversations[prompt_idx]
-                    last_msg_content: str | list[dict[str, str]] = ""
-                    if (
-                        conversation
-                        and "content" in conversation[-1]
-                        and conversation[-1].get("role") == role
-                    ):
-                        last_msg_content = conversation[-1]["content"] or ""
-                    if isinstance(last_msg_content, list):
-                        last_msg_content = "\n".join(
-                            msg["text"] for msg in last_msg_content
-                        )
+                    last_msg_content = get_echo_content(
+                        all_conversations[prompt_idx], role
+                    )
                     message.content = last_msg_content + (message.content or "")
 
                 choice_data = ChatCompletionResponseChoice(
@@ -331,10 +349,35 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 )
                 choices.append(choice_data)
 
+                if self.enable_log_outputs and self.request_logger and message.content:
+                    self.request_logger.log_outputs(
+                        request_id=f"{request_id}_{prompt_idx}",
+                        outputs=message.content,
+                        output_token_ids=output.token_ids,
+                        finish_reason=choice_data.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
+
+        mm_total: Counter[str] = Counter()
+        for counts in mm_token_counts or ():
+            mm_total.update(counts)
+
         usage = UsageInfo(
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            completion_tokens_details=(
+                _make_completion_tokens_details(total_reasoning_tokens)
+                if self._include_reasoning_tokens_details
+                else None
+            ),
+            prompt_tokens_details=_make_prompt_tokens_details(
+                self.enable_prompt_tokens_details,
+                _sum_or_none(cached_tokens),
+                _sum_or_none(cache_creation_tokens),
+                mm_total,
+            ),
         )
         request_metadata.final_usage_info = usage
 

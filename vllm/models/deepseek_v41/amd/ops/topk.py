@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The sparse indexer's decode top-512 for gfx942 (topk512_gfx942.cu).
 
-``build`` builds the extension with hipcc into torch's extension cache (about
+`build` builds the extension with hipcc into torch's extension cache (about
 a minute), and later processes load the cached build. The mono decode layers
 call it when the model is created, so that the build happens at startup and
 not at the first decode step. The TP ranks share one build: torch's extension
@@ -86,7 +86,7 @@ def decode_top_k(logits, next_n, seq_lens, indices, topk_tokens) -> bool:
     """The hook in front of vLLM's decode top-k in the indexer's decode path
     (sparse_indexer.py).
 
-    When ``enabled()`` and the extension is built, a call with topK 512 and
+    When `enabled()` and the extension is built, a call with topK 512 and
     unit column strides runs here and returns True. Otherwise it returns
     False and vLLM runs torch.ops._C.top_k_per_row_decode."""
     if not _ready():
@@ -103,8 +103,8 @@ def candidate_top_k(
     """The hook in front of the DSpark candidate mask of the decode indexer
     (sparse_indexer.py), on layers 24 to 36.
 
-    When ``enabled()`` and the extension is built, a call with topK 512
-    writes each row's top 512 among its candidate blocks to ``indices`` and
+    When `enabled()` and the extension is built, a call with topK 512
+    writes each row's top 512 among its candidate blocks to `indices` and
     returns True. vLLM then skips its mask and its top-k. The mask writes -inf
     to about 7 of every 8 logits of a 128k row, and the top-k then reads the
     whole row. Here only the 2048 x 8 candidate logits of a row are read.
@@ -142,8 +142,8 @@ def candidate_logits_top_k(
     """The hook in front of the dense logits of the decode indexer
     (sparse_indexer.py), on layers 24 to 36.
 
-    When ``enabled()`` and the extension is built, a call that the hook
-    takes writes each row's top 512 among its candidate blocks to ``indices``
+    When `enabled()` and the extension is built, a call that the hook
+    takes writes each row's top 512 among its candidate blocks to `indices`
     and returns True. vLLM then skips its dense logits, its candidate mask and
     its top-k for the layer. The call computes only the 2048 x 8 candidate
     logits of each row (cand_logits.py), bit-identical to the dense kernel's,
@@ -222,7 +222,7 @@ def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
     indexer (sparse_indexer.py), on layer 20, which writes the
     candidate blocks of layers 24 to 36.
 
-    When ``enabled()`` and the extension is built, ``candidates`` gets each
+    When `enabled()` and the extension is built, `candidates` gets each
     row's block ids from one launch (candidateBlocks in topk512_gfx942.cu) and
     this returns True. vLLM takes three launches and torch.topk, which also
     sorts the picks, and about 100 us for a 128k step's 6 rows. The block ids
@@ -252,7 +252,7 @@ def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
 
 def skip_decode_fill(has_prefill, num_decode_tokens, num_tokens, decode) -> bool:
     """Whether the indexer's decode path (sparse_indexer.py) may skip vLLM's
-    -1 fill of the step's top-k rows. When ``enabled()`` and the extension is
+    -1 fill of the step's top-k rows. When `enabled()` and the extension is
     built, it may when every row of the step is a decode row and none is
     padded. The decode top-k then writes every entry of every row, the -1
     past a short row's end included. The extension's top-k (decode_top_k and
@@ -281,9 +281,9 @@ def top_k_per_row_decode_512(
     indices[r, :512] gets the column indices of row r's 512 largest logits, in
     no particular order, and -1 past the row's length when it is shorter.
 
-    With ``register_select``, rows of up to 1M logits that start at 16-byte
+    With `register_select`, rows of up to 1M logits that start at 16-byte
     boundaries run selectFromRegisters, which keeps a block's logits in
-    registers. Other rows, and all rows without ``register_select``, run the
+    registers. Other rows, and all rows without `register_select`, run the
     gfx942 build of vLLM's topKPerRowJob. The index sets are the same, except
     for ties at the cut."""
     if (

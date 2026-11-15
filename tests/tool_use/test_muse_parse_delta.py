@@ -4,11 +4,11 @@
 """parse_delta-level regression tests for the Muse parsers.
 
 These drive the UNIFIED parser-engine streaming API the serving layer actually
-uses (``DelegatingParser.parse_delta``), NOT the ``extract_*_streaming`` methods
+uses (`DelegatingParser.parse_delta`), NOT the `extract_*_streaming` methods
 directly. This is the coverage that was missing when a live no-tools streaming
-request leaked raw harmony framing into ``content``: the phase machine marked
-``reasoning_ended=True`` at the prompt boundary (because ``is_reasoning_end`` on
-a prompt with no ``to=self`` wrongly returned True), skipping the reasoning
+request leaked raw harmony framing into `content`: the phase machine marked
+`reasoning_ended=True` at the prompt boundary (because `is_reasoning_end` on
+a prompt with no `to=self` wrongly returned True), skipping the reasoning
 phase for the whole generation.
 
 Requires a real Muse tokenizer; skipped if the checkpoint is unavailable.
@@ -195,8 +195,10 @@ if __name__ == "__main__":
         ("<|message|>Think.<|eot|>", "Think.", ""),
         ("to=developer<|message|>internal<|eot|>", "", ""),
         (
-            "to=commentary<|message|>Working. to=developer<|message|>internal"
-            "<|eom|><|start|>assistant to=user<|message|>Done.<|eot|>",
+            (
+                "to=commentary<|message|>Working. to=developer<|message|>internal"
+                "<|eom|><|start|>assistant to=user<|message|>Done.<|eot|>"
+            ),
             "",
             "Working. Done.",
         ),

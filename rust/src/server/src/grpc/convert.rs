@@ -9,8 +9,9 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputsParams,
+    StructuredOutputConstraint, StructuredOutputsParams,
 };
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -18,6 +19,7 @@ use vllm_text::{
 };
 
 use super::pb;
+use crate::model_names::ServedModelNames;
 
 fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
     KvHintsEnvelope {
@@ -51,15 +53,15 @@ fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
 
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
-/// If `req.model` is non-empty, it must match one of `served_model_names`;
-/// otherwise the request is rejected with `NotFound`. An empty string is
-/// treated as "unset" (proto3 default) and accepted.
+/// `req.model` must be accepted by `served_model_names`; otherwise the request
+/// is rejected with `NotFound`. An empty string is treated as "unset" (proto3
+/// default) and accepted.
 pub fn to_text_request(
     req: pb::GenerateRequest,
     stream: bool,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<TextRequest, Status> {
-    if !req.model.is_empty() && !served_model_names.iter().any(|n| n == &req.model) {
+    if !served_model_names.accepts(Some(&req.model)) {
         return Err(Status::not_found(format!(
             "model `{}` not found",
             req.model
@@ -124,6 +126,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
+        detokenize: response.and_then(|options| options.output_text).unwrap_or(true),
     };
 
     Ok(TextRequest {
@@ -208,7 +211,14 @@ fn build_sampling_params(
             params.bad_words_token_ids =
                 Some(d.bad_words_token_ids.iter().map(|sequence| sequence.ids.clone()).collect());
         }
-        params.structured_outputs = convert_structured_output(d)?;
+        let legacy = d.legacy_structured_output.as_ref().map(legacy_structured_output);
+        if d.structured_output.is_some() && legacy.is_some() {
+            return Err(Status::invalid_argument(
+                "set decoding.structured_output or the legacy inline structured-output fields, not both",
+            ));
+        }
+        params.structured_outputs =
+            structured_output_from_proto(d.structured_output.as_ref().or(legacy.as_ref()))?;
     }
 
     // StoppingCriteria
@@ -276,35 +286,70 @@ fn candidate_logprob_spec(
     }
 }
 
-/// EngineCore compiles every request with the backend of the first one it sees,
-/// so all gRPC constraints use xgrammar.
-fn convert_structured_output(
-    d: &pb::DecodingParameters,
+/// Convert a proto structured-output constraint; `None` and
+/// `json_object = false` mean unconstrained.
+pub(super) fn structured_output_from_proto(
+    structured_output: Option<&pb::StructuredOutput>,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
-    let so = match d.structured_output.as_ref() {
-        None => return Ok(None),
-        Some(so) => so,
+    use pb::structured_output::Kind;
+
+    let Some(kind) = structured_output.and_then(|output| output.kind.as_ref()) else {
+        return Ok(None);
     };
-    use pb::decoding_parameters::StructuredOutput;
-    let mut params = match so {
-        StructuredOutput::Json(schema) => {
+    let params = match kind {
+        Kind::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
             StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
-        StructuredOutput::Choice(choices) => {
-            StructuredOutputsParams::choice(choices.choices.clone())
-        }
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
-        StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => {
-            StructuredOutputsParams::structural_tag(tag.clone())
-        }
+        Kind::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        Kind::Choice(choices) => StructuredOutputsParams::choice(choices.choices.clone()),
+        Kind::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        Kind::JsonObject(true) => StructuredOutputsParams::json_object(),
+        Kind::JsonObject(false) => return Ok(None),
+        Kind::StructuralTag(tag) => StructuredOutputsParams::structural_tag(tag.clone()),
     };
-    params.backend = StructuredOutputBackend::Xgrammar;
     Ok(Some(params))
+}
+
+/// Lift the legacy inline `DecodingParameters` constraint into the shared
+/// `StructuredOutput` message.
+fn legacy_structured_output(
+    legacy: &pb::decoding_parameters::LegacyStructuredOutput,
+) -> pb::StructuredOutput {
+    use pb::decoding_parameters::LegacyStructuredOutput as Legacy;
+    use pb::structured_output::Kind;
+
+    let kind = match legacy {
+        Legacy::Json(schema) => Kind::Json(schema.clone()),
+        Legacy::Regex(regex) => Kind::Regex(regex.clone()),
+        Legacy::Choice(choices) => Kind::Choice(choices.clone()),
+        Legacy::Grammar(grammar) => Kind::Grammar(grammar.clone()),
+        Legacy::JsonObject(json_object) => Kind::JsonObject(*json_object),
+        Legacy::StructuralTag(tag) => Kind::StructuralTag(tag.clone()),
+    };
+    pb::StructuredOutput { kind: Some(kind) }
+}
+
+/// The inverse of [`structured_output_from_proto`]. Constraint options are
+/// not carried: the engine reads them from its own config.
+pub(super) fn structured_output_to_proto(params: &StructuredOutputsParams) -> pb::StructuredOutput {
+    use pb::structured_output::{Kind, StringChoices};
+
+    let kind = match &params.constraint {
+        StructuredOutputConstraint::Json(serde_json::Value::String(schema)) => {
+            Kind::Json(schema.clone())
+        }
+        StructuredOutputConstraint::Json(schema) => Kind::Json(schema.to_string()),
+        StructuredOutputConstraint::Regex(regex) => Kind::Regex(regex.clone()),
+        StructuredOutputConstraint::Choice(choices) => Kind::Choice(StringChoices {
+            choices: choices.clone(),
+        }),
+        StructuredOutputConstraint::Grammar(grammar) => Kind::Grammar(grammar.clone()),
+        StructuredOutputConstraint::JsonObject => Kind::JsonObject(true),
+        StructuredOutputConstraint::StructuralTag(tag) => Kind::StructuralTag(tag.clone()),
+    };
+    pb::StructuredOutput { kind: Some(kind) }
 }
 
 // ========================================================================================
@@ -339,11 +384,15 @@ pub fn to_prompt_info(
 }
 
 /// Convert a `DecodedTextEvent::TextDelta` into a gRPC `SequenceOutput`.
+///
+/// `sampling_mask` holds the whole request's rows, which only the terminal
+/// output carries.
 pub fn to_sequence_output(
     delta: &str,
     token_ids: &[u32],
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
+    sampling_mask: Option<&SamplingMask>,
     opts: &ResponseOpts,
 ) -> Result<pb::SequenceOutput, Status> {
     let finish_info = finished.map(|f| to_finish_info(f, token_ids)).transpose()?;
@@ -352,8 +401,7 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
-    let sampling_mask = finished
-        .and_then(|finished| finished.sampling_mask.as_ref())
+    let sampling_mask = sampling_mask
         .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
         .unwrap_or_default();
 
@@ -399,6 +447,9 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
         FinishReason::Error(Some(error)) if error.retryable => {
             return Err(Status::unavailable(error.message.clone()));
         }
@@ -412,7 +463,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -485,13 +536,13 @@ fn positions_to_proto(
 /// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
 const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
 
-fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
+pub(super) fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
     )
 }
 
-fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
+pub(super) fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     use prost_types::value::Kind;
     match v.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
@@ -571,6 +622,7 @@ mod tests {
     use prost::Message as _;
     use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -578,9 +630,13 @@ mod tests {
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{
-        ResponseOpts, Status, StructuredOutputBackend, StructuredOutputsParams,
-        json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
     };
+    use crate::model_names::ServedModelNames;
+
+    fn served() -> ServedModelNames {
+        ServedModelNames::new(vec!["test-model".to_string()])
+    }
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -606,7 +662,7 @@ mod tests {
         let encoded = request.encode_to_vec();
         for stream in [false, true] {
             let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-            let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+            let text = to_text_request(decoded, stream, &served()).unwrap();
             let engine = vllm_text::lower_text_request(
                 text,
                 vec![1],
@@ -617,12 +673,76 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
             .generate_request;
             let params = engine.sampling_params;
             assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
+        }
+    }
+
+    /// Clients built before `decoding.structured_output` still set the legacy
+    /// inline fields, which must keep constraining generation; setting both is
+    /// ambiguous and rejected.
+    #[test]
+    fn grpc_legacy_structured_output_fields_still_constrain() {
+        use pb::decoding_parameters::LegacyStructuredOutput as Legacy;
+        use pb::structured_output::{Kind, StringChoices};
+
+        let schema = r#"{"type":"object"}"#;
+        let request = |decoding| pb::GenerateRequest {
+            decoding: Some(decoding),
+            ..base_request()
+        };
+        let constraint = |decoding| {
+            let encoded = request(decoding).encode_to_vec();
+            let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+            to_text_request(decoded, false, &served())
+                .map(|text| text.sampling_params.structured_outputs)
+        };
+        for (legacy, kind) in [
+            (
+                Legacy::Json(schema.to_string()),
+                Kind::Json(schema.to_string()),
+            ),
+            (
+                Legacy::Regex("a+".to_string()),
+                Kind::Regex("a+".to_string()),
+            ),
+            (
+                Legacy::Choice(StringChoices {
+                    choices: vec!["yes".to_string(), "no".to_string()],
+                }),
+                Kind::Choice(StringChoices {
+                    choices: vec!["yes".to_string(), "no".to_string()],
+                }),
+            ),
+            (Legacy::JsonObject(true), Kind::JsonObject(true)),
+        ] {
+            let from_legacy = constraint(pb::DecodingParameters {
+                legacy_structured_output: Some(legacy.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            let from_current = constraint(pb::DecodingParameters {
+                structured_output: Some(pb::StructuredOutput {
+                    kind: Some(kind.clone()),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(from_legacy.is_some(), "{legacy:?}");
+            assert_eq!(from_legacy, from_current, "{legacy:?}");
+
+            let error = constraint(pb::DecodingParameters {
+                legacy_structured_output: Some(legacy),
+                structured_output: Some(pb::StructuredOutput { kind: Some(kind) }),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
         }
     }
 
@@ -669,7 +789,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(request, stream, &["test-model".to_string()])
+                let text = to_text_request(request, stream, &served())
                     .expect("reasoning controls accepted");
                 let engine = vllm_text::lower_text_request(
                     text,
@@ -681,6 +801,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .expect("reasoning controls lower to engine")
@@ -707,8 +828,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()])
-                    .expect("convert request");
+                let text = to_text_request(decoded, stream, &served()).expect("convert request");
                 assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
@@ -720,7 +840,7 @@ mod tests {
             temperature: Some(0.7),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.temperature, Some(0.7));
     }
 
@@ -740,7 +860,7 @@ mod tests {
             ..base_request()
         };
 
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         let hints = text.kv_hints.expect("kv hints");
         assert_eq!(hints.protocol_version, "0.1");
         assert_eq!(hints.message_id, "msg-1");
@@ -755,47 +875,9 @@ mod tests {
 
     #[test]
     fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &["test-model".to_string()])
-            .expect("convert ok");
+        let text = to_text_request(base_request(), false, &served()).expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
-    }
-
-    fn lower_structured_output(
-        so: super::pb::decoding_parameters::StructuredOutput,
-    ) -> Result<StructuredOutputsParams, Status> {
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(so),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        Ok(to_text_request(req, false, &["test-model".to_string()])?
-            .sampling_params
-            .structured_outputs
-            .expect("structured outputs set"))
-    }
-
-    #[test]
-    fn grpc_structured_outputs_use_xgrammar() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        for so in [
-            StructuredOutput::Json(r#"{"type": "object"}"#.to_string()),
-            StructuredOutput::JsonObject(true),
-            StructuredOutput::Regex("[a-z]+".to_string()),
-            StructuredOutput::Grammar(r#"root ::= "a""#.to_string()),
-            StructuredOutput::Choice(super::pb::decoding_parameters::StringChoices {
-                choices: vec!["a".to_string()],
-            }),
-            StructuredOutput::StructuralTag(
-                r#"{"type": "structural_tag", "format": {"type": "const_string", "value": "x"}}"#
-                    .to_string(),
-            ),
-        ] {
-            let params = lower_structured_output(so.clone()).expect("convert ok");
-            assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
-        }
     }
 
     #[test]
@@ -807,7 +889,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, None);
     }
 
@@ -820,7 +902,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
     }
 
@@ -864,8 +946,7 @@ mod tests {
                 }),
                 ..base_request()
             };
-            let text =
-                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let text = to_text_request(req, false, &served()).expect("convert ok");
             let params = lower_sampling_params(
                 text.sampling_params,
                 SamplingHints::default(),
@@ -875,6 +956,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -907,7 +989,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let text = to_text_request(decoded, stream, &served()).unwrap();
                 let engine = vllm_text::lower_text_request(
                     text,
                     vec![1],
@@ -923,6 +1005,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -942,7 +1025,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(true));
     }
 
@@ -955,7 +1038,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
@@ -966,12 +1049,14 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
-            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
             timestamps: Default::default(),
         }
     }
@@ -1042,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn retryable_engine_error_maps_to_unavailable() {
+    fn engine_errors_map_to_status_codes() {
         let error = RequestError {
             code: "engine_paused".to_string(),
             message: "Generation is paused.".to_string(),
@@ -1051,6 +1136,19 @@ mod tests {
         let fin = finished(FinishReason::Error(Some(Box::new(error))));
         let status = to_finish_info(&fin, &[]).expect_err("retryable error");
         assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
 
         let fin = finished(FinishReason::Error(None));
         let status = to_finish_info(&fin, &[]).expect_err("internal error");
@@ -1061,14 +1159,14 @@ mod tests {
     fn to_sequence_output_threads_token_ids_into_eos_id() {
         let mut fin = finished(FinishReason::Stop(None));
         fin.usage.prompt_token_count = 8;
-        fin.usage.cached_token_count = 5;
+        fin.usage.prompt_cache_usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
+        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), None, &opts)
             .expect("sequence output");
         let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
@@ -1080,15 +1178,21 @@ mod tests {
 
     #[test]
     fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
-        let mut fin = finished(FinishReason::Length);
-        fin.sampling_mask = Some(SamplingMask {
+        let fin = finished(FinishReason::Length);
+        let mask = SamplingMask {
             rows: vec![vec![1, 10], vec![2, 20]],
-        });
+        };
 
-        let terminal =
-            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
-                .expect("terminal output");
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+        let terminal = to_sequence_output(
+            "",
+            &[10, 20],
+            None,
+            Some(&fin),
+            Some(&mask),
+            &ResponseOpts::default(),
+        )
+        .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, None, &ResponseOpts::default())
             .expect("intermediate output");
 
         assert_eq!(

@@ -128,7 +128,8 @@ fn factory_distinguishes_glm_reasoning_framing() {
 
 #[test]
 fn step5_preserves_reasoning_and_content_whitespace_across_chunks() {
-    use vllm_tokenizer::{DecodedText, Tokenizer as _};
+    use vllm_tokenizer::Tokenizer as _;
+    use vllm_tokenizer::test_utils::decode_chunks;
 
     let tokenizer = Arc::new(
         TestTokenizer::new()
@@ -154,9 +155,12 @@ fn step5_preserves_reasoning_and_content_whitespace_across_chunks() {
             parser.initialize(&prompt).unwrap();
             let mut reasoning = String::new();
             let mut content = String::new();
+            let [head, rest] = decode_chunks(tokenizer.as_ref(), &[&wire[..split], &wire[split..]])
+                .try_into()
+                .unwrap();
             for delta in [
-                parser.push(DecodedText::unattributed(&wire[..split])).unwrap(),
-                parser.push(DecodedText::unattributed(&wire[split..])).unwrap(),
+                parser.push(head).unwrap(),
+                parser.push(rest).unwrap(),
                 parser.finish().unwrap(),
             ] {
                 if let Some(text) = delta.reasoning {
