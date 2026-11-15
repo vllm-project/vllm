@@ -56,14 +56,17 @@ features:
       - "kimi_k3"
   spec_decoding:
     description: "Use DSpark speculative decoding with the Kimi-K3.1 draft."
-    # The K3.1 DSpark draft (5 layers), not the K3 draft.
+    # Inferact/Kimi-K3.1-Pro-DSpark: 5 GQA layers with a 2,048-token sliding
+    # window. It replaces Inferact/Kimi-K3.1-Pro-DSpark-preview (5 MLA layers),
+    # which MI355X and the presets keep because they were measured with it.
     args:
       - "--speculative-config"
-      - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","draft_sample_method":"probabilistic"}'
+      - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":5,"method":"dspark","draft_sample_method":"probabilistic"}'
     hardware_overrides:
-      # MI355X runs the draft on ROCM_AITER_MLA, and the draft's FP8 KV assumes
-      # an FP8 target KV. The AgentX TP8 preset sets its own token count per
-      # point: 7 at concurrency 1, 5 at 4, 4 at 16 and 24, 3 at 32 and 48.
+      # MI355X keeps the preview draft on ROCM_AITER_MLA (the GQA draft has not
+      # been run there), and the draft's FP8 KV assumes an FP8 target KV. The
+      # AgentX TP8 preset sets its own token count per point: 7 at concurrency
+      # 1, 5 at 4, 4 at 16 and 24, 3 at 32 and 48.
       mi355x:
         args:
           - "--kv-cache-dtype"
@@ -547,7 +550,7 @@ presets:
     # --kv-transfer-config: the Simple option's connector with the lane's host
     # DRAM split per rank.
     json_args:
-      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 281125000000 } }
       "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
     # Decode capture sizes are 5 rows (1 + 4 draft tokens) per request.
@@ -638,7 +641,7 @@ presets:
       VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
     # Decode sizes, then prefill and mixed steps up to 4096 tokens.
     json_args:
-      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 3, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 3, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 281125000000 } }
       "--compilation-config":
         max_cudagraph_capture_size: 4096
@@ -733,7 +736,7 @@ presets:
       VLLM_ENABLE_GEMM_RS: "0"
       TOKENSPEED_MLA_FP16_PARTIALS: "0"
     json_args:
-      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", attention_backend: TOKENSPEED_MLA, num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 374875000000 } }
       "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
     # --max-num-seqs equals the concurrency; decode capture sizes are 5 rows
@@ -935,7 +938,7 @@ presets:
     # The lane's connector options on the composed MultiConnector, and its
     # draft length.
     json_args: &k31_gb300_pd_json
-      "--speculative-config": { num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config":
         kv_load_failure_policy: recompute
         NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
@@ -1431,7 +1434,7 @@ presets:
       TILELANG_CLEANUP_TEMP_FILES: "1"
     # The draft length, and the lane's options on the store connector.
     json_args:
-      "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 7, rejection_sample_method: block }
       "--kv-transfer-config": { kv_load_failure_policy: recompute, kv_connector_extra_config: { load_async: true, lookup_async: true, enable_cross_layers_blocks: false, enable_offload: false } }
     points:
       c1:
