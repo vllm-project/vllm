@@ -62,7 +62,10 @@ class EncoderOnlyAttention(Attention):
         **kwargs,
     ):
         """`attn_backend` replaces the selected backend (e.g. a model's own
-        subclass); it is wrapped for non-causal metadata like the default."""
+        subclass); it is wrapped for non-causal metadata like the default.
+        A given backend skips the backend selector and its validation, and
+        overrides `--attention-backend`. Its `get_name()` must be the name of
+        a registered `AttentionBackendEnum` member."""
         dtype = torch.get_default_dtype()
 
         if cache_config is not None:
@@ -70,12 +73,13 @@ class EncoderOnlyAttention(Attention):
         else:
             kv_cache_dtype = "auto"
 
-        underlying_attn_backend = attn_backend or get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            attn_type=AttentionType.ENCODER_ONLY,
-        )
+        if attn_backend is None:
+            attn_backend = get_attn_backend(
+                head_size,
+                dtype,
+                kv_cache_dtype,
+                attn_type=AttentionType.ENCODER_ONLY,
+            )
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_ONLY, (
@@ -87,7 +91,7 @@ class EncoderOnlyAttention(Attention):
             head_size=head_size,
             scale=scale,
             cache_config=cache_config,
-            attn_backend=create_encoder_only_attention_backend(underlying_attn_backend),
+            attn_backend=create_encoder_only_attention_backend(attn_backend),
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,
         )

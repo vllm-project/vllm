@@ -472,6 +472,7 @@ class BertPoolingModel(BertModel):
             vllm_config=vllm_config,
             prefix=prefix,
             embedding_class=embedding_class,
+            attn_backend=attn_backend,
         )
 
         self.pooler = BertPooler(vllm_config.model_config)

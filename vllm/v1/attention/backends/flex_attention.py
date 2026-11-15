@@ -834,8 +834,12 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    # The metadata class ``build`` creates (and builds the block mask of). A
-    # subclass may name its own, e.g. one with another ``get_mask_mod``.
+    # The metadata class `build` creates and builds the block mask of. A
+    # subclass may name its own, e.g. one with another `get_mask_mod`. The mask
+    # is built inside `build`, so per-batch data the mask reads (e.g. segment
+    # ids) must be stashed on the builder, in persistent full-capacity tensors,
+    # before the subclass calls `super().build()`; the metadata class reads it
+    # from there.
     metadata_cls: ClassVar[type[FlexAttentionMetadata]] = FlexAttentionMetadata
 
     def __init__(

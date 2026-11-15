@@ -21,6 +21,7 @@ from vllm.model_executor.models.config import (
     register_model_config,
 )
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends import flex_attention
 from vllm.v1.attention.backends.flex_attention import (
     FlexAttentionBackend,
     FlexAttentionMetadata,
@@ -53,6 +54,32 @@ def test_encoder_only_attention_takes_a_backend(monkeypatch):
     assert seen["attn_type"] == AttentionType.ENCODER_ONLY
 
 
+@pytest.mark.parametrize("model_cls", ["BertModel", "BertPoolingModel"])
+def test_bert_layers_receive_the_backend(monkeypatch, dist_init, model_cls):
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.models import bert
+
+    seen = []
+
+    def record(self, *args, attn_backend=None, **kwargs):
+        torch.nn.Module.__init__(self)
+        seen.append(attn_backend)
+
+    monkeypatch.setattr(encoder_only_attention.EncoderOnlyAttention, "__init__", record)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            "sentence-transformers/all-MiniLM-L6-v2", runner="pooling"
+        )
+    )
+    with set_current_vllm_config(vllm_config):
+        getattr(bert, model_cls)(
+            vllm_config=vllm_config, prefix="model", attn_backend=FlexAttentionBackend
+        )
+    # Every encoder layer gets the model's backend.
+    assert len(seen) == vllm_config.model_config.hf_config.num_hidden_layers
+    assert all(backend is FlexAttentionBackend for backend in seen)
+
+
 def _only_self(b, h, q_idx, kv_idx):
     return q_idx == kv_idx
 
@@ -66,7 +93,11 @@ class _OwnBuilder(FlexAttentionMetadataBuilder):
     metadata_cls = _OwnMetadata
 
 
-def test_flex_builder_builds_its_metadata_cls():
+def test_flex_builder_builds_its_metadata_cls(monkeypatch):
+    # CPU test: build the block mask eagerly, without torch.compile.
+    monkeypatch.setattr(
+        flex_attention, "create_block_mask_compiled", flex_attention.create_block_mask
+    )
     vllm_config = create_vllm_config(max_model_len=256, block_size=16)
     device = torch.device("cpu")
     layer_names = ["layer.0"]
@@ -103,8 +134,8 @@ class _HookB(VerifyAndUpdateConfig):
 
 
 def test_register_model_config(monkeypatch):
-    monkeypatch.setitem(MODELS_CONFIG_MAP, "PluginArchForTest", _HookA)
-    MODELS_CONFIG_MAP.pop("PluginArchForTest")
+    # Restored (absent) after the test.
+    monkeypatch.delitem(MODELS_CONFIG_MAP, "PluginArchForTest", raising=False)
     register_model_config("PluginArchForTest", _HookA)
     assert MODELS_CONFIG_MAP["PluginArchForTest"] is _HookA
     register_model_config("PluginArchForTest", _HookA)  # idempotent
