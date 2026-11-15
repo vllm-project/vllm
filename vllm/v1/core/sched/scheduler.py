@@ -479,6 +479,11 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
+        # Preemptions queue their requeued work here; the next output flush
+        # sends it. Empty whenever reporting is off.
+        self._deferred_prefill_progress: dict[int, list[PrefillProgress]] = (
+            defaultdict(list)
+        )
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
 
@@ -1813,6 +1818,21 @@ class Scheduler(SchedulerInterface):
             return None
         return new_block_ids_to_zero or None
 
+    def _queue_requeued_progress(self, request: Request) -> None:
+        """Record the work a preemption put back, for the next output flush."""
+        if not self.scheduler_config.enable_prefill_progress:
+            return
+        if request.prefill_progress_left is None:
+            return
+        remaining = max(0, request.num_tokens - request.num_computed_tokens)
+        request.prefill_progress_left = None
+        request.prefill_progress_step = 0
+        self._deferred_prefill_progress.setdefault(request.client_index, []).append(
+            PrefillProgress(
+                request_id=request.request_id, remaining_prefill_tokens=remaining
+            )
+        )
+
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1852,6 +1872,9 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
+        # The work this preemption puts back is reported before the request is
+        # scheduled again, so a consumer never prices it from the old value.
+        self._queue_requeued_progress(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -2258,6 +2281,13 @@ class Scheduler(SchedulerInterface):
         """
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = max(0, request.num_tokens - computed)
+        if remaining <= 0:
+            # Reaching zero is a state change, not a sample: it is never
+            # throttled, and it ends this request's reporting.
+            request.prefill_progress_left = None
+            return PrefillProgress(
+                request_id=request.request_id, remaining_prefill_tokens=0
+            )
         if request.prefill_progress_step == 0:
             request.prefill_progress_step = max(
                 1,
@@ -2302,7 +2332,10 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-        prefill_progress: dict[int, list[PrefillProgress]] = defaultdict(list)
+        prefill_progress: dict[int, list[PrefillProgress]] = (
+            self._deferred_prefill_progress
+        )
+        self._deferred_prefill_progress = defaultdict(list)
         # A report rides on the output this step already produces for the
         # request; only a step without one needs an output of its own.
         prefill_by_request: dict[str, PrefillProgress] = {}
@@ -2529,11 +2562,10 @@ class Scheduler(SchedulerInterface):
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if request.prefill_progress_left is not None:
                         request.prefill_progress_left = None
-                        prefill_by_request.pop(req_id, None)
-                        prefill_progress.setdefault(request.client_index, []).append(
-                            PrefillProgress(
-                                request_id=req_id, remaining_prefill_tokens=0
-                            )
+                        # Attach the final zero to this step's terminal output;
+                        # a step without one flushes it as its own frame.
+                        prefill_by_request[req_id] = PrefillProgress(
+                            request_id=req_id, remaining_prefill_tokens=0
                         )
                     if (
                         prefill_stats is not None
