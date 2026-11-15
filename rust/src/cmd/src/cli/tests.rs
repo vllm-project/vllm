@@ -79,6 +79,10 @@ fn render_args_build_config_without_tls() {
         "50051",
         "--dtype",
         "float16",
+        "--shutdown-timeout",
+        "7",
+        "--http-timeout-keep-alive",
+        "9",
         "--lora-modules",
         "adapter-a=org/adapter-a",
         "--max-model-len",
@@ -119,6 +123,8 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
     assert_eq!(config.grpc_port, Some(50051));
+    assert_eq!(config.shutdown_timeout, Duration::from_secs(7));
+    assert_eq!(config.keep_alive_timeout, Duration::from_secs(9));
     assert_eq!(config.dtype, Some(ModelDtype::Float16));
     assert_eq!(config.lora_modules[0].name, "adapter-a");
     assert!(!config.language_model_only);
@@ -282,8 +288,10 @@ fn serve_args_forward_python_flags_with_separator() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
-                        shutdown_timeout: 0,
-                        http_timeout_keep_alive: None,
+                        timeouts: ServerTimeoutArgs {
+                            shutdown_timeout: 0,
+                            http_timeout_keep_alive: None,
+                        },
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,
@@ -540,7 +548,7 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.runtime.shutdown_timeout, 60);
+    assert_eq!(args.runtime.timeouts.shutdown_timeout, 60);
 
     let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
@@ -2287,8 +2295,10 @@ fn frontend_args_accept_json() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
-                        shutdown_timeout: 0,
-                        http_timeout_keep_alive: None,
+                        timeouts: ServerTimeoutArgs {
+                            shutdown_timeout: 0,
+                            http_timeout_keep_alive: None,
+                        },
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,
@@ -2387,7 +2397,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_logprobs, None);
-    assert_eq!(args.runtime.shutdown_timeout, 0);
+    assert_eq!(args.runtime.timeouts.shutdown_timeout, 0);
     assert_eq!(args.into_config().transport_mode.data_parallel_size(), 4);
 }
 
@@ -2610,7 +2620,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
     assert_eq!(args.runtime.max_logprobs, Some(-1));
-    assert_eq!(args.runtime.shutdown_timeout, 3);
+    assert_eq!(args.runtime.timeouts.shutdown_timeout, 3);
 }
 
 #[test]
@@ -3246,8 +3256,10 @@ fn serve_args_accept_handshake_aliases() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
-                        shutdown_timeout: 0,
-                        http_timeout_keep_alive: None,
+                        timeouts: ServerTimeoutArgs {
+                            shutdown_timeout: 0,
+                            http_timeout_keep_alive: None,
+                        },
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,

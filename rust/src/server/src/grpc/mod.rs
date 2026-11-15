@@ -15,7 +15,7 @@ pub use vllm_proto as pb;
 
 pub(crate) use control::ControlGrpcService;
 pub use control::ControlServiceImpl;
-pub(crate) use health::{EngineHealth, HealthMonitor};
+pub(crate) use health::{EngineHealth, HealthMonitor, HealthSource};
 pub(crate) use inference::InferenceGrpcService;
 pub use inference::InferenceServiceImpl;
 pub use pb::control_server::ControlServer;

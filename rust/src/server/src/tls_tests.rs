@@ -29,7 +29,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
 use crate::listener::{Listener, MaybeTlsListener};
-use crate::{ConnectionTimeouts, serve_connections, tls};
+use crate::serving::{ConnectionTimeouts, serve_connections};
+use crate::tls;
 
 // ============================================================================
 // Test infrastructure
