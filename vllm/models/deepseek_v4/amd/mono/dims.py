@@ -56,7 +56,7 @@ def ld(k: int) -> int:
     return k + 256 if k % 512 == 0 else k
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dims:
     """A TP rank's share of the model's widths."""
 
