@@ -776,6 +776,9 @@ class Scheduler(SchedulerInterface):
             )
 
         # First, schedule the RUNNING requests.
+        parked_reserved_blocks = self._inflight_prefill_reserved_blocks(
+            parked_only=True
+        )
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -901,9 +904,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                         # Parked transfers cannot release their prefix blocks.
-                        reserved_blocks=self._inflight_prefill_reserved_blocks(
-                            parked_only=True
-                        ),
+                        reserved_blocks=parked_reserved_blocks,
                     )
 
                     if new_blocks is not None:
