@@ -131,6 +131,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
     "draft_lm_head_quantization",
+    "draft_prefill_cudagraph_max_tokens",
     "index_share_for_mtp_iteration",
     "xpress_topc",
     "speculator_options",
@@ -489,6 +490,14 @@ class SpeculativeConfig:
 
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
+    draft_prefill_cudagraph_max_tokens: int | None = Field(default=None, gt=0)
+    """Optional token ceiling for first-draft PIECEWISE CUDA graphs with the
+    EAGLE/EAGLE3, single-module MTP, and Gemma4 speculators. Larger first
+    passes run eagerly; target and later draft graphs are unchanged. The cap
+    filters the configured prefill sizes without adding a size at the ceiling.
+    None (default) uses the target's capture sizes. NONE/FULL-only modes
+    ignore the cap with a startup warning. Other speculators reject it.
+    """
     # General speculative decoding control
     num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
@@ -787,6 +796,7 @@ class SpeculativeConfig:
             "disable_eagle_block_drop",
             "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
+            "draft_prefill_cudagraph_max_tokens",
             "use_local_argmax_reduction",
             "prompt_lookup_max",
             "prompt_lookup_min",
@@ -813,6 +823,10 @@ class SpeculativeConfig:
             "fly_entropy_top_k",
         }
         factors = get_compile_factors(self, ignored_factors)
+        if self.draft_prefill_cudagraph_max_tokens is not None:
+            factors["draft_prefill_cudagraph_max_tokens"] = (
+                self.draft_prefill_cudagraph_max_tokens
+            )
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden
         # state.

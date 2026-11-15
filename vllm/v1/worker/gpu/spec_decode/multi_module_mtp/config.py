@@ -4,6 +4,9 @@ from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
 
 class MultiModuleMTPSpeculatorConfig(MTPSpeculatorConfig):
+    supported_options = MTPSpeculatorConfig.supported_options - {
+        "draft_prefill_cudagraph_max_tokens"
+    }
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator."
         "MultiModuleMTPSpeculator"

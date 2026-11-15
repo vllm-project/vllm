@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import copy
 from typing import Any
 
 import torch
@@ -8,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -18,6 +20,8 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
+
+logger = init_logger(__name__)
 
 
 class TargetDependentARSpeculator(AutoRegressiveSpeculator):
@@ -40,8 +44,31 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.inputs_embeds: torch.Tensor | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        prefill_config = self.vllm_config
+        cap = self.speculative_config.draft_prefill_cudagraph_max_tokens
+        if cap is not None and cudagraph_mode.has_piecewise_cudagraphs():
+            compilation = copy(self.vllm_config.compilation_config)
+            sizes = [
+                n
+                for n in compilation.prefill_cudagraph_capture_token_sizes or ()
+                if n <= cap
+            ]
+            if not sizes:
+                raise ValueError(
+                    "No configured draft prefill CUDA graph capture sizes fit "
+                    "draft_prefill_cudagraph_max_tokens"
+                )
+            compilation.prefill_cudagraph_capture_token_sizes = sizes
+            compilation.max_prefill_cudagraph_capture_tokens = max(sizes)
+            prefill_config = copy(self.vllm_config)
+            prefill_config.compilation_config = compilation
+        elif cap is not None:
+            logger.warning_once(
+                "draft_prefill_cudagraph_max_tokens has no effect without "
+                "PIECEWISE CUDA graphs."
+            )
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
+            prefill_config,
             self.device,
             cudagraph_mode,
             self.vllm_config.get_decode_cudagraph_query_lens(
