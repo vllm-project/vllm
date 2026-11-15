@@ -72,8 +72,8 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
         choices=["auto", "real", "balanced", "zipf"],
         default="auto",
         help="MoE routing. balanced: fixed routing with equal load per EP rank. "
-        "zipf: fixed weighted sampling without replacement (alpha=1.25), "
-        "with expert popularity shuffled per layer. "
+        "zipf: weighted sampling without replacement (alpha=1.25), with expert "
+        "popularity shuffled per layer and re-drawn for each timing sample. "
         "auto: zipf with dummy weights, else real; falls back to real when "
         "the synthetic fixture is unsupported.",
     )
@@ -279,6 +279,7 @@ def run_case(
     mode, fixture = routing
     if fixture is not None:
         fixture.begin_case()
+        bench.before_sample = fixture.redraw
     try:
         result = bench.run()
         if fixture is not None:

@@ -25,8 +25,10 @@ Each token independently selects distinct experts without replacement, weighted
 by popularity rank to the power of `-1.25`. Expert popularity is randomly
 permuted per layer to avoid systematically assigning hot experts to the lowest
 EP ranks.
-The fixture is seeded by `--seed`, fixed across timing replays, and generated
-outside the timed forward. Sequence-parallel TP ranks use their corresponding
+The fixture is seeded by `--seed` and generated outside the timed forward. Each
+timing sample (`--samples`) after the first re-draws the per-layer popularity
+permutation in place, so a case's median averages over which experts are hot
+and on which EP rank; the replays within a sample share one draw. Sequence-parallel TP ranks use their corresponding
 token rows. When replacing expert IDs, both synthetic modes preserve inactive
 `-1` slots and leave routing weights unchanged, so padded rows remain unrouted.
 The expert-ID hook performs this mask selection inside the timed forward; the

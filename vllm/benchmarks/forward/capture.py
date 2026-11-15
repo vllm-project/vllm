@@ -268,6 +268,9 @@ class ForwardBench:
         self.profile_prefix = profile_prefix
         self.phase = "warmup"
         self.result: dict[str, Any] = {}
+        # Called with the sample index before each timing sample (e.g. a routing
+        # re-draw), and with 0 after timing.
+        self.before_sample: Callable[[int], None] | None = None
         self.include_drafter = include_drafter
         self.drafter: DraftBench | None = None
         self.include_sampler = include_sampler
@@ -542,10 +545,18 @@ class ForwardBench:
         start, end = self._events
         self._warmup(graph)
         times = []
-        for _ in range(self.iters * self.samples):
-            graph.replay()
-            end.synchronize()
-            times.append(start.elapsed_time(end) * 1000)
+        for sample in range(self.samples):
+            if self.before_sample is not None and sample > 0:
+                self.before_sample(sample)
+                for _ in range(2):  # untimed: settle on the new draw
+                    graph.replay()
+                torch.accelerator.synchronize()
+            for _ in range(self.iters):
+                graph.replay()
+                end.synchronize()
+                times.append(start.elapsed_time(end) * 1000)
+        if self.before_sample is not None:
+            self.before_sample(0)
         arr = torch.tensor(times, device=self.device)
         if world.world_size > 1:
             torch.distributed.all_reduce(

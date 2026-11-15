@@ -198,6 +198,38 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     assert set(ids.flatten().tolist()) == {0, 1}
 
 
+def test_zipf_redraw_relabels_experts_in_place(dist_init):
+    """Timing samples re-draw which experts are hot: a consistent relabeling of the
+    fixture's expert ids, in the same tensors (captured graphs replay it), and sample 0
+    restores the original draw."""
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    device = torch.device(current_platform.device_type)
+    layer = torch.nn.Module()
+    layer.add_module("router", GateLinear(4, 8, params_dtype=torch.float32).to(device))
+    layer.top_k = 2
+    fixture = RoutingFixture(layer, 64, 0, 1, 4, 0, device, mode="zipf")
+    try:
+        tables = fixture._tables[0]
+        tables["logits"] = fixture._logits(0)
+        ids, logits = tables["ids"], tables["logits"]
+        base = ids.clone()
+        fixture.redraw(1)
+        assert tables["ids"] is ids and tables["logits"] is logits
+        mapping: dict[int, int] = {}
+        for old, new in zip(base.flatten().tolist(), ids.flatten().tolist()):
+            assert mapping.setdefault(old, new) == new
+        assert len(set(mapping.values())) == len(mapping) and mapping != {
+            e: e for e in mapping
+        }
+        chosen = logits.topk(2, dim=1).indices.sort(dim=1).values
+        assert torch.equal(chosen, ids.long().sort(dim=1).values)
+        fixture.redraw(0)
+        assert torch.equal(ids, base)
+    finally:
+        fixture.remove()
+
+
 @pytest.mark.benchmark
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."

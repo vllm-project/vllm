@@ -197,11 +197,37 @@ class RoutingFixture:
             ids = ids[self._dp_rank * rows : (self._dp_rank + 1) * rows]
             tables.clear()
             tables["ids"] = torch.from_numpy(ids).to(self._device)
+            tables["base_ids"] = tables["ids"].clone()
         self._rows = rows
+        self._draw = 0
+
+    def redraw(self, sample: int) -> None:
+        """Relabel every layer's experts with a fresh popularity permutation (sample 0:
+        the original draw), in place so captured graphs replay it. Zipf routing draws
+        that permutation first, so this is a new draw of which experts are hot and on
+        which EP rank; timing samples then average over draws."""
+        if self._mode != "zipf" or sample == self._draw:
+            return
+        for (num_experts, _, layer_seed), tables in zip(self._specs, self._tables):
+            if sample == 0:
+                perm = torch.arange(num_experts, device=self._device)
+            else:
+                rng = np.random.default_rng([*layer_seed, sample])
+                perm = torch.from_numpy(rng.permutation(num_experts)).to(self._device)
+            tables["ids"].copy_(perm[tables["base_ids"].long()].to(tables["ids"].dtype))
+            if "logits" in tables:
+                tables["logits"].copy_(
+                    self._logits_from(tables["ids"], num_experts, layer_seed)
+                )
+        self._draw = sample
 
     def _logits(self, layer: int) -> torch.Tensor:
         num_experts, _, layer_seed = self._specs[layer]
-        ids = self._tables[layer]["ids"]
+        return self._logits_from(self._tables[layer]["ids"], num_experts, layer_seed)
+
+    def _logits_from(
+        self, ids: torch.Tensor, num_experts: int, layer_seed: list[int]
+    ) -> torch.Tensor:
         logits = torch.full(
             (ids.shape[0], num_experts), _OTHER_LOGIT, device=self._device
         )
