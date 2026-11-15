@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-14
+  date_updated: 2026-11-15
   tasks:
     - multimodal
     - text
@@ -639,6 +639,8 @@ presets:
       VLLM_USE_DIRECT_DCP_A2A: "1"
       VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
       VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+    # The lane leaves FlashInfer autotuning on.
+    remove_args: ["--no-enable-flashinfer-autotune"]
     # Decode sizes, then prefill and mixed steps up to 4096 tokens.
     json_args:
       "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 3, rejection_sample_method: block }
@@ -1521,6 +1523,17 @@ strategy_overrides:
           VLLM_DEEPEPLL_RECV_HOOK: "0"
           VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: "1"
           DEEPEP_COMBINE_TOKEN_BALANCED: "1"
+  # TP8 on one B300 node: the default --max-num-seqs (1,024) does not fit. The
+  # KV cache holds one KDA state block for only about 600 sequences without
+  # spec decoding, and has no memory left with it. FlashInfer's MoE autotuning
+  # adds about two hours to startup. The B300 presets set their own values.
+  single_node_tp:
+    hardware_overrides:
+      b300:
+        extra_args:
+          - "--max-num-seqs"
+          - "128"
+          - "--no-enable-flashinfer-autotune"
   # TEP on one B300 node: experts on MegaMoE, which dispatches tokens over
   # NVLink one-sided all-to-all.
   single_node_tep:
@@ -1571,7 +1584,10 @@ guide: |
   routed-expert weights; everything else is BF16.
 
   The baseline is the simplest working setup on NVIDIA: one tensor-parallel group of 8 GPUs,
-  either two GB300 trays or one B300 node. Throughput was not tuned.
+  either two GB300 trays or one B300 node. Throughput was not tuned. On B300 it caps
+  `--max-num-seqs` at 128, since the memory left for the KV cache cannot hold the KDA state of
+  the default 1,024 sequences, and turns off FlashInfer's MoE autotuning, which would otherwise
+  add about two hours to startup.
 
   VR200 (preview) takes the same TP8 layout on two trays, in the `vllm/vllm-openai:kimi-k31-cu134`
   image (CUDA 13.4). It uses the Blackwell flags and hasn't been tuned or verified on Rubin.
