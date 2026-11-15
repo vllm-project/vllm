@@ -292,10 +292,7 @@ class VoxtralRealtimeGeneration(
             len(prompt) * stride + ahead,
         )
         self._frontend_graph_startup_tokens = len(prompt)
-        requested_batch = (
-            vllm_config.compilation_config.encoder_cudagraph_max_vision_items_per_batch
-        )
-        self._frontend_graph_max_batch = requested_batch or min(
+        self._frontend_graph_max_batch = min(
             32, vllm_config.scheduler_config.max_num_seqs
         )
         batch = self._frontend_graph_max_batch

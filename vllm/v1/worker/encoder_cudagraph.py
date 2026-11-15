@@ -90,6 +90,10 @@ class EncoderCudaGraphManager:
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
         user_max_vision_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
+        if not {"image", "video"} & set(self.config.modalities):
+            # The option caps images/videos. Other encoders, such as the
+            # Voxtral Realtime audio frontend, size batches from their budgets.
+            user_max_vision_items = 0
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
         max_token_budget = comp_config.encoder_cudagraph_max_token_budget
 

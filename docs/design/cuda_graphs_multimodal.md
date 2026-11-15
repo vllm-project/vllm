@@ -59,8 +59,7 @@ lookahead, padding and per-item normalization.
 Startup capture uses separate waveform-length and batch axes. With the default
 streaming configuration, inputs contain 49,960 samples at startup and 2,160
 samples thereafter. Batch capacities are powers of two up to
-`min(32, max_num_seqs)`. The existing
-`encoder_cudagraph_max_vision_items_per_batch` option overrides that maximum.
+`min(32, max_num_seqs)`.
 An aggregate token budget avoids duplicate captures of the same layout.
 The existing token-budget options still bound replay coverage; batches that
 exceed that budget use the eager frontend.
@@ -190,7 +189,7 @@ Five fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. Must be positive or `None`. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of items per batch during capture. For vision encoders, 0 auto-infers `max_budget // min_budget`, and oversized batches run eagerly in one forward. [Voxtral Realtime](#voxtral-realtime-audio-frontend) uses this as its audio microbatch cap instead.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward. Audio-only encoders such as [Voxtral Realtime](#voxtral-realtime-audio-frontend) ignore it.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.

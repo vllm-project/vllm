@@ -630,13 +630,12 @@ class CompilationConfig:
     Ignored when encoder_cudagraph_token_budgets is set."""
 
     encoder_cudagraph_max_vision_items_per_batch: int = 0
-    """Maximum number of items per batch for encoder CUDA graph capture.
+    """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference. Vision batches with more items run eagerly in one forward.
-    Voxtral Realtime uses this as the maximum audio microbatch size, with
-    power-of-two capture capacities and a default of min(32, max_num_seqs)."""
+    auto-inference. A batch with more items runs eagerly in one forward.
+    Audio-only encoders such as Voxtral Realtime ignore it."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.
