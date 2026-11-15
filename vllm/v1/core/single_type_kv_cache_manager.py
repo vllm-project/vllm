@@ -44,7 +44,7 @@ class SingleTypeKVCacheManager(ABC):
     logic of one specific type of attention layer.
     """
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class Params:
         """The manager's allocation parameters; managers without any inherit
         this empty set. Subclasses must stay frozen dataclasses so configs
@@ -1024,7 +1024,7 @@ class RSWAManager(FullAttentionManager):
     growing linearly with decode length.
     """
 
-    @dataclass(frozen=True, kw_only=True)
+    @dataclass(frozen=True, kw_only=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         rswa_window: int
 
@@ -1067,7 +1067,7 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         sliding_window: int
         extra_retained_tokens: int = 0
@@ -1510,7 +1510,7 @@ class CircularBufferManager(SingleTypeKVCacheManager):
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         attention_chunk_size: int
 
@@ -1693,7 +1693,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # blocks in place. Other modes retain positional identity.
         return self.mamba_cache_mode != "align"
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         mamba_cache_mode: str = "none"
         num_speculative_blocks: int = 0
@@ -2589,7 +2589,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 
 class SinkFullAttentionManager(FullAttentionManager):
-    @dataclass(frozen=True, kw_only=True)
+    @dataclass(frozen=True, kw_only=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         sink_len: int
 
@@ -2796,7 +2796,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 class HiSparseHotManager(_HiSparseAuxiliaryManager):
     """Allocate a hot region only after a request acquires CPU-only history."""
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         blocks_per_request: int
 
