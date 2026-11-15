@@ -83,6 +83,7 @@ def layer_norm_fwd_kernel(
     stride_x_row,  # how much to increase the pointer when moving by 1 row
     stride_y_row,
     stride_z_row,
+    stride_w_group,  # 0 when all groups share one weight (and bias)
     M,  # number of rows in X
     N: tl.constexpr,  # number of columns in X
     eps,  # epsilon to avoid division by zero
@@ -149,7 +150,7 @@ def layer_norm_fwd_kernel(
     tl.store(Rstd + rstd_offsets, rstd, mask=rstd_mask)
 
     # Load weights and biases (broadcast across rows)
-    w_offsets = cols + group * N
+    w_offsets = cols + group * stride_w_group
     w_mask = cols < N
     w = tl.load(W + w_offsets, mask=w_mask, other=0.0).to(tl.float32)
 
@@ -199,6 +200,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         stride_x_row: int
         stride_y_row: int
         stride_z_row: int
+        stride_w_group: int
         M: int
         N: int
         BLOCK_N: int
@@ -229,6 +231,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         stride_x_row: int,
         stride_y_row: int,
         stride_z_row: int,
+        stride_w_group: int,
         M: int,
         N: int,
         BLOCK_N: int,
@@ -258,6 +261,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             stride_x_row=triton_scalar_specialization_rep(stride_x_row),
             stride_y_row=triton_scalar_specialization_rep(stride_y_row),
             stride_z_row=triton_scalar_specialization_rep(stride_z_row),
+            stride_w_group=triton_scalar_specialization_rep(stride_w_group),
             M=triton_scalar_specialization_rep(M),
             N=N,
             BLOCK_N=BLOCK_N,
@@ -272,6 +276,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         *,
         max_num_tokens: int,
         rows_per_token: int,
+        groups_per_row: int,
         group_size: int,
         x_dtype: torch.dtype,
         weight_dtype: torch.dtype,
@@ -280,7 +285,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         is_rms_norm: bool,
         activation: str,
     ) -> list[CompileKey]:
-        if max_num_tokens < 1 or rows_per_token < 1:
+        if max_num_tokens < 1 or rows_per_token < 1 or groups_per_row < 1:
             return []
 
         max_fused_size = 65536 // torch.empty((), dtype=x_dtype).element_size()
@@ -295,7 +300,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             M = num_tokens * rows_per_token
             signature = (
                 triton_scalar_specialization_rep(M),
-                calc_rows_per_block(M, device),
+                calc_rows_per_block(M * groups_per_row, device),
             )
             m_values.setdefault(signature, M)
 
@@ -316,13 +321,14 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
                 z_aligned=True,
                 mean_aligned=True,
                 rstd_aligned=True,
-                stride_x_row=group_size,
-                stride_y_row=group_size,
-                stride_z_row=group_size,
+                stride_x_row=group_size * groups_per_row,
+                stride_y_row=group_size * groups_per_row,
+                stride_z_row=group_size * groups_per_row,
+                stride_w_group=0 if groups_per_row > 1 else group_size,
                 M=M,
                 N=group_size,
                 BLOCK_N=block_n,
-                ROWS_PER_BLOCK=calc_rows_per_block(M, device),
+                ROWS_PER_BLOCK=calc_rows_per_block(M * groups_per_row, device),
                 norm_before_gate=norm_before_gate,
                 is_rms_norm=is_rms_norm,
                 activation=activation,
@@ -349,6 +355,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             compile_key.stride_x_row,
             compile_key.stride_y_row,
             compile_key.stride_z_row,
+            compile_key.stride_w_group,
             compile_key.M,
             compile_key.N,
             1e-5,
@@ -383,8 +390,10 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
         if group_size > block_n:
             raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-        rows_per_block = calc_rows_per_block(M, x.device)
-        grid = (cdiv(M, rows_per_block), x.shape[1] // group_size)
+        ngroups = x.shape[1] // group_size
+        # Tile by (row, group) programs: a row of G groups tiles like G rows.
+        rows_per_block = calc_rows_per_block(M * ngroups, x.device)
+        grid = (cdiv(M, rows_per_block), ngroups)
         self.kernel[grid](
             x,
             out,
@@ -396,6 +405,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             x.stride(0),
             out.stride(0),
             z.stride(0) if z is not None else 0,
+            weight.stride(0) if weight.dim() == 2 else group_size,
             M,
             group_size,
             eps,
@@ -417,6 +427,7 @@ def warmup_layer_norm_fwd(
     *,
     max_num_tokens: int,
     rows_per_token: int,
+    groups_per_row: int,
     group_size: int,
     x_dtype: torch.dtype,
     weight_dtype: torch.dtype,
@@ -428,6 +439,7 @@ def warmup_layer_norm_fwd(
     _LAYER_NORM_FWD_KERNEL.warmup(
         max_num_tokens=max_num_tokens,
         rows_per_token=rows_per_token,
+        groups_per_row=groups_per_row,
         group_size=group_size,
         x_dtype=x_dtype,
         weight_dtype=weight_dtype,
@@ -459,11 +471,11 @@ def layer_norm_fwd(
     if z is not None:
         assert z.stride(-1) == 1
         assert z.shape == (M, N)
-    assert weight.shape == (N,)
+    # [ngroups, group_size] may be a stride-0 `expand` of one shared weight.
+    assert weight.shape in ((N,), (ngroups, group_size))
     assert weight.stride(-1) == 1
     if bias is not None:
-        assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
+        assert bias.shape == weight.shape and bias.stride() == weight.stride()
     # allocate output
     if out is not None:
         assert out.shape == x.shape
