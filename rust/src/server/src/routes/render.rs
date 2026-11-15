@@ -125,6 +125,8 @@ fn lower_render_request(
             n,
             stop: None,
             include_stop_str_in_output: None,
+            detokenize: None,
+            skip_special_tokens: None,
             trace_decode_token_ids: None,
             inner: text_request.sampling_params,
         },

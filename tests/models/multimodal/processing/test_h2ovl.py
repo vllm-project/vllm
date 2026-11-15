@@ -232,7 +232,7 @@ def test_image_cache_identity_across_image_counts(
     if use_embeds:
         assert hashes[0] == hashes[1]
         if use_uuid:
-            assert hashes[0] == "image-0"
+            assert hashes[0] == "uuid:image-0"
     elif use_msac:
         assert lengths[0] > lengths[1] == lengths[2]
         assert hashes[0] != hashes[1]

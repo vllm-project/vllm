@@ -416,7 +416,7 @@ class CPUSamplingStates:
         return int(np.max(self.num_logprobs[idx_mapping_np]))
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
