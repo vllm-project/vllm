@@ -40,6 +40,7 @@ def run_test(
     hf_model_kwargs: dict[str, Any] | None,
     hf_processor: Callable[[str], Any] | None,
     patch_hf_runner: Callable[[HfRunner], HfRunner] | None,
+    hf_runner_kwargs: dict[str, Any] | None = None,
     runner: RunnerOption = "auto",
     distributed_executor_backend: str | None = None,
     tensor_parallel_size: int = 1,
@@ -117,7 +118,7 @@ def run_test(
             )
             vllm_outputs_per_mm.append(vllm_output)
 
-    hf_runner_kwargs: dict[str, Any] = {}
+    hf_runner_kwargs = dict(hf_runner_kwargs or {})
     if model_info.tokenizer:
         hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
     if hf_processor is not None:
