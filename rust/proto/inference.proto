@@ -185,6 +185,7 @@ message ResponseOptions {
   // Defaults to true when omitted.
   optional bool skip_special_tokens = 8;
   // Supersedes output_text when set. UNSPECIFIED uses output_text (default true).
+  // TEXT requires a tokenizer; otherwise returns INVALID_ARGUMENT.
   // TOKENS disables detokenization; output_token_ids still controls returned IDs.
   // DERENDER returns UNIMPLEMENTED; unknown enum values return INVALID_ARGUMENT.
   OutputMode output_mode = 9;

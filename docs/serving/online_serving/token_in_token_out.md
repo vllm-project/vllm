@@ -138,8 +138,8 @@ differs from the HTTP endpoint above:
 
 | `output_mode` | gRPC behavior |
 | --- | --- |
-| Omitted or `OUTPUT_MODE_UNSPECIFIED` | Honor the legacy `output_text` flag, which defaults to `true`. |
-| `OUTPUT_MODE_TEXT` | Detokenize and return `SequenceOutput.text`, even when `output_text` is `false`. |
+| Omitted or `OUTPUT_MODE_UNSPECIFIED` | Honor the legacy `output_text` flag, which defaults to `true`; tokenizer-less backends retain their token-only fallback. |
+| `OUTPUT_MODE_TEXT` | Detokenize and return `SequenceOutput.text`, even when `output_text` is `false`. A tokenizer is required; otherwise return `INVALID_ARGUMENT`. |
 | `OUTPUT_MODE_TOKENS` | Skip detokenization and return an empty `text`, even when `output_text` is `true`. |
 | `OUTPUT_MODE_DERENDER` | Return gRPC `UNIMPLEMENTED`; worker-side parsing is not supported yet. |
 | Unknown numeric enum value | Return gRPC `INVALID_ARGUMENT`. |

@@ -230,12 +230,14 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
 #[derive(Clone)]
 struct FakeTextBackend {
     tokenizer: DynTokenizer,
+    has_tokenizer: bool,
 }
 
 impl Default for FakeTextBackend {
     fn default() -> Self {
         Self {
             tokenizer: Arc::new(TestTokenizer::new()),
+            has_tokenizer: true,
         }
     }
 }
@@ -243,6 +245,10 @@ impl Default for FakeTextBackend {
 impl TextBackend for FakeTextBackend {
     fn tokenizer(&self) -> DynTokenizer {
         Arc::clone(&self.tokenizer)
+    }
+
+    fn has_tokenizer(&self) -> bool {
+        self.has_tokenizer
     }
 
     fn model_id(&self) -> &str {
@@ -866,7 +872,10 @@ async fn generate_output_mode_precedence_for_both_rpcs() {
                 setup_grpc_service_with_backend(
                     b"engine-grpc-token-only",
                     default_stream_output_specs(),
-                    Arc::new(FakeTextBackend { tokenizer }),
+                    Arc::new(FakeTextBackend {
+                        tokenizer,
+                        ..Default::default()
+                    }),
                     |_| {},
                 )
                 .await;
@@ -897,24 +906,8 @@ async fn generate_output_mode_precedence_for_both_rpcs() {
                 ..Default::default()
             };
 
-            let outputs: Vec<_> = if streaming {
-                let mut stream =
-                    client.generate_stream(request).await.expect("start stream").into_inner();
-                let mut outputs = Vec::new();
-                while let Some(response) = stream.message().await.expect("stream message") {
-                    outputs.extend(response.outputs);
-                }
-                outputs
-            } else {
-                client
-                    .generate(request)
-                    .await
-                    .expect("unary generate")
-                    .into_inner()
-                    .outputs
-                    .into_iter()
-                    .collect()
-            };
+            let outputs =
+                generate_outputs(&mut client, request, streaming).await.expect("generate");
 
             assert_eq!(
                 outputs.iter().map(|output| output.text.as_str()).collect::<String>(),
@@ -944,6 +937,85 @@ async fn generate_output_mode_precedence_for_both_rpcs() {
             assert_eq!(finish.num_output_tokens, 3);
 
             engine_task.await.expect("mock engine task");
+            server_task.abort();
+        }
+    }
+}
+
+async fn generate_outputs(
+    client: &mut InferenceClient<Channel>,
+    request: pb::GenerateRequest,
+    streaming: bool,
+) -> Result<Vec<pb::SequenceOutput>, tonic::Status> {
+    if streaming {
+        let mut stream = client.generate_stream(request).await?.into_inner();
+        let mut outputs = Vec::new();
+        while let Some(response) = stream.message().await? {
+            outputs.extend(response.outputs);
+        }
+        Ok(outputs)
+    } else {
+        Ok(client.generate(request).await?.into_inner().outputs.into_iter().collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
+    for mode in [
+        pb::OutputMode::Text,
+        pb::OutputMode::Tokens,
+        pb::OutputMode::Unspecified,
+    ] {
+        for streaming in [false, true] {
+            let (inference_service, control_service, engine_health, engine_task) =
+                setup_grpc_service_with_backend(
+                    b"engine-grpc-no-tokenizer",
+                    default_stream_output_specs(),
+                    Arc::new(FakeTextBackend {
+                        tokenizer: Arc::new(PanickingTokenizer),
+                        has_tokenizer: false,
+                    }),
+                    |_| {},
+                )
+                .await;
+            let (channel, server_task) = start_grpc_test_server(
+                inference_service,
+                control_service,
+                engine_health,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+            let mut client = InferenceClient::new(channel);
+            let request = pb::GenerateRequest {
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2, 3],
+                })),
+                response: Some(pb::ResponseOptions {
+                    output_mode: mode as i32,
+                    output_token_ids: mode != pb::OutputMode::Text,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let result = generate_outputs(&mut client, request, streaming).await;
+            if mode == pb::OutputMode::Text {
+                let status = result.expect_err("explicit TEXT needs a tokenizer");
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(status.message().contains("requires a tokenizer"));
+            } else {
+                let outputs = result.expect("token output remains available");
+                assert!(outputs.iter().all(|output| output.text.is_empty()));
+                assert_eq!(
+                    outputs
+                        .iter()
+                        .flat_map(|output| &output.token_ids)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    [b'h' as u32, b'i' as u32, b'!' as u32]
+                );
+                engine_task.await.expect("mock engine task");
+            }
             server_task.abort();
         }
     }
