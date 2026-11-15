@@ -11,7 +11,7 @@ import pytest
 
 from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
-from vllm.multimodal.audio import VAD
+from vllm.multimodal.vad import VAD
 
 SR = 16_000
 _PATCH = "vllm.entrypoints.speech_to_text.base.serving"
@@ -83,7 +83,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     wrong_offsets = [0.0, 30.0, 60.0]  # what the old bug produced
 
     serving = _make_serving(audio)
-    with patch("vllm.multimodal.audio.split_audio", return_value=chunks):
+    with patch("vllm.multimodal.vad.split_audio", return_value=chunks):
         _, _, offsets, _ = await _preprocess(serving, _make_request(vad_enabled=False))
 
     assert offsets == pytest.approx(expected_offsets, abs=1e-6)

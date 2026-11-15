@@ -31,13 +31,9 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import (
-    AudioResampler,
-    ThreadLocalVADProvider,
-    get_audio_duration,
-    split_audio_with_vad,
-)
+from vllm.multimodal.audio import AudioResampler, get_audio_duration
 from vllm.multimodal.media.audio import load_audio
+from vllm.multimodal.vad import ThreadLocalVADProvider, split_audio_with_vad
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
