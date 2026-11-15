@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true
+base64.workspace = true
 chrono.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
@@ -46,7 +47,6 @@ xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true

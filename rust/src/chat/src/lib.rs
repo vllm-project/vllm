@@ -671,8 +671,11 @@ mod tests {
 
         let cache = test_shm_cache();
         let info = qwen3_vl_info().with_mm_processor_cache(Some(Arc::clone(&cache)));
-        let processor =
-            ChatRequestProcessor::new(Arc::new(MmTestBackend { info }), ModelDtype::Float32, 4096);
+        let processor = ChatRequestProcessor::new(
+            Arc::new(MmTestBackend { info }),
+            Some(ModelDtype::Float32),
+            Some(4096),
+        );
         let request = ChatRequest {
             messages: vec![ChatMessage::user(vec![
                 ChatContentPart::text("describe"),

@@ -28,7 +28,7 @@ use crate::error::{Result, bail_mm_uuid_reference};
 ///
 /// TODO: drop this name list once `llm-multimodal` exposes a capability flag
 /// on `VisionPreProcessor` for request-context sensitivity.
-pub(super) const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_h_omni"];
+pub(super) const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_omni"];
 
 /// Whether a vision processor's output depends on the per-request
 /// preprocessing context, in which case its items bypass the SHM cache.
@@ -114,17 +114,24 @@ impl MmProcessorCache {
 
     /// Look up a UUID-keyed item before its media is fetched.
     ///
-    /// UUID hits never pass through the post-fetch pre-touch, so this touches
-    /// the key itself: with the new touch semantics the item is protected from
-    /// eviction until the `get_cached` inside `address_item_for_cached` (or
-    /// the request-end `release_touches`), so a hit cannot be evicted before
-    /// the engine reads it.
-    ///
     /// On a hit the returned [`PreparedItem`] carries the UUID as its `hash`
     /// (Python parity: `hashes.append(uuid_item)`).
     pub(super) fn lookup_uuid(&self, uuid: &str) -> Option<(PreparedItem, PromptReplacement)> {
-        self.touch(uuid);
-        self.lookup(uuid, Some(uuid.to_owned()))
+        self.lookup_unfetched(uuid, Some(uuid.to_owned()))
+    }
+
+    /// Look up one key that never passes through the post-fetch pre-touch
+    /// (UUID references and locally hashed content resolved before fetch):
+    /// touch it first so a hit cannot be evicted before the engine reads it
+    /// (the item stays protected until the `get_cached` inside
+    /// `address_item_for_cached`, or the request-end `release_touches`).
+    pub(super) fn lookup_unfetched(
+        &self,
+        key: &str,
+        uuid: Option<String>,
+    ) -> Option<(PreparedItem, PromptReplacement)> {
+        self.touch(key);
+        self.lookup(key, uuid)
     }
 
     /// Put a freshly preprocessed item into shm and shadow its prompt
@@ -261,6 +268,7 @@ fn media_part_identity(part: &MediaContentPart) -> Option<(Option<&str>, bool, M
 pub(super) fn resolve_uuid_references<'a>(
     cache_for: impl Fn(Modality) -> Option<&'a MmProcessorCache>,
     budget_sensitive_images: bool,
+    video_sampling_policy: Option<(llm_multimodal::FrameSampling, Option<f64>)>,
     media_parts: Vec<MediaContentPart>,
 ) -> Result<UuidPartition> {
     let mut slots: HashMap<Modality, Vec<UuidSlot>> = HashMap::new();
@@ -271,8 +279,9 @@ pub(super) fn resolve_uuid_references<'a>(
         };
         let modality_slots = slots.entry(modality).or_default();
         let index = modality_slots.len();
+        let uuid = uuid.map(str::to_owned);
 
-        match (cache_for(modality), uuid) {
+        match (cache_for(modality), uuid.as_deref()) {
             (Some(cache), Some(uuid)) => {
                 if let Some((item, replacement)) = cache.lookup_uuid(uuid) {
                     modality_slots.push(UuidSlot::Ready(item, replacement));
@@ -301,13 +310,146 @@ pub(super) fn resolve_uuid_references<'a>(
                      (--mm-processor-cache-type shm)"
                 );
             }
-            _ => {
+            (cache, uuid) => {
+                // Content-addressed reference: locally available bytes (inline
+                // or base64 data URL) can be hashed without the connector, so
+                // a hit skips its fetch AND decode. On a miss the decoded
+                // bytes go to the connector as inline content so the payload
+                // is not base64-decoded twice when its options permit.
+                let mut part = part;
+                if let Some(cache) = cache
+                    && let Some((bytes, hash)) = hash_local_content(&part, video_sampling_policy)
+                {
+                    if let Some((item, replacement)) =
+                        cache.lookup_unfetched(&hash, uuid.map(str::to_owned))
+                    {
+                        modality_slots.push(UuidSlot::Ready(item, replacement));
+                        continue;
+                    }
+                    if can_into_inline_part(&part) {
+                        part = into_inline_part(part, bytes);
+                    }
+                }
                 modality_slots.push(UuidSlot::Fetch(uuid.map(str::to_owned)));
                 fetch_parts.push(part);
             }
         }
     }
     Ok(UuidPartition { slots, fetch_parts })
+}
+
+/// Decode the locally-available content of one media part (inline bytes or a
+/// base64 data URL) and compute its content hash without the media connector,
+/// so cache hits skip the connector's fetch AND decode entirely.
+///
+/// Mirrors the connector's data-URL handling and decode-aware hash policies,
+/// so the hash matches the fused fetch+decode path over the same bytes.
+fn hash_local_content(
+    part: &MediaContentPart,
+    video_sampling_policy: Option<(llm_multimodal::FrameSampling, Option<f64>)>,
+) -> Option<(Vec<u8>, String)> {
+    use base64::Engine as _;
+    let decode_data_url = |url: &str| -> Option<Vec<u8>> {
+        let (metadata, data) = url.strip_prefix("data:")?.split_once(',')?;
+        if !metadata.ends_with(";base64") {
+            return None;
+        }
+        base64::engine::general_purpose::STANDARD.decode(data.trim()).ok()
+    };
+    let bytes = match part {
+        MediaContentPart::ImageData { data, .. }
+        | MediaContentPart::AudioData { data, .. }
+        | MediaContentPart::VideoData { data, .. } => data.clone(),
+        MediaContentPart::ImageUrl { url, .. }
+        | MediaContentPart::AudioUrl { url, .. }
+        | MediaContentPart::VideoUrl { url, .. } => decode_data_url(url)?,
+        _ => return None,
+    };
+    let hash = match part {
+        MediaContentPart::ImageUrl {
+            max_long_side_pixel,
+            ..
+        } => llm_multimodal::hasher::hash_image_with_transparency(
+            &bytes,
+            *max_long_side_pixel,
+            llm_multimodal::TransparencyPolicy::KeepAlpha,
+        ),
+        MediaContentPart::ImageData { .. } => llm_multimodal::hasher::hash_image_with_transparency(
+            &bytes,
+            None,
+            llm_multimodal::TransparencyPolicy::KeepAlpha,
+        ),
+        MediaContentPart::AudioData { .. } | MediaContentPart::AudioUrl { .. } => {
+            llm_multimodal::hasher::hash_audio(&bytes)
+        }
+        MediaContentPart::VideoUrl {
+            fps,
+            max_long_side_pixel,
+            ..
+        } => hash_local_video(&bytes, *fps, *max_long_side_pixel, video_sampling_policy),
+        MediaContentPart::VideoData { .. } => {
+            hash_local_video(&bytes, None, None, video_sampling_policy)
+        }
+        _ => return None,
+    };
+    Some((bytes, hash))
+}
+
+/// Hash video bytes under the same sampling defaults as the media tracker.
+fn hash_local_video(
+    bytes: &[u8],
+    fps: Option<f64>,
+    max_long_side_pixel: Option<u32>,
+    policy: Option<(llm_multimodal::FrameSampling, Option<f64>)>,
+) -> String {
+    let (sampling, default_fps) =
+        policy.unwrap_or((llm_multimodal::FrameSampling::default(), None));
+    let default = llm_multimodal::VideoFetchConfig::default();
+    llm_multimodal::hasher::hash_video_with_sampling(
+        bytes,
+        fps.or(default_fps).unwrap_or(default.sample_fps),
+        max_long_side_pixel,
+        sampling,
+    )
+}
+
+/// Whether conversion to inline data preserves the URL part's decode options.
+fn can_into_inline_part(part: &MediaContentPart) -> bool {
+    !matches!(
+        part,
+        MediaContentPart::ImageUrl {
+            max_long_side_pixel: Some(_),
+            ..
+        } | MediaContentPart::VideoUrl { fps: Some(_), .. }
+            | MediaContentPart::VideoUrl {
+                max_long_side_pixel: Some(_),
+                ..
+            }
+    )
+}
+
+/// Hand locally decoded bytes to the connector as inline content, so the
+/// payload is not base64-decoded twice on a cache miss.
+fn into_inline_part(part: MediaContentPart, bytes: Vec<u8>) -> MediaContentPart {
+    match part {
+        MediaContentPart::ImageUrl { uuid, detail, .. } => MediaContentPart::ImageData {
+            data: bytes,
+            mime_type: None,
+            uuid,
+            detail,
+        },
+        MediaContentPart::AudioUrl { uuid, .. } => MediaContentPart::AudioData {
+            data: bytes,
+            mime_type: None,
+            uuid,
+        },
+        MediaContentPart::VideoUrl { uuid, .. } => MediaContentPart::VideoData {
+            data: bytes,
+            mime_type: None,
+            uuid,
+        },
+        inline => inline,
+    }
 }
 
 /// Attach fetched media to its fetch slots, producing cache slots for
@@ -736,6 +878,7 @@ pub(crate) mod tests {
         let second = info
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
+                    max_long_side_pixel: None,
                     url: String::new(),
                     detail: None,
                     uuid: Some("img-uuid-1".to_string()),
@@ -792,6 +935,7 @@ pub(crate) mod tests {
         let second = info
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
+                    max_long_side_pixel: None,
                     url: "https://127.0.0.1:1/unreachable.png".to_string(),
                     detail: None,
                     uuid: Some("img-uuid-2".to_string()),
@@ -823,6 +967,7 @@ pub(crate) mod tests {
         let error = info
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
+                    max_long_side_pixel: None,
                     url: String::new(),
                     detail: None,
                     uuid: Some("missing-uuid".to_string()),
@@ -877,10 +1022,10 @@ pub(crate) mod tests {
         use llm_multimodal::MediaContentPart;
         use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-        use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_h_omni_info};
+        use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_omni_info};
 
         let shm = test_shm_cache();
-        let info = nemotron_h_omni_info().with_mm_processor_cache(Some(Arc::clone(&shm)));
+        let info = nemotron_omni_info().with_mm_processor_cache(Some(Arc::clone(&shm)));
         let media_part = || MediaContentPart::ImageData {
             data: test_png_bytes(),
             mime_type: Some("image/png".to_string()),
@@ -923,12 +1068,13 @@ pub(crate) mod tests {
         use llm_multimodal::MediaContentPart;
         use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
-        use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_h_omni_info};
+        use super::super::tests::{NEMOTRON_IMAGE_ID, nemotron_omni_info};
 
-        let info = nemotron_h_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
+        let info = nemotron_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
         let error = info
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
+                    max_long_side_pixel: None,
                     url: String::new(),
                     detail: None,
                     uuid: Some("nem-uuid".to_string()),
@@ -948,15 +1094,182 @@ pub(crate) mod tests {
     fn mm_cache_for_bypasses_only_budget_sensitive_image_processors() {
         use llm_multimodal::Modality;
 
-        use super::super::tests::{nemotron_h_omni_info, qwen3_vl_info};
+        use super::super::tests::{nemotron_omni_info, qwen3_vl_info};
 
         let qwen = qwen3_vl_info().with_mm_processor_cache(Some(test_shm_cache()));
         assert!(qwen.mm_cache_for(Modality::Image).is_some());
         assert!(qwen.mm_cache_for(Modality::Video).is_some());
 
-        let nemotron = nemotron_h_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
+        let nemotron = nemotron_omni_info().with_mm_processor_cache(Some(test_shm_cache()));
         assert!(nemotron.mm_cache_for(Modality::Image).is_none());
 
         assert!(qwen3_vl_info().mm_cache_for(Modality::Image).is_none());
+    }
+
+    /// A data-URL image whose content hash is cached resolves to a Ready slot
+    /// in phase 0 — before the connector fetches or decodes anything.
+    #[test]
+    fn data_url_hit_resolves_ready_before_fetch() {
+        use base64::Engine as _;
+
+        let cache = MmProcessorCache::new(test_shm_cache());
+        let png = test_png_bytes();
+        let hash = llm_multimodal::hasher::hash_image(&png);
+        let sent = cache.put_or_inline_and_track(&hash, &test_replacement(), test_item(7));
+        assert!(is_address_item(&sent));
+
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let partition = super::resolve_uuid_references(
+            |_| Some(&cache),
+            false,
+            None,
+            vec![MediaContentPart::ImageUrl {
+                max_long_side_pixel: None,
+                url: data_url,
+                detail: None,
+                uuid: None,
+            }],
+        )
+        .expect("resolve");
+
+        assert!(
+            partition.fetch_parts.is_empty(),
+            "a content hit must not fetch"
+        );
+        let slots = &partition.slots[&Modality::Image];
+        assert_eq!(slots.len(), 1);
+        let UuidSlot::Ready(item, _) = &slots[0] else {
+            panic!("expected a Ready slot for the content hit");
+        };
+        assert_eq!(address_of(&item.data), address_of(&sent));
+        assert_eq!(item.hash, hash);
+        assert_eq!(item.uuid, None);
+    }
+
+    /// Content that is not locally hashable (plain URL) still goes through the
+    /// connector unchanged.
+    #[test]
+    fn non_local_content_falls_through_to_fetch() {
+        let cache = MmProcessorCache::new(test_shm_cache());
+        let part = MediaContentPart::ImageUrl {
+            url: "https://example.com/image.png".to_string(),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        };
+        let partition =
+            super::resolve_uuid_references(|_| Some(&cache), false, None, vec![part.clone()])
+                .expect("resolve");
+
+        assert_eq!(partition.fetch_parts.len(), 1);
+        assert!(matches!(
+            partition.fetch_parts[0],
+            MediaContentPart::ImageUrl { .. }
+        ));
+        assert!(matches!(
+            partition.slots[&Modality::Image][0],
+            UuidSlot::Fetch(None)
+        ));
+    }
+
+    #[test]
+    fn local_content_hashes_include_decode_options() {
+        use base64::Engine as _;
+
+        let png = test_png_bytes();
+        let image = MediaContentPart::ImageUrl {
+            url: format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&png)
+            ),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: Some(504),
+        };
+        let (_, image_hash) = super::hash_local_content(&image, None).expect("image hash");
+        assert_eq!(
+            image_hash,
+            llm_multimodal::hasher::hash_image_with_transparency(
+                &png,
+                Some(504),
+                llm_multimodal::TransparencyPolicy::KeepAlpha,
+            )
+        );
+
+        let bytes = b"video".to_vec();
+        let video = MediaContentPart::VideoData {
+            data: bytes.clone(),
+            mime_type: None,
+            uuid: None,
+        };
+        let sampling = llm_multimodal::FrameSampling::UpTo { max_frames: 32 };
+        let (_, video_hash) =
+            super::hash_local_content(&video, Some((sampling, Some(1.0)))).expect("video hash");
+        assert_eq!(
+            video_hash,
+            llm_multimodal::hasher::hash_video_with_sampling(&bytes, 1.0, None, sampling)
+        );
+        assert_ne!(video_hash, llm_multimodal::hasher::hash_video(&bytes));
+    }
+
+    /// End to end: the second prepare of the same image bytes via a data URL
+    /// (no UUID) hits the content hash before fetch/decode.
+    #[tokio::test]
+    async fn data_url_content_hit_skips_fetch_decode_and_preprocessing() {
+        use vllm_engine_core_client::protocol::dtype::ModelDtype;
+
+        use super::super::tests::{QWEN3_IMAGE_PAD_ID, qwen3_vl_info};
+        use base64::Engine as _;
+
+        let cache = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(cache));
+
+        let mut tokens_first = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+        let first = info
+            .prepare_multimodal(
+                vec![MediaContentPart::ImageData {
+                    data: test_png_bytes(),
+                    mime_type: Some("image/png".to_string()),
+                    uuid: None,
+                    detail: None,
+                }],
+                &mut tokens_first,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .expect("first image prepare should succeed");
+        assert!(is_address_item(first[0].data.as_ref().unwrap()));
+
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(test_png_bytes())
+        );
+        let mut tokens_second = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+        let second = info
+            .prepare_multimodal(
+                vec![MediaContentPart::ImageUrl {
+                    max_long_side_pixel: None,
+                    url: data_url,
+                    detail: None,
+                    uuid: None,
+                }],
+                &mut tokens_second,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .expect("a content-hash hit should resolve without fetch or decode");
+        assert_eq!(
+            address_of(second[0].data.as_ref().unwrap()),
+            address_of(first[0].data.as_ref().unwrap())
+        );
+        assert_eq!(tokens_second, tokens_first);
+        // Content-keyed items report the content hash, never a UUID.
+        assert_eq!(first[0].mm_hash, second[0].mm_hash);
+        assert_eq!(first[0].identifier, second[0].identifier);
     }
 }

@@ -471,6 +471,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 &config.random_mm_limit,
                 &config.random_mm_buckets,
                 config.enable_multimodal_chat,
+                config.random_mm_share_image,
+                config.random_mm_share_image_uuid,
             )?
         }
         DatasetName::ShareGpt => {

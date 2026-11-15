@@ -3085,7 +3085,7 @@ fn serve_args_accept_mm_processor_cache_shm() {
     assert_eq!(shm_config.data_buffer_size, 8 << 30);
     assert_eq!(shm_config.max_object_size, 64 << 20);
 
-    let config = args.to_managed_engine_config(5555);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
             "--reasoning-parser",

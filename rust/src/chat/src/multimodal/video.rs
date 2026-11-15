@@ -391,17 +391,22 @@ mod tests {
         // groups of two start at frames 0, 17, 35, 53.
         let sampled = info
             .prepare_videos(
-                vec![clip(Some(VideoSamplingInfo {
-                    source_fps: 30.0,
-                    frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
-                }))],
-                vec![None],
+                vec![CacheSlot::Pending(
+                    clip(Some(VideoSamplingInfo {
+                        source_fps: 30.0,
+                        frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
+                    })),
+                    None,
+                )],
                 ModelDtype::Float32,
             )
             .await
             .unwrap();
         let fallback = info
-            .prepare_videos(vec![clip(None)], vec![None], ModelDtype::Float32)
+            .prepare_videos(
+                vec![CacheSlot::Pending(clip(None), None)],
+                ModelDtype::Float32,
+            )
             .await
             .unwrap();
 

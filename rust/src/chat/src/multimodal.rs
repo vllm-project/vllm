@@ -969,6 +969,7 @@ impl MultimodalModelInfo {
         let mut partition = cache::resolve_uuid_references(
             |modality| self.mm_cache_for(modality),
             self.image.as_ref().is_some_and(cache::is_budget_sensitive),
+            self.video_sampling_policy(),
             media_parts,
         )?;
         let fetched = self.fetch_media(partition.fetch_parts).await?;
@@ -1469,7 +1470,9 @@ pub(crate) mod tests {
         );
     }
 
-    fn nemotron_omni_info() -> MultimodalModelInfo {
+    pub(crate) const NEMOTRON_IMAGE_ID: u32 = 1018;
+
+    pub(crate) fn nemotron_omni_info() -> MultimodalModelInfo {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<image>", 1018)
             .with_regular_token("<img>", 1019)
@@ -1727,7 +1730,8 @@ pub(crate) mod tests {
             AudioSource::InlineBytes,
             "audio".to_owned(),
         ));
-        let prepared = info.prepare_audios(vec![audio], vec![None]).await.unwrap();
+        let prepared =
+            info.prepare_audios(vec![cache::CacheSlot::Pending(audio, None)]).await.unwrap();
         assert_eq!(prepared.replacements[0].tokens, [201463, 200038, 201464]);
 
         let frame_len = 3 * 28 * 28;
@@ -1749,8 +1753,13 @@ pub(crate) mod tests {
             "video".to_owned(),
             2.0,
         ));
-        let prepared =
-            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+        let prepared = info
+            .prepare_videos(
+                vec![cache::CacheSlot::Pending(clip, None)],
+                ModelDtype::Float32,
+            )
+            .await
+            .unwrap();
         let token_ids =
             prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
         // Two frames uniformly sampled at 2 fps with temporal_patch_size=2

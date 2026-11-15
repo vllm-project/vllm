@@ -306,6 +306,17 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = false)]
     pub enable_multimodal_chat: bool,
 
+    /// Reuse one shared image per (height,width,num_frames) bucket across all
+    /// requests, so a frontend multimodal processor cache can hit.
+    #[arg(long, default_value_t = false)]
+    pub random_mm_share_image: bool,
+
+    /// Emit a stable per-bucket content-part UUID with shared images, so the
+    /// frontend can serve repeated items without even fetching them.
+    /// Requires --random-mm-share-image.
+    #[arg(long, default_value_t = false)]
+    pub random_mm_share_image_uuid: bool,
+
     // --- Custom dataset (JSONL) ---
     /// Output tokens per request for the custom dataset. Set to -1 to use the
     /// per-line "output_tokens" field from the JSONL file instead.

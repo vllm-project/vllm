@@ -9204,7 +9204,13 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
         move |state| state.with_mm_processor_cache(Some(state_cache)),
     )
     .await;
-    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let mut app = build_router_with_gates(
+        state,
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
 
     let response = app
         .call(
