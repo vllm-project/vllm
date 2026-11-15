@@ -23,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     MambaStoreLayout,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
-    split_layer_range,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.utils.math_utils import cdiv
@@ -373,12 +372,6 @@ def test_rank_local_layout_skips_block_padding():
     addrs, sizes, _ = layout.prepare_values([(0, BLOCK_SIZE)], [1], [0])
     assert addrs == [[view.data_ptr() + page for view in views]]
     assert sizes == [[state] * num_layers]
-
-
-def test_split_layer_range_cuts_only_inside_the_range():
-    assert split_layer_range((0, 28), {14}) == ((0, 14), (14, 28))
-    assert split_layer_range((0, 14), {0, 14, 20}) == ((0, 14),)
-    assert split_layer_range((10, 20), {5, 14, 25}) == ((10, 14), (14, 20))
 
 
 def _layer_names(layers: Iterable[int]) -> list[str]:

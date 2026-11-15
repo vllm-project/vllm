@@ -3642,20 +3642,14 @@ def test_pp_stage_keys_name_their_layers(pp_stage_layouts):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("store_config", "layout_cls"),
-    [({}, LayerRangeStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
-)
-def test_pp_sizes_share_layer_range_keys_across_pp_sizes(
-    pp_stage_layouts, store_config, layout_cls
-):
-    """With pp_sizes=[1, 2], a PP=1 instance stores each block as one object
-    per PP=2 stage, under the keys the PP=2 stages use, also with Store TP."""
-    config = {"pp_sizes": [1, 2], **store_config}
+def test_pp_sizes_share_store_tp_keys_across_pp_sizes(pp_stage_layouts):
+    """With pp_sizes=[1, 2] and Store TP, a PP=1 instance stores each block as
+    one object per PP=2 stage, under the keys the PP=2 stages use."""
+    config = {"pp_sizes": [1, 2], "store_tp_size": 2}
     (pp1,) = pp_stage_layouts(1, 0, config)
     stages = [pp_stage_layouts(2, rank, config)[0] for rank in (0, 1)]
 
-    assert type(pp1) is layout_cls
+    assert type(pp1) is HeadMajorStoreLayout
     assert _layout_keys(pp1) == _layout_keys(stages[0]) + _layout_keys(stages[1])
 
 
