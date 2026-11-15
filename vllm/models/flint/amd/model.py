@@ -90,10 +90,10 @@ def _flint_gguf_quant_config(
 
 
 class FlintMLP(nn.Module):
-    """Dense SwiGLU MLP used on ``mlp_only_layers`` and as the shared expert.
+    """Dense SwiGLU MLP used on `mlp_only_layers` and as the shared expert.
 
-    Uses standard vLLM ``MergedColumnParallelLinear`` / ``RowParallelLinear``
-    with the generic ``SiluAndMul`` activation (no NVIDIA fast-path).
+    Uses standard vLLM `MergedColumnParallelLinear` / `RowParallelLinear`
+    with the generic `SiluAndMul` activation (no NVIDIA fast-path).
     """
 
     def __init__(
@@ -132,9 +132,9 @@ class FlintMLP(nn.Module):
 class FlintSparseMoeBlock(nn.Module):
     """Sigmoid-routed MoE block with a shared expert.
 
-    Always uses ``FusedMoEFactory`` (vLLM's portable fused-MoE layer) which
+    Always uses `FusedMoEFactory` (vLLM's portable fused-MoE layer) which
     automatically selects the best backend for the current platform (including
-    AITER on ROCm when ``VLLM_ROCM_USE_AITER=1``).
+    AITER on ROCm when `VLLM_ROCM_USE_AITER=1`).
     """
 
     def __init__(
@@ -181,11 +181,11 @@ class FlintAttention(nn.Module):
 
     Hybrid attention pattern:
     - Sliding-window layers use RoPE and a 513-token window.
-    - Full-attention layers (in ``no_rope_layer_indices``) use no RoPE.
+    - Full-attention layers (in `no_rope_layer_indices`) use no RoPE.
 
-    Uses vLLM's standard ``Attention`` layer which dispatches to the best
+    Uses vLLM's standard `Attention` layer which dispatches to the best
     available backend on the current platform (FlashAttention, CK, Triton, …).
-    The ``sinks`` parameter passes learned softmax offsets to the backend.
+    The `sinks` parameter passes learned softmax offsets to the backend.
     """
 
     def __init__(
