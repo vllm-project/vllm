@@ -654,6 +654,11 @@ def fence_proxy_async_global(*, loc=None, ip=None):
 
 
 @dsl_user_op
+def fence_proxy_async_shared(*, loc=None, ip=None):
+    _asm(None, [], "fence.proxy.async.shared::cta;", "", loc, ip, side_effects=True)
+
+
+@dsl_user_op
 def red_add_gpu(addr, v, *, loc=None, ip=None):
     _asm(
         None,

@@ -53,6 +53,7 @@ from ._moe_ptx import (
     fence_gpu,
     fence_mbar_init,
     fence_proxy_async_global,
+    fence_proxy_async_shared,
     fence_regs,
     fmax,
     griddep_wait,
@@ -451,9 +452,8 @@ class ExpertsKernel:
                 au[4 * g + 1] = au[4 * g + 1] + du[4 * g + 1] * (sb * wu)
                 au[4 * g + 2] = au[4 * g + 2] + du[4 * g + 2] * (sa * wu)
                 au[4 * g + 3] = au[4 * g + 3] + du[4 * g + 3] * (sb * wu)
-            cute.arch.sync_warp()
-            if lane == 0:
-                mbar_arrive(empty + stage * 8)
+            fence_proxy_async_shared()
+            mbar_arrive(empty + stage * 8)
             stage = stage + 1
             if stage == ns:
                 stage = Int32(0)
@@ -636,9 +636,8 @@ class ExpertsKernel:
                     acc[4 * g + 1] = acc[4 * g + 1] + d[4 * g + 1] * sb
                     acc[4 * g + 2] = acc[4 * g + 2] + d[4 * g + 2] * sa
                     acc[4 * g + 3] = acc[4 * g + 3] + d[4 * g + 3] * sb
-            cute.arch.sync_warp()
-            if lane == 0:
-                mbar_arrive(empty + stage * 8)
+            fence_proxy_async_shared()
+            mbar_arrive(empty + stage * 8)
             stage = stage + 1
             if stage == ns:
                 stage = Int32(0)
@@ -741,10 +740,10 @@ class ExpertsKernel:
         if tid == 0:
             for s in cutlass.range_constexpr(self.ns1):
                 mbar_init(full1 + s * 8, 1)
-                mbar_init(empty1 + s * 8, CONSUMERS)
+                mbar_init(empty1 + s * 8, CONSUMER_THREADS)
             for s in cutlass.range_constexpr(self.ns2):
                 mbar_init(full2 + s * 8, 1)
-                mbar_init(empty2 + s * 8, CONSUMERS)
+                mbar_init(empty2 + s * 8, CONSUMER_THREADS)
             fence_mbar_init()
         cute.arch.sync_threads()
         if warp == PRODUCER and lane == 0:
@@ -782,9 +781,8 @@ class ExpertsKernel:
                 ch = Int32(lds32(sbase + stage * self.sb1 + self.hdr1))
                 if ch >= n1:
                     running = Int32(0)
-                    cute.arch.sync_warp()
-                    if lane == 0:
-                        mbar_arrive(empty1 + stage * 8)
+                    fence_proxy_async_shared()
+                    mbar_arrive(empty1 + stage * 8)
                 else:
                     r = ch // PAIRS
                     p = ch % PAIRS
@@ -805,9 +803,8 @@ class ExpertsKernel:
                 ch = Int32(lds32(sbase + stage * self.sb2 + self.hdr2))
                 if ch >= n2:
                     running = Int32(0)
-                    cute.arch.sync_warp()
-                    if lane == 0:
-                        mbar_arrive(empty2 + stage * 8)
+                    fence_proxy_async_shared()
+                    mbar_arrive(empty2 + stage * 8)
                 else:
                     r = ch // OUT_TILES
                     nb = ch % OUT_TILES

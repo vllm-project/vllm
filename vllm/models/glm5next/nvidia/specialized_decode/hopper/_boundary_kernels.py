@@ -226,6 +226,9 @@ class HopperBoundaryKernel:
         totals = smem.allocate_array(Float32, tokens * values)
         warp_sums2 = smem.allocate_array(Float32, tokens * self.warps)
         cluster_sums2 = smem.allocate_array(Float32, tokens * cluster)
+        # Peers' shared memory is written below; the wait before that makes sure
+        # every CTA of the cluster has started.
+        cute.arch.cluster_arrive_relaxed()
 
         # Everything below until the PDL wait is a weight or was written before
         # the producer of the input started. residual, post and comb come from
@@ -377,6 +380,7 @@ class HopperBoundaryKernel:
         cute.arch.barrier()
 
         # Every CTA's per-token sums into every peer's slot, then the totals.
+        cute.arch.cluster_wait()
         for k in cutlass.range_constexpr(
             (tokens * values + self.threads - 1) // self.threads
         ):
