@@ -161,7 +161,7 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=(?i)(?:^|[/_.-])m?llama(?!(?:index|stack))
-      - title~=(?i)llama
+      - title~=(?i)\bm?llama(?!(?:index|stack))
   actions:
     label:
       add:
@@ -256,12 +256,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^tests/.*gpt[-_]?oss.*\.py
-      - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
-      - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
-      - files~=^vllm/entrypoints/openai/parser/harmony_utils.py
-      # Harmony rendering now lives in the Rust frontend.
-      - files~=^rust/src/chat/src/.*/harmony/
+      - files~=(?i)(?:gpt[-_]?oss|harmony)
       - title~=(?i)gpt[-_]?oss
       - title~=(?i)harmony
   actions:
@@ -286,12 +281,8 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      # Anchored to the start of the filename so midashenglm.py (an unrelated
-      # model) does not match.
-      - files~=^vllm/model_executor/models/(?:chat)?glm[^/]*\.py
-      - files~=^tests/.*[/_](?:chat)?glm[^/]*\.py
-      - files~=^vllm/tool_parsers/.*glm.*\.py
-      - files~=^vllm/transformers_utils/.*/(?:chat)?glm[^/]*\.py
+      # Require a path/name boundary so midashenglm.py does not match.
+      - files~=(?i)(?:^|[/_.-])(?:chat)?glm
       - title~=(?i)\b(?:chat)?glm
   actions:
     label:
@@ -337,10 +328,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^vllm/models/inkling/
-      - files~=^vllm/tool_parsers/inkling.*\.py
-      - files~=^vllm/renderers/inkling.*\.py
-      - files~=^tests/.*inkling.*\.py
+      - files~=(?i)inkling
       - title~=(?i)inkling
   actions:
     label:
