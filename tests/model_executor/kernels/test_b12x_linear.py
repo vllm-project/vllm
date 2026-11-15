@@ -1051,6 +1051,37 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
 
 
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_autotune_prepares_tuned_plans(
+    monkeypatch, tmp_path, default_vllm_config
+) -> None:
+    """VLLM_B12X_AUTOTUNE prepares every planned token count with a measured
+    selection, and the tuned plan computes the same result."""
+    import vllm.utils.b12x as b12x_utils
+
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    monkeypatch.setenv("VLLM_B12X_AUTOTUNE", "1")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setattr(b12x_utils, "_TUNING_SESSION", None)
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 8]
+    n, k = 256, 512
+    layer, decoded = _nvfp4_w4a16_layer(n, k)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    kernel.process_weights_after_loading(layer)
+    kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
+    plan = layer.b12x_nvfp4_plan
+    sources = {plan.variants[m].selection.source for m in plan.token_counts}
+    assert sources <= {"tuned", "cached"}, sources
+    for m in plan.token_counts:
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        expected = (x.double() @ decoded.double().T).bfloat16()
+        torch.testing.assert_close(
+            kernel.apply_weights(layer, x), expected, atol=0.005, rtol=0.01
+        )
+
+
 def _block_weights(n, k, codec):
     block_size, block_bytes = (
         (32, 34) if codec == "q8_0" else (256, 66 if codec == "iq2_xxs" else 74)
