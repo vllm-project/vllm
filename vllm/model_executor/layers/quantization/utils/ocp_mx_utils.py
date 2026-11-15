@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from vllm.logger import init_logger
@@ -50,17 +50,17 @@ OCP_MX_DTYPES = {
 def ocp_mx_weight_dtype_and_rows(
     weight_quant: dict[str, Any] | None,
 ) -> tuple[str, int] | None:
-    """Normalize a Quark weight quant config to ``(mx_dtype, scale_block_rows)``.
+    """Normalize a Quark weight quant config to `(mx_dtype, scale_block_rows)`.
 
     Quark spells OCP MX weights two ways. The canonical one is 1-D per-group:
-    ``qscheme="per_group"``, ``group_size=32``, ``scale_format="e8m0"``. MXFP8
+    `qscheme="per_group"`, `group_size=32`, `scale_format="e8m0"`. MXFP8
     checkpoints may instead use a 2-D per-block spelling
-    (``qscheme="per_block"``, ``block_size=[R, 32]``,
-    ``scale_type="float8_e8m0fnu"``), which carries one scale per ``R`` weight
-    rows rather than one per row. ``scale_block_rows`` is that ``R``; it is 1
+    (`qscheme="per_block"`, `block_size=[R, 32]`,
+    `scale_type="float8_e8m0fnu"`), which carries one scale per `R` weight
+    rows rather than one per row. `scale_block_rows` is that `R`; it is 1
     for the canonical spelling, where the two layouts coincide.
 
-    Returns ``None`` when the config is not an OCP MX weight quantization.
+    Returns `None` when the config is not an OCP MX weight quantization.
     """
     if not isinstance(weight_quant, dict):
         return None
@@ -97,7 +97,7 @@ def ocp_mx_weight_dtype_and_rows(
     return None
 
 
-class OCP_MX_Scheme(str, Enum):
+class OCP_MX_Scheme(StrEnum):
     w_mxfp4 = "w_mxfp4"
     w_mxfp4_a_mxfp4 = "w_mxfp4_a_mxfp4"
     w_mxfp4_a_mxfp6_e3m2 = "w_mxfp4_a_mxfp6_e3m2"

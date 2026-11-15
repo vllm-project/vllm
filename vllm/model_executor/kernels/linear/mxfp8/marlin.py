@@ -6,6 +6,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -26,6 +27,12 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
         return False, "Marlin FP8 not available"
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         N, K = c.weight_shape
         if N <= 0 or K <= 0:
@@ -33,8 +40,10 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
         if K % MXFP8_BLOCK_SIZE != 0:
             return (
                 False,
-                f"Marlin MXFP8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
-                f"got K={K}.",
+                (
+                    f"Marlin MXFP8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, "
+                    f"got K={K}."
+                ),
             )
         # Tile misalignment is fixed by zero-padding at weight prep.
         return True, None

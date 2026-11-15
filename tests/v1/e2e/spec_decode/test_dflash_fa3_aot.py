@@ -10,11 +10,14 @@ from .utils import compute_acceptance_rate
 
 
 @pytest.mark.parametrize(
-    ("draft_window", "full_allocation"), [(None, False), (128, False), (128, True)]
+    ("draft_window", "full_allocation", "promote"),
+    [(None, False, True), (128, False, False), (128, False, True), (128, True, True)],
 )
 def test_draft_aot_uses_own_window_after_group_merge(
-    dist_init, draft_window, full_allocation
+    dist_init, tmp_path, draft_window, full_allocation, promote
 ):
+    from transformers import Qwen3Config
+
     from vllm.config import (
         AttentionConfig,
         CacheConfig,
@@ -32,19 +35,30 @@ def test_draft_aot_uses_own_window_after_group_merge(
     )
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        get_kv_cache_spec_sliding_window,
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        FullAttentionManager,
+        SlidingWindowManager,
     )
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
     from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
         _disable_aot_schedule_for_sliding_window_drafts,
     )
     from vllm.v1.worker.utils import AttentionGroup
 
+    model_dir = tmp_path / "target"
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=512,
+    ).save_pretrained(model_dir)
     config = VllmConfig(
         model_config=ModelConfig(
-            model="Qwen/Qwen3-4B",
-            revision="1cfa9a7208912126459214e8b04321603b3df60c",
+            model=str(model_dir),
+            skip_tokenizer_init=True,
             dtype="bfloat16",
             max_model_len=512,
         ),
@@ -55,7 +69,7 @@ def test_draft_aot_uses_own_window_after_group_merge(
             is_encoder_decoder=False,
             max_num_seqs=2,
             max_num_batched_tokens=512,
-            disable_hybrid_kv_cache_manager=True,
+            disable_hybrid_kv_cache_manager=promote,
         ),
         attention_config=AttentionConfig(flash_attn_version=3),
     )
@@ -82,26 +96,38 @@ def test_draft_aot_uses_own_window_after_group_merge(
         for impl in layers["draft"].impl.get_impl_variants():
             assert isinstance(impl, FlashAttentionImpl)
             assert impl.sliding_window == ((127, 0) if draft_window else (-1, -1))
-        specs = {
-            name: spec
+        layer_configs = {
+            name: layer_config
             for name, layer in layers.items()
-            if (spec := layer.get_kv_cache_spec(config)) is not None
+            if (layer_config := layer.get_kv_cache_config(config)) is not None
         }
-        assert len(specs) == 2
-        groups = get_kv_cache_groups(config, specs)
-        assert len(groups) == 1
-        spec = groups[0].kv_cache_spec
-        assert isinstance(spec, FullAttentionSpec)
-        assert spec.sliding_window == (None if full_allocation else 128)
-        assert get_kv_cache_spec_sliding_window(spec) is None
+        assert len(layer_configs) == 2
+        groups = get_kv_cache_groups(config, layer_configs)
+        group_id, kv_group = next(
+            (i, group) for i, group in enumerate(groups) if "draft" in group.layer_names
+        )
+        assert kv_group.manager_cls is (
+            FullAttentionManager if promote else SlidingWindowManager
+        )
+        spec = kv_group.kv_cache_specs["draft"]
+        assert isinstance(spec, AttentionSpec)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=1, kv_cache_tensors=[], kv_cache_groups=groups
+        )
         builder = FlashAttentionMetadataBuilder(
             spec, ["draft"], config, torch.device("cpu")
         )
         group = AttentionGroup(
-            FlashAttentionBackend, ["draft"], spec, 0, metadata_builders=[builder]
+            FlashAttentionBackend,
+            ["draft"],
+            spec,
+            group_id,
+            metadata_builders=[builder],
         )
         assert builder.aot_schedule
-        _disable_aot_schedule_for_sliding_window_drafts(config, [[group]])
+        _disable_aot_schedule_for_sliding_window_drafts(
+            config, [[group]], kv_cache_config
+        )
         assert builder.aot_schedule is (draft_window is None)
 
 
@@ -117,30 +143,34 @@ def _windowed_dflash(config):
 def _dflash_aot_state(worker):
     from vllm.config import get_layers_from_vllm_config
     from vllm.model_executor.layers.attention import Attention
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_sliding_window
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+    from vllm.v1.worker.utils import groups_with_metadata_builders
 
     draft = worker.model_runner.speculator
     layers = get_layers_from_vllm_config(
         draft.vllm_config, Attention, draft.draft_attn_layer_names
     )
-    builders = [
-        group.get_metadata_builder() for groups in draft.attn_groups for group in groups
-    ]
+    builders = []
+    for groups in draft.attn_groups:
+        for group in groups_with_metadata_builders(groups):
+            builder = group.get_metadata_builder()
+            assert isinstance(builder, FlashAttentionMetadataBuilder)
+            kv_group = draft.kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+            builders.append(
+                {
+                    "type": type(builder).__name__,
+                    "spec": type(builder.kv_cache_spec).__name__,
+                    "manager": kv_group.manager_cls.__name__,
+                    "allocation_window": getattr(
+                        kv_group.manager_config.params, "sliding_window", None
+                    ),
+                    "aot": builder.aot_schedule,
+                }
+            )
     manager = draft.query_cudagraph_manager
     return {
         "windows": [layer.sliding_window for layer in layers.values()],
-        "builders": [
-            {
-                "type": type(builder).__name__,
-                "spec": type(builder.kv_cache_spec).__name__,
-                "spec_window": builder.kv_cache_spec.sliding_window,
-                "allocation_window": get_kv_cache_spec_sliding_window(
-                    builder.kv_cache_spec
-                ),
-                "aot": builder.aot_schedule,
-            }
-            for builder in builders
-        ],
+        "builders": builders,
         "graphs": len(manager.graphs),
         "dispatch": [
             manager.dispatch(
@@ -156,7 +186,6 @@ def _dflash_aot_state(worker):
 
 def test_dflash_fa3_window_guard_survives_cache_promotion(monkeypatch, vllm_runner):
     """Keep the real FA3 guard through full allocation and FULL graph decoding."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
@@ -209,12 +238,12 @@ def test_dflash_fa3_window_guard_survives_cache_promotion(monkeypatch, vllm_runn
             assert state["builders"]
             for builder in state["builders"]:
                 assert builder["type"] == "FlashAttentionMetadataBuilder"
-                assert builder["spec"] == (
-                    "SlidingWindowSpec"
+                assert builder["spec"] == "AttentionSpec"
+                assert builder["manager"] == (
+                    "SlidingWindowManager"
                     if window and not promote
-                    else "FullAttentionSpec"
+                    else "FullAttentionManager"
                 )
-                assert builder["spec_window"] == window
                 assert builder["allocation_window"] == (window if not promote else None)
                 assert builder["aot"] is (window is None)
             assert state["graphs"] >= 2

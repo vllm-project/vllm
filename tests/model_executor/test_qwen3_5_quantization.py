@@ -59,17 +59,10 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
     mock_vllm_config.compilation_config.mode = CompilationMode.NONE
     mock_vllm_config.quant_config = mock_quant_config
 
-    mock_pp_group = Mock()
-    mock_pp_group.is_last_rank = True
-
     with (
         patch("vllm.model_executor.models.qwen3_5_mtp.Qwen3_5MultiTokenPredictor"),
         patch("vllm.model_executor.models.qwen3_5_mtp.ParallelLMHead") as MockLMHead,
         patch("vllm.model_executor.models.qwen3_5_mtp.LogitsProcessor"),
-        patch(
-            "vllm.model_executor.models.qwen3_5_mtp.get_pp_group",
-            return_value=mock_pp_group,
-        ),
     ):
         Qwen3_5MTP(vllm_config=mock_vllm_config)
 

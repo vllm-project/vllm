@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""VL wrapper finalization contract with the language model."""
+"""The loader reaches the language model's post-load hook inside VL wrappers."""
 
 import importlib
 
@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.utils import WeightsMapper
 
 
@@ -34,7 +35,7 @@ class _FakeLanguageModel(nn.Module):
     ],
     ids=["v4", "v41-nvidia", "v41-amd"],
 )
-def test_vl_wrapper_delegates_finalization_to_hook(module, cls_name) -> None:
+def test_vl_wrapper_runs_language_model_hook(module, cls_name) -> None:
     wrapper_cls = getattr(importlib.import_module(module), cls_name)
 
     model = object.__new__(wrapper_cls)
@@ -60,10 +61,10 @@ def test_vl_wrapper_delegates_finalization_to_hook(module, cls_name) -> None:
     }
     assert model.language_model.finalized_values == []
 
-    model.process_weights_after_loading()
+    finalize_model_weights(model)
 
     assert model.language_model.finalized_values == [(1.0, 3.0)]
 
     # A reload reruns the hook: no one-shot guard may skip it.
-    model.process_weights_after_loading()
+    finalize_model_weights(model)
     assert model.language_model.finalized_values == [(1.0, 3.0)] * 2
