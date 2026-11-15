@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm import envs
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -913,6 +914,7 @@ def _fused_moe_lora_kernel(
     b_ptr,
     b_desc,
     c_ptr,
+    zero_mask_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
@@ -955,6 +957,10 @@ def _fused_moe_lora_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
     USE_B_L2_CACHE: tl.constexpr,  # new, enable .ca load for B
+    ZERO_MASK_WRITE: tl.constexpr,
+    ZERO_MASK_READ: tl.constexpr,
+    MASK_RANK_BLOCKS: tl.constexpr,
+    MASK_SHRINK_BLOCK_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -1103,42 +1109,110 @@ def _fused_moe_lora_kernel(
     if USE_GDC and not IS_PRIMARY:
         tl.extra.cuda.gdc_wait()
 
-    for k in range(0, grid_k):
-        cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
-        k_remaining = K - cur_k_offset
-        # pre-fetch lora weight
-        if b_desc is not None:
-            b = (
-                b_desc.load([lora_id, expert_id, offs_bn, offs_bk + cur_k_offset])
-                .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
-                .T
-            )
+    if ZERO_MASK_READ and USE_TMA:
+        tl.static_assert(USE_TMA, "H100 mask fast path requires TMA")
+        mask_root = (
+            (slice_id * max_loras + lora_id) * num_pid_m + pid_m
+        ) * MASK_RANK_BLOCKS
+        last_rank_tile_active = tl.load(
+            zero_mask_ptr + mask_root + MASK_RANK_BLOCKS - 1
+        )
+        if last_rank_tile_active != 0:
+            # A nonzero last tile is sufficient to choose the dense path.
+            # Earlier zero tiles are harmless because this is the original dot.
+            for k in range(0, grid_k):
+                cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
+                b = (
+                    b_desc.load([lora_id, expert_id, offs_bn, offs_bk + cur_k_offset])
+                    .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                    .T
+                )
+                a = a_desc.load([offs_am, offs_ak + cur_k_offset])
+                dot_dtype = a_ptr.dtype.element_ty
+                accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
         else:
-            # add (offs_bn < N) mask; optional .ca for B
-            b_mask = (offs_k[:, None] < k_remaining) & (offs_bn[None, :] < N)
-            if USE_B_L2_CACHE:
-                b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=".ca")
+            for k in range(0, grid_k):
+                cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
+                mask_base = mask_root + cur_k_offset // MASK_SHRINK_BLOCK_N
+                active = tl.load(zero_mask_ptr + mask_base).to(tl.int32)
+                active |= tl.load(zero_mask_ptr + mask_base + 1).to(tl.int32)
+                if active != 0:
+                    b = (
+                        b_desc.load(
+                            [lora_id, expert_id, offs_bn, offs_bk + cur_k_offset]
+                        )
+                        .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                        .T
+                    )
+                    a = a_desc.load([offs_am, offs_ak + cur_k_offset])
+                    dot_dtype = a_ptr.dtype.element_ty
+                    accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
+    else:
+        for k in range(0, grid_k):
+            cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
+            k_remaining = K - cur_k_offset
+            if ZERO_MASK_READ:
+                tl.static_assert(not USE_TMA, "zero-mask path requires non-TMA loads")
+                mask_base = (
+                    (slice_id * max_loras + lora_id) * num_pid_m + pid_m
+                ) * MASK_RANK_BLOCKS + cur_k_offset // MASK_SHRINK_BLOCK_N
+                active = tl.load(zero_mask_ptr + mask_base).to(tl.int32)
+                active |= tl.load(zero_mask_ptr + mask_base + 1).to(tl.int32)
+                if active != 0:
+                    b_mask = (offs_k[:, None] < k_remaining) & (offs_bn[None, :] < N)
+                    if USE_B_L2_CACHE:
+                        b = tl.load(
+                            b_ptrs, mask=b_mask, other=0.0, cache_modifier=".ca"
+                        )
+                    else:
+                        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+                    a = tl.load(
+                        a_ptrs,
+                        mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                        other=0.0,
+                    )
+                    dot_dtype = a_ptr.dtype.element_ty
+                    accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
+                a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
+                b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
             else:
-                b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-            b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+                # pre-fetch lora weight
+                if b_desc is not None:
+                    b = (
+                        b_desc.load(
+                            [lora_id, expert_id, offs_bn, offs_bk + cur_k_offset]
+                        )
+                        .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                        .T
+                    )
+                else:
+                    # add (offs_bn < N) mask; optional .ca for B
+                    b_mask = (offs_k[:, None] < k_remaining) & (offs_bn[None, :] < N)
+                    if USE_B_L2_CACHE:
+                        b = tl.load(
+                            b_ptrs, mask=b_mask, other=0.0, cache_modifier=".ca"
+                        )
+                    else:
+                        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+                    b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
-        if a_desc is not None:
-            a = a_desc.load([offs_am, offs_ak + cur_k_offset])
-        else:
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-                other=0.0,
-            )
-            a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
+                if a_desc is not None:
+                    a = a_desc.load([offs_am, offs_ak + cur_k_offset])
+                else:
+                    a = tl.load(
+                        a_ptrs,
+                        mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                        other=0.0,
+                    )
+                    a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        # Cast operands to the input dtype for tl.dot. On ROCm, Triton's
-        # compiler may infer different types for a and b when merging if/else
-        # branches (TMA desc path returns fp32, tl.load returns the pointer's
-        # element type). Casting to bfloat16 here silently changes fp16 LoRA
-        # operands and can produce incorrect results.
-        dot_dtype = a_ptr.dtype.element_ty
-        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
+                # Cast operands to the input dtype for tl.dot. On ROCm, Triton's
+                # compiler may infer different types for a and b when merging if/else
+                # branches (TMA desc path returns fp32, tl.load returns the pointer's
+                # element type). Casting to bfloat16 here silently changes fp16 LoRA
+                # operands and can produce incorrect results.
+                dot_dtype = a_ptr.dtype.element_ty
+                accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -1172,6 +1246,21 @@ def _fused_moe_lora_kernel(
             tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
         tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
+
+    if ZERO_MASK_WRITE:
+        mask_index = (
+            (slice_id * max_loras + lora_id) * num_pid_m + pid_m
+        ) * MASK_RANK_BLOCKS + pid_n
+        if USE_TMA:
+            tl.store(
+                zero_mask_ptr + mask_index,
+                tl.max((accumulator != 0).to(tl.int32)).to(tl.uint8),
+            )
+        else:
+            tl.store(
+                zero_mask_ptr + mask_index,
+                (tl.sum((accumulator != 0).to(tl.int32)) != 0).to(tl.uint8),
+            )
 
 
 @torch.inference_mode()
@@ -1210,6 +1299,7 @@ def _fused_moe_lora_shrink(
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
+    zero_mask: torch.Tensor | None = None,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
@@ -1257,6 +1347,7 @@ def _fused_moe_lora_shrink(
         b_ptr,
         b_desc,
         a_intermediate_cache1,
+        zero_mask,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -1290,6 +1381,10 @@ def _fused_moe_lora_shrink(
         MUL_ROUTED_WEIGHT=False,
         ADD_INPUTS=False,
         USE_B_L2_CACHE=True,
+        ZERO_MASK_WRITE=zero_mask is not None,
+        ZERO_MASK_READ=False,
+        MASK_RANK_BLOCKS=triton.cdiv(N, block_size_n) if zero_mask is not None else 0,
+        MASK_SHRINK_BLOCK_N=block_size_n if zero_mask is not None else 0,
         sort_c=use_tma and sorted_token_ids is not None,
         IS_PRIMARY=True,
         **shrink_config,
@@ -1335,6 +1430,7 @@ def _fused_moe_lora_expand(
     use_gdc: bool = False,
     use_tma: bool = False,
     add_inputs: bool = True,
+    zero_mask: torch.Tensor | None = None,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -1399,6 +1495,7 @@ def _fused_moe_lora_expand(
         b_ptr,
         b_desc,
         out_view,
+        zero_mask,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -1432,6 +1529,12 @@ def _fused_moe_lora_expand(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         ADD_INPUTS=add_inputs,
         USE_B_L2_CACHE=True,
+        ZERO_MASK_WRITE=False,
+        ZERO_MASK_READ=zero_mask is not None,
+        MASK_RANK_BLOCKS=(
+            triton.cdiv(K, block_size_k // 2) if zero_mask is not None else 0
+        ),
+        MASK_SHRINK_BLOCK_N=block_size_k // 2 if zero_mask is not None else 0,
         sort_c=False,
         IS_PRIMARY=False,
         **expand_config,
@@ -1606,6 +1709,42 @@ def _fused_moe_lora(
         device=device,
     )
 
+    use_a100_zero_mask = (
+        envs.VLLM_MOE_LORA_INTERMEDIATE_MASK
+        and device.type == "cuda"
+        and torch.cuda.get_device_capability(device) == (8, 0)
+        and not use_tma
+    )
+    use_h100_zero_mask = (
+        envs.VLLM_MOE_LORA_TMA_INTERMEDIATE_MASK
+        and device.type == "cuda"
+        and torch.cuda.get_device_capability(device) == (9, 0)
+        and use_tma
+    )
+    use_zero_mask = (
+        (use_a100_zero_mask or use_h100_zero_mask)
+        and not fully_sharded
+        and sorted_token_ids is not None
+        and num_slices == 1
+        and shrink_split_k == expand_split_k == 1
+        and expand_block_size_k == 2 * shrink_block_size_n
+        and max_lora_rank % expand_block_size_k == 0
+    )
+    zero_mask = (
+        torch.empty(
+            (
+                num_slices,
+                lora_a_stacked[0].shape[0],
+                triton.cdiv(EM, shrink_block_size_m),
+                triton.cdiv(max_lora_rank, shrink_block_size_n),
+            ),
+            dtype=torch.uint8,
+            device=device,
+        )
+        if use_zero_mask
+        else None
+    )
+
     use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
@@ -1639,6 +1778,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        zero_mask=zero_mask,
     )
 
     if fully_sharded:
@@ -1690,6 +1830,7 @@ def _fused_moe_lora(
         use_gdc=use_gdc,
         use_tma=use_tma,
         add_inputs=add_inputs,
+        zero_mask=zero_mask,
     )
 
 
@@ -1703,7 +1844,7 @@ try:
     direct_register_custom_op(
         op_name="fused_moe_lora_shrink",
         op_func=_fused_moe_lora_shrink,
-        mutates_args=["a_intermediate_cache1"],
+        mutates_args=["a_intermediate_cache1", "zero_mask"],
     )
 
     direct_register_custom_op(

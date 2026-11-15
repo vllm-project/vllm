@@ -18,7 +18,10 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.ops.triton_ops import fused_moe_lora
-from vllm.lora.ops.triton_ops.utils import FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
+from vllm.lora.ops.triton_ops.utils import (
+    FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS,
+    supports_tma,
+)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
@@ -457,6 +460,92 @@ def test_fused_moe_lora_kernel_large_rank_fallback(
         torch.testing.assert_close(output.float(), expected, atol=1e-2, rtol=8e-4)
     else:
         torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("active_rank", [8, 96, 256])
+@pytest.mark.parametrize("add_inputs", [False, True])
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_rank256_intermediate_mask(
+    active_rank, add_inputs, device, monkeypatch
+):
+    """Skipping zero rank tiles preserves the rank-256 two-kernel result."""
+    from vllm.lora.ops.triton_ops import fused_moe_lora_op
+
+    torch.set_default_device(device)
+    set_random_seed(42)
+    num_tokens, top_k_num, num_experts, max_loras = 16, 2, 4, 2
+    max_lora_rank, K, N, block_size = 256, 256, 256, 16
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, 4, max_loras, num_experts, top_k_num
+    )
+    lora_a = torch.zeros(
+        (max_loras, num_experts, max_lora_rank, K), dtype=torch.bfloat16
+    )
+    lora_b = torch.zeros(
+        (max_loras, num_experts, N, max_lora_rank), dtype=torch.bfloat16
+    )
+    lora_a[:, :, :active_rank] = 0.25 * torch.rand(
+        (max_loras, num_experts, active_rank, K), dtype=torch.bfloat16
+    )
+    lora_b[:, :, :, :active_rank] = 0.25 * torch.rand(
+        (max_loras, num_experts, N, active_rank), dtype=torch.bfloat16
+    )
+    hidden_states = 0.25 * torch.rand((num_tokens, K), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, top_k_num, N), dtype=torch.bfloat16)
+
+    masks = []
+    original_shrink = fused_moe_lora_op._fused_moe_lora_shrink
+
+    def record_mask(*args, **kwargs):
+        masks.append(kwargs.get("zero_mask"))
+        return original_shrink(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_lora_op, "_fused_moe_lora_shrink", record_mask)
+    outputs = []
+    for use_mask in (False, True):
+        monkeypatch.setenv("VLLM_MOE_LORA_INTERMEDIATE_MASK", str(int(use_mask)))
+        monkeypatch.setenv("VLLM_MOE_LORA_TMA_INTERMEDIATE_MASK", str(int(use_mask)))
+        output = residual.clone()
+        use_fused_moe_lora_kernel(
+            topk_ids,
+            topk_weights,
+            token_lora_mapping,
+            max_lora_rank,
+            top_k_num,
+            lora_ids,
+            [lora_a],
+            [lora_b],
+            hidden_states,
+            output,
+            max_loras,
+            num_experts,
+            block_size,
+            add_inputs=add_inputs,
+        )
+        outputs.append(output)
+
+    assert len(masks) == 2
+    assert masks[0] is None
+    gpu_type = (
+        torch.cuda.get_device_capability(device) if DEVICE_TYPE == "cuda" else None
+    )
+    expect_mask = gpu_type == (8, 0) or (
+        gpu_type == (9, 0) and supports_tma(torch.device(device))
+    )
+    assert (masks[1] is not None) == expect_mask
+    torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
+
+    expected = use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        [lora_a[:, :, :active_rank]],
+        [lora_b[:, :, :, :active_rank]],
+        top_k_num,
+    )
+    if add_inputs:
+        expected += residual
+    torch.testing.assert_close(outputs[1], expected, atol=2e-2, rtol=2e-2)
 
 
 def use_fused_moe_lora_kernel_naive(
