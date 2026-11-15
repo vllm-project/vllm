@@ -29,14 +29,25 @@ engine drives on your behalf:
 
 ## Available Backends
 
-| Backend | Transport | Use Case |
-| ------- | --------- | -------- |
-| [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
-| [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
-| [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
-| [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
-| [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
-| [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
+The backend picks the transport; the protocol and the API stay the same.
+
+| Backend | Transport | Use Case | What a sync moves |
+| ------- | --------- | -------- | ----------------- |
+| [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference | One broadcast over NVLink or InfiniBand; `packed=True` batches small tensors |
+| [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU | Nothing over a data plane: workers read the trainer's tensors through the handles |
+| [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches | Only the changed coordinates |
+| [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) | Each worker fetches only its own slices |
+| [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts | Reshard on the wire, without materializing full tensors |
+| [ModelExpress](modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas | Immutable versions installed by id, optionally as deltas |
+
+For IPC, NCCL, sparse_nccl, sharded_rdt, and nccl_m2n a sync costs one transfer
+of the updated weights over the chosen link plus the in-place load on each
+worker; there is no checkpoint write or read, no server restart, and no CUDA
+graph recapture. Checkpoint-format engines (such as IPC and NCCL) run the
+[layerwise reload](../layerwise.md) path on the inference side, which fuses,
+(online-)quantizes, and shards each layer as it lands. When training and
+inference are colocated, IPC is the cheapest option because no bytes cross a
+device boundary; NCCL is the default once they are split across GPUs.
 
 ## Quickstart
 
@@ -101,6 +112,50 @@ trainer's broadcast, since both rendezvous inside the same NCCL calls).
 
 There is no `backend=` argument on the trainer side: each `TrainerInitInfo`
 subclass declares its own `backend`, and the factory dispatches on it.
+
+### Reference Examples
+
+- [RLHF with IPC weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_ipc.py) — start here when training and inference share a GPU
+- [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) — trainer on one GPU, tensor-parallel fp8 server on others
+- [Async RLHF with mid-flight pause and resume](../../../examples/rl/rlhf_async_new_apis.py) — generation overlaps training, with weight sync between rollouts
+
+Each `vllm serve` example launches and tears down its own server; the async
+example runs the engine in-process. The backend pages link the remaining
+examples (FSDP/EP, multi-source, sparse, sharded RDT, M2N).
+
+## Updating Weights While Serving
+
+Weight transfer updates weights **in place**: every worker loads the new tensors
+into the storage the model already owns (see [Layerwise Reloading](../layerwise.md)),
+so compiled artifacts are reused rather than rebuilt. CUDA graphs are replayed
+against the new values and are not recaptured, and no startup-time work (initial
+weight load, graph capture) is repeated. A sync therefore costs the transfer
+plus the in-place load, not a restart and warmup. When the new weights are
+already a checkpoint on disk, the mid-level `reload_weights` API uses the same
+in-place path; weight transfer exists to move tensors straight from the training
+process, with no checkpoint round trip.
+
+The protocol does not pause the engine for you. When requests may be in flight:
+
+- **Pause first.** Call `pause_generation()` before `/start_weight_update` and
+  `resume_generation()` after `/finish_weight_update`. `mode="keep"` freezes
+  in-flight requests so they continue on the new weights; `"wait"` and `"abort"`
+  make the update a generation boundary. See
+  [The Pause and Resume API](../async_rl.md#the-pause-and-resume-api).
+- **Invalidate stale KV.** Entries computed under the old weights are stale
+  after the update. `pause_generation(clear_cache=True)` clears the KV, prefix,
+  and connector caches. Block hashes do not cover weights, so if you keep the
+  connector cache, give requests a per-version `cache_salt`.
+- **Label the update.** Pass `weight_version` to `finish_weight_update` (or call
+  `/update_weight_version`) so outputs carry `weight_versions` spans for tokens
+  sampled before and after the update. See
+  [Weight Versions in Outputs](../async_rl.md#weight-versions-in-outputs).
+- **Data parallelism.** With the internal load balancer one pause/resume covers
+  all DP ranks; behind an external load balancer, pause, label, and resume every
+  instance. See [the DP note in the Async RL guide](../async_rl.md).
+
+The [Async RL](../async_rl.md) guide covers the full async loop that combines
+these pieces.
 
 ## Where Each Setting Lives
 
