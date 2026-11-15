@@ -3,6 +3,7 @@
 
 """Online MXFP4 (microscaling FP4, block-32) quantization methods."""
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -44,6 +45,31 @@ from vllm.model_executor.utils import replace_parameter
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
 # and MoE oracle paths.
 MXFP4_BLOCK_SIZE = 32
+
+# Midpoints between consecutive FP4 (e2m1) magnitudes 0, 0.5, 1, ..., 4, 6.
+_FP4_MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
+def _quantize_mxfp4_round_up_scale(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MXFP4 with block scale `2**ceil(log2(amax / 6))`, so no value saturates.
+
+    The OCP scale used by `mxfp4_quantize` rounds down and clips the largest
+    values of a block, which costs accuracy on Hadamard-rotated weights.
+    Returns the same packed layout and e8m0 scales as `mxfp4_quantize`.
+    """
+    blocks = weight.float().unflatten(-1, (-1, MXFP4_BLOCK_SIZE))
+    amax = blocks.abs().amax(dim=-1, keepdim=True)
+    exponent = torch.ceil(torch.log2(amax / 6.0)).clamp(-127, 127)
+    scaled = blocks / torch.exp2(exponent)
+    midpoints = torch.tensor(_FP4_MIDPOINTS, device=weight.device)
+    codes = torch.bucketize(scaled.abs(), midpoints).to(torch.uint8)
+    codes |= (scaled < 0).to(torch.uint8) << 3
+    codes = codes.flatten(-2)
+    packed = codes[..., 0::2] | (codes[..., 1::2] << 4)
+    scales = (exponent.squeeze(-1) + 127).to(torch.uint8)
+    return packed, scales
 
 
 def _quantize_mxfp4_moe_weight(
@@ -153,6 +179,10 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     activation_quant_key: "QuantKey | None" = kMxfp4Dynamic
     accepts_activation_override = True
+    # Activation key the kernel format conversion runs with; None keeps the
+    # backend default.
+    kernel_activation_key: "QuantKey | None" = None
+    hadamard_size = 1
 
     def __init__(
         self,
@@ -170,9 +200,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.w13_precision_config: Any = None
         self.w2_precision_config: Any = None
 
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            config=self.moe, activation_key=self.activation_quant_key
-        )
+        self.mxfp4_backend, self.experts_cls = self._select_backend()
         # The oracle may fall back to a backend computing another activation
         # format (EMULATION computes MXFP4): reject an override it cannot honour.
         backend_key = (
@@ -189,6 +217,18 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 f"activation={self.activation_quant_key}; it computes "
                 f"activation={backend_key}."
             )
+
+    def _select_backend(
+        self,
+    ) -> "tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]":
+        return select_mxfp4_moe_backend(
+            config=self.moe, activation_key=self.activation_quant_key
+        )
+
+    def _quantize_weight(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return _quantize_mxfp4_moe_weight(weight)
 
     def maybe_roundup_sizes(
         self,
@@ -257,8 +297,16 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                activation_key=self.kernel_activation_key,
             )
         )
+        if self.hadamard_size > 1:
+            layer.weight_schemas = {
+                name: dataclasses.replace(
+                    schema, hadamard_block_size=self.hadamard_size
+                )
+                for name, schema in layer.weight_schemas.items()
+            }
 
         # Handle weight/scale assignment based on backend type
         # Copied from `quark_moe.py`.
@@ -338,8 +386,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
             self._zero_padding(layer, w13_weight, w2_weight)
             return (
-                *_quantize_mxfp4_moe_weight(w13_weight),
-                *_quantize_mxfp4_moe_weight(w2_weight),
+                *self._quantize_weight(w13_weight),
+                *self._quantize_weight(w2_weight),
             )
 
         w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)
@@ -356,3 +404,74 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
+
+
+class Mxfp4HadamardOnlineMoEMethod(Mxfp4OnlineMoEMethod):
+    """Online MXFP4 MoE with a Sylvester Hadamard rotation on Humming.
+
+    Expert weights are rotated along their input dimension before
+    quantization, and Humming fuses the matching activation rotation into its
+    input quantization. Activations default to MXFP4 (W4A4).
+    """
+
+    def __init__(
+        self,
+        *,
+        moe: FusedMoEConfig,
+        hadamard_size: int,
+        activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
+    ):
+        self.hadamard_size = hadamard_size
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
+        self.kernel_activation_key = self.activation_quant_key
+
+    def _select_backend(
+        self,
+    ) -> "tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]":
+        if self.moe.moe_backend not in ("auto", "humming"):
+            raise ValueError(
+                "Online MXFP4 with a Hadamard rotation requires "
+                f"moe_backend='humming', got {self.moe.moe_backend!r}."
+            )
+        # Humming runs the requested activations itself (kernel_activation_key),
+        # so select it as a weight-only backend.
+        return select_mxfp4_moe_backend(
+            config=dataclasses.replace(self.moe, moe_backend="humming")
+        )
+
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if (
+            hidden_size % self.hadamard_size != 0
+            or intermediate_size_per_partition % self.hadamard_size != 0
+        ):
+            raise ValueError(
+                "Online MXFP4 Hadamard MoE requires hidden/intermediate sizes "
+                f"divisible by hadamard_size={self.hadamard_size}."
+            )
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def _quantize_weight(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.utils.humming import process_input
+
+        rotated = process_input(
+            weight.reshape(-1, weight.size(-1)).contiguous(),
+            hadamard_block_size=self.hadamard_size,
+        )[0]
+        return _quantize_mxfp4_round_up_scale(rotated.view(weight.shape))
