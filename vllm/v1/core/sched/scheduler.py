@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -89,15 +89,6 @@ logger = init_logger(__name__)
 
 # Reports per prefill; the spacing is fixed by the work left at the first one.
 PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
-
-
-@dataclass
-class _PrefillProgressState:
-    client_index: int
-    # Remaining tokens at the last report; None reports on the first step.
-    last_remaining: int | None = None
-    # Tokens of progress between two reports, fixed by the first report.
-    step: int = 0
 
 
 class Scheduler(SchedulerInterface):
@@ -256,7 +247,6 @@ class Scheduler(SchedulerInterface):
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
         self.running: list[Request] = []
-        self._prefill_progress: dict[str, _PrefillProgressState] = {}
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -2260,45 +2250,26 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
-    def _report_prefill_progress(
-        self,
-        request: Request,
-        pending: dict[int, list[PrefillProgress]],
-    ) -> None:
-        """Queue a progress update; a finished request reports a final zero."""
+    def _report_prefill_progress(self, request: Request) -> PrefillProgress | None:
+        """Return this step's report, or None when it is not due yet.
+
+        The state lives on the request, so a step costs a comparison per
+        scheduled request and nothing when reporting is off.
+        """
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = max(0, request.num_tokens - computed)
-        state = self._prefill_progress.get(request.request_id)
-        if remaining <= 0:
-            client_index = request.client_index
-            if state is not None:
-                del self._prefill_progress[request.request_id]
-                client_index = state.client_index
-            pending.setdefault(client_index, []).append(
-                PrefillProgress(
-                    request_id=request.request_id, remaining_prefill_tokens=0
-                )
-            )
-            return
-        if state is None:
-            state = _PrefillProgressState(client_index=request.client_index)
-            state.step = max(
+        if request.prefill_progress_step == 0:
+            request.prefill_progress_step = max(
                 1,
                 -(-remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST),
             )
-            self._prefill_progress[request.request_id] = state
-        elif (
-            state.last_remaining is not None
-            and remaining <= state.last_remaining
-            and state.last_remaining - remaining < state.step
-        ):
-            return
-        state.last_remaining = remaining
+        last = request.prefill_progress_left
+        if last is not None and 0 <= last - remaining < request.prefill_progress_step:
+            return None
+        request.prefill_progress_left = remaining
         logger.debug("PP emit %s remaining=%d", request.request_id, remaining)
-        pending.setdefault(state.client_index, []).append(
-            PrefillProgress(
-                request_id=request.request_id, remaining_prefill_tokens=remaining
-            )
+        return PrefillProgress(
+            request_id=request.request_id, remaining_prefill_tokens=remaining
         )
 
     def update_from_output(
@@ -2332,6 +2303,9 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         prefill_progress: dict[int, list[PrefillProgress]] = defaultdict(list)
+        # A report rides on the output this step already produces for the
+        # request; only a step without one needs an output of its own.
+        prefill_by_request: dict[str, PrefillProgress] = {}
 
         spec_decoding_stats: SpecDecodingStats | None = None
 
@@ -2376,8 +2350,11 @@ class Scheduler(SchedulerInterface):
                 if (
                     request.num_output_tokens == 0
                     and self.scheduler_config.enable_prefill_progress
+                    and not request.is_finished()
                 ):
-                    self._report_prefill_progress(request, prefill_progress)
+                    progress = self._report_prefill_progress(request)
+                    if progress is not None:
+                        prefill_by_request[request.request_id] = progress
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2550,6 +2527,14 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if request.prefill_progress_left is not None:
+                        request.prefill_progress_left = None
+                        prefill_by_request.pop(req_id, None)
+                        prefill_progress.setdefault(request.client_index, []).append(
+                            PrefillProgress(
+                                request_id=req_id, remaining_prefill_tokens=0
+                            )
+                        )
                     if (
                         prefill_stats is not None
                         and kv_transfer_params is not None
@@ -2587,6 +2572,7 @@ class Scheduler(SchedulerInterface):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
+                        prefill_progress=prefill_by_request.pop(req_id, None),
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2627,31 +2613,12 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        # A finished or aborted request reports its final zero and releases the
-        # slot. A preempted one keeps work to redo, so it only releases the slot
-        # and reports again when it runs.
-        if self._prefill_progress:
-            running_req_ids = {request.request_id for request in self.running}
-            stopped_req_ids = {request.request_id for request in stopped_running_reqs}
-            for request_id, state in list(self._prefill_progress.items()):
-                if request_id in running_req_ids:
-                    continue
-                del self._prefill_progress[request_id]
-                if request_id not in stopped_req_ids:
-                    # Preempted: it has work queued again.
-                    request = self.requests.get(request_id)
-                    if request is None:
-                        continue
-                    remaining = max(0, request.num_tokens - request.num_computed_tokens)
-                    prefill_progress.setdefault(state.client_index, []).append(
-                        PrefillProgress(
-                            request_id=request_id, remaining_prefill_tokens=remaining
-                        )
-                    )
-                    continue
-                prefill_progress.setdefault(state.client_index, []).append(
-                    PrefillProgress(request_id=request_id, remaining_prefill_tokens=0)
-                )
+        # Steps that produced no output of their own still owe the report.
+        for request_id, progress in prefill_by_request.items():
+            request = self.requests.get(request_id)
+            if request is not None:
+                prefill_progress.setdefault(request.client_index, []).append(progress)
+        prefill_by_request.clear()
 
         request_errors = self.grammar_compile_error_reqs
         self.grammar_compile_error_reqs = {}
