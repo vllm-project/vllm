@@ -44,6 +44,32 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
+### FlashInfer one-sided sync protocol
+
+`VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL` selects how `flashinfer_nvlink_one_sided`
+signals that a step's tokens have arrived. The default is `auto`.
+
+| Value | Behavior |
+| ----- | -------- |
+| `auto` (default) | `sentinel` for steps whose busiest rank sends at most 256 tokens, `fence` for larger steps. Adds `ep_size` × 256 rows of workspace per rank |
+| `fence` | Completion flags behind a memory fence for every step, the behavior before this option existed |
+| `sentinel` | Receivers poll the token rows themselves for every step, prefill included. For diagnostics only: its workspace holds `ep_size` × `--max-num-batched-tokens` rows per rank |
+
+FlashInfer uses fences even under `auto` or `sentinel`:
+
+- on GPUs other than SM 10.0, 10.3 and 10.7 (B200/GB200, B300/GB300, VR200);
+- when EP is larger than 64;
+- with `VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE=1`;
+- for dispatch formats or row widths without sentinel support, such as padded MXFP8;
+- for steps whose rows do not match the shared workspace's row format, for example the
+  target-model layers when a speculative-decoding draft layer uses a wider dispatch format.
+
+Each rank logs the largest step that may use the sentinel protocol, for example
+`sync protocol auto, sentinel steps up to 256 tokens per rank`; `0` means every step
+uses fences. For some shapes (wide BF16 rows, Kimi-K3) at EP 8 or more, sentinel can
+be slower than fence at 128–256 tokens per rank; set `fence` if your deployment
+measures that.
+
 ## Single Node Deployment
 
 ### Configuration

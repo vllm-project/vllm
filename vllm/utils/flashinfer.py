@@ -440,6 +440,8 @@ def has_flashinfer_nvlink_one_sided() -> bool:
             )
         )
         and hasattr(mod.MoEEpCommParams, "dispatch_format")
+        and "sync_protocol"
+        in getattr(mod.NVLinkOneSidedConfig, "__dataclass_fields__", {})
     )
 
 
