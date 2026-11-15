@@ -56,6 +56,7 @@ from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
+from .prefix_token_cache import PrefixTokenCache
 
 if TYPE_CHECKING:
     from collections.abc import Set
@@ -1062,6 +1063,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         )
 
         if self.tokenizer is not None:
+            self._prefix_token_cache = PrefixTokenCache.maybe_create(self.tokenizer)
             maybe_make_thread_pool(
                 self.tokenizer, config.model_config.renderer_num_workers + 1
             )
