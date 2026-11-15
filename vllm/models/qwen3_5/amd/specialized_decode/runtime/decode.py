@@ -56,6 +56,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_hadamard import (
     block_hadamard_rotate,
+    hadamard_matrix,
 )
 from vllm.models.qwen3_5.amd.specialized_decode import layout as L
 from vllm.models.qwen3_5.amd.specialized_decode.abi import FAILED
@@ -343,8 +344,9 @@ class SpecializedDecode:
                 core = gdn_verify_core(layer.linear_attn, x)
                 out_proj = layer.linear_attn.out_proj
                 if checked_format(out_proj).fmt == "mxfp4_h32":
-                    # layer_block reads the rotated core
-                    core = block_hadamard_rotate(core, out_proj.input_hadamard)
+                    # layer_block reads the rotated core; `input_hadamard` is
+                    # absent when the GEMM fuses the rotation
+                    core = block_hadamard_rotate(core, hadamard_matrix(32, core.device))
                 h, res = la.mono_layer(i, core, gate, residual)
                 continue
             if la.mono_gdn_layer(i, rows):
