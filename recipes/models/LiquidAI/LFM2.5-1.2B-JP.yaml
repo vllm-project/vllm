@@ -127,7 +127,6 @@ guide: |
 
   ## Configuration Tips
   - Set `--max-model-len` to match your workload (up to 32K); lowering it frees VRAM for KV cache.
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
   - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
 
   ## References

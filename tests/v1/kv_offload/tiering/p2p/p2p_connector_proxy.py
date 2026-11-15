@@ -295,7 +295,12 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate(), media_type="application/json")
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream"
+            if req_data.get("stream")
+            else "application/json",
+        )
 
     except Exception as e:
         import sys
@@ -374,7 +379,12 @@ async def _handle_completions_decoder_first(api: str, request: Request):
                     raise value
                 yield value
 
-        return StreamingResponse(generate(), media_type="application/json")
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream"
+            if req_data.get("stream")
+            else "application/json",
+        )
 
     except Exception as e:
         import sys
