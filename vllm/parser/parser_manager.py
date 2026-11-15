@@ -265,10 +265,19 @@ class ParserManager:
 
         r_cls = reasoning_parser_cls
         t_cls = tool_parser_cls
+        engine_parsers = (
+            getattr(r_cls, "_parser_engine_cls", None),
+            getattr(t_cls, "_parser_engine_cls", None),
+        )
+        always_adjust = any(
+            parser is not None and parser.always_adjust_request
+            for parser in engine_parsers
+        )
 
         class _Parser(DelegatingParser):
             reasoning_parser_cls = r_cls
             tool_parser_cls = t_cls
             tool_strict_level = strict_level
+            always_adjust_request = always_adjust
 
         return _Parser

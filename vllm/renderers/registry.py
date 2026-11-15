@@ -25,6 +25,7 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
     "deepseek_v41": ("deepseek_v4", "DeepseekV41Renderer"),
+    "gigachat4": ("gigachat4", "GigaChat4Renderer"),
     "glm5_next": ("hf", "HfRenderer"),
     "hf": ("hf", "HfRenderer"),
     "inkling": ("inkling", "InklingRenderer"),
@@ -94,4 +95,6 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
         model_config.hf_text_config, "unlimited_ocr2", False
     ):
         renderer_mode = "unlimited_ocr2"
+    if renderer_mode == "hf" and model_config.hf_config.model_type == "gigachat4":
+        renderer_mode = "gigachat4"
     return RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
