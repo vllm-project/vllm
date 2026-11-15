@@ -1764,6 +1764,14 @@ setup(
         ],
         # extra quantization plugin
         "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
+        # Optional extra for guidance structured-output backend
+        "guidance": [
+            (
+                'llguidance >= 1.3.0, < 1.8.0; platform_machine == "x86_64" '
+                'or platform_machine == "arm64" or platform_machine == "aarch64" '
+                'or platform_machine == "ppc64le" or platform_machine == "s390x"'
+            )
+        ],
     },
     cmdclass=cmdclass,
     package_data=package_data,

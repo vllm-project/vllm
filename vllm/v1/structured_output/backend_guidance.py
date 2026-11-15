@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import copy
 import json
 import os
@@ -14,7 +16,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.import_utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader, ensure_llguidance_available
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -183,6 +185,7 @@ class GuidanceBackend(StructuredOutputBackend):
                 "This error should NOT happen,"
                 "if you see this, please report an issue."
             )
+        ensure_llguidance_available()
         self.ll_tokenizer = self._build_ll_tokenizer(self.tokenizer, self.vocab_size)
 
     def compile_grammar(
@@ -331,6 +334,8 @@ def serialize_guidance_grammar(
     disable_any_whitespace: bool = False,
     disable_additional_properties: bool = False,
 ) -> str:
+    ensure_llguidance_available()
+
     def _process_schema(
         grammar_spec: str | dict[str, Any],
     ) -> str:
@@ -402,6 +407,7 @@ def validate_guidance_grammar(
     # if structured output is not enabled, there is nothing to validate
     if sampling_params.structured_outputs is None:
         return
+    ensure_llguidance_available()
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
     try:
         guidance_grm = serialize_guidance_grammar(tp, grm)

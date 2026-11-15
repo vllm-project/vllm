@@ -5,8 +5,6 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
-from mistral_common.guidance.grammar_factory import GrammarFactory
-from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
@@ -37,9 +35,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers.protocol import TokenizerLike
+from vllm.utils.import_utils import ensure_llguidance_available, has_llguidance
 
 if TYPE_CHECKING:
     import llguidance
+    from mistral_common.guidance.grammar_factory import GrammarFactory
     from transformers import BatchEncoding
 
 logger = init_logger(__name__)
@@ -534,16 +534,23 @@ class MistralTokenizer(TokenizerLike):
 
     @property
     def supports_grammar(self) -> bool:
+        if not has_llguidance():
+            return False
+        from mistral_common.guidance.grammar_factory import GrammarFactory
+
         return GrammarFactory.is_supported(self.mistral)
 
     @cached_property
-    def grammar_factory(self) -> GrammarFactory:
+    def grammar_factory(self) -> "GrammarFactory":
+        ensure_llguidance_available()
         if not self.supports_grammar:
             raise AttributeError(
                 "This tokenizer does not support `grammar_factory`. "
                 "This is only supported for tekken tokenizers with "
                 "version >= 11."
             )
+        from mistral_common.guidance.grammar_factory import GrammarFactory
+
         # Cache grammar factory to avoid creating a llguidance tokenizer at every usage.
         return GrammarFactory(self.mistral)
 
@@ -551,4 +558,7 @@ class MistralTokenizer(TokenizerLike):
     def llg_tokenizer(self) -> "llguidance.LLTokenizer":
         if not self.is_tekken:
             raise ValueError("`llg_tokenizer` is only supported for Tekkenizers.")
+        ensure_llguidance_available()
+        from mistral_common.guidance.tokenizer import from_mistral_tokenizer
+
         return from_mistral_tokenizer(self.mistral)

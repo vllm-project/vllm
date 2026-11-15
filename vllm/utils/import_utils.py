@@ -693,6 +693,28 @@ def has_torchcodec_image_decoding() -> bool:
     return hasattr(decoders, "decode_image")
 
 
+def has_llguidance() -> bool:
+    """Whether the optional `llguidance` package is available."""
+    return _has_module("llguidance")
+
+
+def ensure_llguidance_available() -> None:
+    """Raise an actionable ImportError if `llguidance` cannot be imported."""
+    try:
+        import llguidance  # noqa: F401
+    except ImportError as e:
+        err_cls = (
+            ModuleNotFoundError if isinstance(e, ModuleNotFoundError) else ImportError
+        )
+        raise err_cls(
+            "The 'guidance' structured output backend requires the "
+            '`llguidance` package. Install it with `pip install "vllm[guidance]"` '
+            "(prebuilt Linux wheels for llguidance >= 1.7.0 require "
+            "glibc >= 2.31; on glibc 2.28 use `llguidance<1.7.0` or build "
+            f"from source): {e}"
+        ) from e
+
+
 def check_torchcodec_available():
     """Whether the optional `torchcodec` package is available."""
     try:

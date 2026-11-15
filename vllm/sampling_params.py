@@ -1329,6 +1329,7 @@ class SamplingParams(
                 "structured_outputs.structural_tag cannot be an empty string"
             )
 
+        from vllm.utils.import_utils import has_llguidance
         from vllm.v1.structured_output.backend_guidance import (
             GuidanceBackend,
             has_guidance_unsupported_json_features,
@@ -1421,6 +1422,23 @@ class SamplingParams(
                     # schemas containing features unsupported by guidance.
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
+                elif not has_llguidance():
+                    # Guidance would be used here, but llguidance is unavailable;
+                    # try outlines first and report the missing dependency if
+                    # outlines also rejects the request.
+                    try:
+                        validate_structured_output_request_outlines(self)
+                        self.structured_outputs._backend = "outlines"
+                    except VLLMValidationError as err:
+                        raise VLLMValidationError(
+                            "No compatible structured output backend was found for "
+                            "this request. XGrammar and Outlines rejected the "
+                            "constraint, and the Guidance backend is unavailable "
+                            "because 'llguidance' is not installed (install with "
+                            "`pip install 'vllm[guidance]'`, or "
+                            "`pip install 'llguidance<1.7.0'` on systems with "
+                            "glibc < 2.31)."
+                        ) from err
                 else:
                     # Fall back to guidance by default.
                     if not GuidanceBackend.is_tokenizer_supported(tokenizer):
