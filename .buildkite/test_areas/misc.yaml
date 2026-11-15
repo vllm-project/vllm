@@ -588,9 +588,9 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Python-only Installation"
+      label: ":amd: (MI300 DPX) Python-only Installation"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
