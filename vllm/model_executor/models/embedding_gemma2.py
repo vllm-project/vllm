@@ -504,18 +504,34 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.pooling_kernel_size
         max_soft_tokens = self.get_video_max_soft_tokens()
-        max_width = overrides.width if overrides and overrides.width else None
-        max_height = overrides.height if overrides and overrides.height else None
         sizes = [
-            ImageSize(
-                width=min(
-                    unit * (max_soft_tokens // h), max_width or unit * max_soft_tokens
-                ),
-                height=min(unit * h, max_height or unit * max_soft_tokens),
-            )
+            ImageSize(width=unit * (max_soft_tokens // h), height=unit * h)
             for h in range(1, max_soft_tokens + 1)
             if max_soft_tokens % h == 0
         ]
+        if overrides is not None and (overrides.width or overrides.height):
+            max_width = overrides.width or unit * max_soft_tokens
+            max_height = overrides.height or unit * max_soft_tokens
+            sizes = [
+                ImageSize(
+                    width=min(size.width, max_width),
+                    height=min(size.height, max_height),
+                )
+                for size in sizes
+            ]
+            sizes.append(ImageSize(width=max_width, height=max_height))
+            for h in range(1, max_soft_tokens + 1):
+                w = max_soft_tokens // h
+                if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
+                    sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
+                scale = min(1.0, max_width / (unit * w), max_height / (unit * h))
+                sizes.append(
+                    ImageSize(
+                        width=max(1, int(unit * w * scale)),
+                        height=max(1, int(unit * h * scale)),
+                    )
+                )
+
         return max(
             sizes,
             key=lambda size: (
@@ -523,6 +539,7 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
                 -abs(
                     size.width / size.height - _VIDEO_FRAME_WIDTH / _VIDEO_FRAME_HEIGHT
                 ),
+                -size.width * size.height,
             ),
         )
 

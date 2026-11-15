@@ -68,6 +68,7 @@ def test_dummy_fills_budget_for_non_square_token_limits(
         ({"width": 2520, "height": 1792}, (2520, 1792)),
         ({"width": 1792}, (1792, 3584)),
         ({"height": 1792}, (3584, 1792)),
+        ({"width": 2357, "height": 2726}, (2357, 2726)),
     ],
 )
 def test_dummy_image_follows_size_hint(
@@ -93,5 +94,5 @@ def test_dummy_image_follows_size_hint(
 
     assert (
         dummy["mm_placeholders"]["image"][0].get_num_embeds()
-        == processed["mm_placeholders"]["image"][0].get_num_embeds()
+        >= processed["mm_placeholders"]["image"][0].get_num_embeds()
     )

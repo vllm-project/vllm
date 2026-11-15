@@ -41,6 +41,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
+from transformers.models.muse_glimmer.image_processing_muse_glimmer import (
+    smart_resize,
+)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -87,7 +90,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -127,16 +129,51 @@ def _get_canvas_with_most_tokens(
     factor: int,
     overrides: ImageDummyOptions | VideoDummyOptions | None = None,
 ) -> ImageSize:
-    max_height = max_width = max_tokens
-    if overrides is not None and overrides.height:
-        max_height = min(max_tokens, cdiv(overrides.height, factor))
-    if overrides is not None and overrides.width:
-        max_width = cdiv(overrides.width, factor)
-    height, width = max(
-        ((h, min(max_tokens // h, max_width)) for h in range(max_height, 0, -1)),
-        key=lambda hw: (hw[0] * hw[1], -abs(hw[0] - hw[1])),
+    if overrides is None or not (overrides.width or overrides.height):
+        height, width = max(
+            ((h, max_tokens // h) for h in range(1, max_tokens + 1)),
+            key=lambda hw: (hw[0] * hw[1], -abs(hw[0] - hw[1])),
+        )
+        return ImageSize(width=factor * width, height=factor * height)
+
+    max_width = overrides.width or factor * max_tokens
+    max_height = overrides.height or factor * max_tokens
+
+    def num_tokens(width: int, height: int) -> int:
+        height, width = smart_resize(height, width, factor, max_tokens)
+        return (height // factor) * (width // factor)
+
+    best, best_tokens = ImageSize(width=factor, height=factor), 0
+    if overrides.width and overrides.height:
+        best = ImageSize(width=max_width, height=max_height)
+        best_tokens = num_tokens(*best)
+    grids = sorted(
+        (
+            (ph, pw)
+            for ph in range(1, min(max_tokens, max_height // factor + 1) + 1)
+            for pw in range(1, min(max_tokens // ph, max_width // factor + 1) + 1)
+        ),
+        key=lambda grid: grid[0] * grid[1],
+        reverse=True,
     )
-    return ImageSize(width=factor * width, height=factor * height)
+    for ph, pw in grids:
+        if ph * pw <= best_tokens:
+            break
+        h_lo, h_hi = (ph - 1) * factor + 1, min(ph * factor, max_height)
+        w_lo, w_hi = (pw - 1) * factor + 1, min(pw * factor, max_width)
+        if h_lo > h_hi or w_lo > w_hi:
+            continue
+        candidates = [(w, h) for w in (w_lo, w_hi) for h in (h_lo, h_hi)]
+        candidates += [
+            (w, min(h_hi, max(h_lo, round(ph * w / pw)))) for w in (w_lo, w_hi)
+        ]
+        candidates += [
+            (min(w_hi, max(w_lo, round(pw * h / ph))), h) for h in (h_lo, h_hi)
+        ]
+        for width, height in candidates:
+            if (tokens := num_tokens(width, height)) > best_tokens:
+                best, best_tokens = ImageSize(width=width, height=height), tokens
+    return best
 
 
 IMAGE_TOKEN = "<|patch|>"

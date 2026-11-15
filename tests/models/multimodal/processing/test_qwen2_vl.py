@@ -472,6 +472,7 @@ def _count_video_tokens(processor_inputs) -> int:
         (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792, "height": 2520}, (1792, 2520)),
         (_SCOPED_HALF_VIDEO_SIZE, {"width": 1792}, (1792, 3584)),
         (_SCOPED_HALF_VIDEO_SIZE, {"height": 1792}, (3584, 1792)),
+        (_SCOPED_HALF_VIDEO_SIZE, {"width": 2357, "height": 2726}, (2357, 2726)),
     ],
 )
 def test_dummy_video_follows_size_hint(

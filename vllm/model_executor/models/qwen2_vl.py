@@ -1144,17 +1144,42 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.spatial_merge_size
         max_patches = size["longest_edge"] // (unit * unit)
-        max_height = cdiv(overrides.height, unit) if overrides.height else max_patches
-        max_width = cdiv(overrides.width, unit) if overrides.width else max_patches
-        candidates = (
-            (h, min(max_patches // h, max_width, 200 * h))
-            for h in range(1, min(max_height, max_patches) + 1)
+        max_width = overrides.width or unit * max_patches
+        max_height = overrides.height or unit * max_patches
+        sizes = [ImageSize(width=max_width, height=max_height)]
+        for h in range(1, max_patches + 1):
+            w = max_patches // h
+            sizes.append(
+                ImageSize(
+                    width=min(unit * w, max_width), height=min(unit * h, max_height)
+                )
+            )
+            if unit * h <= max_height and (w_fit := min(w, max_width // unit)):
+                sizes.append(ImageSize(width=unit * w_fit, height=unit * h))
+            scale = min(1.0, max_width / (unit * w), max_height / (unit * h))
+            sizes.append(
+                ImageSize(
+                    width=max(1, int(unit * w * scale)),
+                    height=max(1, int(unit * h * scale)),
+                )
+            )
+
+        def num_tokens(canvas: ImageSize) -> int:
+            if max(canvas) > 200 * min(canvas):
+                return 0
+            height, width = smart_resize(
+                height=canvas.height,
+                width=canvas.width,
+                factor=unit,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
+            )
+            return (height // unit) * (width // unit)
+
+        return max(
+            sizes,
+            key=lambda canvas: (num_tokens(canvas), -canvas.width * canvas.height),
         )
-        height, width = max(
-            (hw for hw in candidates if hw[0] <= 200 * hw[1]),
-            key=lambda hw: hw[0] * hw[1],
-        )
-        return ImageSize(width=unit * width, height=unit * height)
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()

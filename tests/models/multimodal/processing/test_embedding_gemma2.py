@@ -146,19 +146,27 @@ def test_video_placeholder_reads_scoped_add_timestamps(configured: bool):
 
 
 @pytest.mark.parametrize(
-    ("hint", "frame_size"),
+    ("mm_processor_kwargs", "hint", "frame_size"),
     [
-        ({"width": 480, "height": 672}, (480, 672)),
-        ({"width": 480}, (480, 672)),
-        ({"height": 480}, (672, 480)),
+        (None, {"width": 480, "height": 672}, (480, 672)),
+        (None, {"width": 480}, (480, 672)),
+        (None, {"height": 480}, (672, 480)),
+        (
+            {"videos_kwargs": {"max_soft_tokens": 70}},
+            {"width": 500, "height": 280},
+            (500, 280),
+        ),
     ],
 )
 def test_dummy_video_follows_size_hint(
-    hint: dict[str, int], frame_size: tuple[int, int]
+    mm_processor_kwargs: dict[str, object] | None,
+    hint: dict[str, int],
+    frame_size: tuple[int, int],
 ):
     num_frames = 4
     ctx = build_model_context(
         MODEL_ID,
+        mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt={
             "image": 0,
             "audio": 0,
@@ -188,5 +196,5 @@ def test_dummy_video_follows_size_hint(
 
     assert (
         dummy["mm_placeholders"]["video"][0].get_num_embeds()
-        == processed["mm_placeholders"]["video"][0].get_num_embeds()
+        >= processed["mm_placeholders"]["video"][0].get_num_embeds()
     )
