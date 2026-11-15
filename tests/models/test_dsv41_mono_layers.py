@@ -698,19 +698,37 @@ class AsmProbe(MonoProbe):
             layer.register_forward_hook(hook(i), with_kwargs=True)
             layer.ffn.register_forward_pre_hook(gap_hook(i, layer), with_kwargs=True)
 
+    def reload_refused(self) -> str:
+        """Process the weights again, as every weight reload ends (after the
+        first forward) → the error that refuses it, else ""."""
+        from vllm.model_executor.model_loader.weight_utils import (
+            finalize_model_weights,
+        )
+
+        try:
+            finalize_model_weights(self.model_runner.model)  # type: ignore[attr-defined]
+        except RuntimeError as e:
+            return str(e)
+        return ""
+
     def asm_state(self) -> dict:
         """What the asm layers took, on this rank (syncs)."""
-        from vllm.models.deepseek_v41.amd.asm import decode
-
-        layers = {
-            i: None
-            if m.mono is None or m.mono.asm is None
-            else [m.mono.asm.attn_fn is not None, m.mono.asm.ffn_fn is not None]
+        asm = {
+            i: m.mono.asm
             for i, m in self._decoder_layers().items()
+            if m.mono is not None and m.mono.asm is not None
         }
-        logged = decode._k1["logged"]
-        runners = {"wob_ar": decode._wob["wob"], "comb_ar": decode._comb["car"]}
-        for j, side in enumerate(decode._eg["sides"]):
+        layers = {
+            i: [asm[i].attn_fn is not None, asm[i].ffn_fn is not None]
+            if i in asm
+            else None
+            for i in self._decoder_layers()
+        }
+        # the model's asm decode state, shared by its layers
+        (st,) = {id(h.st): h.st for h in asm.values()}.values()
+        logged = st.logged
+        runners = {"wob_ar": st.wob, "comb_ar": st.car}
+        for j, side in enumerate(st.eg_sides):
             runners |= {
                 f"engram{j} rows": side.ag_rows,
                 f"engram{j} gate": side.ag_gate,
@@ -728,11 +746,11 @@ class AsmProbe(MonoProbe):
                 )
         return {
             "layers": layers,
-            "k1": sorted(decode._k1["seen"]),
-            "k2": sorted(decode._k2["seen"]),
-            "engram": sorted(decode._eg["seen"]),
+            "k1": sorted(st.seen["K1"]),
+            "k2": sorted(st.seen["K2"]),
+            "engram": sorted(st.seen["Engram"]),
             "mixed": "mixed" in logged,
-            "idx": sorted(decode._summary["indexer top-k"]),
+            "idx": sorted(st.summary["indexer top-k"]),
             "fallbacks": sorted(
                 str(k)
                 for k in logged
@@ -870,6 +888,10 @@ def _run(vllm_runner, monkeypatch, mono: bool, graph: bool, phases: dict, path=N
         if path is not None:
             llm.collective_rpc("save_capture", args=(path,))
         state = llm.collective_rpc("asm_state") if mono else None
+        if mono:
+            # a weight reload after startup: refused, not silently ignored
+            refused = llm.collective_rpc("reload_refused")
+            assert all("weights were reloaded" in e for e in refused), refused
     return out, state
 
 
@@ -1007,3 +1029,38 @@ def test_asm_decode_needs_flash_shapes():
             **{k: v for k, v in decode.SHAPES.items() if k != name}
         )
         assert decode._shape_mismatch(missing) == f"{name}: None (needs {want})"
+
+
+def test_asm_decode_needs_flash_quantization():
+    """The asm kernels read DeepSeek-V4.1-Flash's MXFP8 linears and MXFP4
+    experts as stored: any other quantization keeps vLLM's path (other
+    checkpoints of the same shapes: bf16, Quark's, NVFP4 experts)."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.models.deepseek_v41.amd.asm import decode
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    flash: dict[str, Any] = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [32, 32],
+        "scale_fmt": "ue8m0",
+        "expert_dtype": "fp4",
+    }
+    assert decode._quant_mismatch(DeepseekV4FP8Config.from_config(flash)) is None
+    changes: list[tuple[dict[str, Any], str]] = [
+        ({"weight_block_size": [128, 128]}, "weight blocks [128, 128]"),
+        ({"ignored_layers": ["layers.0.attn.wq_b"]}, "unquantized layers"),
+        # AMD-Quark's checkpoints, as DeepseekV4FP8Config reads them
+        (
+            {"quant_method": "quark", "exclude": ["lm_head"]},
+            "weight blocks [128, 128]",
+        ),
+    ]
+    for change, why in changes:
+        quant = DeepseekV4FP8Config.from_config({**flash, **change})
+        assert decode._quant_mismatch(quant) == why, change
+    nvfp4 = DeepseekV4FP8Config.from_config(flash)
+    nvfp4._resolved_moe_quant_algo = "NVFP4"
+    assert decode._quant_mismatch(nvfp4) == "experts NVFP4"
+    assert decode._quant_mismatch(None) == "unquantized"
+    assert decode._quant_mismatch(Fp8Config.from_config(flash)) == "Fp8Config"

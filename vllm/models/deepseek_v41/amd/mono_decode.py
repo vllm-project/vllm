@@ -28,6 +28,7 @@ Every TP rank must take the same path at every layer (the kernels wait on each
 other's pushes): the conditions read only metadata every rank holds alike.
 """
 
+import functools
 from collections.abc import Container, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -189,13 +190,9 @@ def _on_gfx942() -> bool:
     return get_cdna_version() == 3
 
 
-def _max_rows(draft: bool = False) -> int:
-    if _on_gfx942():
-        return MAX_ROWS_GFX942
-    if draft:
-        return MAX_ROWS
-    # the asm decode layers take the steps above their limit (gfx950, TP4)
-    return asm_decode.mono_rows() or MAX_ROWS
+@functools.cache
+def _max_rows() -> int:
+    return MAX_ROWS_GFX942 if _on_gfx942() else MAX_ROWS
 
 
 def _capture_plain_experts(experts) -> None:
@@ -383,6 +380,12 @@ class MonoDecodeLayer:
         self._weights: MonoLayerWeights | None = None
         self.next_layer: DeepseekV4DecoderLayer | None = None
         self.asm: asm_decode.AsmDecodeLayer | None = None
+        # the target's row limit with the asm decode layers on (gfx950, TP4)
+        self.asm_rows: int | None = None
+
+    @property
+    def max_rows(self) -> int:
+        return self.asm_rows or _max_rows()
 
     @property
     def unfolded_entry(self) -> bool:
@@ -406,9 +409,11 @@ class MonoDecodeLayer:
             _copy_942_at_load(layer, mono.ffn_only)
         elif mono is not None:
             _keep_row_major_at_load(layer, mono.ffn_only)
-        if mono is not None:
-            # the steps of 17-256 rows on gfx950 at TP4 (asm/decode.py)
+            # the steps of 17-256 rows on gfx950 at TP4 (asm/decode.py); the
+            # target's mono decode layers keep the steps below
             mono.asm = asm_decode.AsmDecodeLayer.create(layer, vllm_config)
+            if not mono.draft:
+                mono.asm_rows = asm_decode.mono_rows(vllm_config)
         return mono
 
     @staticmethod
@@ -559,6 +564,8 @@ class MonoDecodeLayer:
         """Build the layer's runner after loading rather than at its first
         decode step, which must not allocate, exchange handles or sync."""
         _mono_runner(device, self if self.draft else None)
+        if self.asm is not None:
+            self.asm.weights_loaded()
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
@@ -686,10 +693,10 @@ class MonoDecodeLayer:
         return None
 
     @staticmethod
-    def _decode_step(layer: "DeepseekV4DecoderLayer", rows: int, draft: bool):
+    def _decode_step(layer: "DeepseekV4DecoderLayer", rows: int, max_rows: int):
         """(why this step takes the original path -- None for a decode-only step
         the kernels take -- the layer's SWA metadata, its compressed cache's)."""
-        if not 1 <= rows <= _max_rows(draft):
+        if not 1 <= rows <= max_rows:
             return f"{rows} rows", None, None
         if not is_forward_context_available():
             return "no forward context", None, None
@@ -722,7 +729,7 @@ class MonoDecodeLayer:
         return why, swa, comp
 
     def _whole_step(self, layer: "DeepseekV4DecoderLayer", rows: int):
-        why, swa, comp = self._decode_step(layer, rows, self.draft)
+        why, swa, comp = self._decode_step(layer, rows, self.max_rows)
         if why is None:
             assert swa is not None
             # the kernels' attention: causal SWA windows, the compressed cache
@@ -799,7 +806,7 @@ class MonoDecodeLayer:
         logger.info_once(
             "DSv4.1 mono decode %slayer active (decode steps of <= %d rows)",
             "draft " if self.draft else "",
-            _max_rows(self.draft),
+            self.max_rows,
         )
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write
@@ -860,7 +867,7 @@ class MonoDecodeLayer:
         """The layer's outputs by the FFN launch from `part`, wo_b's unreduced
         output, and the attention seam's outputs; None when this step takes the
         original path (the caller then reduces `part` itself)."""
-        why, _, _ = self._decode_step(layer, part.shape[0], self.draft)
+        why, _, _ = self._decode_step(layer, part.shape[0], self.max_rows)
         tensors = (part, residual, post_mix, res_mix, pre_mix)
         if why is None and not all(t.is_contiguous() for t in tensors):
             why = "non-contiguous layer inputs"
@@ -869,6 +876,6 @@ class MonoDecodeLayer:
         runner = _mono_runner(part.device)
         logger.info_once(
             "DSv4.1 mono decode FFN launch active (decode steps of <= %d rows)",
-            _max_rows(self.draft),
+            self.max_rows,
         )
         return runner.ffn(self.weights(layer), *tensors, topk=self.topk)

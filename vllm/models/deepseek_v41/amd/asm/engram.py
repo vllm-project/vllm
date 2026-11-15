@@ -45,12 +45,11 @@ class EngramSide:
     (16 B per token); the next attention seam applies copy + gate · value."""
 
     @staticmethod
-    def create(engram) -> "EngramSide | None":
+    def create(engram, st) -> "EngramSide | None":
         """The side chain where vLLM's Engram prefetches on a stream of its own
-        (host-offloaded, TP-only tables) at TP4; collective: every rank makes the
-        same calls."""
-        from vllm.models.deepseek_v41.amd.asm import decode
-
+        (host-offloaded, TP-only tables) at TP4, added to the model's asm decode
+        state `st` (decode.AsmDecode); collective: every rank makes the same
+        calls."""
         if (
             engram._prefetch_stream is None
             or engram._prefetch_done is None
@@ -60,15 +59,15 @@ class EngramSide:
             or get_tensor_model_parallel_world_size() != 4
         ):
             return None
-        side = EngramSide(engram)
-        decode._eg["sides"].append(side)
+        side = EngramSide(engram, st)
+        st.eg_sides.append(side)
         logger.debug("asm decode: Engram side chain on")
         return side
 
-    def __init__(self, engram):
+    def __init__(self, engram, st):
         from vllm.models.deepseek_v41.amd.asm.eg_runner import RANK_ROW, IpcAllGather
 
-        self.engram = engram
+        self.engram, self.st = engram, st
         tp = get_tp_group()
         r, world = tp.rank_in_group, tp.world_size
         D, hc = engram.dim, engram.hc_mult
@@ -153,15 +152,12 @@ class EngramSide:
     def gate(self, hidden_states: torch.Tensor, token_mask) -> tuple:
         """The gates of r' (`hidden_states` [n, 4, 5120]) → (all-gathered gates
         [n, 16] f32, value [n, 5120] bf16); after `done`."""
-        from vllm.models.deepseek_v41.amd.asm.decode import _eg
         from vllm.models.deepseek_v41.amd.asm.eg_runner import eg_gate
 
         engram = self.engram
         n = hidden_states.shape[0]
         assert hidden_states.is_contiguous() and n <= EG_MAX_M
-        if n not in _eg["seen"]:
-            _eg["seen"].add(n)
-            logger.debug("asm decode: Engram at M = %d", n)
+        self.st.ran("Engram", n)
         eg_gate(
             hidden_states,
             self.kv2[0, :n],

@@ -79,50 +79,116 @@ SHAPES = {
 # --kv-cache-dtype values DeepseekV4Attention turns into fp8_ds_mla (K1's cache)
 KV_DTYPES = ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla")
 
-_cfg: dict = {}
-
 
 def _log(msg: str) -> None:
     logger.debug("asm decode: %s", msg)
 
 
-def enabled(vllm_config) -> bool:
-    """Whether this process runs the asm decode layers: `--monokernel` on a
-    gfx950 GPU at TP4, DeepSeek-V4.1-Flash's shapes (SHAPES) and an AMDGPU LLVM
-    (clang, ld.lld) to build the kernels. Decided once, when the first decoder
-    layer is built."""
-    if "on" not in _cfg:
-        why = None
-        config = vllm_config.model_config.hf_text_config
-        if not vllm_config.kernel_config.monokernel:
-            why = "--monokernel is off"
-        else:
-            from vllm.models.deepseek_v41.amd.asm.kernels.build import (
-                toolchain_missing,
-            )
+def _why_off(vllm_config) -> str | None:
+    """Why the asm decode layers stay off in this deployment, or None. They run
+    with `--monokernel` on a gfx950 GPU at TP4, on DeepSeek-V4.1-Flash's shapes
+    (SHAPES) and quantization, with weights that stay as loaded and an AMDGPU
+    LLVM (clang, ld.lld) to build the kernels."""
+    if not vllm_config.kernel_config.monokernel:
+        return "--monokernel is off"
+    from vllm.models.deepseek_v41.amd.asm.kernels.build import toolchain_missing
+    from vllm.platforms.rocm import on_gfx950
 
-            props = torch.cuda.get_device_properties(
-                torch.accelerator.current_device_index()
-            )
-            arch = props.gcnArchName.split(":")[0]
-            tp = get_tensor_model_parallel_world_size()
-            pc = vllm_config.parallel_config
-            if arch != "gfx950" or tp != 4:
-                why = f"needs gfx950 and TP4 (have {arch}, TP{tp})"
-            elif pc.pipeline_parallel_size > 1 or pc.decode_context_parallel_size > 1:
-                why = "no pipeline or decode context parallelism"
-            elif vllm_config.lora_config is not None:
-                why = "no LoRA adapters"
-            elif vllm_config.kv_transfer_config is not None:
-                why = "no KV transfer"
-            elif shape := _shape_mismatch(config):
-                why = f"needs DeepSeek-V4.1-Flash's shapes ({shape})"
-            elif (kv := vllm_config.cache_config.cache_dtype) not in KV_DTYPES:
-                why = f"needs the fp8_ds_mla KV cache (have {kv})"
-            elif missing := toolchain_missing():
-                why = f"needs {missing}"
-        _cfg["on"] = why is None
-        _cfg["layers"] = config.num_hidden_layers
+    gfx950, tp = on_gfx950(), get_tensor_model_parallel_world_size()
+    pc = vllm_config.parallel_config
+    if not gfx950 or tp != 4:
+        gpu = "gfx950" if gfx950 else "another GPU"
+        return f"needs gfx950 and TP4 (have {gpu}, TP{tp})"
+    if pc.pipeline_parallel_size > 1 or pc.decode_context_parallel_size > 1:
+        return "no pipeline or decode context parallelism"
+    if vllm_config.lora_config is not None:
+        return "no LoRA adapters"
+    if vllm_config.kv_transfer_config is not None:
+        return "no KV transfer"
+    if vllm_config.weight_transfer_config is not None:
+        # the kernels read copies of the weights made at the first forward
+        return "no weight updates after startup (a weight transfer config)"
+    if shape := _shape_mismatch(vllm_config.model_config.hf_text_config):
+        return f"needs DeepSeek-V4.1-Flash's shapes ({shape})"
+    if quant := _quant_mismatch(vllm_config.quant_config):
+        return f"needs DeepSeek-V4.1-Flash's quantization ({quant})"
+    if (kv := vllm_config.cache_config.cache_dtype) not in KV_DTYPES:
+        return f"needs the fp8_ds_mla KV cache (have {kv})"
+    if missing := toolchain_missing():
+        return f"needs {missing}"
+    return None
+
+
+def _shape_mismatch(config) -> str | None:
+    """The first config field that isn't the kernels' SHAPES, as "name: value
+    (needs value)", else None."""
+    for name, want in SHAPES.items():
+        have = getattr(config, name, None)
+        if have != want:
+            return f"{name}: {have} (needs {want})"
+    return None
+
+
+def _quant_mismatch(quant_config) -> str | None:
+    """How the checkpoint's quantization differs from DeepSeek-V4.1-Flash's,
+    which the kernels read as stored (MXFP8 linears in 32x32 blocks, MXFP4
+    experts), else None."""
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    if not isinstance(quant_config, DeepseekV4FP8Config):
+        return type(quant_config).__name__ if quant_config else "unquantized"
+    if list(quant_config.weight_block_size or ()) != [32, 32]:
+        return f"weight blocks {quant_config.weight_block_size}"
+    if quant_config.expert_dtype != "fp4" or quant_config.moe_quant_algo:
+        return f"experts {quant_config.moe_quant_algo or quant_config.expert_dtype}"
+    if quant_config.online_quantization_config is not None:
+        return "requantized online"
+    if quant_config.ignored_layers:
+        return "unquantized layers"
+    return None
+
+
+_building: "AsmDecode | None" = None
+
+
+class AsmDecode:
+    """The asm decode state of one model, shared by its decoder layers: the
+    on/off decision, the folded all-reduces (IPC buffers on the model's TP
+    group), the K1 / K2 runners (their scratch), the Engram side chains, the
+    step's top-k lists and the logs. A second engine in the same process (e.g.
+    torchrun's external launcher, or an RL setup that re-creates its engine)
+    gets its own; only the kernels' code objects are the process's."""
+
+    @staticmethod
+    def of(vllm_config) -> "AsmDecode":
+        """The state of the model built with `vllm_config` (made at its first
+        decoder layer)."""
+        global _building
+        if _building is None or _building.vllm_config is not vllm_config:
+            _building = AsmDecode(vllm_config)
+        return _building
+
+    def __init__(self, vllm_config):
+        self.vllm_config = vllm_config
+        why = _why_off(vllm_config)
+        self.on = why is None
+        # the target's layers (create's draft check counts the same)
+        self.layers = vllm_config.model_config.hf_config.num_hidden_layers
+        self.wob: Any = None
+        self.car: Any = None
+        self.k1: Any = None
+        self.k2: Any = None
+        self.eg_sides: list = []
+        # this step: the index source, compress ratio and rows our top-k wrote
+        # (tk_done), and that the runner's fixed-stride lists hold (tk_src)
+        self.tk_done: tuple | None = None
+        self.tk_src: tuple | None = None
+        # scratch shared by the layers (their uses don't overlap)
+        self.bufs: dict = {}
+        # the row counts each part ran at, the messages logged once
+        self.seen: dict[str, set[int]] = {"K1": set(), "K2": set(), "Engram": set()}
+        self.logged: set = set()
+        self.summary: dict = {"attention": {}, "FFN": {}, "indexer top-k": {}}
         if why is None:
             logger.info_once(
                 "DeepSeek-V4.1 asm decode: steps of %d..%d rows on the asm "
@@ -136,52 +202,102 @@ def enabled(vllm_config) -> bool:
             # gfx950 at TP4 expects it: say so louder there
             log = logger.warning_once if "needs gfx950" not in why else logger.info_once
             log("DeepSeek-V4.1 asm decode off: %s", why, scope="global")
-    return _cfg["on"]
+
+    def ran(self, part: str, m: int) -> None:
+        if m not in self.seen[part]:
+            self.seen[part].add(m)
+            _log(f"{part} at M = {m}")
+
+    def log_once(self, key, msg: str) -> None:
+        if key not in self.logged:
+            self.logged.add(key)
+            _log(msg)
+
+    def wob_setup(self) -> None:
+        """K1's wo_b and all-reduce #1 in one launch. Collective: every rank
+        calls it from its first layer forward (the profile run, outside graph
+        capture)."""
+        if self.wob is not None:
+            return
+        from vllm.models.deepseek_v41.amd.asm.ar_runner import WoBAllReduce
+
+        tp = get_tp_group()
+        self.wob = WoBAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
+
+    def comb_setup(self) -> None:
+        """K2's MoE combine and all-reduce #2 in one launch. Collective, like
+        wob_setup."""
+        if self.car is not None:
+            return
+        from vllm.models.deepseek_v41.amd.asm.ar_runner import CombAllReduce
+
+        tp = get_tp_group()
+        self.car = CombAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
+
+    def k1_runner(self):
+        """The model's K1Runner (built on first use, under the build lock)."""
+        if self.k1 is None:
+            from vllm.models.deepseek_v41.amd.asm.k1_runner import K1Runner
+            from vllm.models.deepseek_v41.amd.asm.kernels.build import build_lock
+            from vllm.models.deepseek_v41.amd.asm.kernels.kmod import wait_builds
+
+            with build_lock():
+                self.k1 = K1Runner()
+                wait_builds()
+        return self.k1
+
+    def k2_runner(self):
+        """The model's K2Runner (built on first use: one rank builds the
+        kernels, in parallel, the others then hit the cache)."""
+        if self.k2 is None:
+            from vllm.models.deepseek_v41.amd.asm.k2_runner import K2Runner
+            from vllm.models.deepseek_v41.amd.asm.kernels.build import build_lock
+            from vllm.models.deepseek_v41.amd.asm.kernels.kmod import wait_builds
+
+            with build_lock():
+                self.k2 = K2Runner()
+                wait_builds()
+        return self.k2
+
+    def log_summary(self) -> None:
+        """Which half of which layer runs on the asm kernels (steps of 17..256
+        rows), once the last layer is set up."""
+        for half, by in self.summary.items():
+            if not by:
+                continue
+            logger.info_once(
+                "DeepSeek-V4.1 asm decode, %s: %s",
+                half,
+                "; ".join(
+                    f"{st}: layers {_ranges(ids)}" for st, ids in sorted(by.items())
+                ),
+                scope="global",
+            )
 
 
-def _shape_mismatch(config) -> str | None:
-    """The first config field that isn't the kernels' SHAPES, as "name: value
-    (needs value)", else None."""
-    for name, want in SHAPES.items():
-        have = getattr(config, name, None)
-        if have != want:
-            return f"{name}: {have} (needs {want})"
-    return None
+def mono_rows(vllm_config) -> int | None:
+    """The mono decode layer's row limit in the model built with `vllm_config`
+    when its asm decode layers are on, else None."""
+    return MONO_ROWS if AsmDecode.of(vllm_config).on else None
 
 
-def mono_rows() -> int | None:
-    """The mono decode layer's row limit with the asm decode layers on, else
-    None (the decision is made before the mono decode layers are built)."""
-    return MONO_ROWS if _cfg.get("on") else None
+def _keep_row_major(layer: "DeepseekV4DecoderLayer") -> None:
+    """On gfx950 vLLM's MXFP8 linears preshuffle their weight in place for
+    AITER's GEMMs, unless told to keep it row-major (then they preshuffle a
+    copy). Our kernels read these as stored: K1's GEMVs and the indexer's wq_b,
+    K2's shared expert, the Engram's wkv."""
+    from vllm.models.deepseek_v41.amd.asm.k1_runner import GEMVS
 
-
-# ---------------------------------------------------------------- the folded
-# all-reduces
-
-_wob: dict = {"wob": None}
-_comb: dict = {"car": None}
-
-
-def _wob_setup() -> None:
-    """K1's wo_b and all-reduce #1 in one launch. Collective: every rank calls
-    it from its first layer forward (the profile run, outside graph capture)."""
-    if _wob["wob"] is not None:
-        return
-    from vllm.models.deepseek_v41.amd.asm.ar_runner import WoBAllReduce
-
-    tp = get_tp_group()
-    _wob["wob"] = WoBAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
-
-
-def _comb_setup() -> None:
-    """K2's MoE combine and all-reduce #2 in one launch. Collective, like
-    _wob_setup."""
-    if _comb["car"] is not None:
-        return
-    from vllm.models.deepseek_v41.amd.asm.ar_runner import CombAllReduce
-
-    tp = get_tp_group()
-    _comb["car"] = CombAllReduce(tp.rank_in_group, tp.cpu_group, tp.world_size)
+    attn, sh = layer.attn, layer.ffn.shared_experts
+    linears = [getattr(attn, attr) for _, attr in GEMVS.values()]
+    if attn.indexer is not None:
+        linears.append(attn.indexer.wq_b)
+    if sh is not None:
+        linears += [sh.gate_up_proj, sh.down_proj]
+    if (engram := getattr(layer, "engram", None)) is not None:
+        linears.append(engram.wkv)
+    for linear in linears:
+        linear.keep_row_major_weight = True
 
 
 class AsmDecodeLayer:
@@ -192,16 +308,19 @@ class AsmDecodeLayer:
 
     @staticmethod
     def create(layer: "DeepseekV4DecoderLayer", vllm_config) -> "AsmDecodeLayer | None":
-        if not enabled(vllm_config) or layer.use_sequence_parallel:
-            return None
         # DSpark's draft layers (other routing, no compressed attention) stay
         # on the mono decode layer and vLLM
         if layer.attn.layer_id >= vllm_config.model_config.hf_config.num_hidden_layers:
             return None
-        return AsmDecodeLayer(layer)
+        st = AsmDecode.of(vllm_config)
+        if not st.on or layer.use_sequence_parallel:
+            return None
+        _keep_row_major(layer)
+        return AsmDecodeLayer(layer, st)
 
-    def __init__(self, layer: "DeepseekV4DecoderLayer"):
+    def __init__(self, layer: "DeepseekV4DecoderLayer", st: AsmDecode):
         self.layer = layer
+        self.st = st
         self.installed = False
         # seam handlers, tried in order: K2's (the FFN seam), then K1's or the
         # Engram seam's (the attention seam)
@@ -217,11 +336,25 @@ class AsmDecodeLayer:
         self.eg_seam = False
         self.eg_pending: tuple | None = None
 
+    def weights_loaded(self) -> None:
+        """The decoder layer's weights were processed after loading: after
+        our first forward, a reload (`reload_weights`, an RL weight update),
+        which our kernels and the captured graphs would not see (they read
+        copies made at the first forward)."""
+        if self.installed:
+            raise RuntimeError(
+                "DeepSeek-V4.1 asm decode: the weights were reloaded, but the "
+                "asm decode layers read copies of them made at the first "
+                "forward. To update weights after startup, start the engine "
+                "with a weight transfer config (the asm decode layers stay off) "
+                "or without --monokernel."
+            )
+
     def install(self) -> None:
         if self.installed:
             return
         self.installed = True
-        layer = self.layer
+        layer, st = self.layer, self.st
         lo, hi = MONO_ROWS + 1, MAX_M
         lid = layer.attn.layer_id
         k1 = _k1_install(self, layer, lo, hi)
@@ -229,15 +362,15 @@ class AsmDecodeLayer:
         if self.ffn_fn is not None and getattr(layer, "engram", None) is not None:
             from vllm.models.deepseek_v41.amd.asm.engram import EngramSide
 
-            self.eg_side = EngramSide.create(layer.engram)
+            self.eg_side = EngramSide.create(layer.engram, st)
         from vllm.models.deepseek_v41.amd.asm.kernels.kmod import wait_builds
 
         # every kernel loaded before graph capture
         wait_builds()
-        _summary["attention"].setdefault(k1, []).append(lid)
-        _summary["FFN"].setdefault(k2, []).append(lid)
-        if lid == _cfg["layers"] - 1:
-            _log_summary()
+        st.summary["attention"].setdefault(k1, []).append(lid)
+        st.summary["FFN"].setdefault(k2, []).append(lid)
+        if lid == st.layers - 1:
+            st.log_summary()
 
     def __call__(
         self,
@@ -311,10 +444,10 @@ class AsmDecodeLayer:
                 # vLLM's wo_b left the reduction to the mono FFN launch
                 out = tensor_model_parallel_all_reduce(out)
         x = out
-        if layer.attn.layer_id == 0 and _eg["sides"] and engram_hashes is not None:
+        if layer.attn.layer_id == 0 and self.st.eg_sides and engram_hashes is not None:
             # the Engram side chains, after layer 0's attention (the lookups
             # are done by then)
-            _eg_start(m)
+            _eg_start(self.st.eg_sides, m)
         residual, post_mix, res_mix, x, ffn_pre = self._pre(
             layer,
             residual,
@@ -399,18 +532,12 @@ def _indexer_and_attn(h: AsmDecodeLayer, attn, *args) -> None:
     h.sparse_indexer_and_attn(attn, *args)
 
 
-_eg: dict = {"sides": [], "seen": set()}
-
-
 @eager_break_during_capture
-def _eg_start(n: int) -> None:
+def _eg_start(sides: list, n: int) -> None:
     """Every Engram layer's side chain for this step's n rows (EngramSide.start)."""
     main = torch.cuda.current_stream()
-    for side in _eg["sides"]:
+    for side in sides:
         side.start(n, main)
-
-
-_summary: dict = {"attention": {}, "FFN": {}, "indexer top-k": {}}
 
 
 def _ranges(ids: list[int]) -> str:
@@ -424,23 +551,7 @@ def _ranges(ids: list[int]) -> str:
     return ", ".join(out)
 
 
-def _log_summary() -> None:
-    """Which half of which layer runs on the asm kernels (steps of 17..256
-    rows), once the last layer is set up."""
-    for half, by in _summary.items():
-        if not by:
-            continue
-        logger.info_once(
-            "DeepSeek-V4.1 asm decode, %s: %s",
-            half,
-            "; ".join(f"{st}: layers {_ranges(ids)}" for st, ids in sorted(by.items())),
-            scope="global",
-        )
-
-
 # ---------------------------------------------------------------- K2: the FFN half
-
-_k2: dict = {"runner": None, "seen": set()}
 
 
 def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
@@ -448,9 +559,10 @@ def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
     lo <= M <= hi and returns a token in the x slot; `ffn` then runs the
     combine + all-reduce #2 on it, as vLLM's MoE runner reduces routed +
     shared."""
-    from vllm.models.deepseek_v41.amd.asm.k2_runner import K2Runner, raw_from_layer
+    from vllm.models.deepseek_v41.amd.asm.k2_runner import raw_from_layer
 
-    _comb_setup()
+    st = h.st
+    st.comb_setup()
     if not layer.fuse_seam_norm:
         return "vLLM's (the seam doesn't fuse the norm)"
     ffn = layer.ffn
@@ -469,15 +581,7 @@ def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
     assert not torch.cuda.is_current_stream_capturing(), (
         "K2 must be set up outside graph capture"
     )
-    if _k2["runner"] is None:
-        from vllm.models.deepseek_v41.amd.asm.kernels.build import build_lock
-        from vllm.models.deepseek_v41.amd.asm.kernels.kmod import wait_builds
-
-        # one rank builds (in parallel), the others then hit the cache
-        with build_lock():
-            _k2["runner"] = K2Runner()
-            wait_builds()
-    run = _k2["runner"]
+    run = st.k2_runner()
     wt = run.weights(raw_from_layer(layer))
     state: dict = {"part": None}
 
@@ -501,9 +605,7 @@ def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
             or not lo <= m <= hi
         ):
             return None
-        if m not in _k2["seen"]:
-            _k2["seen"].add(m)
-            _log(f"K2 at M = {m}")
+        st.ran("K2", m)
         part, r_new, post, comb, pre = run(
             wt,
             sub.contiguous(),
@@ -520,7 +622,7 @@ def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
     def ffn_forward(x):
         if state["part"] is not None and x is state["part"]:
             state["part"] = None
-            return _comb["car"](*state.pop("comb_in"), x.shape[0])
+            return st.car(*state.pop("comb_in"), x.shape[0])
         return None
 
     h.seams.insert(0, seam_forward)
@@ -531,30 +633,9 @@ def _k2_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
 # ---------------------------------------------------------------- K1: the attention
 # half
 
-_k1: dict = {"runner": None, "seen": set(), "logged": set()}
 
-
-def _log_once(key, msg: str) -> None:
-    if key not in _k1["logged"]:
-        _k1["logged"].add(key)
-        _log(msg)
-
-
-def _k1_runner():
-    """The process's one K1Runner (built on first use, under the build lock)."""
-    if _k1["runner"] is None:
-        from vllm.models.deepseek_v41.amd.asm.k1_runner import K1Runner
-        from vllm.models.deepseek_v41.amd.asm.kernels.build import build_lock
-        from vllm.models.deepseek_v41.amd.asm.kernels.kmod import wait_builds
-
-        with build_lock():
-            _k1["runner"] = K1Runner()
-            wait_builds()
-    return _k1["runner"]
-
-
-def _idx_status(attn, status: str) -> None:
-    _summary["indexer top-k"].setdefault(status, []).append(attn.layer_id)
+def _idx_status(h: AsmDecodeLayer, attn, status: str) -> None:
+    h.st.summary["indexer top-k"].setdefault(status, []).append(attn.layer_id)
 
 
 def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
@@ -568,6 +649,7 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
     context) keep vLLM's op, as do prefill / mixed steps."""
     from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import _layer
 
+    st = h.st
     op = attn.indexer.indexer_op
     width = int(op.max_model_len)
     cand: Any = getattr(op, "candidate_blocks", None)
@@ -595,14 +677,14 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
         or op.topk_tokens != 512
         or (width > 4 * 512 * 18 and not (wide or gat))
     ):
-        _idx_status(attn, f"vLLM's ({kind}, width {width})")
+        _idx_status(h, attn, f"vLLM's ({kind}, width {width})")
         return
     if (
         cand is not None
         and -(-width // op.candidate_block_size) > cand.shape[1]
         and not (src_wide or gat)
     ):
-        _idx_status(attn, f"vLLM's (width {width}: candidates can filter)")
+        _idx_status(h, attn, f"vLLM's (width {width}: candidates can filter)")
         return
     if gat:
         run.idx_gather_prepare()
@@ -612,7 +694,7 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
         run.idx_logits_prepare(width)
 
     def fallback(why, *args):
-        _log_once(
+        st.log_once(
             ("idx", attn.layer_id, why),
             f"idx top-k: vLLM's op on layer {attn.layer_id} ({why})",
         )
@@ -646,8 +728,14 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
         # per row on the row lengths and row block table
         n = swa_md.num_decode_tokens
         lens = imd.decode_row_lens
-        rows = lens.shape[0]
-        if rows > MAX_M or rows < n:
+        # Decode rows sharded over TP (steps of 64+ rows): this rank scores
+        # rows lo.. (vLLM narrowed the row lens and block table to them), and
+        # vLLM's all-gather of the top-k rows fills in the other ranks' rows
+        shard: Any = getattr(imd, "decode_shard", None)
+        lo, rows, mine = 0, lens.shape[0], lens.shape[0]
+        if shard is not None:
+            lo, rows = shard.start, shard.num_rows
+        if rows > MAX_M or rows < n or lo + mine > rows:
             return fallback(f"rows: n {n}, lens {tuple(lens.shape)}", *args)
         lay = _layer(
             op.k_cache.prefix,
@@ -668,46 +756,58 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
         assert flat.shape[1] == nE * 68 and flat.stride(1) == 1
         if src_wide and imd.decode_block_ends is None:
             return fallback("no block ends", *args)
-        if gat:
+        # this rank's decode rows (graph-padded rows past n get none)
+        r = slice(lo, max(lo, min(lo + mine, n)))
+        if r.stop > lo and gat:
             run.idx_gather(
-                lay.q[:n],
-                lay.q_scale[:n],
-                lay.weights[:n],
+                lay.q[r],
+                lay.q_scale[r],
+                lay.weights[r],
                 flat,
                 flat.stride(0),
                 nE,
                 imd.decode.block_table,
-                lens[:n],
-                swa_md.is_valid_token[:n],
-                swa_md.token_to_req_indices[:n],
+                lens[: r.stop - lo],
+                swa_md.is_valid_token[r],
+                swa_md.token_to_req_indices[r],
                 comp_md.block_table[: swa_md.num_decodes],
                 comp_md.block_size // attn.compress_ratio,
-                buf[:n],
-                cand[:n],
+                buf[r],
+                cand[r],
             )
-        else:
+        elif r.stop > lo:
             (run.idx_wide if wide else run.idx_logits)(
                 width,
-                lay.q[:n],
-                lay.q_scale[:n],
-                lay.weights[:n],
+                lay.q[r],
+                lay.q_scale[r],
+                lay.weights[r],
                 flat,
                 flat.stride(0),
                 nE,
                 imd.decode.block_table,
-                lens[:n],
-                swa_md.is_valid_token[:n],
-                swa_md.token_to_req_indices[:n],
+                lens[: r.stop - lo],
+                swa_md.is_valid_token[r],
+                swa_md.token_to_req_indices[r],
                 comp_md.block_table[: swa_md.num_decodes],
                 comp_md.block_size // attn.compress_ratio,
-                buf[:n],
+                buf[r],
                 **(
-                    dict(cand=cand[:rows], bends=imd.decode_block_ends)
+                    dict(cand=cand[lo : lo + mine], bends=imd.decode_block_ends)
                     if src_wide
                     else {}
                 ),
             )
-        _k1["tk_done"] = (attn._index_source_prefix, attn.compress_ratio, n)
+        if shard is None:
+            # the runner's fixed-stride lists hold these rows too
+            st.tk_done = (attn._index_source_prefix, attn.compress_ratio, n)
+        else:
+            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+                _exchange_decode_rows,
+            )
+
+            # (the lists hold this rank's rows only: tk_hook maps the gathered
+            # rows into them)
+            _exchange_decode_rows(lay)
         return buf
 
     h.idx_topk_fn = forward
@@ -718,7 +818,7 @@ def _idx_topk_install(h: AsmDecodeLayer, attn, run, metadata) -> None:
         if cand is not None
         else "none"
     )
-    _idx_status(attn, f"asm (width {width}, candidates {candidates})")
+    _idx_status(h, attn, f"asm (width {width}, candidates {candidates})")
 
 
 def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
@@ -735,7 +835,8 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
       sparse attention on decode-only steps (vLLM's own on mixed steps, its
       MXFP8 output converted to our layout), then our back with all-reduce #1.
     """
-    _wob_setup()
+    st = h.st
+    st.wob_setup()
     attn = layer.attn
     index = attn.indexer is not None
     if attn.compress_ratio <= 0 or (attn.compressor is not None and not index):
@@ -749,7 +850,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
     assert not torch.cuda.is_current_stream_capturing(), (
         "K1 must be set up outside graph capture"
     )
-    run = _k1_runner()
+    run = st.k1_runner()
 
     def metadata():
         md = get_forward_context().attn_metadata
@@ -764,8 +865,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
         # pack. tk_src names the source, ratio and row count the lists are
         # for; anything else falls back.
         def tk_hook():
-            done = _k1.pop("tk_done", None)
-            _k1["tk_src"] = None
+            done, st.tk_done, st.tk_src = st.tk_done, None, None
             swa_md, comp_md = metadata()
             if (
                 swa_md is None
@@ -789,7 +889,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
                 )
             # what vLLM's source does with fresh indices
             attn._topk_ragged_cache = {}
-            _k1["tk_src"] = src
+            st.tk_src = src
 
         h.tk_hook = tk_hook
         _idx_topk_install(h, attn, run, metadata)
@@ -856,7 +956,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
             q = q[:n]
             positions = positions[:n]
             tk_idx = tk_ptr = None
-            fixed = comp_md is not None and _k1.get("tk_src") == (
+            fixed = comp_md is not None and st.tk_src == (
                 attn._index_source_prefix,
                 attn.compress_ratio,
                 n,
@@ -870,10 +970,10 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
                     num_decodes=swa_md.num_decodes,
                     num_decode_tokens=n,
                 )
-                _log_once(
+                st.log_once(
                     ("tk", attn.layer_id),
                     f"layer {attn.layer_id} took vLLM's ragged top-k (fixed "
-                    f"lists are for {_k1.get('tk_src')}, M = {n})",
+                    f"lists are for {st.tk_src}, M = {n})",
                 )
             run.attend(
                 w,
@@ -895,7 +995,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
         run.q_rr(q, float(attn.eps))
         attn.forward_mqa(q, kv, positions, output)
         run.from_attn_out(output.data, output.scale, m)
-        _log_once("mixed", "mixed step: vLLM's attention + layout conversion")
+        st.log_once("mixed", "mixed step: vLLM's attention + layout conversion")
 
     # the compressor's GEMM (comp_gemm: split-K partials) + save / pool / norm,
     # compressed insert and the indexer K store in one launch (comp_tail) on
@@ -914,8 +1014,8 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
             # one partial buffer for all layers (their aux chains don't
             # overlap)
             key = ("comp_part", cw.shape[0])
-            if key not in _k1:
-                _k1[key] = torch.empty(16, MAX_M, cw.shape[0], device=cw.device)
+            if key not in st.bufs:
+                st.bufs[key] = torch.empty(16, MAX_M, cw.shape[0], device=cw.device)
             ctail = dict(
                 fn=ct.comp_tail,
                 lat=torch.empty(
@@ -924,7 +1024,10 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
                 wk=idxr.wk.weight.data.contiguous(),
                 layout=rocm_paged_mxfp4_cache_layout,
                 gemm=dict(
-                    fn=ct.comp_gemm, cfg=ct.gemm_cfg, w=cw.contiguous(), part=_k1[key]
+                    fn=ct.comp_gemm,
+                    cfg=ct.gemm_cfg,
+                    w=cw.contiguous(),
+                    part=st.bufs[key],
                 ),
             )
 
@@ -939,11 +1042,11 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
             struct.pack("<f", attn.indexer.softmax_scale * attn.indexer.n_head**-0.5),
         )[0]
         w_pow2 = math.frexp(w_scale)[0] == 0.5
-        if "idx_wf" not in _k1:
-            _k1["idx_wf"] = torch.empty(
+        if "idx_wf" not in st.bufs:
+            st.bufs["idx_wf"] = torch.empty(
                 MAX_M, attn.indexer.n_head, device=attn.indexer.wq_b.weight.device
             )
-        w_f32 = _k1["idx_wf"]
+        w_f32 = st.bufs["idx_wf"]
         assert (
             attn.indexer.use_fp4_kv
             and attn.indexer.indexer_weights_dtype == torch.float32
@@ -1087,9 +1190,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
         state["y"] = None
         m = hidden_states.shape[0]
         swa_md, _ = metadata()
-        if m not in _k1["seen"]:
-            _k1["seen"].add(m)
-            _log(f"K1 at M = {m}")
+        st.ran("K1", m)
         if index:
             q, iq, iq_scale, iw = index_front(positions, hidden_states, m, swa_md)
         else:
@@ -1106,7 +1207,7 @@ def _k1_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> str:
         _indexer_and_attn(
             h, attn, hidden_states, iq, iq_scale, iw, q, positions, attn_out
         )
-        return run.back_ar(w, m, positions, _wob["wob"])
+        return run.back_ar(w, m, positions, st.wob)
 
     h.seams.append(seam_forward)
     h.attn_fn = attn_forward
@@ -1143,7 +1244,7 @@ def _eg_seam(h: AsmDecodeLayer, layer, run, w, args, kw, front=False, idx=False)
 def _eg_seam_only_install(h: AsmDecodeLayer, layer, lo: int, hi: int) -> None:
     """Our seam on an Engram layer whose attention stays vLLM's (layer 1, ratio
     0): the seam call runs k1_runner.seam_eg, vLLM's attention takes its y."""
-    run = _k1_runner()
+    run = h.st.k1_runner()
     w = run.weights(layer, seam_only=True)
 
     def seam_forward(*args, **kw):
