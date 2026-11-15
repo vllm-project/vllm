@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning parser for the Kimi K3 (XTML) chat format.
 
-This strips the ``think`` channel out of generated text and hands the remainder
-(``response`` + ``tools`` channels) downstream. Kimi K3 wraps the thinking
+This strips the `think` channel out of generated text and hands the remainder
+(`response` + `tools` channels) downstream. Kimi K3 wraps the thinking
 channel as an XTML element built from special tokens::
 
     <|open|>think<|sep|> <reasoning> <|close|>think<|sep|>
 
 Two subtleties drive the implementation:
-  * Unlike Kimi-K2 (a single ``<think>`` token), each K3 marker is a 3-token
+  * Unlike Kimi-K2 (a single `<think>` token), each K3 marker is a 3-token
     sequence, so the token-id helpers search for the marker *subsequence*
     rather than a single id.
-  * In thinking mode the serving layer may feed ``<|open|>think<|sep|>`` as the
+  * In thinking mode the serving layer may feed `<|open|>think<|sep|>` as the
     generation prefix, so the model's output can begin *inside* the think
     channel with no open marker. The text paths therefore treat a missing open
     marker as "reasoning starts at offset 0".
 
-When thinking is disabled (``chat_template_kwargs={"thinking": False}`` or
-``{"enable_thinking": False}``, i.e. instruct mode) the parser returns every
+When thinking is disabled (`chat_template_kwargs={"thinking": False}` or
+`{"enable_thinking": False}`, i.e. instruct mode) the parser returns every
 delta as normal content; there is simply no think channel to extract.
 """
 
@@ -40,8 +40,8 @@ if TYPE_CHECKING:
 def _match_at(haystack: Sequence[int], i: int, needle: Sequence[int]) -> bool:
     """Whether *needle* occurs in *haystack* starting at *i*.
 
-    Compares element by element rather than slicing: ``haystack`` is usually a
-    ``ConstantList``, whose slices cost a Python ``__getitem__`` plus a list
+    Compares element by element rather than slicing: `haystack` is usually a
+    `ConstantList`, whose slices cost a Python `__getitem__` plus a list
     allocation on every probe.
     """
     return all(haystack[i + k] == needle[k] for k in range(len(needle)))
@@ -63,7 +63,7 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
     """Report which of *a* / *b* occurs last in *haystack*.
 
     Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
-    Equivalent to comparing two ``_subseq_index`` results, but a single backward
+    Equivalent to comparing two `_subseq_index` results, but a single backward
     pass that stops at the first hit instead of walking to index 0 twice.
     """
     return -1 if not a or not b else rfind_token_sequences(haystack, (a, b))[1]
@@ -172,10 +172,10 @@ class KimiK3ReasoningParser(ReasoningParser):
 
         The engine calls this once per structured-output request per decode step
         while the request is still inside the think channel, so it only has to
-        look at the tokens generated this step, plus ``len(marker) - 1`` tokens
+        look at the tokens generated this step, plus `len(marker) - 1` tokens
         of context in case a marker straddles the step boundary.
 
-        The inherited default re-runs the full-sequence ``is_reasoning_end``,
+        The inherited default re-runs the full-sequence `is_reasoning_end`,
         which makes the scheduler O(context) per request per step and starves the
         GPU on long agentic contexts.
         """
@@ -244,11 +244,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         return count
 
     def _strip_content_wrapper(self, text: str) -> str:
-        """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and
-        ``<|close|>message<|sep|>`` from *text*.
+        """Strip `<|open|>response<|sep|>…<|close|>response<|sep|>` wrapper and
+        `<|close|>message<|sep|>` from *text*.
 
         When Kimi K3 tool parsing is active it needs the raw XTML
-        ``response`` + ``tools`` channels. Otherwise the reasoning parser cleans
+        `response` + `tools` channels. Otherwise the reasoning parser cleans
         up the response wrapper itself so API users do not see XTML markers.
         """
         # Try structured unwrap first: extract body of response channel
@@ -286,16 +286,16 @@ class KimiK3ReasoningParser(ReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """Split full text into ``(reasoning, rest)`` for the non-streaming path.
+        """Split full text into `(reasoning, rest)` for the non-streaming path.
 
         Handles four shapes:
           * response opener without think markers -> no think channel; all content
-          * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
+          * open marker present       -> reasoning starts after `<|open|>think<|sep|>`
           * open marker absent but a   close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
           * neither marker present     -> truncated reasoning after a consumed
             generation prefix
-        ``rest`` is whatever follows the close marker, fed on to the tool parser.
+        `rest` is whatever follows the close marker, fed on to the tool parser.
         """
         if not self._thinking_enabled:
             return None, self._content_after_reasoning(model_output, request)
@@ -326,17 +326,17 @@ class KimiK3ReasoningParser(ReasoningParser):
         split-open and split-close handling into the same prefix-diff problem.
 
         Example 1: split think-open marker.
-          chunks: ``<|open|>`` / ``think`` / ``<|sep|>reasoning``
-          current text after chunk 1: ``<|open|>`` -> emit ``""``
-          current text after chunk 2: ``<|open|>think`` -> emit ``""``
-          current text after chunk 3: ``<|open|>think<|sep|>reasoning``
-          -> emit ``reasoning``
+          chunks: `<|open|>` / `think` / `<|sep|>reasoning`
+          current text after chunk 1: `<|open|>` -> emit `""`
+          current text after chunk 2: `<|open|>think` -> emit `""`
+          current text after chunk 3: `<|open|>think<|sep|>reasoning`
+          -> emit `reasoning`
 
         Example 2: split think-close marker.
-          chunks: ``reasoning`` / ``<|close|>`` / ``think<|sep|>...``
-          after ``<|close|>``, the suffix is only a partial close marker, so the
-          sendable reasoning is still ``reasoning`` and the delta is empty. Once
-          ``think<|sep|>`` arrives, the close branch hands the following response
+          chunks: `reasoning` / `<|close|>` / `think<|sep|>...`
+          after `<|close|>`, the suffix is only a partial close marker, so the
+          sendable reasoning is still `reasoning` and the delta is empty. Once
+          `think<|sep|>` arrives, the close branch hands the following response
           or tools text to the downstream parser.
         """
         m_open = self._think_open_re.search(text)
@@ -354,10 +354,10 @@ class KimiK3ReasoningParser(ReasoningParser):
     def _content_ready_to_emit(self, text: str) -> str:
         """Return the content prefix that is safe to stream now.
 
-        Mirrors ``_reasoning_text_ready_to_emit`` but for the post-reasoning
-        content phase.  Strips the ``<|open|>response<|sep|>`` prefix, holds back
+        Mirrors `_reasoning_text_ready_to_emit` but for the post-reasoning
+        content phase.  Strips the `<|open|>response<|sep|>` prefix, holds back
         any partial marker suffix, and removes complete
-        ``<|close|>response<|sep|>`` / ``<|close|>message<|sep|>`` markers.
+        `<|close|>response<|sep|>` / `<|close|>message<|sep|>` markers.
         """
         # Strip response-open prefix
         m_open = self._response_open_re.search(text)
@@ -390,10 +390,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         """Strip XTML content wrappers from streaming deltas after reasoning.
 
         Called by KimiK3Parser when no tool parser is configured, so the
-        reasoning parser handles ``<|open|>response<|sep|>`` /
-        ``<|close|>response<|sep|>`` / ``<|close|>message<|sep|>`` stripping itself.
+        reasoning parser handles `<|open|>response<|sep|>` /
+        `<|close|>response<|sep|>` / `<|close|>message<|sep|>` stripping itself.
 
-        Works from accumulated text (``previous_text`` / ``current_text``
+        Works from accumulated text (`previous_text` / `current_text`
         already contain only post-reasoning content).
         """
         current_safe = self._content_ready_to_emit(current_text)

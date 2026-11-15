@@ -12,7 +12,7 @@ use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use self::wire::*;
+pub use self::wire::WireLogprobs;
 use crate::error::{Error, Result, bail_ext_value_decode};
 use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::tensor::{WireArrayData, WireNdArray};
@@ -150,7 +150,8 @@ impl Serialize for MaybeWireLogprobs {
     where
         S: serde::Serializer,
     {
-        // For testing purposes only. We don't actually serialize it into aux frames.
+        // An engine serializes the wire form (`EngineCoreOutputs::into_frames`);
+        // `Direct` serves mocked outputs in tests.
         match self {
             Self::Wire(value) => value.serialize(serializer),
             Self::Direct(value) => WireLogprobs::from_direct(value)
@@ -167,6 +168,18 @@ impl MaybeWireLogprobs {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
+        }
+    }
+}
+
+impl MaybeWireLogprobs {
+    /// Move the large arrays of a wire payload into the ordered auxiliary-frame
+    /// list.
+    pub(super) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Self::Wire(value) = self {
+            value.logprob_token_ids.extract_aux_frame(aux_frames, threshold);
+            value.logprobs.extract_aux_frame(aux_frames, threshold);
+            value.token_ranks.extract_aux_frame(aux_frames, threshold);
         }
     }
 }

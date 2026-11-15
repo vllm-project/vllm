@@ -23,7 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .qwen2 import Qwen2MLP, Qwen2Model
+from .qwen3 import Qwen3MLP, Qwen3Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 
@@ -169,7 +169,7 @@ class DomynEdgeDecoderLayer(nn.Module):
             window_size=config.window_sizes[layer_idx][0],
             prefix=f"{prefix}.attention",
         )
-        self.feedforward = Qwen2MLP(
+        self.feedforward = Qwen3MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -214,13 +214,8 @@ class DomynEdgeDecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class DomynEdgeModel(Qwen2Model):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            decoder_layer_type=DomynEdgeDecoderLayer,
-        )
+class DomynEdgeModel(Qwen3Model):
+    decoder_layer_type = DomynEdgeDecoderLayer
 
 
 class DomynEdgeForCausalLM(nn.Module):

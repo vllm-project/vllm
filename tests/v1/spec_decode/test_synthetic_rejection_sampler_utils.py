@@ -3,7 +3,9 @@
 import pytest
 
 from vllm.config.speculative import SpeculativeConfig
-from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+    unconditional_to_conditional_rates,
+)
 
 
 def test_unconditional_to_conditional_rates_basic():

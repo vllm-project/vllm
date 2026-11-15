@@ -37,7 +37,7 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
-    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+    RequestBatchOutputs, UtilityCallOutput,
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
@@ -570,6 +570,14 @@ fn is_engine_core_dead(error: &Error) -> bool {
     match error {
         Error::EngineCoreDead => true,
         Error::Shared(error) => is_engine_core_dead(error),
+        _ => false,
+    }
+}
+
+fn is_engine_disconnected(error: &Error) -> bool {
+    match error {
+        Error::EngineDisconnected { .. } => true,
+        Error::Shared(error) => is_engine_disconnected(error),
         _ => false,
     }
 }
@@ -2320,6 +2328,81 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     client.shutdown().await.unwrap();
 }
 
+/// A killed engine sends no `ENGINE_CORE_DEAD` sentinel: its input connection
+/// closing fails the in-flight requests and marks the client unhealthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_disconnect_fails_in_flight_requests_and_marks_client_unhealthy() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (request_received_tx, request_received_rx) = oneshot::channel();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-killed".to_vec(),
+        move |dealer, _push| {
+            Box::pin(async move {
+                recv_engine_message(dealer).await;
+                let _ = request_received_tx.send(());
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let mut stream = client
+        .call(sample_request_with_id("req-in-flight"))
+        .await
+        .unwrap()
+        .into_outputs();
+    timeout(Duration::from_secs(2), request_received_rx)
+        .await
+        .expect("wait for the engine to receive the request")
+        .unwrap();
+
+    // Drop the engine's sockets without a sentinel, as a killed process does.
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+
+    let error = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("in-flight request must fail promptly")
+        .expect("stream must yield the failure")
+        .expect_err("request must fail");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+    assert!(!client.is_healthy());
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::EngineDisconnected { .. })
+    ));
+
+    let error = client
+        .call(sample_request_with_id("req-after-disconnect"))
+        .await
+        .err()
+        .expect("later requests must be rejected");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     init_tracing();
@@ -3335,16 +3418,19 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
+    client
+        .sleep(SleepLevel::OffloadWeights, PauseMode::default(), true)
+        .await
+        .unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"
@@ -3836,6 +3922,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
     let inplace_lora_request_hex =
         lines.next().expect("missing in-place LoRA request fixture line");
+    let simple_cpu_offload_stats_hex =
+        lines.next().expect("missing SimpleCPUOffload stats fixture line");
+    let kv_offload_stats_hex = lines.next().expect("missing kv offload stats fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -3921,7 +4010,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(python_mm_features, rust_mm_features);
 
     let decoded_sampling_mask_outputs =
-        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
+        EngineCoreOutputs::from_frames(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
@@ -3936,7 +4025,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         hex::decode(extended_outputs_hex).unwrap(),
     )];
     assert_eq!(
-        decode_engine_core_outputs(&extended_frames).unwrap(),
+        EngineCoreOutputs::from_frames(&extended_frames).unwrap(),
         decoded_outputs
     );
     expect_test::expect![[r#"
@@ -4017,7 +4106,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     };
 
     let inline_logprobs =
-        decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(inline_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         inline_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4026,7 +4115,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_logprobs =
-        decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         multipart_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4034,7 +4123,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             .expect("multipart logprobs decoded"),
     );
 
-    let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
+    let inline_prompt =
+        EngineCoreOutputs::from_frames(&decode_frames(inline_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         inline_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4043,7 +4133,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_prompt =
-        decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         multipart_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4086,6 +4176,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.mooncake_transfer.is_some());
     assert!(multi_connector_stats.mooncake.is_some());
     assert!(multi_connector_stats.umbp.is_some());
+    assert!(multi_connector_stats.simple_cpu_offload.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -4135,6 +4226,55 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(rendered_metrics.contains(
         "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
          operation=\"load\"} 8192"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:simple_kv_offload_save_outcomes_total{model_name=\"test-model\",engine=\"0\",\
+         outcome=\"stored\"} 3"
+    ));
+
+    let simple_cpu_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(simple_cpu_offload_stats_hex).unwrap()).unwrap();
+    let KvConnectorStats::SimpleCpuOffload(simple_cpu_offload_stats) = simple_cpu_offload_stats
+    else {
+        panic!("Python SimpleCPUOffload stats should decode as SimpleCpuOffload");
+    };
+    expect_test::expect![[r#"
+        SimpleCpuOffloadData {
+            save_outcomes: {
+                [
+                    "skipped_in_flight",
+                ]: 1,
+                [
+                    "stored",
+                ]: 3,
+            },
+            load_blocks: {
+                []: 4,
+            },
+            used_blocks: {
+                []: 9,
+            },
+            pending_store_blocks: {
+                []: 2,
+            },
+            info: {
+                [
+                    "cpu",
+                    "false",
+                    "true",
+                    "64",
+                ]: 1,
+            },
+        }
+    "#]]
+    .assert_debug_eq(&simple_cpu_offload_stats.data);
+
+    // Another connector's `types`/`data` payload is not taken for SimpleCPUOffload.
+    let kv_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(kv_offload_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        kv_offload_stats,
+        KvConnectorStats::Multi(stats) if stats.simple_cpu_offload.is_none()
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {

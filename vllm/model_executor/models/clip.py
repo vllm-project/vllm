@@ -124,10 +124,10 @@ def dual_encoder_has_text_tokens(
 ) -> bool:
     """Whether a dual-encoder pooling batch still contains text tokens.
 
-    ``embed_input_ids`` used to treat "the batch has any image embeddings" as
+    `embed_input_ids` used to treat "the batch has any image embeddings" as
     "the whole batch is vision-only". Mixed image+text batches then skipped
     the text encoder, so completion-style text embeddings collapsed (issue
-    #53091). Honor the per-token ``is_multimodal`` mask instead.
+    #53091). Honor the per-token `is_multimodal` mask instead.
     """
     if not has_mm_embeddings or is_multimodal is None:
         return not has_mm_embeddings
@@ -141,7 +141,7 @@ def merge_dual_encoder_text_and_vision(
 ) -> torch.Tensor:
     """Restore vision embeddings on multimodal tokens after the text encoder.
 
-    The model runner builds ``is_multimodal`` on CPU; text and vision features
+    The model runner builds `is_multimodal` on CPU; text and vision features
     are on the compute device.
     """
     if is_multimodal is None or not bool(is_multimodal.any().item()):

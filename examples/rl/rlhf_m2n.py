@@ -5,20 +5,20 @@ sharding-aware weight transfer.
 
 Layout (4 GPUs, no colocation):
   * GPUs 0-1: two FSDP2 training workers, one per GPU.
-  * GPUs 2-3: one vLLM ``LLM`` actor with ``tensor_parallel_size=2``.
+  * GPUs 2-3: one vLLM `LLM` actor with `tensor_parallel_size=2`.
 
 The trainer and the inference workers share one NCCL communicator of 4 ranks:
-trainer ranks ``[0, 2)`` and inference ranks ``[2, 4)``. Every parameter moves
-with a single ``reshard`` that redistributes it from the FSDP layout to the
+trainer ranks `[0, 2)` and inference ranks `[2, 4)`. Every parameter moves
+with a single `reshard` that redistributes it from the FSDP layout to the
 inference layout — the trainer sends its local shards and never all-gathers a
 full tensor, which broadcast-based weight sync would force it to do.
 
-Every FSDP rank builds an ``M2NTrainerWeightTransferEngine`` and calls
-``send_weights()``; all ranks run every reshard, and only rank 0 drives the
-inference side through its ``RayVLLMWeightSyncClient``.
+Every FSDP rank builds an `M2NTrainerWeightTransferEngine` and calls
+`send_weights()`; all ranks run every reshard, and only rank 0 drives the
+inference side through its `RayVLLMWeightSyncClient`.
 
-Requires the ``nccl-extensions`` package (NCCL 2.30.5+). The backend creates
-the data-plane communicator with ``nccl4py`` and passes it directly to M2N.
+Requires the `nccl-extensions` package (NCCL 2.30.5+). The backend creates
+the data-plane communicator with `nccl4py` and passes it directly to M2N.
 
 This example was written for 4xH100.
 """

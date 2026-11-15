@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Determinism + FP32-reference correctness tests for the RDNA3 W4A16 GEMM.
 
-The split-K epilogues of ``gptq_gemm_rdna3`` (scalar path) and the WMMA
+The split-K epilogues of `gptq_gemm_rdna3` (scalar path) and the WMMA
 path previously accumulated per-split low-precision partials directly into
 the output via CAS atomics. With multiple writers per output element the
 accumulation order — and therefore the rounded result — varied per call:
@@ -17,13 +17,13 @@ construction. When the split count is 1 every path stores directly
 
 These tests assert, through the public op path:
 
-A. Repeatability — ``torch.equal`` across repeated identical calls.
+A. Repeatability — `torch.equal` across repeated identical calls.
 B. Numerical correctness — against an FP32 dequantized reference.
 
 (B) exists because repeatability alone cannot see the failure mode the
 deterministic epilogue introduces: the FP32 partials scratch is
-``at::empty`` (its coverage invariant is documented at
-``alloc_wmma_partials`` in ``csrc/rocm/q_gemm_rdna3_wmma.cu``), and across
+`at::empty` (its coverage invariant is documented at
+`alloc_wmma_partials` in `csrc/rocm/q_gemm_rdna3_wmma.cu`), and across
 repeated calls the caching allocator hands back the same block — a slot
 that ever went unwritten would be bitwise-repeatable *and* wrong.
 
@@ -55,8 +55,8 @@ All four are orders of magnitude below what an unwritten scratch slot
 scale as |ref| ≈ 7) would produce.
 
 Test hygiene: the op path needs a single-process distributed group and a
-current VLLM config; tests use the repo-standard ``dist_init`` fixture from
-``tests/conftest.py`` (real context manager, temp-file rendezvous so no
+current VLLM config; tests use the repo-standard `dist_init` fixture from
+`tests/conftest.py` (real context manager, temp-file rendezvous so no
 hardcoded MASTER_PORT can collide in parallel CI, and the suite's standard
 post-test cleanup).
 """
