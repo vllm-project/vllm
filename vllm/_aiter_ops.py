@@ -3874,6 +3874,18 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
+    def sparse_mla_fuses_q_rope() -> bool:
+        """Whether the installed aiter sparse MLA takes a raw bf16 q."""
+        import inspect
+
+        try:
+            from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+        except ImportError:
+            return False
+        return "q_rope_positions" in inspect.signature(sparse_mla_fwd).parameters
+
+    @staticmethod
+    @functools.cache
     def _flydsl_sparse_mla_ops() -> tuple[Callable, Callable] | None:
         """Return the FlyDSL sparse MLA (supported, fwd), or None if absent.
 
@@ -3995,6 +4007,9 @@ class rocm_aiter_ops:
         out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
         return_lse: bool = False,
         dot_precision: str | None = None,
+        q_rope_positions: torch.Tensor | None = None,
+        q_rope_cos_sin_cache: torch.Tensor | None = None,
+        q_norm_eps: float | None = None,
     ) -> torch.Tensor | None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -4008,15 +4023,18 @@ class rocm_aiter_ops:
         compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
         make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
         replaces o with MXFP8 rows. dot_precision overrides the default
-        selected from q's dtype.
+        selected from q's dtype. q_rope_positions and q_rope_cos_sin_cache
+        take a raw bf16 q (rope-free fp8 cache) and have the kernel rotate and
+        cast it to fp8 itself; q_norm_eps adds an RMSNorm of q first.
 
         With VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA, the calls the FlyDSL
         kernel supports (bf16 q, fp8_ds_mla, no scales/sink/extra) run there.
         """
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
+        fuses_q_rope = q_rope_positions is not None
         if dot_precision is None:
-            dot_precision = "fp8" if fp8_q else "bf16"
+            dot_precision = "fp8" if fp8_q or fuses_q_rope else "bf16"
         # The FlyDSL supports() check knows nothing of the inverse-RoPE
         # store or the MXFP8 output, so it would accept a call whose result it
         # then writes in the wrong form. Keep those on the Triton kernel.
@@ -4025,6 +4043,7 @@ class rocm_aiter_ops:
             and out_mxfp8 is None
             and inv_rope_positions is None
             and inv_rope_cos_sin_cache is None
+            and not fuses_q_rope
         )
         if flydsl_eligible:
             handled, lse = rocm_aiter_ops._flydsl_sparse_mla_fwd(
@@ -4051,6 +4070,15 @@ class rocm_aiter_ops:
 
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
+        q_rope_kwargs = (
+            dict(
+                q_rope_positions=q_rope_positions,
+                q_rope_cos_sin_cache=q_rope_cos_sin_cache,
+                q_norm_eps=q_norm_eps,
+            )
+            if fuses_q_rope
+            else {}
+        )
         _, lse = sparse_mla_fwd(
             q,
             kv_buffer,
@@ -4062,7 +4090,7 @@ class rocm_aiter_ops:
             qk_rope_head_dim=qk_rope_head_dim,
             has_invalid=has_invalid,
             dot_precision=dot_precision,
-            q_scale=q_scale if fp8_q else None,
+            q_scale=q_scale if fp8_q or fuses_q_rope else None,
             out=o,
             attn_sink=attn_sink,
             extra_kv=extra_kv_buffer,
@@ -4072,6 +4100,7 @@ class rocm_aiter_ops:
             inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
             out_mxfp8=out_mxfp8,
             return_lse=return_lse,
+            **q_rope_kwargs,
         )
         return lse
 

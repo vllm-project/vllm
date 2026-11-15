@@ -196,10 +196,18 @@ def _plain_fp8_sparse_mla(
 ) -> None:
     """Sparse MLA through aiter on per-tensor fp8 rows, with fp8 dots. RoPE
     lives inside the 512-wide row, so it runs the rope-free geometry. Both
-    caches share one KV scale. The store can apply inverse RoPE and MXFP8."""
+    caches share one KV scale. The store can apply inverse RoPE and MXFP8. A
+    bf16 q is raw: the kernel rotates it and casts it to fp8."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     assert output_mxfp8 is None or positions is not None
+    q_rope = {}
+    if q.dtype == torch.bfloat16:
+        assert positions is not None
+        q_rope = dict(
+            q_rope_positions=positions,
+            q_rope_cos_sin_cache=layer.rotary_emb.cos_sin_cache,
+        )
     rocm_aiter_ops.triton_sparse_mla_fwd(
         q,
         swa_k_cache,
@@ -223,6 +231,7 @@ def _plain_fp8_sparse_mla(
             None if positions is None else layer.rotary_emb.cos_sin_cache
         ),
         out_mxfp8=output_mxfp8,
+        **q_rope,
     )
 
 

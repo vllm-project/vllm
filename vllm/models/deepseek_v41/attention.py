@@ -282,6 +282,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """
         return False
 
+    def fuses_q_rope_in_attention(self, num_tokens: int) -> bool:
+        """Whether a step of `num_tokens` hands `forward_mqa` the raw bf16 `q`.
+
+        Unlike `accepts_unnormed_unroped_query`, `q` keeps the head-major
+        layout, and the attention kernel only rotates it and casts it to fp8.
+        Only a per-tensor fp8 cache can be paired with it.
+        """
+        return False
+
     @property
     def packed_kv_cache_dtype(self) -> CacheDType:
         """The packed KV record this layer's kernel prefers.
@@ -1231,6 +1240,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             return q
 
         # per-tensor fp8 (torch.float8_e4m3fn)
+        if self.fuses_q_rope_in_attention(q.shape[0]):
+            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                kv,
+                swa_kv_cache_3d,
+                slot_mapping,
+                positions,
+                cos_sin_cache,
+                block_size,
+                self._flashinfer_fp8_kv_scale,
+                False,
+            )
+            return q
+
         q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             q,

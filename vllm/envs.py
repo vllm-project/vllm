@@ -158,6 +158,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_FUSE_Q_ROPE: bool = True
+    VLLM_ROCM_FUSE_Q_ROPE_MIN_TOKENS: int = 2048
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1463,6 +1465,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # Whether DeepSeek V4.1 on ROCm with a per-tensor fp8 KV cache
+    # (--kv-cache-dtype fp8_e4m3) lets the aiter sparse MLA kernel rotate and
+    # cast Q itself, which saves a separate Q pass. Needs the aiter sparse MLA
+    # (VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA on gfx950) and an aiter whose
+    # sparse_mla_fwd takes q_rope_*; without one this has no effect.
+    # By default is enabled.
+    "VLLM_ROCM_FUSE_Q_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_FUSE_Q_ROPE", "True").lower() in ("true", "1")
+    ),
+    # Smallest step (in tokens) that VLLM_ROCM_FUSE_Q_ROPE applies to; smaller
+    # steps (decode) keep the separate Q pass, which is not slower there.
+    "VLLM_ROCM_FUSE_Q_ROPE_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_FUSE_Q_ROPE_MIN_TOKENS", "2048")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
