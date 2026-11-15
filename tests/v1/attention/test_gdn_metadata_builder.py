@@ -32,7 +32,7 @@ BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-@dataclass
+@dataclass(slots=True)
 class GDNBuildTestCase:
     """Specification for a GDN metadata builder classification test."""
 

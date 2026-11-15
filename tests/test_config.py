@@ -2696,7 +2696,7 @@ def test_dspark_compile_factors_hash_graph_settings_once():
     assert "dspark" not in factors
 
 
-@dataclass
+@dataclass(slots=True)
 class _TestConfigFields:
     a: int
     b: dict = field(default_factory=dict)
@@ -2715,12 +2715,12 @@ def test_get_field():
     assert c.default_factory is MISSING
 
 
-@dataclass
+@dataclass(slots=True)
 class _TestNestedConfig:
     a: _TestConfigFields = field(default_factory=lambda: _TestConfigFields(a=0))
 
 
-@dataclass
+@dataclass(slots=True)
 class _TestDerivedConfigFields(_TestConfigFields):
     pass
 
