@@ -121,7 +121,7 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 _SHARED_REGION_GROUP_ID = -1
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TransferRegion:
     layer_name: str
     layer_index: int
@@ -698,7 +698,7 @@ class MooncakeLeaseHeartbeat(
     lease_transfer_ids: list[TransferId] = msgspec.field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class LeaseHeartbeat:
     """Transfers that one P engine holds for this D engine under a lease."""
 
@@ -717,7 +717,7 @@ def _get_kv_lease_duration(kv_transfer_config: KVTransferConfig) -> float | None
     return duration
 
 
-@dataclass
+@dataclass(slots=True)
 class PullReqMeta:
     d_req_id: ReqId
     transfer_id: TransferId
@@ -733,7 +733,7 @@ class PullReqMeta:
     failed: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class SendBlockMeta:
     p_req_id: ReqId
     transfer_id: TransferId

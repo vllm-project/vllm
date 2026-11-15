@@ -137,6 +137,7 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate

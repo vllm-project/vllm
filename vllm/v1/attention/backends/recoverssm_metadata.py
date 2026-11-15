@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecoverSSMPostprocessMetadata:
     """Metadata used during postprocessing for prefix caching."""
 

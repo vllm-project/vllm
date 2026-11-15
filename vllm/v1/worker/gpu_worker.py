@@ -551,8 +551,13 @@ class Worker(WorkerBase):
             torch.nn.functional.linear(x, x, x[0])
             del x
 
+            # Collect garbage, then freeze the startup heap so that later gc.collect()
+            # calls (weight loading, memory profiling, KV cache sizing) skip it. It is
+            # unfrozen by the first CUDA graph capture, or at the latest by
+            # compile_or_warm_up_model, which then refreezes the final heap.
+            freeze_gc_heap()
+
             # Now take memory snapshot after NCCL is initialized
-            gc.collect()
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
@@ -581,7 +586,10 @@ class Worker(WorkerBase):
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        pc = self.vllm_config.parallel_config
+        # all-reduce-overlap runs both microbatches on one stream: one workspace set.
+        per_ubatch = pc.enable_dbo and pc.dbo_schedule != "all-reduce-overlap"
+        num_ubatches = 2 if per_ubatch else 1
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -1245,8 +1253,10 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
+        # Unfreeze and run GC (also frees cyclic garbage objects since init_device),
+        # then refreeze so that GC won't scan static objects (model weights, KV caches,
+        # CUDA graphs) during inference.
+        gc.unfreeze()
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
