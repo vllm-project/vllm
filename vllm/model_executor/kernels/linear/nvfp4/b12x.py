@@ -5,12 +5,17 @@ from __future__ import annotations
 
 import torch
 
+import vllm.envs as envs
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
+from vllm.utils.b12x import (
+    B12xWarmupUnit,
+    prepare_b12x_autotuned,
+    reuse_packed_weight_storage,
+)
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -198,6 +203,8 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         plan = layer.b12x_nvfp4_plan
 
         def compile() -> None:
+            if envs.VLLM_B12X_AUTOTUNE:
+                prepare_b12x_autotuned((_autotune_request(layer, plan),))
             for tokens in sorted(set(token_counts) | set(plan.token_counts)):
                 source = torch.zeros(
                     (tokens, layer.weight.shape[1] * 2),
@@ -234,6 +241,44 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])
+
+
+def _autotune_request(layer: torch.nn.Module, plan):
+    """A b12x preparation request that measures every planned token count on
+    this layer's weight."""
+    from b12x.preparation import PreparedCall
+
+    packed = layer.b12x_nvfp4_packed_weight
+    k = layer.weight.shape[1] * 2
+
+    def call_for(tokens: int):
+        def factory(state):
+            seed = torch.randn(
+                (tokens, k), dtype=torch.bfloat16, device=layer.weight.device
+            )
+            source = torch.empty_like(seed)
+            return PreparedCall(
+                run=lambda: state.run(
+                    source,
+                    packed.values,
+                    packed.scale_mma,
+                    packed.global_scale,
+                    activation_scale=None,
+                ),
+                # Rewrite the input before each measured call so candidates do
+                # not see it cached.
+                produce=lambda: source.copy_(seed),
+                owners=(seed, source),
+            )
+
+        return factory
+
+    calls = {tokens: call_for(tokens) for tokens in plan.token_counts}
+    return plan.request(
+        name=f"vllm.nvfp4_w4a16.{plan.handle}",
+        prepare_calls=calls,
+        benchmark_calls=calls,
+    )
 
 
 __all__ = ["B12xNvFp4LinearKernel", "B12xNvFp4W4A16LinearKernel"]

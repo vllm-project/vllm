@@ -4,6 +4,7 @@
 
 import importlib
 import importlib.util
+import os
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass, fields, is_dataclass
 from types import ModuleType
@@ -79,6 +80,29 @@ def get_b12x_fused_moe() -> ModuleType | None:
 
 def get_b12x_paged_attention() -> ModuleType | None:
     return _get_submodule("b12x.attention.paged")
+
+
+_TUNING_SESSION: Any = None
+
+
+def prepare_b12x_autotuned(requests: Iterable[Any]) -> None:
+    """Prepare b12x plans with autotuned configurations.
+
+    One session serves the whole process: it must stay open, because closing it
+    releases the plans it prepared. Selections are cached on disk, so a restart
+    with the same shapes skips the measurements.
+    """
+    global _TUNING_SESSION
+    from b12x.preparation import PreparationSession
+
+    import vllm.envs as envs
+
+    if _TUNING_SESSION is None:
+        _TUNING_SESSION = PreparationSession(
+            autotune=True,
+            cache_dir=os.path.join(envs.VLLM_CACHE_ROOT, "b12x_tuning"),
+        )
+    _TUNING_SESSION.prepare(tuple(requests))
 
 
 def b12x_warmup_token_counts(

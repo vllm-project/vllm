@@ -202,6 +202,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_B12X_AUTOTUNE: bool = False
     VLLM_STRICT_QUANT_SCHEME: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
@@ -1791,6 +1792,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
     ),
+    # Autotune b12x NVFP4 W4A16 linear plans at warmup instead of using b12x's
+    # default configurations. Selections are cached under VLLM_CACHE_ROOT.
+    "VLLM_B12X_AUTOTUNE": lambda: bool(int(os.getenv("VLLM_B12X_AUTOTUNE", "0"))),
     # Forbid kernels that run a different activation quantization than the
     # checkpoint or quantization config requests (e.g. Marlin running FP8 W8A8
     # layers as W8A16). Otherwise such fallbacks are allowed with a warning.
