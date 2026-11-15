@@ -13,11 +13,12 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.attention.dsa.flashtopk import FLASHTOPK_WARMUP
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-    FUSED_MQA_TOPK_WARMUP,
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
+    fused_mqa_topk_workspace_specs,
     reserve_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
@@ -159,9 +160,10 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    fused_topk = topk_tokens // max(index_kpool, 1)
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
-        topk=topk_tokens // max(index_kpool, 1),
+        topk=fused_topk,
         fp4_cache=use_fp4_cache,
         full_context=dcp_world_size == 1,
     )
@@ -172,17 +174,24 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
+        fused_specs = (
+            fused_mqa_topk_workspace_specs(
+                q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
+            )
+            if fused_mqa_topk
+            else []
+        )
         current_workspace_manager().get_simultaneous(
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            *fused_specs,
         )
-        # Allocate the largest fused_mqa_topk workspaces so they are accounted
-        # for (native: freed again, they overlap the dense logits below;
-        # flashtopk: held by its Selector).
+        # Allocate the largest native fused_mqa_topk workspaces so they are
+        # accounted for (freed again, they overlap the dense logits below).
         if fused_mqa_topk:
             reserve_fused_mqa_topk_workspaces(
-                q_quant.device, q_quant.shape[0], topk_tokens // max(index_kpool, 1)
+                q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
             )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
@@ -373,10 +382,23 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
+        # FlashTopK's scratch, beside the gathered K its calls read.
+        fused_specs = (
+            fused_mqa_topk_workspace_specs(
+                q_quant.device,
+                max(c.token_end - c.token_start for c in prefill_metadata.chunks),
+                total_seq_lens,
+                fused_topk,
+            )
+            if fused_mqa_topk and prefill_metadata.chunks
+            else []
+        )
+        k_quant_full, k_scale_full, *fused_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
+            *fused_specs,
         )
+        fused_workspace = fused_bufs[0] if fused_bufs else None
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             # Under DCP this rank only gathers the pools it owns.
             assert chunk.local_cu_seq_lens is not None
@@ -443,6 +465,7 @@ def sparse_attn_indexer_kpool(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_dst,
+                    fused_workspace,
                 )
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
@@ -865,8 +888,8 @@ class SparseAttnIndexerKpool(CustomOp):
             else torch.float32
         )
         if _cfg is not None and _cfg.kernel_config.enable_jit_warmup:
-            # Compiles the fused_mqa_topk backend the profiling run reserves.
-            FUSED_MQA_TOPK_WARMUP.register_warmup()
+            # Compiles the FlashTopK calls the profiling run reserves.
+            FLASHTOPK_WARMUP.register_warmup()
         _parallel = _cfg.parallel_config if _cfg is not None else None
         self._parallel_config = _parallel
         self.dcp_world_size = 1

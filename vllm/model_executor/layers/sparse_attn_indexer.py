@@ -30,11 +30,12 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.flashtopk import FLASHTOPK_WARMUP
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-    FUSED_MQA_TOPK_WARMUP,
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
+    fused_mqa_topk_workspace_specs,
     reserve_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
@@ -595,13 +596,16 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
+        if fused_mqa_topk:
+            profile_specs += fused_mqa_topk_workspace_specs(
+                q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
+            )
         current_workspace_manager().get_simultaneous(*profile_specs)
         if fused_mqa_topk:
-            # Allocate the largest fused_mqa_topk workspaces so they are
-            # accounted for (native: freed again, they overlap the dense logits
-            # below; flashtopk: held by its Selector).
+            # Allocate the largest native fused_mqa_topk workspaces so they are
+            # accounted for (freed again, they overlap the dense logits below).
             reserve_fused_mqa_topk_workspaces(
-                q_quant.device, q_quant.shape[0], topk_tokens
+                q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
             )
 
         # Decode rows per step: each decode is padded to 1 + speculative tokens.
@@ -767,11 +771,24 @@ def sparse_attn_indexer(
                 gather_specs.extend(
                     _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
                 )
+        # FlashTopK's scratch, beside the gathered K its calls read.
+        fused_specs = (
+            fused_mqa_topk_workspace_specs(
+                q_quant.device,
+                max(c.token_end - c.token_start for c in prefill_metadata.chunks),
+                total_seq_lens,
+                topk_tokens,
+            )
+            if fused_mqa_topk
+            else []
+        )
         k_quant_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
             *gather_specs,
+            *fused_specs,
         )
+        fused_workspace = gather_bufs.pop() if fused_specs else None
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
@@ -847,6 +864,7 @@ def sparse_attn_indexer(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_indices,
+                    fused_workspace,
                 )
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
             else:
@@ -1319,8 +1337,8 @@ class SparseAttnIndexer(CustomOp):
                 pad_value=0 if use_fp4_cache else -float("inf"),
             )
             _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
-            # Compiles the fused_mqa_topk backend the profiling run reserves.
-            FUSED_MQA_TOPK_WARMUP.register_warmup()
+            # Compiles the FlashTopK calls the profiling run reserves.
+            FLASHTOPK_WARMUP.register_warmup()
 
             if self.dcp_world_size > 1 and current_platform.is_cuda() and has_cutedsl():
                 from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
