@@ -837,8 +837,10 @@ def _hip_skinny_reference(
         (4, 16384, 512, 128),
         (5, 21504, 512, 32),
         (5, 20992, 512, 128),
-        # 6..8 rows (gfx115x only): LDS-resident (4096 * 8 fills it), then
-        # K-chunked; 2560 and 20992 hit the ragged K tail.
+        # 6..8 rows (gfx1151 only): LDS-resident (4096 * 8 fills it), then
+        # K-chunked; 2560 and 20992 hit the ragged K tail. N = 502 is not a
+        # multiple of the tile's 4 output rows, so it takes wvSplitK_int4_hf_,
+        # once LDS-resident and once K-chunked (symmetric only).
         (6, 1024, 2048, 32),
         (7, 2048, 1024, 64),
         (8, 2048, 512, 128),
@@ -848,6 +850,8 @@ def _hip_skinny_reference(
         (7, 16384, 512, 32),
         (8, 20480, 512, 128),
         (8, 20992, 512, 32),
+        (8, 2048, 502, 64),
+        (7, 8192, 502, 64),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
@@ -855,10 +859,12 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
 
-    if M > MAX_SKINNY_BATCH_SIZE and not on_gfx115x():
-        pytest.skip("6..8 rows are gfx115x only")
+    if M > MAX_SKINNY_BATCH_SIZE and not on_gfx1151():
+        pytest.skip("6..8 rows are gfx1151 only")
     if K * M > LDS_CAPACITY_ELEMENTS and not on_gfx115x():
         pytest.skip("deep-K HIP path is gfx115x only")
+    if has_zp and N % 8:
+        pytest.skip("zero points pack 8 output rows per word")
 
     set_random_seed(0)
 
@@ -1094,7 +1100,7 @@ def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_zp", [False, True])
-@pytest.mark.parametrize("M", [1, 9])
+@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1, 9])
 def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
     """Padding the weight rows is a pure layout change.
 
