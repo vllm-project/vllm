@@ -419,3 +419,208 @@ def test_active_ec_connector_reset_forwards_to_transfer_connector():
     ActiveECConnector.reset(wrapper)
     wrapper.ec_connector.reset.assert_called_once_with()
     ECConnector().reset()
+
+
+# ---------------------------------------------------------------------------
+# Deferred invalidation: leased residents survive reset only until their
+# final lease is released, and never serve new work in the meantime.
+
+
+_POOL_CAPACITY_2 = 512  # two 256-byte-aligned allocations
+
+
+class _HeldEvent(torch.Event):
+    """Stand-in for a CUDA retire event that never reports completion."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.polled = False
+
+    def query(self) -> bool:
+        self.polled = True
+        return False
+
+
+def _two_tensor_pool() -> ConsumerMemoryPool:
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    transfer.unregister_memory.return_value = True
+    pool = ConsumerMemoryPool(_POOL_CAPACITY_2, transfer)
+    pool.prepare(torch.device("cpu"))
+    assert pool.tensor is not None
+    return pool
+
+
+def _reserve(
+    manager: ConsumerReservationManager,
+    transfer_id: str,
+    mm_hash: str,
+) -> tuple[ConsumerReservation | None, bool]:
+    return manager.reserve(transfer_id, mm_hash, _NBYTES, _SHAPE, "float16", _DTYPE)
+
+
+def _reserve_cached(
+    manager: ConsumerReservationManager,
+    transfer_id: str,
+    mm_hash: str,
+) -> ConsumerReservation:
+    """Take a READY-from-cache reservation holding a lease on the resident."""
+    record, write = _reserve(manager, transfer_id, mm_hash)
+    assert record is not None
+    assert write is False
+    assert record.state is ConsumerReservationState.READY
+    assert record.lease is not None
+    return record
+
+
+def test_reset_reclaims_leased_resident_after_cancel():
+    """A leased resident skipped at reset frees up once its lease is cancelled."""
+    pool = _one_tensor_pool()
+    manager = _reservation_manager(pool)
+    allocation_a = _load_and_publish(manager, "xfer-a", "hashA")
+    leased = _reserve_cached(manager, "xfer-a2", "hashA")
+
+    _worker_with_pool(pool).reset()
+
+    # The lease pins the entry for now, but nothing new may reuse it and a
+    # full pool still cannot serve a second destination.
+    assert pool.acquire_cached("hashA", _SHAPE, _DTYPE) is None
+    assert _reserve(manager, "xfer-b", "hashB")[0] is None
+
+    assert manager.cancel("xfer-a2", leased.reservation_id) is True
+
+    record_b, write_b = _reserve(manager, "xfer-b", "hashB")
+    assert record_b is not None
+    assert write_b is True
+    assert record_b.allocation is not None
+    assert record_b.allocation is not allocation_a
+
+
+def test_reset_reclaims_leased_resident_after_expiry():
+    """Expiring the outstanding lease also reclaims the invalidated resident."""
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    transfer.unregister_memory.return_value = True
+    pool = ConsumerMemoryPool(_POOL_CAPACITY, transfer)
+    pool.prepare(torch.device("cpu"))
+    manager = ConsumerReservationManager(pool, lease_ttl=0, tombstone_limit=8)
+    _load_and_publish(manager, "xfer-a", "hashA")
+    _reserve_cached(manager, "xfer-a2", "hashA")
+
+    _worker_with_pool(pool).reset()
+    assert manager.expire() == 1
+
+    record_b, write_b = _reserve(manager, "xfer-b", "hashB")
+    assert record_b is not None
+    assert write_b is True
+
+
+def test_reset_does_not_serve_invalidated_resident_to_new_reservations():
+    """After reset, reserving A again must not reuse the invalidated tensor."""
+    pool = _two_tensor_pool()
+    manager = _reservation_manager(pool)
+    allocation_a = _load_and_publish(manager, "xfer-a", "hashA")
+    _reserve_cached(manager, "xfer-a2", "hashA")
+
+    _worker_with_pool(pool).reset()
+
+    record_a3, write_a3 = _reserve(manager, "xfer-a3", "hashA")
+    assert record_a3 is not None
+    assert write_a3 is True
+    assert record_a3.state is ConsumerReservationState.WRITING
+    assert record_a3.lease is None
+    assert record_a3.allocation is not allocation_a
+
+
+def test_replacement_frees_invalidated_resident_and_keeps_new_one():
+    """A fresh publish of hash A replaces the invalidated resident cleanly."""
+    pool = _two_tensor_pool()
+    manager = _reservation_manager(pool)
+    allocation_a = _load_and_publish(manager, "xfer-a", "hashA")
+    leased = _reserve_cached(manager, "xfer-a2", "hashA")
+
+    _worker_with_pool(pool).reset()
+
+    record_a3, write_a3 = _reserve(manager, "xfer-a3", "hashA")
+    assert record_a3 is not None
+    assert write_a3 is True
+    manager.complete("xfer-a3", record_a3.reservation_id)
+    allocation_new = manager.take("xfer-a3", "hashA")
+    assert allocation_new is not allocation_a
+
+    assert manager.cancel("xfer-a2", leased.reservation_id) is True
+
+    lease = pool.acquire_cached("hashA", _SHAPE, _DTYPE)
+    assert lease is not None
+    assert lease.value is allocation_new
+    pool.release_cached(lease)
+    extra = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert extra is not None
+    assert extra.tensor.data_ptr() == allocation_a.tensor.data_ptr()
+
+
+def test_take_rejects_invalidated_ready_lease_and_reclaims():
+    """take() refuses a stale READY lease, terminates it, and frees the pool."""
+    pool = _one_tensor_pool()
+    manager = _reservation_manager(pool)
+    _load_and_publish(manager, "xfer-a", "hashA")
+    _reserve_cached(manager, "xfer-a2", "hashA")
+
+    _worker_with_pool(pool).reset()
+
+    with pytest.raises(RuntimeError, match="invalidated"):
+        manager.take("xfer-a2", "hashA")
+
+    assert manager.status("xfer-a2") is None
+    record_b, write_b = _reserve(manager, "xfer-b", "hashB")
+    assert record_b is not None
+    assert write_b is True
+
+
+def test_reset_evictions_are_not_reported_as_reclaimed():
+    """Reset evictions skip the reclaimed report; LRU evictions keep it."""
+    pool = _two_tensor_pool()
+    manager = _reservation_manager(pool)
+    _load_and_publish(manager, "xfer-a", "hashA")
+    _load_and_publish(manager, "xfer-b", "hashB")
+    leased = _reserve_cached(manager, "xfer-b2", "hashB")
+
+    _worker_with_pool(pool).reset()
+
+    assert pool.drain_reclaimed() == set()
+    assert manager.cancel("xfer-b2", leased.reservation_id) is True
+    assert pool.drain_reclaimed() == set()
+
+    _load_and_publish(manager, "xfer-c", "hashC")
+    _load_and_publish(manager, "xfer-d", "hashD")
+    manager.retire_stale({}, freed=["hashC", "hashD"])
+    record_e, write_e = _reserve(manager, "xfer-e", "hashE")
+    assert record_e is not None
+    assert write_e is True
+    assert pool.drain_reclaimed() == {"hashC"}
+
+
+def test_replaced_retire_event_is_not_inherited_by_new_resident():
+    """The replacement resident must not inherit the old one's retire event."""
+    pool = _two_tensor_pool()
+    old = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert old is not None
+    pool.publish("hashA", old)
+    lease = pool.acquire_cached("hashA", _SHAPE, _DTYPE)
+    assert lease is not None
+
+    sentinel = _HeldEvent()
+    pool._retire_events["hashA"] = sentinel
+    pool.invalidate_published()
+
+    fresh = pool.try_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert fresh is not None
+    pool.publish("hashA", fresh)
+
+    assert "hashA" not in pool._retire_events
+
+    pool.retire_stale({}, freed=["hashA"])
+    reclaimed = pool.reclaim_and_allocate(_NBYTES, _SHAPE, _DTYPE)
+    assert reclaimed is not None
+    assert sentinel.polled is False
+    assert pool._pending_frees == []

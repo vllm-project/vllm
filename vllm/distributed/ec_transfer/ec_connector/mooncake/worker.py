@@ -942,15 +942,15 @@ class ECMooncakeWorker:
         return meta
 
     def reset(self) -> None:
-        """Evict published ConsumerMemoryPool residents after a cache reset.
+        """Invalidate published ConsumerMemoryPool residents after a reset.
 
-        `reset_encoder_cache` already clears the worker encoder cache.
-        Published residents would otherwise stay pinned after the
-        freed-hash list is cleared, so later `acquire_cached` /
-        `take_resident` can return a stale tensor and a full pool
-        cannot allocate a new destination. Residents with active
-        leases are left in place. In-flight WRITING reservations are
-        not cancelled. Safe to call before the receive slab is prepared.
+        `reset_encoder_cache` already clears the worker encoder cache,
+        and the Scheduler expires its own records. Unleased published
+        residents are evicted at once; leased ones are marked
+        invalidated, so lookups miss, `take` refuses their stale READY
+        leases, and the entry is evicted at final lease release.
+        In-flight WRITING reservations are not cancelled. Safe to call
+        before the receive slab is prepared.
         """
         self._consumer_memory.invalidate_published()
 
