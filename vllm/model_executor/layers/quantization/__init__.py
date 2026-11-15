@@ -49,6 +49,7 @@ QuantizationMethods = Literal[
     "mxfp8",
     "lut_b_moe",
     "mxfp4_hadamard32",
+    "nf12",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 

@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
+    kNf12,
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
@@ -52,6 +53,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
     "lut_b": kLutBStatic,
+    "nf12": kNf12,
     # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV).
     "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
@@ -312,6 +314,10 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # emulated elsewhere. Dense layers stay unquantized.
     "lut_b_moe": QuantizationConfigArgs(
         moe=QuantSpec(weight=kLutBStatic),
+    ),
+    "nf12": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kNf12),
+        moe=QuantSpec(weight=kNf12),
     ),
 }
 
