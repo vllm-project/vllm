@@ -1402,43 +1402,6 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=4,
-        trust_remote_code=True,
-        enforce_eager=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "[unused19]"
-    video_placeholder = "[unused32]"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # OpenVLA
 def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2192,7 +2155,6 @@ model_example_map = {
     "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
-    "openpangu_vl": run_openpangu_vl,
     "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
