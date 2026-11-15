@@ -479,9 +479,8 @@ class Scheduler(SchedulerInterface):
         # Parked async KV loads can number thousands, so theirs are cached until
         # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
-        # Progress waiting to go out, keyed by request so a newer report for
-        # the same request replaces an older one instead of being sent twice.
-        # Preemptions write here too. Empty whenever reporting is off.
+        # Progress waiting to go out, keyed by request so a newer report
+        # replaces an older one. Preemptions write here too.
         self._pending_prefill_progress: dict[str, tuple[int, PrefillProgress]] = {}
         self._parked_reservations: dict[Request, int] = {}
         self._parked_reserved_blocks = 0
@@ -2274,11 +2273,7 @@ class Scheduler(SchedulerInterface):
         return GrammarOutput(structured_output_request_ids, bitmask)
 
     def _report_prefill_progress(self, request: Request) -> PrefillProgress | None:
-        """Return this step's report, or None when it is not due yet.
-
-        The state lives on the request, so a step costs a comparison per
-        scheduled request and nothing when reporting is off.
-        """
+        """This step's report, or None when it is not due yet."""
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = max(0, request.num_tokens - computed)
         if remaining <= 0:
@@ -2758,9 +2753,7 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
-        # Progress travels as an ordinary output so the frontend routes it per
-        # request, including on steps that produce no tokens. What is left here
-        # is exactly the requests whose step produced no output of its own.
+        # What is left produced no output of its own this step.
         for request_id, (client_index, update) in pending_progress.items():
             if request_id not in self.requests:
                 continue

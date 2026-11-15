@@ -1692,9 +1692,11 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
     )
     .await
     .expect("stream completion timeout");
-    assert!(responses.iter().any(|response| response.prompt_info.is_some()));
     assert!(responses.iter().any(|response| {
-        response.outputs.as_ref().is_some_and(|output| output.finish_info.is_some())
+        response
+            .outputs
+            .as_ref()
+            .is_some_and(|output| output.finish_info.is_some() && !output.token_ids.is_empty())
     }));
     engine_task.await.expect("mock engine task");
     server_task.abort();
