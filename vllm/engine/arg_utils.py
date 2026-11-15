@@ -485,6 +485,43 @@ class DeprecatedLogConfigFileAction(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
+def _validate_data_parallel_start_rank(
+    *,
+    data_parallel_size: int,
+    data_parallel_size_local: int,
+    data_parallel_start_rank: int | None,
+) -> None:
+    """Reject `--data-parallel-start-rank` values that would be ignored.
+
+    `data_parallel_size_local` must already be resolved, i.e. after the
+    launch options were inferred from `--nnodes` / `--node-rank`.
+    """
+    if data_parallel_start_rank is None:
+        return
+
+    if not 0 <= data_parallel_start_rank < data_parallel_size:
+        raise ValueError(
+            "Invalid data-parallel launch options: "
+            f"`--data-parallel-start-rank {data_parallel_start_rank}` is "
+            f"out of range for `--data-parallel-size {data_parallel_size}`; "
+            f"the valid range is 0..{data_parallel_size - 1}."
+        )
+
+    last_rank = data_parallel_start_rank + data_parallel_size_local - 1
+    if last_rank >= data_parallel_size:
+        raise ValueError(
+            "Invalid data-parallel launch options: "
+            f"`--data-parallel-start-rank {data_parallel_start_rank}` with "
+            f"`--data-parallel-size-local {data_parallel_size_local}` "
+            f"selects data-parallel ranks {data_parallel_start_rank}.."
+            f"{last_rank}, but only ranks 0..{data_parallel_size - 1} "
+            f"exist (`--data-parallel-size {data_parallel_size}`). Drop "
+            "`--data-parallel-start-rank` if this launch should own the "
+            "whole data-parallel group, otherwise lower "
+            "`--data-parallel-size-local`."
+        )
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -2517,6 +2554,15 @@ class EngineArgs:
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
+            if self.data_parallel_start_rank is not None:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-start-rank` does not apply to external "
+                    "load balancing, which is enabled by "
+                    "`--data-parallel-external-lb` or `--data-parallel-rank`. "
+                    "Set `--data-parallel-rank` to the global data-parallel "
+                    "rank of this process instead."
+                )
             if self.data_parallel_rank is None:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
@@ -2618,6 +2664,11 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
+        _validate_data_parallel_start_rank(
+            data_parallel_size=self.data_parallel_size,
+            data_parallel_size_local=data_parallel_size_local,
+            data_parallel_start_rank=self.data_parallel_start_rank,
+        )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
