@@ -50,6 +50,28 @@ else:
 
 logger = init_logger(__name__)
 
+
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
+_ROPE_HF_OVERRIDE_KEYS = frozenset(
+    {
+        "rope_parameters",
+        "original_max_position_embeddings",
+        "rope_theta",
+        "partial_rotary_factor",
+    }
+)
+# Nested HF configs that commonly wrap those rope fields (VL / hybrid).
+_NESTED_HF_CONFIG_KEYS = frozenset(
+    {
+        "text_config",
+        "language_config",
+        "llm_config",
+        "thinker_config",
+    }
+)
+
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "dots3_note_mtp",
@@ -128,6 +150,26 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+# RoPE types whose cos_sin_cache holds original_max_position_embeddings * factor
+# positions, whatever max_position_embeddings is.
+_YARN_ROPE_TYPES = frozenset({"yarn", "deepseek_yarn", "deepseek_llama_scaling"})
+
+
+def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
+    positions = []
+    for params in iter_rope_parameters(hf_config):
+        original = params.get("original_max_position_embeddings")
+        factor = params.get("factor")
+        if (
+            params.get("rope_type") not in _YARN_ROPE_TYPES
+            or not original
+            or not factor
+        ):
+            return None
+        positions.append(int(original * factor))
+    return min(positions, default=None)
 
 
 _MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
@@ -418,14 +460,10 @@ def _validate_qwen3_omni_dspark(
             f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
         )
 
-    rope_configs = (
-        getattr(draft_hf_config, "rope_parameters", None),
-        getattr(draft_hf_config, "rope_scaling", None),
-    )
+    rope_parameters = getattr(draft_hf_config, "rope_parameters", None)
     has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
-    has_mrope = has_mrope or any(
-        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
-        for rope_config in rope_configs
+    has_mrope = has_mrope or (
+        isinstance(rope_parameters, Mapping) and "mrope_section" in rope_parameters
     )
     if has_mrope:
         raise ValueError(
@@ -481,6 +519,18 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
+    draft_enable_eplb: bool = True
+    """Whether to enable EPLB for the draft model when it is enabled for the
+    target model."""
+    resolved_draft_num_redundant_experts: int | None = field(
+        default=None, init=False, repr=False
+    )
+    """Resolved redundant expert count used for the draft's EPLB config."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -629,6 +679,15 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -759,6 +818,10 @@ class SpeculativeConfig:
         # state.
         factors["uses_aux_hidden_states"] = self.uses_aux_hidden_states
         factors["speculator"] = normalize_value(self.speculator_config.hash_factors())
+        if self.resolved_draft_num_redundant_experts is not None:
+            factors["resolved_draft_num_redundant_experts"] = (
+                self.resolved_draft_num_redundant_experts
+            )
         if self.draft_model_config is not None:
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
@@ -814,6 +877,15 @@ class SpeculativeConfig:
                 }
             )
             return hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
+            text_config, "mtp_config", None
+        ):
+            from vllm.transformers_utils.configs.mistral import (
+                get_mistral_large_4_dspark_config,
+            )
+
+            return get_mistral_large_4_dspark_config(text_config)
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1301,6 +1373,45 @@ class SpeculativeConfig:
         return target_hf_overrides(hf_config)
 
     @staticmethod
+    def _select_draft_hf_overrides(
+        overrides: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep rope-relevant keys, including those nested under VL wrappers."""
+        selected: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key in _ROPE_HF_OVERRIDE_KEYS:
+                selected[key] = copy.deepcopy(value)
+            elif key in _NESTED_HF_CONFIG_KEYS and isinstance(value, Mapping):
+                nested = SpeculativeConfig._select_draft_hf_overrides(value)
+                if nested:
+                    selected[key] = nested
+        return selected
+
+    @staticmethod
+    def _apply_dict_then_arch_override(
+        target_hf_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        """Apply dict rope overrides, then the draft arch rewrite.
+
+        Dict patches run first so nested keys (`text_config.rope_parameters`)
+        apply before arch mapping may promote `text_config`. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare `text_config` dict that `get_text_config()` picks up instead.
+        """
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
+        return SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
@@ -1311,8 +1422,13 @@ class SpeculativeConfig:
         (e.g. test harnesses shrinking `num_hidden_layers`) and must also
         reach the draft config — otherwise a draft belonging to a large
         target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
+
+        Dict overrides are mostly target-specific key patches, but
+        rope-relevant keys (`rope_parameters` / `rope_theta`, including nested
+        `text_config`) must reach the draft or a YaRN-style target override
+        leaves the draft on native rope (#58080). `max_position_embeddings`
+        stays target-only so the draft max-model-len clamp keeps holding
+        (#63909).
 
         The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
@@ -1320,15 +1436,31 @@ class SpeculativeConfig:
         target via `functools.partial` over a module-referenceable static
         method instead.
         """
-        if not callable(target_hf_overrides):
+        if callable(target_hf_overrides):
+            return functools.partial(
+                SpeculativeConfig._apply_composed_hf_override,
+                target_hf_overrides,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        if not isinstance(target_hf_overrides, Mapping) or not target_hf_overrides:
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
+
+        draft_overrides = SpeculativeConfig._select_draft_hf_overrides(
+            target_hf_overrides
+        )
+        if not draft_overrides:
             return functools.partial(
                 SpeculativeConfig.hf_config_override,
                 transformers_mtp_overrides=transformers_mtp_overrides,
             )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override,
-            target_hf_overrides,
+            SpeculativeConfig._apply_dict_then_arch_override,
+            draft_overrides,
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
@@ -1387,6 +1519,24 @@ class SpeculativeConfig:
                     f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
+
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
 
         if (
             config_cls.adaptive_verification_uses_draft_logits
@@ -1536,6 +1686,19 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
+
     def update_arch_(self):
         """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
@@ -1581,17 +1744,220 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
-    def apply_draft_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
-        """Overlay this config's kernel overrides onto a target VllmConfig.
+    def _verify_draft_eplb_config(self) -> None:
+        """Validate EPLB against draft experts and the topology they use."""
+        draft_model_config = self.draft_model_config
+        target_parallel_config = self.target_parallel_config
+        requested_redundant_experts = (
+            target_parallel_config.eplb_config.draft_num_redundant_experts
+            if target_parallel_config is not None
+            else None
+        )
 
-        Only non-None fields override, so an unset field keeps whatever the
-        target resolved.
+        if not self.draft_enable_eplb:
+            if requested_redundant_experts is not None:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts requires "
+                    "speculative_config.draft_enable_eplb=true."
+                )
+            return
+
+        if requested_redundant_experts is not None:
+            if target_parallel_config is None or not target_parallel_config.enable_eplb:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts requires target "
+                    "EPLB to be "
+                    "enabled and speculative_config.draft_enable_eplb=true."
+                )
+            if not self.use_eagle():
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts is only supported for MoE "
+                    "draft methods that use EPLB."
+                )
+
+        if draft_model_config is None or target_parallel_config is None:
+            return
+
+        if self.method == "dspark":
+            if not target_parallel_config.enable_eplb:
+                return
+
+            from vllm.v1.worker.gpu.spec_decode.dspark.config import (
+                dspark_draft_supports_eplb,
+            )
+
+            supports_eplb = dspark_draft_supports_eplb(draft_model_config)
+            if requested_redundant_experts is not None and not supports_eplb:
+                raise ValueError(
+                    "eplb_config.draft_num_redundant_experts is only supported for "
+                    "DeepSeek V4 or V4.1 DSpark drafts that support EPLB. To "
+                    "disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts "
+                    "and set speculative_config.draft_enable_eplb=false."
+                )
+            if not supports_eplb:
+                return
+
+            if target_parallel_config.enable_elastic_ep:
+                raise ValueError(
+                    "EPLB for a DSpark draft is not supported with Elastic EP. "
+                    "Set speculative_config.draft_enable_eplb=false to disable "
+                    "draft EPLB."
+                )
+
+            assert self.draft_parallel_config is not None
+            if (
+                self.draft_parallel_config.tensor_parallel_size == 1
+                and target_parallel_config.prefill_context_parallel_size == 1
+                and target_parallel_config.data_parallel_size == 1
+            ):
+                remediation = (
+                    " If you want to disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts and set "
+                    "speculative_config.draft_enable_eplb=false."
+                    if requested_redundant_experts is not None
+                    else " To disable draft EPLB, set "
+                    "speculative_config.draft_enable_eplb=false."
+                )
+                raise ValueError(
+                    "EPLB for a DSpark draft requires its tensor parallel size, "
+                    "prefill context parallel size, or data parallel size to "
+                    "be greater than 1."
+                    f"{remediation}"
+                )
+            draft_parallel_config = target_parallel_config
+            draft_num_experts = (
+                getattr(draft_model_config.hf_config, "dspark_n_routed_experts", 0)
+                or getattr(
+                    draft_model_config.hf_text_config,
+                    "dspark_n_routed_experts",
+                    0,
+                )
+                or None
+            )
+        else:
+            if not self.use_eagle() or not target_parallel_config.enable_eplb:
+                return
+            if not draft_model_config.is_moe:
+                if requested_redundant_experts is not None:
+                    raise ValueError(
+                        "eplb_config.draft_num_redundant_experts requires a MoE "
+                        "draft model."
+                    )
+                return
+            draft_parallel_config = target_parallel_config
+            draft_num_experts = None
+
+        ep_size = (
+            draft_parallel_config.tensor_parallel_size
+            * draft_parallel_config.prefill_context_parallel_size
+            * draft_parallel_config.data_parallel_size
+        )
+        draft_expert_counts = draft_model_config.get_eplb_expert_counts(
+            draft_num_experts
+        )
+        target_expert_counts = (
+            self.target_model_config.get_eplb_expert_counts()
+            if self.target_model_config is not None
+            else set()
+        )
+        target_num_redundant_experts = (
+            target_parallel_config.eplb_config.num_redundant_experts
+        )
+        can_inherit_target_count = (
+            requested_redundant_experts is None
+            and bool(draft_expert_counts)
+            and draft_expert_counts == target_expert_counts
+            and target_num_redundant_experts is not None
+        )
+        if can_inherit_target_count:
+            self.resolved_draft_num_redundant_experts = target_num_redundant_experts
+        elif requested_redundant_experts is not None:
+            self.resolved_draft_num_redundant_experts = requested_redundant_experts
+        else:
+            default_num_experts = (
+                draft_num_experts
+                if draft_num_experts is not None
+                else draft_model_config.get_num_experts()
+            )
+            minimum_counts = {(-count) % ep_size for count in draft_expert_counts}
+            if len(minimum_counts) == 1:
+                self.resolved_draft_num_redundant_experts = next(iter(minimum_counts))
+            else:
+                self.resolved_draft_num_redundant_experts = (
+                    -default_num_experts
+                ) % ep_size
+            logger.info_once(
+                "Draft EPLB redundant expert count not specified, "
+                "defaulting to minimum valid value: %d "
+                "(routed_expert_counts=%s, ep_size=%d)",
+                self.resolved_draft_num_redundant_experts,
+                tuple(sorted(draft_expert_counts)),
+                ep_size,
+            )
+        draft_parallel_config = replace(
+            draft_parallel_config,
+            eplb_config=replace(
+                draft_parallel_config.eplb_config,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
+            ),
+        )
+
+        draft_model_config.verify_eplb_config(
+            draft_parallel_config,
+            num_experts=draft_num_experts,
+            config_name="eplb_config.draft_num_redundant_experts",
+            disable_config_name="speculative_config.draft_enable_eplb",
+        )
+
+    def _apply_draft_eplb_override(
+        self, parallel_config: ParallelConfig
+    ) -> ParallelConfig:
+        """Return the parallel config with the draft EPLB settings applied."""
+        if not self.draft_enable_eplb:
+            return replace(
+                parallel_config,
+                enable_eplb=False,
+                enable_elastic_ep=False,
+                eplb_config=replace(
+                    parallel_config.eplb_config,
+                    num_redundant_experts=0,
+                ),
+            )
+        if self.resolved_draft_num_redundant_experts is None:
+            return parallel_config
+        return replace(
+            parallel_config,
+            eplb_config=replace(
+                parallel_config.eplb_config,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
+            ),
+        )
+
+    def apply_draft_eplb_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
+        """Apply draft-only EPLB settings without changing the target config."""
+        if self.draft_enable_eplb and self.resolved_draft_num_redundant_experts is None:
+            return vllm_config
+        # VllmConfig retains the target ModelConfig here. Replacing it would
+        # revalidate the draft count against the target model's expert count.
+        draft_vllm_config = copy.copy(vllm_config)
+        draft_vllm_config.parallel_config = self._apply_draft_eplb_override(
+            vllm_config.parallel_config
+        )
+        return draft_vllm_config
+
+    def apply_draft_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
+        """Overlay this config's draft overrides onto a target VllmConfig.
+
+        Only non-None model overrides are applied. Draft EPLB settings are
+        applied separately, including the draft-specific redundant-expert count
+        from eplb_config.
         """
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:
                 sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
-        return vllm_config
+        return self.apply_draft_eplb_overrides(vllm_config)
 
     @field_validator("method")
     @classmethod
@@ -1657,6 +2023,7 @@ class SpeculativeConfig:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
             )
+        self._verify_draft_eplb_config()
 
         if self.parallel_drafting is not None:
             if self.parallel_drafting and self.method not in ("dflash", "dspark"):
@@ -1690,6 +2057,25 @@ class SpeculativeConfig:
             logger.warning_once(
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
+            )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
             )
 
         self.verify_equal_vocab_size_if_draft_model()

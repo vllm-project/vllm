@@ -114,12 +114,12 @@ def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return full_tensor() if callable(full_tensor) else tensor
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Replicate:
     """Every coordinate along this mesh axis holds the whole extent."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shard:
     """This mesh axis splits tensor dim `dim` the way `torch.chunk` does."""
 

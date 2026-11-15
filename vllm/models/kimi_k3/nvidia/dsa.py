@@ -67,6 +67,10 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 logger = init_logger(__name__)
 
@@ -520,16 +524,12 @@ class KimiK3DSAAttention(nn.Module):
         rope_parameters: dict = dict(getattr(config, "rope_parameters", None) or {})
         if "rope_theta" not in rope_parameters:
             rope_parameters["rope_theta"] = 10000.0
-        rope_scaling = (
-            rope_parameters
-            if rope_parameters.get("rope_type") not in (None, "default")
-            else None
-        )
+        is_scaled_rope = rope_parameters.get("rope_type") not in (None, "default")
         self.use_nope = bool(config.mla_use_nope)
         if self.use_nope:
             self.rotary_emb = None
         else:
-            if rope_scaling:
+            if is_scaled_rope:
                 rope_parameters["rope_type"] = "deepseek_yarn"
             self.rotary_emb = get_rope(
                 qk_rope_head_dim,
@@ -537,8 +537,8 @@ class KimiK3DSAAttention(nn.Module):
                 is_neox_style=False,
                 rope_parameters=rope_parameters,
             )
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+        if is_scaled_rope:
+            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
             scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
@@ -649,6 +649,10 @@ class KimiK3DSAAttention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             is_sparse=True,
             topk_indices_buffer=self.topk_indices_buffer,
+            index_group_builder=SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            ),
         )
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
