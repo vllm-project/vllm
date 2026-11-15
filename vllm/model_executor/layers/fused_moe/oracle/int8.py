@@ -42,8 +42,8 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """Return the fixed INT8 backend priority order."""
-    return list(Int8MoEKernelOracle.priority_backends)
+    """Legacy wrapper for INT8 backend priority selection."""
+    return Int8MoEKernelOracle(moe_config).get_priority_backends()
 
 
 def backend_to_kernel_cls(

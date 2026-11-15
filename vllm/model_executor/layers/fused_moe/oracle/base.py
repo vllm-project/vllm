@@ -50,6 +50,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     Deployment inputs are supplied at construction and stored as
     `self.moe_config`, `self.weight_key`, and `self.activation_key`. Priority
     and selection overrides can read these attributes without per-call inputs.
+    Subclasses needing additional inputs should override specific methods, and extend
+    the signature.
     """
 
     # Display name for the shared log helpers below; subclasses must set it.
