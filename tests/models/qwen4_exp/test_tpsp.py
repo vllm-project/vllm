@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multi-GPU equivalence tests for Qwen4Exp HC and MoE sequence parallelism."""
+"""Multi-GPU equivalence tests for Qwen4Exp sequence parallelism and batch-sharded
+sampling."""
 
 from dataclasses import MISSING, fields
 from types import SimpleNamespace
@@ -32,7 +33,9 @@ from vllm.distributed import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -40,6 +43,8 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadata
+from vllm.v1.worker.gpu.sample.batch_shard import all_to_all_vocab_shards
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from .test_ple import _ConvBatchCase, _make_conv_metadata
@@ -295,6 +300,87 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
         cleanup_dist_env_and_memory()
 
 
+def _check_batch_sharded_logits(rank: int) -> None:
+    """Compare the batch-sharded logits and tokens of this rank with the all-gather."""
+    tp_size, num_rows, vocab_size, hidden_size, tie_period = 2, 6, 1000, 16, 250
+    language_model = qwen4_model.Qwen4ExpForCausalLM.__new__(
+        qwen4_model.Qwen4ExpForCausalLM
+    )
+    model = qwen4_model.Qwen4ExpForConditionalGeneration.__new__(
+        qwen4_model.Qwen4ExpForConditionalGeneration
+    )
+    for module in (language_model, model):
+        nn.Module.__init__(module)
+    lm_head = ParallelLMHead(vocab_size, hidden_size, params_dtype=torch.bfloat16)
+    language_model.lm_head = lm_head
+    language_model.logits_processor = LogitsProcessor(vocab_size)
+    model.language_model = language_model
+
+    # Small integers keep BF16 logits exact. Token ids that differ by tie_period
+    # share a head row, so each row maximum is tied inside and across the shards.
+    generator = torch.Generator().manual_seed(0)
+    head_rows = torch.randint(
+        -2, 3, (tie_period, hidden_size), generator=generator, device="cpu"
+    )
+    shard_width = lm_head.num_embeddings_per_partition
+    shard_token_ids = torch.arange(shard_width, device="cpu") + rank * shard_width
+    lm_head.weight.copy_(head_rows[shard_token_ids % tie_period])
+    hidden = torch.randint(
+        -1, 2, (num_rows, hidden_size), generator=generator, device="cpu"
+    ).to(lm_head.weight)
+
+    gathered = model.compute_logits(hidden)
+    assert ((gathered == gathered.amax(-1, keepdim=True)).sum(-1) >= 4).all()
+
+    # Rows in owner order, as BatchSharder passes them: request i belongs to
+    # rank i % tp_size, and each rank receives its own rows at full vocabulary.
+    rows_by_owner = [torch.arange(owner, num_rows, tp_size) for owner in range(tp_size)]
+    local = model.compute_logits_local(hidden[torch.cat(rows_by_owner)])
+    assert local.shape == (num_rows, shard_width)
+    owned = rows_by_owner[rank]
+    sharded = all_to_all_vocab_shards(local, [len(owned)] * tp_size, len(owned))
+    sharded = sharded[:, :vocab_size]
+    assert torch.equal(sharded, gathered[owned])
+
+    # Greedy requests take the lowest tied id; the others draw seeded noise.
+    temperature = torch.tensor([0.0, 0.0, 1.0, 1.0, 0.0, 1.0])
+    seeds = torch.arange(num_rows) + 7
+    positions = torch.arange(num_rows) + 3
+
+    def sample(logits: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+        return gumbel_sample(
+            logits,
+            rows,
+            temperature,
+            seeds,
+            positions[rows],
+            apply_temperature=False,
+            is_drafting=False,
+        )
+
+    all_rows = torch.arange(num_rows)
+    assert torch.equal(sample(sharded, owned), sample(gathered, all_rows)[owned])
+
+
+def _run_batch_sharded_logits(rank: int, port: int) -> None:
+    """Initialize a TP=2 rank and run the batch-sharded logits check."""
+    torch.accelerator.set_device_index(rank)
+    config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
+    init_distributed_environment(
+        world_size=2,
+        rank=rank,
+        local_rank=rank,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+    )
+    try:
+        with set_current_vllm_config(config):
+            initialize_model_parallel(tensor_model_parallel_size=2)
+            with torch.device(f"cuda:{rank}"), torch.inference_mode():
+                _check_batch_sharded_logits(rank)
+    finally:
+        cleanup_dist_env_and_memory()
+
+
 @multi_gpu_test(num_gpus=2)
 def test_hc_sp_decoder_and_ple() -> None:
     """HC SP preserves decoder output and PLE cache across a token-shard boundary."""
@@ -313,3 +399,10 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
     """Padding in compiled SP collectives must not specialize on the traced size."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_batch_sharded_logits_match_all_gather() -> None:
+    """Batch-sharded sampling reads the logits and samples the tokens of the
+    all-gather path, through the served model's `compute_logits_local`."""
+    mp.spawn(_run_batch_sharded_logits, args=(get_open_port(),), nprocs=2)
