@@ -11,9 +11,8 @@ gate_up, in_proj_qkvz, in_proj_ba) are tuned as well as their parts.
 
 Every shape is tuned with `mm_bf16(pdl=True, backend="auto")` for the given
 M buckets and the winners are written to a FlashInfer autotune JSON file. Put
-the file into `~/.cache/vllm/flashinfer_bf16_tuning` (under VLLM_CACHE_ROOT) and
-start vLLM with `--linear-backend flashinfer`: matching shapes are then not
-tuned again at warmup.
+the file into `vllm/model_executor/layers/gemmbf16_configs` and start vLLM with
+`--linear-backend flashinfer`: matching shapes are then not tuned again at warmup.
 
 Usage:
     python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 --bs 1,2,4 --out F.json

@@ -37,6 +37,12 @@ def is_flashinfer_autotuning() -> bool:
     return AutoTuner.get().is_tuning_mode
 
 
+_BF16_TUNING_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "model_executor"
+    / "layers"
+    / "gemmbf16_configs"
+)
 _bf16_tuning_files_loaded = False
 
 
@@ -46,8 +52,8 @@ def is_flashinfer_bf16_tuning_loaded() -> bool:
 
 @functools.cache
 def load_flashinfer_bf16_tuning_dir() -> None:
-    """Load every FlashInfer autotune JSON in VLLM_CACHE_ROOT/flashinfer_bf16_tuning."""
-    directory = Path(envs.VLLM_CACHE_ROOT) / "flashinfer_bf16_tuning"
+    """Load every FlashInfer autotune JSON shipped in gemmbf16_configs."""
+    directory = _BF16_TUNING_DIR
     files = sorted(directory.glob("*.json"))
     if not files:
         return

@@ -89,9 +89,9 @@ def tuner_loads(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
 
 @pytest.fixture
 def tuning_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
-    directory = tmp_path / "flashinfer_bf16_tuning"
+    directory = tmp_path / "gemmbf16_configs"
     directory.mkdir()
+    monkeypatch.setattr(fi, "_BF16_TUNING_DIR", directory)
     return directory
 
 
@@ -106,7 +106,7 @@ def test_load_tuning_dir_loads_every_json(tuner_loads: list[str], tuning_dir: Pa
 def test_load_tuning_dir_missing_loads_nothing(
     tuner_loads: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setattr(fi, "_BF16_TUNING_DIR", tmp_path / "missing")
     fi.load_flashinfer_bf16_tuning_dir()
     assert tuner_loads == []
     assert not fi.is_flashinfer_bf16_tuning_loaded()
