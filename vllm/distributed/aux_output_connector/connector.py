@@ -12,15 +12,42 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    get_routed_experts_bytes_per_token,
+)
+from vllm.v1.core.kv_cache_utils import (
+    maybe_convert_block_hash,
+    resolve_kv_cache_block_sizes,
+)
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+
+def retained_objects(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> tuple[int, int]:
+    """Number of hash-block objects whose routed experts the scheduler retains
+    and the worker stores, and the tokens per object."""
+    block_size, hash_block_size = resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    max_bytes = vllm_config.aux_output_config.max_bytes
+    if max_bytes is not None:
+        object_nbytes = hash_block_size * get_routed_experts_bytes_per_token(
+            vllm_config
+        )
+        return max(max_bytes // object_nbytes, 1), hash_block_size
+    num_blocks = kv_cache_config.num_blocks
+    if vllm_config.kv_transfer_config is not None:
+        num_blocks *= 2
+    return num_blocks * (block_size // hash_block_size), hash_block_size
 
 
 @dataclass(slots=True)
@@ -57,7 +84,7 @@ class AuxOutputSchedulerConnector:
     def __init__(
         self,
         kv_cache_manager: KVCacheManager,
-        kv_connector: KVConnectorBase_V1 | None = None,
+        num_objects: int,
     ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -74,9 +101,7 @@ class AuxOutputSchedulerConnector:
             OrderedDict()
         )
         self._loading: dict[str, set[ExternalBlockHash]] = {}
-        self._capacity = kv_cache_manager.kv_cache_config.num_blocks * (
-            2 if kv_connector else 1
-        )
+        self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
 
