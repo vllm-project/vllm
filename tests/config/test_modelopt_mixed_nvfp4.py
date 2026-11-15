@@ -131,3 +131,24 @@ def test_mixed_precision_backfills_missing_quantized_layers_from_hf_quant_config
         == "NVFP4"
     )
     assert quant_config.is_layer_excluded("mtp.layers.0.eh_proj")
+
+
+def test_mixed_precision_preserves_config_when_auxiliary_metadata_is_none(tmp_path):
+    """An unusable optional file must not break a complete embedded config."""
+    from transformers import LlamaConfig
+
+    from vllm.transformers_utils.config import get_config
+
+    hf_config = LlamaConfig()
+    hf_config.quantization_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION",
+        **_quantized_layers("FP8", "NVFP4"),
+    }
+    hf_config.save_pretrained(tmp_path)
+    # A JSON null exercises the same None result as a failed optional Hub download.
+    (tmp_path / "hf_quant_config.json").write_text("null")
+
+    loaded = get_config(tmp_path, trust_remote_code=False)
+
+    assert loaded.quantization_config == hf_config.quantization_config

@@ -1020,6 +1020,8 @@ def get_config(
         # auxiliary layer entries from config.json's quantized_layers that are
         # present in hf_quant_config.json. Backfill any missing layer entries.
         hf_quant_config = get_hf_file_to_dict("hf_quant_config.json", model, revision)
+        if hf_quant_config is None:
+            hf_quant_config = {}
         hf_layers = (
             hf_quant_config.get("quantization", {}).get("quantized_layers")
             if isinstance(hf_quant_config.get("quantization"), dict)
