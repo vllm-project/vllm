@@ -14,7 +14,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -95,13 +94,13 @@ class FileSystemTierManager(SecondaryTierManager):
 
     Cross-process sharing:
         KV cache sharing between multiple vLLM instances using the same
-        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH`
         (the chain-hash seed for block content hashes) is derived from a fixed
         default seed, so identical token content produces identical block
-        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        filenames across instances. Setting the `PYTHONHASHSEED` environment
         variable to the same value on all instances overrides the default seed,
         and is required to share a cache when using a non-cryptographic
-        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
+        prefix-caching hash algorithm, which seeds `NONE_HASH` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -150,13 +149,11 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Track in-flight store jobs for lookup invalidation and KV events.
+        self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Block count per in-flight job, used to report transfer_bytes.
-        self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -164,6 +161,10 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+        # Block count per in-flight job, used to report transfer_bytes. Loads
+        # count their keys; stores count the blocks actually written (set by
+        # the pool worker, same ordering as _load_progress).
+        self._job_block_counts: dict[JobId, int] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -221,19 +222,22 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = keys
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
-            self._use_o_direct,
-        )
-        self._job_block_counts[job_metadata.job_id] = len(keys)
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        self._store_jobs[job_id] = job_metadata
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+
+        def store_task() -> None:
+            self._job_block_counts[job_id] = batch_store_block(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(job_id, 1, [store_task])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -281,17 +285,22 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
-            block_count = self._job_block_counts.pop(job_id, 0)
-            transfer_bytes = block_count * self._block_size if block_count else None
-            if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
+            block_count = self._job_block_counts.pop(job_id, None)
+            transfer_bytes = (
+                block_count * self._block_size if block_count is not None else None
+            )
+            job = self._store_jobs.pop(job_id, None)
+            if job is not None and success:
+                # Successful store makes previously absent keys known-present.
+                self._lookup_manager.mark_present(job.keys)
+                if self.events is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=keys,
+                            keys=list(job.keys),
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=job.req_context,
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)

@@ -5,7 +5,7 @@
 Only the prefill path is specialized on CDNA: each 128-token KV block is split
 into SUB_K-token sub-tiles to right-size the per-block QK/PV MFMAs. Everything
 else -- the decode split-K kernels, the FP8 dtype set, the sparse block size --
-is reused unchanged from ``common.ops.sparse_attn``.
+is reused unchanged from `common.ops.sparse_attn`.
 """
 
 import torch
@@ -33,10 +33,10 @@ _SPARSE_ATTN_PREFILL_KWARG: dict | None = None
 def _sparse_attn_prefill_kwargs() -> dict:
     """MFMA + pipeline launch params for the sub-tiled prefill kernel.
 
-    gfx942 and gfx950 share the same params: ``num_warps=1`` keeps one wave
-    resident on the small per-sub-tile GEMM, ``matrix_instr_nonkdim=16`` /
-    ``kpack=2`` select the MFMA_16x16 path, and ``num_stages=1`` fits LDS and is
-    fastest in the sweep. Only the sub-tile width (``_SPARSE_ATTN_SUB_K``)
+    gfx942 and gfx950 share the same params: `num_warps=1` keeps one wave
+    resident on the small per-sub-tile GEMM, `matrix_instr_nonkdim=16` /
+    `kpack=2` select the MFMA_16x16 path, and `num_stages=1` fits LDS and is
+    fastest in the sweep. Only the sub-tile width (`_SPARSE_ATTN_SUB_K`)
     differs by arch. Empty on other AMD archs. Cached: arch is fixed per process.
     """
     global _SPARSE_ATTN_PREFILL_KWARG
@@ -65,8 +65,9 @@ def _sparse_attn_prefill_kwargs() -> dict:
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
         "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
-        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_QH": lambda args: (
+            args["BLOCK_SIZE_Q"] * triton.next_power_of_2(args["gqa_group_size"])
+        ),
     }
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])

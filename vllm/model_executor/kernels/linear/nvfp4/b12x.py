@@ -6,9 +6,10 @@ from __future__ import annotations
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit
+from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -63,7 +64,7 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
             return False, "B12X NVFP4 kernels require a Blackwell 12x device"
         blockscaled = _import_b12x_blockscaled()
         if blockscaled is None or _import_b12x_intrinsics() is None:
-            return False, "Install the B12X backend with `pip install vllm[b12x]`"
+            return False, "The b12x backend requires flashinfer-python>=0.7.2"
         if not blockscaled.is_supported():
             return False, "b12x native NVFP4 GEMM is not supported"
         return True, None
@@ -141,15 +142,24 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
 class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
     """BF16 x NVFP4 GEMM without activation quantization."""
 
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        layer.b12x_nvfp4_packed_weight = blockscaled.pack_weight(
+        packed_weight = blockscaled.pack_weight(
             layer.weight,
             layer.weight_scale,
             recipe="nvfp4",
             global_scale=layer.weight_global_scale,
+        )
+        layer.b12x_nvfp4_packed_weight = reuse_packed_weight_storage(
+            getattr(layer, "b12x_nvfp4_packed_weight", None), packed_weight
         )
 
     def get_b12x_warmup_unit(

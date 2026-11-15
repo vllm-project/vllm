@@ -5,6 +5,8 @@
 
 use std::sync::{Arc, LazyLock};
 
+use vllm_tokenizer::DynTokenizer;
+
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
@@ -49,8 +51,11 @@ pub mod names {
 }
 
 /// Constructor signature for one registered tool parser implementation.
-type ToolParserCreator =
-    Arc<dyn Fn(&[ChatTool]) -> vllm_parser::tool::Result<Box<dyn ToolParser>> + Send + Sync>;
+type ToolParserCreator = Arc<
+    dyn Fn(&[ChatTool], DynTokenizer) -> vllm_parser::tool::Result<Box<dyn ToolParser>>
+        + Send
+        + Sync,
+>;
 
 /// Registry and model matcher for tool parsers.
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
@@ -146,14 +151,19 @@ impl ToolParserFactory {
     }
 
     /// Construct a parser from an exact name.
-    pub fn create(&self, name: &str, tools: &[ChatTool]) -> crate::Result<Box<dyn ToolParser>> {
+    pub fn create(
+        &self,
+        name: &str,
+        tools: &[ChatTool],
+        tokenizer: DynTokenizer,
+    ) -> crate::Result<Box<dyn ToolParser>> {
         let creator = self.creator(name).ok_or_else(|| crate::Error::ParserUnavailableByName {
             kind: "tool",
             name: name.to_string(),
             available_names: self.list(),
         })?;
 
-        creator.as_ref()(tools).map_err(|error| crate::Error::ParserInitialization {
+        creator.as_ref()(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "tool",
             name: name.to_string(),
             error: error.into(),
@@ -165,6 +175,7 @@ impl ToolParserFactory {
         &self,
         model_id: &str,
         tools: &[ChatTool],
+        tokenizer: DynTokenizer,
     ) -> crate::Result<Box<dyn ToolParser>> {
         let name = self.resolve_name_for_model(model_id).ok_or_else(|| {
             crate::Error::ParserUnavailableForModel {
@@ -172,7 +183,7 @@ impl ToolParserFactory {
                 model_id: model_id.to_string(),
             }
         })?;
-        self.create(name, tools)
+        self.create(name, tools, tokenizer)
     }
 }
 

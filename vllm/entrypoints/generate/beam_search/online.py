@@ -78,7 +78,7 @@ class BeamSearchOnlineMixin(ABC):
             self.engine_client.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
+        sort_beams_key = create_sort_beams_key_function(length_penalty)
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
