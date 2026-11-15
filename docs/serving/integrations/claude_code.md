@@ -23,8 +23,21 @@ Counting accepts the same request fields but does not require `max_tokens`.
 `temperature` must be between 0 and 1, inclusive, following the Anthropic API.
 A final assistant message containing non-empty text is continued; token counting
 uses the same continuation prompt. Both endpoints reuse the shared chat renderer
-and tokenizer. Streaming, other content types, and other request options return
-an error. Authentication uses the existing bearer-token configuration.
+and tokenizer.
+
+Parsed reasoning is returned as `thinking` blocks with generated
+UUID signatures. Assistant history accepts `thinking` blocks, ignores their
+signatures, and skips opaque `redacted_thinking` blocks. These signatures match
+the Python frontend's placeholders, not Anthropic's encrypted signatures.
+
+Both endpoints accept `thinking` and `output_config.effort`, using the shared
+reasoning-effort map and renderer. Enabled thinking requires `budget_tokens` of
+at least 1,024; adaptive thinking preserves the requested effort or model default.
+Disabled and `between_tools` thinking map to effort `none`, subject to the
+configured effort map. As in Python, `thinking.display` is accepted but ignored;
+reasoning is always returned. Streaming, tools, output-format configuration,
+other content types, and other request options return an error.
+Authentication uses the existing bearer-token configuration.
 Request failures use Anthropic error envelopes. Retryable engine rejections return
 HTTP 503.
 Use `VLLM_USE_RUST_FRONTEND=0` for the Claude Code workflow below.

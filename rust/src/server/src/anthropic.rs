@@ -16,8 +16,8 @@ use crate::utils::ResolvedRequestContext;
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessageExt as _, ChatContent, ChatContentPart, ChatLlm,
-    ChatMessage, ChatOptions, ChatRequest, FinishReason, GenerationPromptMode, ResolvedToolContext,
-    SamplingParams,
+    ChatMessage, ChatOptions, ChatRequest, EffortValue, FinishReason, GenerationPromptMode,
+    ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::TokenUsage;
@@ -26,7 +26,7 @@ use vllm_llm::TokenUsage;
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessagesRequest {
     pub(crate) model: String,
-    messages: Vec<Message>,
+    messages: Vec<InputMessage>,
     system: Option<TextContent>,
     #[validate(range(min = 1))]
     max_tokens: Option<u32>,
@@ -37,6 +37,8 @@ pub(crate) struct MessagesRequest {
     top_k: Option<u32>,
     stop_sequences: Option<Vec<String>>,
     stream: Option<bool>,
+    thinking: Option<ThinkingConfig>,
+    output_config: Option<OutputConfig>,
 }
 
 impl Normalizable for MessagesRequest {
@@ -48,23 +50,31 @@ impl Normalizable for MessagesRequest {
     }
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
-enum Message {
+enum InputMessage {
     User { content: TextContent },
-    Assistant { content: TextContent },
+    Assistant { content: AssistantContent },
 }
 
-impl From<Message> for ChatMessage {
-    fn from(message: Message) -> Self {
+impl From<InputMessage> for ChatMessage {
+    fn from(message: InputMessage) -> Self {
         match message {
-            Message::User { content } => Self::user(content.into_content()),
-            Message::Assistant { content } => match content {
-                TextContent::Text(text) => Self::assistant_text(text),
-                TextContent::Blocks(blocks) => Self::assistant_blocks(
+            InputMessage::User { content } => Self::user(content.into_content()),
+            InputMessage::Assistant { content } => match content {
+                AssistantContent::Text(text) => Self::assistant_text(text),
+                AssistantContent::Blocks(blocks) => Self::assistant_blocks(
                     blocks
                         .into_iter()
-                        .map(|TextBlock::Text { text }| AssistantContentBlock::Text { text })
+                        .filter_map(|block| match block {
+                            AssistantInputBlock::Text { text } => {
+                                Some(AssistantContentBlock::Text { text })
+                            }
+                            AssistantInputBlock::Thinking { thinking, .. } => {
+                                Some(AssistantContentBlock::Reasoning { text: thinking })
+                            }
+                            AssistantInputBlock::RedactedThinking { .. } => None,
+                        })
                         .collect(),
                 ),
             },
@@ -72,17 +82,98 @@ impl From<Message> for ChatMessage {
     }
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum TextContent {
     Text(String),
     Blocks(Vec<TextBlock>),
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum TextBlock {
     Text { text: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AssistantContent {
+    Text(String),
+    Blocks(Vec<AssistantInputBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum AssistantInputBlock {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
+    // Opaque reasoning cannot be rendered, but clients replay the full response.
+    RedactedThinking {
+        data: String,
+    },
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum OutputContentBlock {
+    Text { text: String },
+    Thinking { thinking: String, signature: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ThinkingConfig {
+    Enabled {
+        budget_tokens: i64,
+        // Like Python, always return reasoning and retain it in history.
+        display: Option<ThinkingDisplay>,
+    },
+    Disabled,
+    Adaptive {
+        display: Option<ThinkingDisplay>,
+    },
+    BetweenTools,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThinkingDisplay {
+    Summarized,
+    Omitted,
+    Updates,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputConfig {
+    effort: Option<OutputEffort>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OutputEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl From<OutputEffort> for EffortValue {
+    fn from(effort: OutputEffort) -> Self {
+        Self::from(match effort {
+            OutputEffort::Low => "low",
+            OutputEffort::Medium => "medium",
+            OutputEffort::High => "high",
+            OutputEffort::XHigh => "xhigh",
+            OutputEffort::Max => "max",
+        })
+    }
 }
 
 impl TextContent {
@@ -122,6 +213,25 @@ impl MessagesRequest {
         if self.stream == Some(true) {
             return Err(invalid_request!("Streaming Messages is not supported yet"));
         }
+        let mut reasoning_effort =
+            self.output_config.and_then(|config| config.effort).map(EffortValue::from);
+        let thinking_token_budget = match self.thinking {
+            Some(ThinkingConfig::Disabled | ThinkingConfig::BetweenTools) => {
+                // Like Python, between-tools thinking starts with thinking disabled.
+                reasoning_effort = Some(EffortValue::from("none"));
+                None
+            }
+            Some(ThinkingConfig::Enabled { budget_tokens, .. }) => {
+                if budget_tokens < 1024 {
+                    return Err(invalid_request!(
+                        param = "thinking.budget_tokens",
+                        "thinking.budget_tokens must be at least 1024"
+                    ));
+                }
+                Some(budget_tokens)
+            }
+            Some(ThinkingConfig::Adaptive { .. }) | None => None,
+        };
         let stop_strings = self
             .stop_sequences
             .map(|stops| {
@@ -153,9 +263,11 @@ impl MessagesRequest {
                 temperature: self.temperature,
                 top_p: self.top_p,
                 top_k: self.top_k,
+                thinking_token_budget,
                 ..Default::default()
             },
             chat_options: ChatOptions {
+                reasoning_effort,
                 generation_prompt_mode: if continuation {
                     GenerationPromptMode::ContinueFinalAssistant
                 } else {
@@ -260,29 +372,68 @@ impl<'a> MessagesLlm<'a> {
         let request_id = request.request_id.clone();
         let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);
         let response = async {
-        let response = self.chat.chat(request).await
-            .map_err(|error| chat_submit_error("failed to submit Messages request", error))?
-            .collect_message().await
-            .map_err(|error| chat_submit_error("failed to collect Messages response", error))?;
-        let (reason, sequence) = stop_reason(&response.finish_reason)?;
-        if response.message.has_reasoning() || response.message.has_tool_calls() {
-            return Err(invalid_request!("Reasoning and tool output are not supported yet"));
+            let response = self
+                .chat
+                .chat(request)
+                .await
+                .map_err(|error| chat_submit_error("failed to submit Messages request", error))?
+                .collect_message()
+                .await
+                .map_err(|error| chat_submit_error("failed to collect Messages response", error))?;
+            let (reason, sequence) = stop_reason(&response.finish_reason)?;
+            let text = response.message.text();
+            let mut content = response
+                .message
+                .content
+                .into_iter()
+                .map(|block| match block {
+                    AssistantContentBlock::Text { text } => Ok(OutputContentBlock::Text { text }),
+                    AssistantContentBlock::Reasoning { text } => Ok(OutputContentBlock::Thinking {
+                        thinking: text,
+                        signature: uuid::Uuid::new_v4().simple().to_string(),
+                    }),
+                    AssistantContentBlock::ToolCall(_) => {
+                        Err(invalid_request!("Tool output is not supported yet"))
+                    }
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+            if content.is_empty() {
+                content.push(OutputContentBlock::Text {
+                    text: String::new(),
+                });
+            }
+            if self.enable_log_requests {
+                tracing::info!(
+                    model = %model.response_model(),
+                    prompt_tokens = response.usage.prompt_token_count,
+                    output_tokens = response.usage.output_token_count,
+                    finish_reason = reason,
+                    "Messages finished"
+                );
+            }
+            if self.log_outputs.logs_complete() && !text.is_empty() {
+                self.log_outputs.log(
+                    LoggedOutput::Response,
+                    &text,
+                    Some(&response.token_ids),
+                    Some(reason),
+                );
+            }
+            Ok::<_, ApiError>(MessagesResponse {
+                id: request_id,
+                message_type: "message",
+                role: "assistant",
+                content,
+                model: model.response_model(),
+                stop_reason: reason,
+                stop_sequence: sequence.map(str::to_owned),
+                usage: usage(response.usage.engine, self.enable_prompt_tokens_details),
+                kv_transfer_params: response.kv_transfer_params,
+                ec_transfer_params: response.ec_transfer_params,
+            })
         }
-        let text = response.message.text();
-        if self.enable_log_requests {
-            tracing::info!(model = %model.response_model(), prompt_tokens = response.usage.prompt_token_count,
-                output_tokens = response.usage.output_token_count, finish_reason = reason, "Messages finished");
-        }
-        if self.log_outputs.logs_complete() && !text.is_empty() {
-            self.log_outputs.log(LoggedOutput::Response, &text, Some(&response.token_ids), Some(reason));
-        }
-        Ok(MessagesResponse {
-            id: request_id, message_type: "message", message: Message::Assistant { content: TextContent::Blocks(vec![TextBlock::Text { text }]) }, model: model.response_model(),
-            stop_reason: reason, stop_sequence: sequence.map(str::to_owned),
-            usage: usage(response.usage.engine, self.enable_prompt_tokens_details),
-            kv_transfer_params: response.kv_transfer_params, ec_transfer_params: response.ec_transfer_params,
-        })
-    }.instrument(span).await?;
+        .instrument(span)
+        .await?;
         Ok(response)
     }
 }
@@ -292,8 +443,8 @@ pub(crate) struct MessagesResponse {
     id: String,
     #[serde(rename = "type")]
     message_type: &'static str,
-    #[serde(flatten)]
-    message: Message,
+    role: &'static str,
+    content: Vec<OutputContentBlock>,
     model: String,
     stop_reason: &'static str,
     stop_sequence: Option<String>,

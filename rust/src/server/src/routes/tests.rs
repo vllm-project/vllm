@@ -13132,7 +13132,7 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn anthropic_errors_cover_extraction_and_counting() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     for (uri, body, status, kind) in [
         (
             "/v1/messages",
@@ -13180,5 +13180,253 @@ async fn anthropic_errors_cover_extraction_and_counting() {
         assert_eq!(value["type"], "error");
         assert_eq!(value["error"]["type"], kind);
         assert!(value["error"].get("code").is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_reasoning_output_preserves_blocks_and_usage() {
+    let mut signatures = BTreeSet::new();
+    // The decoder removes the terminal stop token ('!') from visible content.
+    for (output, finish, expected_stop, expected_text) in [
+        (
+            "<think>reason</think>answer!",
+            EngineCoreFinishReason::Stop,
+            "end_turn",
+            Some("answer"),
+        ),
+        (
+            "<think>unfinished",
+            EngineCoreFinishReason::Length,
+            "max_tokens",
+            None,
+        ),
+    ] {
+        let output_ids = token_ids(output);
+        let output_tokens = output_ids.len();
+        let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            vec![(output_ids, Some(finish))],
+        )
+        .await;
+        let (status, mut body) = post_json(
+            &mut app,
+            "/v1/messages",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Hi"}]
+            }),
+        )
+        .await;
+        engine_task.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let signature = body["content"][0]["signature"].as_str().unwrap();
+        let uuid = uuid::Uuid::parse_str(signature).unwrap();
+        assert_eq!(uuid.get_version_num(), 4);
+        assert_eq!(signature, uuid.simple().to_string());
+        assert!(signatures.insert(signature.to_owned()));
+        body["content"][0]["signature"] = json!("<signature>");
+        let mut expected = vec![json!({"type": "thinking",
+            "thinking": if expected_text.is_some() { "reason" } else { "unfinished" },
+            "signature": "<signature>"})];
+        if let Some(text) = expected_text {
+            expected.push(json!({"type": "text", "text": text}));
+        }
+        assert_eq!(body["content"], json!(expected));
+        assert_eq!(body["stop_reason"], expected_stop);
+        assert_eq!(body["stop_sequence"], json!(null));
+        assert_eq!(body["usage"]["output_tokens"], output_tokens);
+    }
+}
+
+// A real HF renderer exposes replayed reasoning and effective effort in the prompt.
+async fn anthropic_reasoning_backend() -> vllm_chat::DynChatBackend {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    fs::write(dir.path().join("tokenizer_config.json"), json!({
+        "chat_template": "{{ reasoning_effort | default('unset') }}|{% if enable_thinking is defined %}{{ enable_thinking | tojson }}{% else %}unset{% endif %}|{% for message in messages %}{{ message.role }}:{{ message.reasoning or '' }}:{{ message.content }};{% endfor %}"
+    }).to_string()).unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "test-model".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                language_model_only: true,
+                ..Default::default()
+            },
+            Arc::new(fake_chat_tokenizer()),
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_replays_thinking_without_signatures_or_redacted_data() {
+    let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        vec![(
+            token_ids("<think>reason</think>answer!"),
+            Some(EngineCoreFinishReason::Stop),
+        )],
+    )
+    .await;
+    let (status, response) = post_json(
+        &mut app,
+        "/v1/messages",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]
+        }),
+    )
+    .await;
+    engine_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let mut content = response["content"].as_array().unwrap().clone();
+    content.push(json!({"type": "redacted_thinking", "data": "opaque-data"}));
+    let expected = token_ids("unset|unset|user::Hi;assistant:reason:answer;user::Next;");
+    let expected_count = expected.len();
+    let backend = anthropic_reasoning_backend().await;
+    let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
+        move |llm| ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend),
+        move |request| assert_eq!(decode_prompt_token_ids(request).unwrap(), expected),
+    )
+    .await;
+    let body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": "Next"}]});
+    for signature in [json!("different-signature"), json!(null)] {
+        let mut count_body = body.clone();
+        count_body["messages"][1]["content"][0]["signature"] = signature;
+        let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", count_body).await;
+        assert_eq!(status, StatusCode::OK, "{count}");
+        assert_eq!(count["input_tokens"], expected_count);
+    }
+    let (status, response) = post_json(&mut app, "/v1/messages", body).await;
+    engine_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["usage"]["input_tokens"], expected_count);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_thinking_controls_reach_renderer_and_engine() {
+    let backend = anthropic_reasoning_backend().await;
+    for (thinking, effort, remap_none, expected_effort, enabled, budget) in [
+        (json!(null), json!(null), false, "unset", "unset", None),
+        (
+            json!({"type": "enabled", "budget_tokens": 1024, "display": "omitted"}),
+            json!("high"),
+            false,
+            "max",
+            "true",
+            Some(1024),
+        ),
+        (
+            json!({"type": "adaptive", "display": "summarized"}),
+            json!("xhigh"),
+            false,
+            "xhigh",
+            "true",
+            None,
+        ),
+        (
+            json!({"type": "adaptive", "display": "updates"}),
+            json!(null),
+            false,
+            "unset",
+            "unset",
+            None,
+        ),
+        (
+            json!({"type": "disabled"}),
+            json!("high"),
+            false,
+            "none",
+            "false",
+            None,
+        ),
+        (
+            json!({"type": "disabled"}),
+            json!("high"),
+            true,
+            "low",
+            "true",
+            None,
+        ),
+        (
+            json!({"type": "between_tools"}),
+            json!("max"),
+            false,
+            "none",
+            "false",
+            None,
+        ),
+    ] {
+        let expected = token_ids(&format!("{expected_effort}|{enabled}|user::Hi;"));
+        let expected_count = expected.len();
+        let backend = backend.clone();
+        let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
+            move |llm| {
+                let mut map = [("high".to_owned(), "max".to_owned())]
+                    .into_iter()
+                    .collect::<std::collections::HashMap<_, _>>();
+                if remap_none {
+                    map.insert("none".to_owned(), "low".to_owned());
+                }
+                ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend)
+                    .with_reasoning_effort_map(map)
+            },
+            move |request| {
+                assert_eq!(decode_prompt_token_ids(request).unwrap(), expected);
+                assert_eq!(
+                    request.sampling_params.as_ref().unwrap().thinking_token_budget,
+                    budget
+                );
+            },
+        )
+        .await;
+        let body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "thinking": thinking, "output_config": {"effort": effort}});
+        let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{count}");
+        assert_eq!(count["input_tokens"], expected_count);
+        let (status, response) = post_json(&mut app, "/v1/messages", body).await;
+        engine_task.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["usage"]["input_tokens"], expected_count);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_rejects_invalid_thinking_and_unsupported_content() {
+    let (mut app, _engine_task) = test_app().await;
+    for overrides in [
+        json!({"thinking": {"type": "enabled"}}),
+        json!({"thinking": {"type": "enabled", "budget_tokens": 1023}}),
+        json!({"thinking": {"type": "adaptive", "display": "invalid"}}),
+        json!({"thinking": {"type": "invalid"}}),
+        json!({"output_config": {"effort": "none"}}),
+        json!({"output_config": {"effort": "minimal"}}),
+        json!({"output_config": {"format": {"type": "json_schema", "schema": {}}}}),
+        json!({"messages": [{"role": "user", "content": [{"type": "thinking", "thinking": "reason"}]}]}),
+        json!({"system": [{"type": "thinking", "thinking": "reason"}]}),
+        json!({"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "call", "name": "f", "input": {}}]}]}),
+    ] {
+        let mut body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]});
+        body.as_object_mut().unwrap().extend(overrides.as_object().unwrap().clone());
+        for endpoint in ["/v1/messages", "/v1/messages/count_tokens"] {
+            let (status, response) = post_json(&mut app, endpoint, body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+            assert_eq!(response["error"]["type"], "invalid_request_error");
+        }
     }
 }
