@@ -1,0 +1,388 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Utilities for selecting and loading models."""
+
+import inspect
+import time
+import warnings
+from contextlib import contextmanager, nullcontext
+from typing import Any, assert_never
+
+import torch
+from torch import nn
+
+import vllm.envs as envs
+from vllm.config import (
+    LoadConfig,
+    ModelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+from vllm.model_executor.model_loader.reload import (
+    record_metadata_for_reloading,
+    set_torchao_reload_attrs,
+)
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    is_draft_model_cacheable,
+)
+from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.tracing import instrument
+from vllm.utils.mem_utils import release_device_memory_under_pressure
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+logger = init_logger(__name__)
+
+
+def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Get load config for the speculative draft model."""
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.draft_load_config is not None
+    ):
+        return speculative_config.draft_load_config
+    load_config = vllm_config.load_config
+    if load_config is not None and load_config.load_format != "ipc_cache":
+        return load_config
+    kwargs = (
+        # Route the draft to the daemon's draft group.
+        {
+            "model_loader_extra_config": {
+                **load_config.model_loader_extra_config,
+                "is_draft": True,
+            }
+        }
+        if is_draft_model_cacheable(speculative_config)
+        # No daemon draft group for this method; load from disk instead of
+        # hitting the target daemon with a mismatching fingerprint.
+        else {"load_format": "auto", "model_loader_extra_config": {}}
+    )
+    return replace(load_config, **kwargs)
+
+
+@instrument(span_name="Initialize model")
+def initialize_model(
+    vllm_config: VllmConfig,
+    *,
+    prefix: str = "",
+    model_class: type[nn.Module] | None = None,
+    model_config: ModelConfig | None = None,
+) -> nn.Module:
+    """Initialize a model with the given configurations."""
+    if model_config is None:
+        model_config = vllm_config.model_config
+    if model_class is None:
+        model_class, _ = get_model_architecture(model_config)
+
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config)
+
+    if vllm_config.quant_config is not None:
+        configure_quant_config(vllm_config.quant_config, model_class)
+
+    signatures = inspect.signature(model_class.__init__)
+    all_params = [param.name for param in signatures.parameters.values()]
+    if "vllm_config" in all_params and "prefix" in all_params:
+        # new-style model class
+        with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
+            model = model_class(vllm_config=vllm_config, prefix=prefix)
+            record_metadata_for_reloading(model)
+            return model
+
+    msg = (
+        "vLLM model class should accept `vllm_config` and `prefix` as "
+        "input arguments. Possibly you have an old-style model class"
+        " registered from out of tree and it is used for new vLLM version. "
+        "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
+        "for the design and update the model class accordingly."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+    logger.warning(
+        "Trying to guess the arguments for old-style model class %s",
+        model_class,
+    )
+    # try to be compatible with old-style model class
+    kwargs: dict[str, Any] = {}
+    if "prefix" in all_params:
+        kwargs["prefix"] = prefix
+    if "config" in all_params:
+        kwargs["config"] = model_config.hf_config
+    if "cache_config" in all_params:
+        kwargs["cache_config"] = vllm_config.cache_config
+    if "quant_config" in all_params:
+        kwargs["quant_config"] = vllm_config.quant_config
+    if "lora_config" in all_params:
+        kwargs["lora_config"] = vllm_config.lora_config
+    if "scheduler_config" in all_params:
+        kwargs["scheduler_config"] = vllm_config.scheduler_config
+    with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
+        model = model_class(**kwargs)
+        record_metadata_for_reloading(model)
+
+    return model
+
+
+def process_weights_after_loading(
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+) -> None:
+    """Post-process loaded weights into runtime format.
+
+    Under `weights_already_processed` (weight cache IPC loader), quant
+    methods skip tensor transforms and must declare
+    `supports_pre_processed_weights`, otherwise this raises `RuntimeError`.
+    """
+    # Reclaim memory when an explicit lm_head has been
+    # loaded, but it is identical to the input embeddings.
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload.direct import (
+        direct_reload_enabled,
+        record_checkpoint_layout,
+    )
+
+    maybe_retie_word_embeddings(model, model_config)
+
+    if direct_reload_enabled():
+        record_checkpoint_layout(model)  # cold start only; reloads reuse it
+
+    for name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            if (
+                is_weights_pre_processed()
+                and not quant_method.supports_pre_processed_weights
+            ):
+                raise RuntimeError(
+                    f"layer {name or '<root>'}: {type(quant_method).__name__} "
+                    "does not support pre-processed weights"
+                )
+            # When quant methods need to process weights after loading
+            # (for repacking, quantizing, etc), they typically expect parameters
+            # to be on the global target device. This scope is for the
+            # case where cpu offloading is used, where we will move the
+            # parameters onto device for processing and back off after.
+            # Methods that can process weights in place (e.g. PLE scale
+            # validation) set requires_device_loading=False to skip this move.
+            loading_context = (
+                device_loading_context(module, target_device)
+                if quant_method.requires_device_loading
+                else nullcontext()
+            )
+            timing_context = (
+                online_quantization_timing_context(module, quant_method)
+                if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+                else nullcontext()
+            )
+            with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
+                quant_method.process_weights_after_loading(module)
+            # process_weights_after_loading may swap in freshly-created
+            # Parameters (e.g. FP8 requantization), which are stamped with the
+            # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
+            # state to the layer so a later weight reload / RL weight-refit
+            # narrows replicated (disable_tp) weights at the correct offset.
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
+            # Repacking transients above can leave large amounts of memory in
+            # the caching allocator, which starves the OS on UMA devices.
+            release_device_memory_under_pressure(target_device)
+
+    finalize_model_weights(model, target_device)
+
+    # Needed for torchao model reloading via model.reload_weights
+    # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
+    if model_config.quantization == "torchao":
+        set_torchao_reload_attrs(model, model_config)
+
+
+@contextmanager
+def device_loading_context(module: torch.nn.Module, target_device: torch.device | None):
+    if target_device is None or target_device.type == "cpu":
+        # If target is CPU, no need to move anything
+        yield module
+        return
+
+    cpu_params: set[str] = set()
+    uva_offloaded_parameters: list[str] = []
+
+    # Store which parameters are on CPU and move them to the GPU
+    for name, p in module.named_parameters():
+        if p.device.type == "cpu":
+            cpu_params.add(name)
+            p.data = p.data.to(target_device)
+        if getattr(p, "_vllm_is_uva_offloaded", False):
+            uva_offloaded_parameters.append(name)
+        # Parameters already on target device are not touched
+
+    try:
+        yield module
+
+    finally:
+        use_pin_memory = (
+            is_pin_memory_available()
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
+        )
+        # Restore the CPU-resident parameters, ignoring new parameters.
+        for name, p in module.named_parameters():
+            if name in cpu_params:
+                p.data = torch.empty_like(
+                    p.data, device="cpu", pin_memory=use_pin_memory
+                ).copy_(p.data)
+
+            # parameter is UVA offloaded, but was replaced with a new device tensor
+            # re-offload it to CPU using UVA
+            if name in uva_offloaded_parameters and not getattr(
+                p, "_vllm_is_uva_offloaded", False
+            ):
+                cpu_data = torch.empty_like(
+                    p.data, device="cpu", pin_memory=use_pin_memory
+                ).copy_(p.data)
+                p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+                p._vllm_is_uva_offloaded = True
+
+
+@contextmanager
+def online_quantization_timing_context(
+    layer: nn.Module, quant_method: QuantizeMethodBase
+):
+    """Accumulate online quantization processing time for `quant_method`."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+
+    assert isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+    quant_config = layer.quant_config
+    assert quant_config is not None
+    online_quantization_config = (
+        quant_config
+        if isinstance(quant_config, OnlineQuantizationConfig)
+        else quant_config.online_quantization_config
+    )
+    # reload/layerwise.py's _layerwise_process calls this for experts_int8,
+    # whose online MoE method has no OnlineQuantizationConfig.
+    if online_quantization_config is None:
+        yield
+        return
+    assert isinstance(online_quantization_config, OnlineQuantizationConfig)
+
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        online_quantization_config.online_quantization_time += (
+            time.perf_counter() - start_time
+        )
+
+
+_MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
+"""Caches the outputs of `_get_model_architecture`."""
+
+
+def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
+
+    architectures = getattr(model_config.hf_config, "architectures", None) or []
+
+    model_cls, arch = model_config.registry.resolve_model_cls(
+        architectures,
+        model_config=model_config,
+    )
+
+    if arch == model_config._get_transformers_backend_cls():
+        assert model_config.model_impl != "vllm"
+        if model_config.model_impl == "auto":
+            logger.warning_once(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.",
+                arch,
+            )
+
+    convert_type = model_config.convert_type
+    if convert_type == "none":
+        pass
+    elif convert_type == "embed":
+        logger.debug_once("Converting to embedding model.")
+        model_cls = as_embedding_model(model_cls)
+    elif convert_type == "classify":
+        logger.debug_once("Converting to sequence classification model.")
+        model_cls = as_seq_cls_model(model_cls)
+    else:
+        assert_never(convert_type)
+
+    return model_cls, arch
+
+
+def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    key = hash(
+        (
+            model_config.model,
+            model_config.convert_type,
+            model_config.runner_type,
+            model_config.trust_remote_code,
+            model_config.model_impl,
+            tuple(getattr(model_config.hf_config, "architectures", None) or []),
+        )
+    )
+    if key in _MODEL_ARCH_BY_HASH:
+        return _MODEL_ARCH_BY_HASH[key]
+
+    model_cls_and_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_cls_and_arch
+    return model_cls_and_arch
+
+
+def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
+    return get_model_architecture(model_config)[0]
+
+
+def get_architecture_class_name(model_config: ModelConfig) -> str:
+    return get_model_architecture(model_config)[1]
+
+
+def configure_quant_config(
+    quant_config: QuantizationConfig, model_class: type[nn.Module]
+):
+    """Pass packed_modules_mapping by reference to quant_config so that
+    quant_config can properly match fused modules
+
+    Note that model attributes are passed by reference to quant_config,
+    enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
+
+    Once the `SupportsQuant` mixin has been added to all models, this
+    function can be removed
+    """
+    if not issubclass(model_class, SupportsQuant):
+        hf_to_vllm_mapper = getattr(model_class, "hf_to_vllm_mapper", None)
+        packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+
+        # pass mappings by reference to quant_config
+        if hf_to_vllm_mapper is not None:
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
+        if packed_mapping is not None:
+            quant_config.packed_modules_mapping = packed_mapping

@@ -1,0 +1,17 @@
+model_name: "RedHatAI/Qwen3-30B-A3B-FP8-block"
+accuracy_threshold: 0.85
+num_questions: 1319
+num_fewshot: 5
+# 30B MoE + DeepGEMM/DeepEP JIT compile can exceed the 1200s default startup wait.
+startup_max_wait_seconds: 2400
+server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel --all2all-backend deepep_low_latency --disable-uvicorn-access-log"
+env:
+  VLLM_USE_DEEP_GEMM: "1"
+  VLLM_USE_DEEP_GEMM_MOE: "1"
+  # Single node: NVSHMEM reaches the DP peer over NVLink, so keep it off the
+  # NICs. Otherwise its IB transport setup can fail (ibv_modify_qp) when the two
+  # GPUs sit on different NUMA sockets, and the server hangs until the startup
+  # timeout. Same settings as tests/kernels/moe/test_moe_layer.py.
+  NVSHMEM_REMOTE_TRANSPORT: "none"
+  # DeepEP forces IBGDA on, so also hide the NICs from it.
+  NVSHMEM_HCA_LIST: "none"

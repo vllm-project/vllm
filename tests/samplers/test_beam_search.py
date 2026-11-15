@@ -1,0 +1,404 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Compare the outputs of HF and vLLM when using beam search.
+
+Run `pytest tests/samplers/test_beam_search.py`.
+"""
+
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import jsonschema
+import pytest
+from transformers import AutoModelForSeq2SeqLM
+
+from vllm import CompletionOutput, RequestOutput
+from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.llm import LLM
+from vllm.inputs import TokensInput
+from vllm.logprobs import Logprob, SampleLogprobs
+from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
+
+# Extra engine kwargs needed for numerically deterministic beam search.
+# On ROCm, floating-point reductions in attention and GEMM kernels are
+# non-associative and sensitive to batch geometry, so we:
+#   async_scheduling=False      – deterministic batch composition
+#   enforce_eager=True          – no CUDA-graph padding changing effective size
+#   enable_prefix_caching=False – avoid prefix-sharing side effects
+#   max_num_seqs=1              – fixed batch size across runs
+# On other platforms these are not needed and the dict is empty.
+EXTRA_ENGINE_KWARGS: dict = (
+    dict(
+        async_scheduling=False,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_num_seqs=1,
+    )
+    if current_platform.is_rocm()
+    else dict(async_scheduling=False, max_num_seqs=1)
+)
+
+# FIXME(zhuohan): The test can not pass if we:
+#   1. Increase max_tokens to 256.
+#   2. Increase beam_width to 8.
+#   3. Use the model "vllm-project/llama-7b".
+MAX_TOKENS = [64]
+BEAM_WIDTHS = [4]
+MM_BEAM_WIDTHS = [2]
+MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_beam_search_stops_at_context_limit_per_prompt(vllm_runner, model: str) -> None:
+    """Finish full-context beams while other prompts continue generating."""
+    max_model_len = 128
+    max_tokens = 8
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    ) as vllm_model:
+        llm = vllm_model.llm
+        token_ids = llm.get_tokenizer().encode("Hello world. " * max_model_len)
+        prompt_lengths = [max_model_len - 1, max_model_len - 4, 16]
+        prompts = [
+            {"prompt_token_ids": token_ids[:length]} for length in prompt_lengths
+        ]
+        params = BeamSearchParams(beam_width=2, max_tokens=max_tokens, ignore_eos=True)
+
+        outputs = llm.beam_search(prompts, params)
+        assert len(outputs) == len(prompts)
+        for prompt, output in zip(prompts, outputs):
+            prompt_ids = prompt["prompt_token_ids"]
+            expected_tokens = min(max_tokens, max_model_len - len(prompt_ids))
+            assert len(output.sequences) == params.beam_width
+            for beam in output.sequences:
+                assert beam.tokens[: len(prompt_ids)] == prompt_ids
+                generated_ids = beam.tokens[len(prompt_ids) :]
+                assert len(generated_ids) == expected_tokens
+                assert len(beam.logprobs) == expected_tokens
+                if len(prompt_ids) + expected_tokens == max_model_len:
+                    assert beam.finish_reason == "length"
+                assert beam.cum_logprob == pytest.approx(
+                    sum(
+                        logprobs[token_id].logprob
+                        for token_id, logprobs in zip(generated_ids, beam.logprobs)
+                    )
+                )
+
+
+@pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
+@pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
+def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
+    monkeypatch,
+    abort_after: int,
+    prompt_token: int,
+    terminal_logprobs: SampleLogprobs | None,
+) -> None:
+    """Return tokens and scores from the last completed step for aborted prompts.
+
+    Other prompts in the batch continue generating.
+    """
+
+    def run_requests(prompts, **kwargs):
+        results = []
+        for prompt in prompts:
+            tokens = prompt["prompt_token_ids"]
+            if tokens[0] == prompt_token:
+                assert len(tokens) <= abort_after + 1, "Continued after abort"
+            aborted = (
+                tokens[0] == prompt_token
+                and len(tokens) == abort_after + 1
+                and tokens[-1] != 12
+            )
+            results.append(
+                RequestOutput(
+                    request_id="inner",
+                    prompt=None,
+                    prompt_token_ids=tokens,
+                    prompt_logprobs=None,
+                    finished=True,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[] if aborted else [11],
+                            cumulative_logprob=None,
+                            logprobs=terminal_logprobs
+                            if aborted
+                            else [{11: Logprob(-0.1), 12: Logprob(-0.2)}],
+                            finish_reason="abort" if aborted else "length",
+                        )
+                    ],
+                )
+            )
+        return results
+
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    llm.model_config = Mock(max_model_len=16)
+    llm.llm_engine.input_processor.generation_config_fields = {}
+    tokenizer = SimpleNamespace(
+        eos_token_id=0,
+        decode=lambda tokens, skip_special_tokens=False: " ".join(
+            str(token) for token in tokens if not skip_special_tokens or token != 0
+        ),
+    )
+    llm.renderer = Mock(get_tokenizer=Mock(return_value=tokenizer))
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    # Engine inputs, since _preprocess_cmpl is patched to the identity
+    prompts: list[TokensInput] = [
+        {"type": "token", "prompt_token_ids": [token]} for token in [prompt_token, 2]
+    ]
+    params = BeamSearchParams(beam_width=2, max_tokens=3)
+    outputs = llm.beam_search(prompts, params)
+
+    aborted, normal = outputs
+    expected_tokens = (
+        [[prompt_token, 11], [prompt_token, 12]] if abort_after else [[prompt_token]]
+    )
+    assert [beam.tokens for beam in aborted.sequences] == expected_tokens
+    for beam in aborted.sequences:
+        assert beam.finish_reason == "abort"
+        assert beam.text == tokenizer.decode(
+            beam.tokens, skip_special_tokens=params.skip_special_tokens
+        )
+        assert len(beam.logprobs) == abort_after
+    assert aborted.sequences[0].cum_logprob == pytest.approx(-0.1 * abort_after)
+    assert len(normal.sequences) == 2
+    assert all(len(beam.tokens) == 4 for beam in normal.sequences)
+    assert all(beam.finish_reason != "abort" for beam in normal.sequences)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", MAX_TOKENS)
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_single_input(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    beam_width: int,
+) -> None:
+    example_prompts = example_prompts[:1]
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
+
+    with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
+        vllm_outputs = vllm_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
+
+    for i in range(len(example_prompts)):
+        hf_output_ids, hf_output_texts = hf_outputs[i]
+        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+        for j, (hf_text, vllm_text) in enumerate(
+            zip(hf_output_texts, vllm_output_texts)
+        ):
+            print(f">>>{j}-th hf output:")
+            print(hf_text)
+            print(f">>>{j}-th vllm output:")
+            print(vllm_text)
+        assert len(hf_output_ids) == len(vllm_output_ids)
+        for j in range(len(hf_output_ids)):
+            assert hf_output_ids[j] == vllm_output_ids[j], (
+                f"Test{i} output{j}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+            )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", MAX_TOKENS)
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_with_concurrency_limit(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    beam_width: int,
+) -> None:
+    # example_prompts[1]&[3]&[7] fails due to unknown reason even without
+    # concurrency limit. skip them for now.
+    example_prompts = example_prompts[:8]
+    concurrency_limit = 2
+    assert len(example_prompts) > concurrency_limit
+    with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
+        outputs_with_limit = vllm_model.generate_beam_search(
+            example_prompts,
+            beam_width,
+            max_tokens,
+            concurrency_limit=concurrency_limit,
+        )
+        outputs_without_limit = []
+
+        for i in range(0, len(example_prompts), concurrency_limit):
+            outputs_without_limit.extend(
+                vllm_model.generate_beam_search(
+                    example_prompts[i : i + concurrency_limit],
+                    beam_width,
+                    max_tokens,
+                )
+            )
+
+    correct = True
+    for i in range(len(example_prompts)):
+        output_ids_with_limit, output_texts_with_limit = outputs_with_limit[i]
+        output_ids_without_limit, output_texts_without_limit = outputs_without_limit[i]
+        for j, (text_with_limit, text_without_limit) in enumerate(
+            zip(output_texts_with_limit, output_texts_without_limit)
+        ):
+            print(f">>>{j}-th with limit output:")
+            print(text_with_limit)
+            print(f">>>{j}-th without limit output:")
+            print(text_without_limit)
+        assert len(output_ids_with_limit) == len(output_ids_without_limit)
+        for j in range(len(output_ids_with_limit)):
+            if output_ids_with_limit[j] != output_ids_without_limit[j]:
+                print(
+                    f"Test{i} output{j}:\n+limit: {output_ids_with_limit}\n"
+                    f"-limit: {output_ids_without_limit}"
+                )
+                correct = False
+    assert correct
+
+
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", MAX_TOKENS)
+@pytest.mark.parametrize("beam_width", MM_BEAM_WIDTHS)
+def test_beam_search_passes_multimodal_data(
+    hf_runner,
+    vllm_runner,
+    dtype: str,
+    max_tokens: int,
+    beam_width: int,
+) -> None:
+    """Ensure that beam search passes multimodal data through correctly."""
+    # NOTE - this test is primarily to check that mm data is passed to beams
+    # correctly. As such, we just need to check one extra modality to make
+    # sure things pass through properly.
+    audios = [AudioAsset("mary_had_lamb").audio_and_sample_rate]
+    model = "Qwen/Qwen2-Audio-7B-Instruct"
+    audio_seq = "<|audio_bos|><|AUDIO|><|audio_eos|>"
+    prompts = [
+        f"<|im_start|>user\n{audio_seq}Can you transcribe this?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+    ]
+
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSeq2SeqLM) as hf_model:
+        audio_token_id = hf_model.config.audio_token_index
+        eos_token_id = hf_model.tokenizer.eos_token_id  # <|im_end|>
+        hf_outputs = hf_model.generate_beam_search(
+            prompts,
+            beam_width=beam_width,
+            max_tokens=max_tokens,
+            audios=audios,
+        )
+
+    with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
+        vllm_outputs = vllm_model.generate_beam_search(
+            prompts,
+            beam_width=beam_width,
+            max_tokens=max_tokens,
+            audios=audios,
+        )
+
+    seq_with_no_audio_toks = lambda seq: [tok for tok in seq if tok != audio_token_id]
+
+    for i in range(len(prompts)):
+        hf_output_ids, hf_output_texts = hf_outputs[i]
+        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+
+        for j, (hf_text, vllm_text) in enumerate(
+            zip(hf_output_texts, vllm_output_texts)
+        ):
+            print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
+            print(hf_text)
+            print(f">>>{j}-th vllm output:")
+            print(vllm_text)
+        assert len(hf_output_ids) == len(vllm_output_ids)
+
+        for j in range(len(hf_output_ids)):
+            # Compare everything except for the audio tokens; we do this since
+            # the IDs returned from the transformers helper expands the audio
+            # token to match features, while the vLLM helper maintains the
+            # single audio token in the input text
+            filtered_hf_output_ids = seq_with_no_audio_toks(hf_output_ids[j])
+            filtered_vllm_output_ids = seq_with_no_audio_toks(vllm_output_ids[j])
+
+            # HF output IDs may contain the end of sequence
+            if len(filtered_hf_output_ids) == len(filtered_vllm_output_ids) + 1:
+                assert filtered_hf_output_ids[-1] == eos_token_id
+                filtered_hf_output_ids = filtered_hf_output_ids[:-1]
+
+            assert filtered_hf_output_ids == filtered_vllm_output_ids
+
+
+# NOTE: encoder/decoder tests are currently located under
+# tests/models/multimodal/generation/test_whisper.py
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_structured_output(
+    model: str,
+    dtype: str,
+    beam_width: int,
+) -> None:
+    """Ensure beam search with structured output produces valid JSON."""
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        },
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            disable_any_whitespace=True,
+        ),
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    )
+
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=64,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompts = [
+        "Generate a JSON object for a person with name and age:",
+    ]
+
+    outputs = llm.beam_search(prompts, params)
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert len(output.sequences) > 0
+        for seq in output.sequences:
+            assert seq.text is not None
+            print(f"Full text: {seq.text!r}")
+            # seq.text includes the prompt, extract generated JSON.
+            gen_start = seq.text.find("{")
+            assert gen_start != -1, f"No JSON found in output: {seq.text!r}"
+            generated = seq.text[gen_start:]
+            generated = generated.replace("</s>", "").strip()
+            print(f"Generated JSON: {generated!r}")
+            parsed = json.loads(generated)
+            jsonschema.validate(instance=parsed, schema=json_schema)

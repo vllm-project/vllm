@@ -1,0 +1,20 @@
+# Optional local formatting profile. CI and pre-commit use rustfmt.toml.
+# Apply manually with:
+#   cargo +nightly fmt -- --config-path rustfmt.unstable.toml
+
+style_edition = "2024"
+chain_width = 80
+comment_width = 100
+use_field_init_shorthand = true
+
+# Unstable features go here.
+unstable_features = true
+
+format_code_in_doc_comments = true
+format_macro_matchers = true
+normalize_comments = true
+normalize_doc_attributes = true
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+reorder_impl_items = true
+wrap_comments = true

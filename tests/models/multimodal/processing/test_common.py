@@ -1,0 +1,594 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
+from collections.abc import Set as AbstractSet
+from functools import partial
+
+import numpy as np
+import pytest
+import torch
+from PIL import Image
+
+from tests.models.utils import build_model_context
+from vllm.config import ModelConfig
+from vllm.config.multimodal import (
+    AudioDummyOptions,
+    BaseDummyOptions,
+    ImageDummyOptions,
+    MultiModalDummyOptions,
+    VideoDummyOptions,
+)
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
+from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.cache.base import MultiModalCache
+from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
+from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.platforms import current_platform
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.utils.mistral import is_mistral_tokenizer
+
+from ....multimodal.utils import random_audio, random_image, random_video
+from ...registry import (
+    _MULTIMODAL_EXAMPLE_MODELS,
+    _TRANSFORMERS_BACKEND_MODELS,
+    HF_EXAMPLE_MODELS,
+)
+
+
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """Add metadata to video mm_data."""
+    assert isinstance(mm_data, dict)
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
+    return mm_data
+
+
+def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """Patch the multimodal data for GLM-ASR model.
+    GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
+    """
+    assert isinstance(mm_data, dict)
+    if "audio" in mm_data:
+        audio = mm_data["audio"]
+        if isinstance(audio, list) and len(audio) > 1:
+            # Limit to single audio to match text requirement
+            mm_data["audio"] = [audio[0]]
+    return mm_data
+
+
+_IGNORE_MM_KEYS = {
+    # Dithering causes minor divergence
+    "cohere_asr": {"input_features"},
+    # In Ultravox, the audio_features can be different depending on padding
+    # The slight difference should not be a problem though, since
+    # attention_mask lets us ignore the difference.
+    "ultravox": {"audio_features"},
+}
+
+MM_DATA_PATCHES = {
+    "glmasr": glmasr_patch_mm_data,
+}
+
+_XPU_EXCLUDED_MODEL_IDS = {
+    "baidu/Unlimited-OCR",
+    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "moonshotai/Kimi-K3",
+    "Qwen/Qwen2.5-Omni-7B-AWQ",
+    "thinkingmachines/Inkling-NVFP4",
+}
+
+_CPU_EXCLUDED_MODEL_IDS = {
+    # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+}
+
+
+def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
+    for model_arch in model_arch_list:
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+        yield model_info.default
+
+        for extra_type, extra_model_id in model_info.extras.items():
+            if "fp" in extra_type:
+                continue  # Redundant to test quantized models
+
+            yield extra_model_id
+
+
+def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
+    model_ids = list(_iter_model_ids_to_test(model_arch_list))
+
+    if current_platform.is_xpu():
+        for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    if current_platform.is_cpu():
+        for excluded_model_id in _CPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    return model_ids
+
+
+def get_model_ids_to_test():
+    transformers_arch_ids = {
+        model_id
+        for info in _TRANSFORMERS_BACKEND_MODELS.values()
+        for model_id in (info.default, *info.extras.values())
+    }
+    vllm_only_archs = {
+        arch
+        for arch, info in _MULTIMODAL_EXAMPLE_MODELS.items()
+        if not any(
+            model_id in transformers_arch_ids
+            for model_id in (info.default, *info.extras.values())
+        )
+    }
+
+    return _get_model_ids_to_test(vllm_only_archs)
+
+
+def get_transformers_backend_model_ids_to_test():
+    return sorted(
+        {
+            model_id
+            for arch, info in _TRANSFORMERS_BACKEND_MODELS.items()
+            if "MultiModal" in arch
+            for model_id in (info.default, *info.extras.values())
+        }
+    )
+
+
+def get_token_prompt(
+    processor: BaseMultiModalProcessor,
+    mm_data: MultiModalDataDict,
+) -> list[int]:
+    tokenizer: TokenizerLike = processor.info.get_tokenizer()
+    model_config = processor.info.ctx.model_config
+
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = add_video_metadata(mm_data)
+
+    model_type = model_config.hf_config.model_type
+    if model_type in MM_DATA_PATCHES:
+        mm_data = MM_DATA_PATCHES[model_type](mm_data)
+
+    parsed_data = processor.info.parse_mm_data(mm_data)
+    mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
+
+    if is_mistral_tokenizer(tokenizer):
+        inputs = processor.get_dummy_inputs(
+            model_config.max_model_len,
+            mm_counts,
+            mm_options=MultiModalDummyOptions(),
+            # Assume all Mistral models define this extra argument
+            mm_data=mm_data,  # type: ignore[call-arg]
+        )
+    else:
+        inputs = processor.get_dummy_inputs(
+            model_config.max_model_len,
+            mm_counts,
+            mm_options=MultiModalDummyOptions(),
+        )
+
+    if not isinstance(inputs.prompt, list):
+        raise TypeError(type(inputs.prompt))
+
+    return inputs.prompt
+
+
+@pytest.mark.parametrize(
+    "model_id,durations",
+    [
+        ("Qwen/Qwen2-Audio-7B-Instruct", [1.0, 2.3]),
+        ("nvidia/audio-flamingo-3-hf", [31.0]),
+        ("fixie-ai/ultravox-v0_5-llama-3_2-1b", [1.0, 31.0]),
+        ("Qwen/Qwen2.5-Omni-3B", [1.0, 2.3]),
+        ("Qwen/Qwen3-Omni-30B-A3B-Instruct", [1.0, 2.3]),
+    ],
+)
+def test_audio_metadata_only_roundtrip(model_id, durations, monkeypatch):
+    """EC metadata preserves the raw-audio prompt without running the HF processor."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": len(durations)})
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    sample_rate = getattr(processor.info, "get_feature_extractor")().sampling_rate  # noqa: B009
+    audios = [
+        np.zeros(int(duration * sample_rate), dtype=np.float32)
+        for duration in durations
+    ]
+    prompt = processor.dummy_inputs.get_dummy_text({"audio": len(audios)})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality="audio",
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"]["audio"], raw["mm_placeholders"]["audio"])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    assert len(metadata) == len(audios)
+    assert all(metadata)
+    audio_data = _get_embeds_data("audio", metadata, processor)
+
+    def unexpected_preprocessing(*args, **kwargs):
+        pytest.fail("The EC consumer must not preprocess audio")
+
+    monkeypatch.setattr(processor, "_call_hf_processor", unexpected_preprocessing)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audio_data}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+    # Omni also consumes these lengths when constructing M-RoPE positions.
+    if "audio_feature_lengths" in audio_data:
+        assert torch.equal(
+            remote["mm_kwargs"].get_data()["audio_feature_lengths"],
+            raw["mm_kwargs"].get_data()["audio_feature_lengths"],
+        )
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({"audio": audio_data})
+
+
+def random_vision_chunk(
+    rng: np.random.RandomState,
+    min_wh: int,
+    max_wh: int,
+    min_frames: int,
+    max_frames: int,
+) -> dict:
+    num_frames = rng.randint(min_frames, max_frames + 1)
+    if num_frames == 1:
+        # Single image chunk
+        wh = rng.randint(min_wh, max_wh + 1)
+        image = random_image(rng, wh, wh + 1)
+        return {"type": "image", "image": image}
+    frames = []
+    for _ in range(num_frames):
+        wh = rng.randint(min_wh, max_wh + 1)
+        frame = rng.randint(0, 256, size=(wh, wh, 3), dtype=np.uint8)
+        frames.append(frame)
+    video_array = np.stack(frames, axis=0)
+    return {"type": "video_chunk", "video_chunk": video_array}
+
+
+@pytest.mark.parametrize("order", [(2, 0, 1), (2, 0, 1, 0), (0, 2, 1)])
+def test_processor_cache_preserves_hits_when_request_exceeds_capacity(order):
+    """Within-request eviction must preserve tensors, tokens and placeholders."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    config = ModelConfig(model, limit_mm_per_prompt={"image": 4})
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    images = [Image.new("RGB", (112, 112), c) for c in ("red", "green", "blue")]
+
+    def process(selected, cache=None):
+        data = {"image": selected}
+        return processor(
+            get_token_prompt(processor, data),
+            mm_items=processor.info.parse_mm_data(data),
+            cache=cache,
+        )
+
+    reference = process(images)
+    capacity = sum(
+        MultiModalCache.get_item_size(item)
+        for item in reference["mm_kwargs"]["image"][:2]
+    )
+    cache = MultiModalProcessorOnlyCache(
+        ModelConfig(model, mm_processor_cache_gb=capacity / (1 << 30))
+    )
+    for _ in range(2):
+        process(images[:2], cache)
+        selected = [images[idx] for idx in order]
+        actual = process(selected, cache)
+        expected = process(selected)
+        _assert_inputs_equal(actual, expected)
+
+
+def _test_processing_correctness(
+    model_id_or_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+    model_impl: str = "auto",
+):
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
+
+    model_config = ModelConfig(
+        model_id,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
+        model_impl=model_impl,
+    )
+    # Ensure that the cache can fit all of the data
+    # (set after because ModelConfig would set it to 0 for encoder-decoder models)
+    assert model_config.multimodal_config is not None
+    model_config.multimodal_config.mm_processor_cache_gb = 2048
+
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    factories = model_cls._processor_factory
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
+    cache = MultiModalProcessorOnlyCache(model_config)
+
+    processing_info = factories.info(ctx)
+    supported_mm_limits = processing_info.get_supported_mm_limits()
+    # Keep integer limits for local data generation
+    limit_mm_per_prompt_ints = {
+        modality: 3 if limit is None else limit
+        for modality, limit in supported_mm_limits.items()
+    }
+
+    def _to_dummy_options(modality: str, count: int) -> BaseDummyOptions:
+        if modality == "video":
+            return VideoDummyOptions(count=count)
+        if modality == "image":
+            return ImageDummyOptions(count=count)
+        if modality == "audio":
+            return AudioDummyOptions(count=count)
+        return BaseDummyOptions(count=count)
+
+    # Assign normalized DummyOptions to the model config
+    model_config.get_multimodal_config().limit_per_prompt = MultiModalDummyOptions(
+        {
+            modality: _to_dummy_options(modality, count)
+            for modality, count in limit_mm_per_prompt_ints.items()
+        }
+    )
+
+    processor = factories.build_processor(ctx)
+
+    rng = np.random.RandomState(0)
+
+    # GLM-ASR requires a minimum audio length of 70ms
+    min_audio_len = 512 if model_config.hf_config.model_type != "glmasr" else 1120
+    input_to_hit = {
+        "image": Image.new("RGB", size=(128, 128)),
+        "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
+        "audio": (np.zeros((min_audio_len,)), 16000),
+        "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
+    }
+    input_factory = {
+        "image": partial(random_image, rng, min_wh=128, max_wh=256),
+        "video": partial(
+            random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
+        ),
+        "audio": partial(
+            random_audio,
+            rng,
+            min_len=min_audio_len,
+            max_len=min_audio_len + 512,
+            sr=16000,
+        ),
+        "vision_chunk": partial(
+            random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
+        ),
+    }
+
+    for batch_idx in range(num_batches):
+        mm_data = {
+            k: [
+                (input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
+                for _ in range(rng.randint(limit + 1))
+            ]
+            for k, limit in limit_mm_per_prompt_ints.items()
+        }
+
+        # Drop unnecessary keys and test single -> multi conversion
+        if rng.rand() < simplify_rate:
+            for k in list(mm_data.keys()):
+                if not mm_data[k]:
+                    del mm_data[k]
+                elif len(mm_data[k]) == 1:
+                    mm_data[k] = mm_data[k][0]
+
+        _test_processing_correctness_one(
+            model_config,
+            mm_data,
+            processor,
+            batch_idx,
+            hit_rate,
+            num_batches,
+            simplify_rate,
+            cache=cache,
+        )
+
+
+def _test_processing_correctness_one(
+    model_config: ModelConfig,
+    mm_data: MultiModalDataDict,
+    processor: BaseMultiModalProcessor,
+    batch_idx: int,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+    cache: MultiModalProcessorOnlyCache,
+):
+    model_type = model_config.hf_config.model_type
+
+    token_prompt = get_token_prompt(processor, mm_data)
+    mm_items = processor.info.parse_mm_data(mm_data)
+    ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
+
+    baseline_tokenized_result = processor(
+        token_prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+
+    cached_tokenized_result = processor(
+        token_prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+        cache=cache,
+    )
+
+    _assert_inputs_equal(
+        baseline_tokenized_result,
+        cached_tokenized_result,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=(
+            f"Failed ({batch_idx=}, {hit_rate=}, "
+            f"{num_batches=}, {simplify_rate=}, "
+            f"{token_prompt=}, {mm_data=})"
+        ),
+    )
+
+
+@pytest.mark.parametrize("model_id", get_model_ids_to_test())
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness(
+    model_id: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    if model_id == "openvla/openvla-7b":
+        pytest.skip(
+            "OpenVLA uses a custom vLLM processor because its HF remote "
+            "processor is incompatible with current Transformers."
+        )
+    if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
+        pytest.skip(
+            "Voxtral Realtime doesn't make use of any place-holder "
+            "tokens and hence cannot pass the processing "
+            "correctness test as is. Let's revisit adapting this "
+            "test once more realtime models exist."
+        )
+    if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
+        pytest.skip(
+            "MOSS-Audio uses a custom processor that dynamically expands "
+            "audio placeholders from processed audio lengths. Its vLLM "
+            "processor paths are covered by test_moss_audio.py."
+        )
+    if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
+        pytest.skip(
+            "LLaVA-OneVision-2 video processing routes frames through custom "
+            "video backends (qwen_vl_utils / codec) that require real encoded "
+            "video bytes and metadata. The synthetic numpy-array videos used by "
+            "this test yield empty video features, so the generic correctness "
+            "check cannot exercise the video path. Image processing is covered "
+            "by registration/inference tests."
+        )
+
+    _test_processing_correctness(
+        model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+@pytest.mark.parametrize("model_id", get_transformers_backend_model_ids_to_test())
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_transformers(
+    model_id: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+        model_impl="transformers",
+    )
+
+
+def _assert_inputs_equal(
+    a: MultiModalInput,
+    b: MultiModalInput,
+    *,
+    ignore_mm_keys: set[str] | None = None,
+    msg: str = "",
+):
+    if ignore_mm_keys is None:
+        ignore_mm_keys = set()
+
+    ignore_prompt_keys = ("prompt", "mm_kwargs")
+    a_rest = {k: v for k, v in a.items() if k not in ignore_prompt_keys}
+    b_rest = {k: v for k, v in b.items() if k not in ignore_prompt_keys}
+
+    assert a_rest == b_rest, msg
+
+    a_data = a["mm_kwargs"].get_data()
+    b_data = b["mm_kwargs"].get_data()
+
+    for key in ignore_mm_keys:
+        a_data.pop(key, None)
+        b_data.pop(key, None)
+
+    assert batched_tensors_equal(a_data, b_data), msg

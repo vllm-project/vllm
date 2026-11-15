@@ -1,0 +1,472 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Utility functions for attention-related v1 tests."""
+
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    DeviceConfig,
+    LoadConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
+from vllm.config.model import ModelDType
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.v1.attention.backend import (
+    AttentionImplBase,
+    AttentionMetadataBuilder,
+    AttentionType,
+    CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.mamba_attn import (
+    BaseMambaAttentionMetadata,
+    BaseMambaAttentionMetadataBuilder,
+)
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    KVCacheTensor,
+    MambaSpec,
+    compute_layout_strides,
+    create_kv_cache_views,
+    get_kv_quant_mode,
+)
+
+
+@dataclass(slots=True)
+class BatchSpec:
+    """Specification for a batch configuration (workload shape only)."""
+
+    seq_lens: list[int]
+    query_lens: list[int]
+
+    name: str = "unnamed"
+
+    @property
+    def batch_size(self):
+        return len(self.seq_lens)
+
+    def __post_init__(self):
+        assert len(self.seq_lens) == len(self.query_lens)
+
+    def compute_num_tokens(self):
+        return sum(self.query_lens)
+
+
+def create_common_attn_metadata(
+    batch_spec: BatchSpec,
+    block_size: int,
+    device: torch.device,
+    max_block_idx: int = 1000,
+    arange_block_indices: bool = False,
+) -> CommonAttentionMetadata:
+    """Create CommonAttentionMetadata from a BatchSpec and ModelParams."""
+    # Create query start locations
+    query_start_loc = torch.zeros(
+        batch_spec.batch_size + 1, dtype=torch.int32, device=device
+    )
+    query_start_loc[1:] = torch.tensor(
+        batch_spec.query_lens, dtype=torch.int32, device=device
+    ).cumsum(0)
+    query_start_loc_cpu = query_start_loc.cpu()
+    num_tokens = batch_spec.compute_num_tokens()
+
+    # Create sequence lengths
+    seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    max_seq_len = int(seq_lens_cpu.max())
+
+    # Create block table and slot mapping
+    max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
+    if arange_block_indices:
+        num_blocks = batch_spec.batch_size * max_blocks
+        block_table_tensor = torch.arange(
+            num_blocks, dtype=torch.int32, device=device
+        ).view(batch_spec.batch_size, max_blocks)
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device).view(
+            num_tokens
+        )
+    else:
+        block_table_tensor = torch.randint(
+            0,
+            max_block_idx,
+            (batch_spec.batch_size, max_blocks),
+            dtype=torch.int32,
+            device=device,
+        )
+        slot_mapping = torch.randint(
+            0, max_block_idx, (num_tokens,), dtype=torch.int64, device=device
+        )
+
+    # Calculate max query length
+    max_query_len = max(batch_spec.query_lens)
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
+
+
+def try_get_attention_backend(
+    backend: AttentionBackendEnum,
+) -> tuple[type[AttentionMetadataBuilder], type[AttentionImplBase]]:
+    """Try to get the attention backend class, skipping test if not found."""
+    try:
+        backend_class = backend.get_class()
+        return backend_class.get_builder_cls(), backend_class.get_impl_cls()
+    except ImportError as e:
+        pytest.skip(f"{backend.name} not available: {e}")
+        raise AssertionError("unreachable") from None
+
+
+def try_backend_includes_kv_cache_update(
+    backend: AttentionBackendEnum,
+) -> bool:
+    """Try to get the attention backend class, skipping test if not found."""
+    try:
+        backend_class = backend.get_class()
+        return backend_class.forward_includes_kv_cache_update
+    except ImportError as e:
+        pytest.skip(f"{backend.name} not available: {e}")
+        raise AssertionError("unreachable") from None
+
+
+def create_standard_kv_cache_spec(
+    vllm_config: VllmConfig,
+) -> AttentionSpec:
+    """Create an AttentionSpec from VllmConfig."""
+    return AttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
+    )
+
+
+@contextmanager
+def registered_attention_layers(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    attn_type: str = AttentionType.DECODER,
+    sliding_window: int | None = None,
+) -> Iterator[None]:
+    """Register stand-in `Attention` layers for builders that read the
+    attention type or window from their group's layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_type = attn_type
+        layer.impl = SimpleNamespace(sliding_window=sliding_window)
+        forward_context[name] = layer
+    try:
+        yield
+    finally:
+        for name in layer_names:
+            forward_context.pop(name, None)
+
+
+class CheckpointingMambaLayer(MambaBase):
+    """Stand-in Mamba layer whose KV cache reserves prefill checkpoints at
+    a fixed alignment."""
+
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+
+    def __init__(self, checkpoint_alignment: int | None):
+        self.checkpoint_alignment = checkpoint_alignment
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return self.checkpoint_alignment
+
+    def get_state_shape(self):
+        return ()
+
+    def get_state_dtype(self):
+        return ()
+
+
+def register_mamba_layers(
+    vllm_config: VllmConfig, layer_names: list[str], checkpoint_alignment: int | None
+) -> None:
+    """Register stand-in Mamba layers for builders that read their prefill
+    checkpoint alignment from their group's layers."""
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        forward_context[name] = CheckpointingMambaLayer(checkpoint_alignment)
+
+
+def create_vllm_config(
+    model_name: str = "Qwen/Qwen3-0.6B",
+    tensor_parallel_size: int = 1,
+    max_model_len: int = 1024,
+    dtype: ModelDType | torch.dtype = "auto",
+    num_gpu_blocks: int = 1000,
+    block_size: int = 16,
+    max_num_seqs: int = 256,
+    max_num_batched_tokens: int = 8192,
+    enable_chunked_prefill: bool = True,
+    hf_config_override: dict | None = None,
+) -> VllmConfig:
+    """Create a VllmConfig for testing with reasonable defaults."""
+    model_config = ModelConfig(
+        model=model_name,
+        tokenizer=model_name,
+        trust_remote_code=False,
+        dtype=dtype,
+        seed=0,
+        max_model_len=max_model_len,
+    )
+
+    cache_config = CacheConfig(
+        block_size=block_size,
+        cache_dtype="auto",
+    )
+    # Set cache blocks for testing
+    #   (these may be set during initialization normally)
+    cache_config.num_gpu_blocks = num_gpu_blocks
+    cache_config.num_cpu_blocks = 0
+    # Builders read the resolved layout from the config; tests that exercise a
+    # different layout overwrite this field.
+    cache_config.kv_cache_layout = "LBNHC"
+
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=tensor_parallel_size,
+    )
+
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+
+    device_config = DeviceConfig()
+    load_config = LoadConfig()
+    compilation_config = CompilationConfig()
+
+    if hf_config_override:
+        model_config.hf_config.update(hf_config_override)
+
+    # VllmConfig() auto-enables breakable cudagraphs process-wide via
+    # VLLM_USE_BREAKABLE_CUDAGRAPH for breakable-by-default models; keep
+    # that from leaking into unrelated tests sharing this process.
+    breakable_env = os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    try:
+        return VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            load_config=load_config,
+            compilation_config=compilation_config,
+        )
+    finally:
+        if breakable_env is None:
+            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        else:
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = breakable_env
+
+
+@dataclass(slots=True)
+class BackendConfig:
+    name: str
+    attention_config: dict
+    comp_config: dict
+    specific_gpu_arch: tuple | None = None
+
+
+# Define all backend configurations of full cudagraph to be tested
+full_cg_backend_configs = {
+    # FA3 on Hopper
+    "FA3": BackendConfig(
+        name="FA3",
+        attention_config={
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": 3,
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
+        },
+        comp_config={
+            "cudagraph_mode": "FULL",
+        },
+        specific_gpu_arch=(9, 0),
+    ),
+    # FlashMLA on Hopper
+    "FlashMLA": BackendConfig(
+        name="FlashMLA",
+        attention_config={"backend": "FLASHMLA"},
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(9, 0),
+    ),
+    # Cutlass MLA on Blackwell
+    "CutlassMLA": BackendConfig(
+        name="CutlassMLA",
+        attention_config={"backend": "CUTLASS_MLA"},
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(10, 0),
+    ),
+    # FlashInfer MLA on Blackwell
+    "FlashInferMLA": BackendConfig(
+        name="FlashInferMLA",
+        attention_config={"backend": "FLASHINFER_MLA"},
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(10, 0),
+    ),
+    # FlashAttention MLA on Hopper
+    "FlashAttentionMLA": BackendConfig(
+        name="FlashAttentionMLA",
+        attention_config={
+            "backend": "FLASH_ATTN_MLA",
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        specific_gpu_arch=(9, 0),
+    ),
+    # FA2
+    "FA2": BackendConfig(
+        name="FA2",
+        attention_config={
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": 2,
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+    ),
+    # Triton Attention
+    "TritonAttn": BackendConfig(
+        name="TritonAttn",
+        attention_config={"backend": "TRITON_ATTN"},
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+    ),
+    # FlashInfer
+    "FlashInfer": BackendConfig(
+        name="FlashInfer",
+        attention_config={"backend": "FLASHINFER"},
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+    ),
+    "RocmAttn": BackendConfig(
+        name="RocmAttn",
+        attention_config={
+            "backend": "ROCM_ATTN",
+        },
+        comp_config={
+            "cudagraph_mode": "FULL",
+        },
+    ),
+}
+
+
+class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetadata]):
+    """Minimal concrete subclass for testing (base class is ABC)."""
+
+    metadata_cls = BaseMambaAttentionMetadata
+
+    @classmethod
+    def build_mamba_metadata(
+        cls,
+        vllm_config: VllmConfig,
+        seq_lens: list[int],
+        query_lens: list[int],
+        is_prefilling: list[bool],
+        *,
+        device: torch.device | None = None,
+    ) -> BaseMambaAttentionMetadata:
+        block_size = vllm_config.cache_config.block_size
+        device = device or torch.device("cpu")
+        mamba_spec = MambaSpec(
+            block_size=block_size, shapes=((1,), (1,)), dtypes=(torch.float32,)
+        )
+        builder = cls(mamba_spec, ["layer0"], vllm_config, device)
+        batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+        common_metadata = create_common_attn_metadata(
+            batch_spec, block_size=block_size, device=device, arange_block_indices=True
+        )
+        common_metadata = common_metadata.replace(
+            is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
+        )
+        return builder.build(0, common_metadata)
+
+
+def dense_kv_cache_tensor(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    layer_names: list[str] | None = None,
+) -> KVCacheTensor:
+    """The `KVCacheTensor` for a dense allocation of `num_layers` layers."""
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, num_blocks, num_layers, layout
+    )
+    return KVCacheTensor(
+        size=raw.numel(),
+        layers=layer_names or [str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+
+
+def dense_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+) -> list[torch.Tensor]:
+    """`create_kv_cache_views` for a dense allocation of `num_layers` layers."""
+    tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
+    return create_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        layout,
+        tensor,
+        kernel_block_size=kernel_block_size,
+    )

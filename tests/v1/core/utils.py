@@ -1,0 +1,492 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import torch
+
+from tests.v1.kv_connector.unit.utils import MockKVConfig
+from vllm.config import (
+    CacheConfig,
+    DiffusionConfig,
+    ECTransferConfig,
+    KVTransferConfig,
+    LoRAConfig,
+    ModelConfig,
+    MultiModalConfig,
+    ObservabilityConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
+from vllm.config.model import RunnerOption
+from vllm.config.scheduler import SchedulerPolicy
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
+    KVQuantMode,
+    MambaSpec,
+    ManagerConfig,
+    MLAAttentionSpec,
+)
+from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
+
+EOS_TOKEN_ID = 50256
+
+
+def mock_kv(matched_tokens: int, is_async: bool, num_defers_before_matching: int = 0):
+    return MockKVConfig(
+        matched_tokens=matched_tokens,
+        is_async=is_async,
+        num_defers_before_matching=num_defers_before_matching,
+    )
+
+
+def create_scheduler(
+    model: str = "facebook/opt-125m",
+    max_num_seqs: int = 16,
+    max_num_active_seqs: int | None = None,
+    max_num_batched_tokens: int = 8192,
+    enable_chunked_prefill: bool = True,
+    enable_prefix_caching: bool = False,
+    long_prefill_token_threshold: int = 0,
+    long_prefill_token_threshold_adaptive: bool = False,
+    disable_chunked_mm_input: bool = False,
+    mm_encoder_only: bool = False,
+    use_kv_connector: None | bool | str | MockKVConfig = None,
+    kv_role: str = "kv_both",
+    num_blocks: int = 10000,
+    block_size: int = 16,
+    max_model_len: int | None = None,
+    num_speculative_tokens: int | None = None,
+    speculative_method: str | None = None,
+    skip_tokenizer_init: bool = False,
+    async_scheduling: bool = False,
+    pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    use_ec_connector: bool = False,
+    ec_role: str | None = None,
+    kv_cache_layer_config: KVCacheLayerConfig | None = None,
+    runner: RunnerOption = "auto",
+    per_request_spec_decode_metrics: str = "none",
+    cache_aware_admission_window: int = 0,
+    cache_aware_admission_threshold: float = 0.5,
+    scheduling_policy: SchedulerPolicy = "fcfs",
+    diffusion_canvas_length: int | None = None,
+    scheduler_cls: type[Scheduler] | None = None,
+    lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
+) -> Scheduler | AsyncScheduler:
+    """Create scheduler under test.
+
+    Args:
+      model: model under test
+      max_num_seqs: max sequences to schedule
+      max_num_batch_tokens: max num tokens to batch
+      enable_prefix_caching: optionally force APC config
+                             (True/False) or use default
+                             (False)
+      long_prefill_token_threshold: cap on prefill chunk size
+      long_prefill_token_threshold_adaptive: floor the cap at a
+                             fair share of the token budget
+
+    Returns:
+      {class}`Scheduler` instance
+
+    """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=skip_tokenizer_init,
+        # The scheduler reads model_config.max_model_len, not the
+        # SchedulerConfig one, so both must agree.
+        max_model_len=max_model_len,
+        runner=runner,
+    )
+    if mm_encoder_only:
+        model_config.multimodal_config.mm_encoder_only = True
+    if use_ec_connector and ec_role == "ec_producer":
+        model_config.multimodal_config = MultiModalConfig()
+    if max_model_len is None:
+        max_model_len = max_num_batched_tokens
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        long_prefill_token_threshold_adaptive=(long_prefill_token_threshold_adaptive),
+        disable_chunked_mm_input=disable_chunked_mm_input,
+        enable_chunked_prefill=enable_chunked_prefill,
+        async_scheduling=async_scheduling,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        cache_aware_admission_window=cache_aware_admission_window,
+        cache_aware_admission_threshold=cache_aware_admission_threshold,
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
+        policy=scheduling_policy,
+    )
+    # Cache config, optionally force APC
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=enable_prefix_caching,
+    )
+    kv_transfer_config = None
+    if isinstance(use_kv_connector, MockKVConfig):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="MockKVConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config={
+                "matched_tokens": use_kv_connector.matched_tokens,
+                "is_async": use_kv_connector.is_async,
+                "num_defers_before_matching": (
+                    use_kv_connector.num_defers_before_matching
+                ),
+            },
+        )
+    elif isinstance(use_kv_connector, str):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector=use_kv_connector,
+            kv_role=kv_role,
+        )
+    elif use_kv_connector:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config={"shared_storage_path": "local_storage"},
+        )
+
+    if num_speculative_tokens is not None:
+        assert speculative_config is None
+        spec_kwargs: dict = dict(
+            model="ngram", num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens_per_batch_size is not None:
+            spec_kwargs["num_speculative_tokens_per_batch_size"] = (
+                num_speculative_tokens_per_batch_size
+            )
+        if speculative_method is not None:
+            spec_kwargs["method"] = speculative_method
+            spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
+            spec_kwargs["prompt_lookup_min"] = 1
+        speculative_config = SpeculativeConfig(**spec_kwargs)
+
+    ec_transfer_config = (
+        ECTransferConfig(
+            ec_connector="ECExampleConnector",
+            ec_role=ec_role,
+            ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
+        )
+        if use_ec_connector
+        else None
+    )
+
+    diffusion_config: DiffusionConfig | None = None
+    if diffusion_canvas_length is not None:
+        # A diffusion checkpoint declares its canvas in the HF config.
+        model_config.hf_config.canvas_length = diffusion_canvas_length
+        diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
+
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        ),
+        kv_transfer_config=kv_transfer_config,
+        speculative_config=speculative_config,
+        diffusion_config=diffusion_config,
+        ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
+        observability_config=ObservabilityConfig(
+            per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+        ),
+    )
+    if kv_cache_layer_config is None:
+        kv_cache_layer_config = full_layer(
+            AttentionSpec(
+                block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
+        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,  # A large number of blocks to hold all requests
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["layer"], kv_cache_layer_config)],
+    )
+    cache_config.num_gpu_blocks = num_blocks
+    if scheduler_cls is None:
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+    scheduler = scheduler_cls(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+    return scheduler
+
+
+_none_hash_initialized = False
+
+
+def create_requests(
+    num_requests: int,
+    num_tokens: int = 10,
+    mm_hashes_list: list[list[str]] | None = None,
+    mm_positions: list[list[PlaceholderRange]] | None = None,
+    ignore_eos: bool = False,
+    max_tokens: int = 16,
+    stop_token_ids: list[int] | None = None,
+    prompt_logprobs: int | None = None,
+    same_prompt: bool = False,
+    block_size: int = 16,
+    req_ids: list[str] | None = None,
+    sampling_params: SamplingParams | None = None,
+) -> list[Request]:
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(sha256)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, sha256)
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    requests = []
+
+    if mm_hashes_list is not None:
+        # NOTE: allow manual input; some mm items can have the same identifier
+        # no. of mm_hashes and mm_positions for each request should be identical
+        assert mm_positions is not None, (
+            "mm_positions must be provided when mm_hashes_list is provided"
+        )
+        assert len(mm_hashes_list) == len(mm_positions) == num_requests
+        assert [len(h) for h in mm_hashes_list] == [len(p) for p in mm_positions]
+
+        # Since same identifier would imply they are identical encoder output
+        # Verify mm items with identical identifier are having mm_position.length
+        seen_hashes: dict[str, int] = {}
+
+    if req_ids:
+        assert len(req_ids) == num_requests
+    else:
+        req_ids = [f"{i}" for i in range(num_requests)]
+
+    for i in range(num_requests):
+        mm_features = []
+
+        for j, position in enumerate(
+            mm_positions[i] if mm_positions is not None else []
+        ):
+            if mm_hashes_list is not None:
+                identifier = mm_hashes_list[i][j]
+
+                # Verify if position length is identical
+                position_length = position.length
+                if identifier in seen_hashes:
+                    assert seen_hashes[identifier] == position_length, (
+                        f"mm_hash '{identifier}' has inconsistent position lengths: "
+                        f"previously {seen_hashes[identifier]}, now {position_length} "
+                        f"at request {i}, position {j}"
+                    )
+                else:
+                    seen_hashes[identifier] = position_length
+            else:
+                # Unique dummy hash for each mm item
+                identifier = f"hash{i}_{j}"
+            mm_feature = MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy(),
+                mm_position=position,
+                identifier=identifier,
+                modality="image",
+            )
+            mm_features.append(mm_feature)
+
+        prompt_token_ids = [0] * num_tokens if same_prompt else [i] * num_tokens
+        request = Request(
+            request_id=req_ids[i],
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            mm_features=mm_features if mm_features else None,
+            block_hasher=block_hasher,
+        )
+        requests.append(request)
+    return requests
+
+
+def new_kv_cache_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    kv_quant_mode=KVQuantMode.NONE,
+):
+    return AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        kv_quant_mode=kv_quant_mode,
+    )
+
+
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+    )
+
+
+def full_layer(spec: KVCacheSpec) -> KVCacheLayerConfig:
+    return FullAttentionManager.layer_config(spec)
+
+
+def sliding_window_layer(
+    spec: KVCacheSpec, sliding_window: int, **config_kwargs
+) -> KVCacheLayerConfig:
+    return SlidingWindowManager.layer_config(
+        spec, sliding_window=sliding_window, **config_kwargs
+    )
+
+
+def chunked_local_layer(
+    spec: KVCacheSpec, attention_chunk_size: int
+) -> KVCacheLayerConfig:
+    return ChunkedLocalAttentionManager.layer_config(
+        spec, attention_chunk_size=attention_chunk_size
+    )
+
+
+def mamba_layer(
+    spec: MambaSpec, mamba_cache_mode="none", num_speculative_blocks=2, **config_kwargs
+) -> KVCacheLayerConfig:
+    return MambaManager.layer_config(
+        spec,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+        **config_kwargs,
+    )
+
+
+def new_kv_cache_layer(sliding_window=None, attention_chunk_size=None, **spec_kwargs):
+    """Attention layer config; the window args pick the manager."""
+    spec = new_kv_cache_spec(**spec_kwargs)
+    if sliding_window is not None:
+        return sliding_window_layer(spec, sliding_window)
+    if attention_chunk_size is not None:
+        return chunked_local_layer(spec, attention_chunk_size)
+    return full_layer(spec)
+
+
+def new_sliding_window_layer(sliding_window=1, **spec_kwargs):
+    return sliding_window_layer(new_kv_cache_spec(**spec_kwargs), sliding_window)
+
+
+def new_mamba_layer(
+    mamba_cache_mode="none", num_speculative_blocks=2, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return mamba_layer(
+        new_mamba_spec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def uniform_spec(group: KVCacheGroup) -> KVCacheSpec:
+    """The layout every layer of `group` shares."""
+    (spec,) = set(group.kv_cache_specs.values())
+    return spec
+
+
+def new_kv_cache_group(
+    layer_names: list[str],
+    layer: KVCacheLayerConfig | KVCacheSpec,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """Group spec from a layer config, or from a bare spec with the default
+    manager for its type (full attention, or Mamba for `MambaSpec`)."""
+    if isinstance(layer, KVCacheSpec):
+        manager_cls = (
+            MambaManager if isinstance(layer, MambaSpec) else FullAttentionManager
+        )
+        layer = KVCacheLayerConfig(manager_config or manager_cls.config(), layer)
+    else:
+        assert manager_config is None
+    if not layer_names:
+        # A pipeline stage holding none of the group's layers.
+        kwargs.setdefault("unprojected_specs", (layer.spec,))
+    return KVCacheGroup(
+        dict.fromkeys(layer_names, layer.spec),
+        layer.manager_config,
+        layer.spec.block_size,
+        layer.spec.dcp_sharded,
+        **kwargs,
+    )
+
+
+def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=576,
+        dtype=torch.float32,
+        cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    layer_configs: list[dict[str, KVCacheLayerConfig]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        layer_configs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, layer_configs),
+    )

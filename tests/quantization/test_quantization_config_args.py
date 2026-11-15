@@ -1,0 +1,378 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for QuantizationConfigArgs parsing."""
+
+import pytest
+
+from tests.quantization.utils import quant_config_args, quant_spec
+from vllm.config.quantization import (
+    _ONLINE_SHORTHANDS,
+    _WEIGHT_QUANT_KEY_NAMES,
+    QUANT_KEY_NAMES,
+    QuantizationConfigArgs,
+    QuantSpec,
+    resolve_quantization_config,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+    _find_matching_targets,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kInt4Static32,
+    kInt8StaticChannelSym,
+    kLutBStatic,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+    kNvfp4DynamicToken,
+    kNvfp4Static,
+)
+
+# ---- QuantSpec ------------------------------------------------------------
+
+
+def test_args_resolve_ambiguous_strings_by_field():
+    args = QuantizationConfigArgs(moe={"weight": "mxfp8", "activation": "mxfp8"})
+    assert args.moe == QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+
+    args = QuantizationConfigArgs(moe={"weight": "mxfp4", "activation": "mxfp4"})
+    assert args.moe == QuantSpec(weight=kMxfp4Static, activation=kMxfp4Dynamic)
+
+
+def test_quant_spec_resolves_string_to_quant_key():
+    spec = quant_spec(weight="mxfp8", activation="fp8_per_token")
+    assert spec.weight == kMxfp8Static
+    assert spec.activation == kFp8DynamicTokenSym
+
+
+def test_quant_spec_accepts_quant_key_directly():
+    spec = QuantSpec(weight=kFp8StaticTensorSym)
+    assert spec.weight is kFp8StaticTensorSym
+    assert spec.activation is None
+
+
+def test_quant_spec_equality_ignores_explicit_field_metadata():
+    assert QuantSpec(weight=kFp8StaticTensorSym) == QuantSpec(
+        weight=kFp8StaticTensorSym,
+        activation=None,
+    )
+
+
+def test_quant_spec_string_representation_uses_quantization_name():
+    assert str(quant_spec(weight="mxfp4")) == "mxfp4"
+
+
+def test_quant_spec_resolves_groupwise_int4_weight():
+    spec = QuantSpec(weight="int4_per_group_32")
+    assert spec.weight == kInt4Static32
+    assert spec.activation is None
+
+
+def test_quant_spec_rejects_unknown_name():
+    with pytest.raises(ValueError, match="unknown quantization name"):
+        quant_spec(weight="not_a_real_format")
+
+
+# ---- QuantizationConfigArgs string shorthand on linear/moe ----------------
+
+
+def test_args_linear_string_resolves_via_quant_key_names():
+    # A bare QUANT_KEY_NAMES entry desugars to QuantSpec(weight=<key>).
+    args = quant_config_args(linear="fp8_per_block_static")
+    assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
+    assert args.moe is None
+
+
+@pytest.mark.parametrize(
+    "shorthand,weight",
+    [("fp8_per_block", kFp8Static128BlockSym), ("nvfp4_per_token", kNvfp4Static)],
+)
+def test_args_moe_string_resolves_via_online_shorthand(shorthand, weight):
+    # An online-shorthand name pulls the matching slot from _ONLINE_SHORTHANDS
+    # (so `linear: "fp8_per_block"` and `moe: "fp8_per_block"` produce the
+    # same per-layer-kind spec the `--quantization fp8_per_block` shorthand
+    # would).
+    args = quant_config_args(moe=shorthand)
+    assert args.moe == QuantSpec(weight=weight)
+
+
+def test_args_string_shorthand_missing_slot_raises():
+    # int8_per_channel_weight_only sets only `moe`; using it on `linear`
+    # has no defined spec and should raise rather than silently no-op.
+    with pytest.raises(ValueError, match="does not define a linear spec"):
+        quant_config_args(linear="int8_per_channel_weight_only")
+
+
+@pytest.mark.parametrize(
+    "activation,expected",
+    [("mxfp8", kMxfp8Dynamic), ("nvfp4_per_token", kNvfp4DynamicToken)],
+)
+def test_args_accepts_dict_form(activation, expected):
+    args = quant_config_args(moe={"activation": activation})
+    assert args.moe == QuantSpec(activation=expected)
+    assert args.linear is None
+
+
+def test_online_shorthands_do_not_set_activation_defaults():
+    for args in _ONLINE_SHORTHANDS.values():
+        for spec in (args.linear, args.moe):
+            if spec is not None:
+                assert "activation" not in spec.fields_set
+
+
+def test_targets_reject_non_string_keys():
+    with pytest.raises(ValueError, match="targets keys must be strings"):
+        QuantizationConfigArgs._validate_targets({123: "mxfp8"})
+
+
+# ---- resolve_quantization_config -----------------------------------------
+
+
+def test_resolve_shorthand_only_populates_both_slots():
+    args = resolve_quantization_config("fp8_per_block", None)
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
+    assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
+
+
+@pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
+def test_resolve_colliding_shorthand_is_deferred(quantization: str):
+    """Checkpoint metadata determines whether an MXFP shorthand is online."""
+    assert resolve_quantization_config(quantization, None) is None
+    # The shorthand's defaults are merged by `get_quant_config` for online
+    # models only: an override alone quantizes no layer a checkpoint skips.
+    override = {"moe": {"activation": "mxfp8"}}
+    args = resolve_quantization_config(quantization, override)
+    assert args == QuantizationConfigArgs(moe=QuantSpec(activation=kMxfp8Dynamic))
+
+
+@pytest.mark.parametrize(
+    "shorthand,weight",
+    [
+        ("int8_per_channel_weight_only", kInt8StaticChannelSym),
+        ("nvfp4_per_token", kNvfp4Static),
+        ("lut_b_moe", kLutBStatic),
+    ],
+)
+def test_resolve_moe_only_shorthand_leaves_linear_unset(shorthand, weight):
+    args = resolve_quantization_config(shorthand, None)
+    assert args is not None
+    assert args.linear is None
+    assert args.moe == QuantSpec(weight=weight)
+
+
+@pytest.mark.parametrize("quantization", [None, "modelopt_fp4"])
+@pytest.mark.parametrize(
+    "activation,expected",
+    [("mxfp8", kMxfp8Dynamic), ("nvfp4_per_token", kNvfp4DynamicToken)],
+)
+def test_resolve_activation_override(quantization, activation, expected):
+    # When only `quantization_config` is given (e.g. for an already-quantized
+    # checkpoint that needs an activation override), it's returned as-is.
+    args = resolve_quantization_config(
+        quantization, {"moe": {"activation": activation}}
+    )
+    assert args is not None
+    assert args.linear is None
+    assert args.moe == QuantSpec(activation=expected)
+
+
+def test_resolve_merges_explicit_over_shorthand():
+    # Explicit linear in quantization_config wins; moe falls back to the
+    # shorthand's slot.
+    args = resolve_quantization_config(
+        "fp8_per_tensor",
+        {"linear": "fp8_per_block"},
+    )
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
+    assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
+    assert "activation" not in args.linear.fields_set
+
+
+def test_resolve_preserves_explicit_null_activation():
+    args = resolve_quantization_config(
+        "fp8_per_tensor",
+        {"linear": {"activation": None}},
+    )
+    assert args is not None
+    assert args.linear == QuantSpec(
+        weight=kFp8StaticTensorSym,
+        activation=None,
+    )
+    assert args.linear.fields_set == frozenset({"weight", "activation"})
+
+
+def test_resolve_quantization_config_with_checkpoint_quantization():
+    args = resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+    assert args == quant_config_args(linear="fp8_per_block")
+
+
+# ---- QUANT_KEY_NAMES coverage --------------------------------------------
+
+
+def test_quant_key_names_round_trip():
+    # Every advertised name should round-trip through QuantSpec activation
+    # parsing without error and produce the same QuantKey it maps to.
+    for name, expected in QUANT_KEY_NAMES.items():
+        assert quant_spec(activation=name).activation == expected, name
+        # Ambiguous names (e.g. "mxfp8") resolve to the static key for weights.
+        expected_weight = _WEIGHT_QUANT_KEY_NAMES.get(name, expected)
+        assert quant_spec(weight=name).weight == expected_weight, name
+
+
+def test_static_block_weight_paired_with_dynamic_block_activation():
+    # The block-FP8 shorthand pair: 128x128 static weights + 1x128 dynamic
+    # activations. Pinning this so renames in QUANT_KEY_NAMES don't quietly
+    # rewire the kernel dispatch.
+    spec = quant_spec(weight="fp8_per_block_static", activation="fp8_per_block_dynamic")
+    assert spec.weight == kFp8Static128BlockSym
+    assert spec.activation == kFp8Dynamic128Sym
+
+
+def test_targets_allow_distinct_patterns_with_the_same_shorthand():
+    layer_name = "model.layers.0.self_attn.qkv_proj"
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    targets = {
+        r"re:.*\.q_proj$": "mxfp8",
+        r"re:.*\.k_proj$": "mxfp8",
+        r"re:.*\.v_proj$": "mxfp8",
+    }
+
+    matches = _find_matching_targets(layer_name, targets, fused_mapping)
+    assert len(matches) == 1
+    assert targets[matches[0]] == "mxfp8"
+
+
+def test_targets_reject_overlapping_patterns():
+    targets = {
+        r"re:.*o_proj": "fp8_per_tensor",
+        "model.layers.0.self_attn.o_proj": "fp8_per_block",
+    }
+
+    with pytest.raises(ValueError, match="multiple quantization_config.targets"):
+        _find_matching_targets("model.layers.0.self_attn.o_proj", targets)
+
+
+def test_targets_reject_partially_matched_fused_layer():
+    targets = {r"re:.*q_proj": "fp8_per_tensor"}
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    with pytest.raises(ValueError, match="unmatched shards"):
+        _find_matching_targets(
+            "model.layers.0.self_attn.qkv_proj", targets, fused_mapping
+        )
+
+
+def test_targets_reject_fused_shards_with_different_schemes():
+    targets = {
+        r"re:.*\.q_proj$": "fp8_per_tensor",
+        r"re:.*\.k_proj$": "fp8_per_block",
+        r"re:.*\.v_proj$": "fp8_per_tensor",
+    }
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    with pytest.raises(ValueError, match="different quantization_config.targets"):
+        _find_matching_targets(
+            "model.layers.0.self_attn.qkv_proj", targets, fused_mapping
+        )
+
+
+def test_targets_reject_moe_only_shorthand_for_linear_layer():
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"model.layers.0.self_attn.o_proj": "nvfp4_per_token"}
+        )
+    )
+
+    with pytest.raises(ValueError, match="does not define a QuantSpec"):
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
+
+
+# ---- hadamard_size ---------------------------------------------------------
+
+
+def test_mxfp4_hadamard32_target_resolves_to_rotated_mxfp4_linear():
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+    )
+
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"re:.*linear_attn\\.out_proj": "mxfp4_hadamard32"}
+        )
+    )
+    resolved = config.resolve_quant_method_cls(
+        LinearBase, "model.layers.0.linear_attn.out_proj"
+    )
+    assert resolved is not None
+    _, quant_key_str, _, spec, method_cls = resolved
+    assert quant_key_str == "mxfp4_hadamard32"
+    assert spec.hadamard_size == 32
+    assert method_cls is Mxfp4OnlineLinearMethod
+
+
+def test_rocm_platform_supports_mxfp4_hadamard32():
+    """`--quantization mxfp4_hadamard32` reaches the ROCm allowlist unchanged."""
+    try:
+        from vllm.platforms.rocm import RocmPlatform
+    except ImportError:
+        pytest.skip("vllm.platforms.rocm not importable outside a ROCm stack")
+
+    RocmPlatform.verify_quantization("mxfp4_hadamard32")
+
+
+@pytest.mark.parametrize("size", [0, 24, 33])
+def test_hadamard_size_must_be_power_of_two(size):
+    with pytest.raises(ValueError, match="power of two"):
+        quant_config_args(linear={"weight": kMxfp4Static, "hadamard_size": size})
+
+
+@pytest.mark.parametrize(
+    "linear,moe",
+    [
+        ({"weight": "fp8_per_block_static", "hadamard_size": 32}, None),
+        (None, {"weight": kMxfp4Static, "hadamard_size": 32}),
+    ],
+)
+def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
+    config = OnlineQuantizationConfig(quant_config_args(linear=linear, moe=moe))
+    layer_cls = LinearBase if linear is not None else RoutedExperts
+    with pytest.raises(NotImplementedError, match="hadamard_size"):
+        config.resolve_quant_method_cls(layer_cls, "model.layers.0.mlp.down_proj")
+
+
+@pytest.mark.parametrize(
+    ("quantization", "linear", "expected_hadamard"),
+    [
+        # `--quantization online` takes the rotation from the spec.
+        ("online", {"weight": "mxfp4", "hadamard_size": 64}, 64),
+        # A compatible override keeps the shorthand's rotation.
+        ("mxfp4_hadamard32", {"activation": None}, 32),
+        # Re-pointing a rotated shorthand at another weight is rejected.
+        ("mxfp4_hadamard32", {"weight": "fp8_per_block_static"}, None),
+    ],
+)
+def test_hadamard_size_composes_with_quantization_config(
+    quantization, linear, expected_hadamard
+):
+    if expected_hadamard is None:
+        with pytest.raises(ValueError, match="Hadamard-rotated shorthand"):
+            resolve_quantization_config(quantization, {"linear": linear})
+        return
+
+    args = resolve_quantization_config(quantization, {"linear": linear})
+    assert args is not None and args.linear is not None
+    assert args.linear.hadamard_size == expected_hadamard
+    resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+        LinearBase, "model.layers.0.self_attn.o_proj"
+    )
+    assert resolved is not None
+    assert resolved[3].hadamard_size == expected_hadamard

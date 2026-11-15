@@ -1,0 +1,415 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
+from collections.abc import Collection, Sequence
+from functools import partial
+from typing import Any, TypeAlias
+
+import numpy as np
+import torch
+
+from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
+from vllm.utils.torch_utils import (
+    TORCH_DTYPE_TO_ARRAY_TYPECODE,
+    get_accelerator_view_from_cpu_tensor,
+)
+from vllm.v1.conf_compute_utils import register_inplace_h2d_target
+
+logger = init_logger(__name__)
+
+# Default round-robin depth for the UVA buffer pools. Must be >= the number of
+# concurrent in-flight steps (engine batch_queue_size).
+_DEFAULT_MAX_CONCURRENCY = 2
+
+# Elements copied per program in `_apply_write_kernel`.
+_WRITE_BLOCK_SIZE = 1024
+
+# Staged by reference rather than copied; see StagedWriteTensor.stage_write.
+_BUFFER_TYPES = (np.ndarray, array.array)
+_Chunk: TypeAlias = "np.ndarray | array.array[Any]"
+
+
+def set_default_max_concurrency(n: int) -> None:
+    global _DEFAULT_MAX_CONCURRENCY
+    _DEFAULT_MAX_CONCURRENCY = max(2, n)
+
+
+class UvaBuffer:
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+        if not is_uva_available():
+            raise RuntimeError("UVA is not available")
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        self.np = self.cpu.numpy()
+        self._uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        return self._uva[:n] if n is not None else self._uva
+
+
+class NonUvaBuffer:
+    """Explicit-copy fallback for platforms without UVA."""
+
+    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
+        from vllm.platforms import current_platform
+
+        # Pinned memory can be available without UVA, e.g. under NVIDIA
+        # Confidential Computing, where UVA is disabled because the device
+        # view of pinned host memory is not coherent.
+        pin_memory = is_pin_memory_available()
+        if current_platform.is_confidential_compute():
+            logger.info_once(
+                "NVIDIA Confidential Computing detected; using explicit "
+                "host-to-device copies instead of UVA buffers (pinned host "
+                "memory: %s).",
+                "available" if pin_memory else "unavailable",
+            )
+        if not pin_memory:
+            logger.warning_once(
+                "Pinned host memory is not available on this platform; UVA "
+                "buffers fall back to pageable host memory with explicit "
+                "host-to-device copies."
+            )
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+        # Pool slots are only rewritten once their GPU readers have retired
+        # (see UvaBufferPool), so the upload from the pinned host buffer may
+        # land in place under CC.
+        if pin_memory:
+            register_inplace_h2d_target(self._uva)
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        if n is None:
+            return self._uva.copy_(self.cpu, non_blocking=True)
+        return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
+
+
+class UvaBufferPool:
+    """Preallocate each slot at size, growing its first dimension as needed.
+
+    Callers must retire a slot's GPU readers before reuse, including growth.
+    """
+
+    def __init__(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        max_concurrency: int | None = None,
+    ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
+        self.size = size
+        self.dtype = dtype
+        self.max_concurrency = max_concurrency
+
+        # UVA buffers for concurrency
+        self._buffer_cls = UvaBuffer if is_uva_available() else NonUvaBuffer
+        self._uva_bufs = [self._buffer_cls(size, dtype) for _ in range(max_concurrency)]
+        # Current buffer index
+        self._curr = 0
+
+    def _next_buf(self, n: int) -> UvaBuffer | NonUvaBuffer:
+        # Round robin to the next buffer.
+        self._curr = (self._curr + 1) % self.max_concurrency
+        buf = self._uva_bufs[self._curr]
+        if n > buf.cpu.shape[0]:
+            capacity = 1 << (n - 1).bit_length()
+            buf = self._buffer_cls((capacity, *buf.cpu.shape[1:]), self.dtype)
+            self._uva_bufs[self._curr] = buf
+        return buf
+
+    def copy_to_uva(self, x: torch.Tensor | np.ndarray | list) -> torch.Tensor:
+        n = len(x)
+        buf = self._next_buf(n)
+        # CPU-to-CPU copy
+        dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
+        dst[:n] = x
+        return buf.uva(n)
+
+    def copy_chunks_to_uva(self, chunks: Sequence[_Chunk], n: int) -> torch.Tensor:
+        buf = self._next_buf(n)
+        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
+        return buf.uva(n)
+
+    def copy_to_gpu(
+        self,
+        x: torch.Tensor | np.ndarray,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        uva = self.copy_to_uva(x)
+        # CPU-to-GPU copy
+        return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
+
+
+class UvaBackedTensor:
+    def __init__(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        max_concurrency: int | None = None,
+    ):
+        self.dtype = dtype
+
+        # Source of truth
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
+        self.np = self.cpu.numpy()
+
+        # Buffers for concurrency
+        self.pool = UvaBufferPool(size, dtype, max_concurrency)
+        self.gpu = self.pool.copy_to_uva(self.np)
+
+    def copy_to_uva(self, n: int | None = None) -> torch.Tensor:
+        # CPU-to-CPU copy
+        self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        return self.gpu
+
+
+class StagedWriteTensor:
+    def __init__(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        device: torch.device,
+        max_concurrency: int | None = None,
+        uva_instead_of_gpu: bool = False,
+    ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
+        if dtype not in TORCH_DTYPE_TO_ARRAY_TYPECODE:
+            raise ValueError(
+                f"Unsupported dtype {dtype}: should be one of "
+                f"{list(TORCH_DTYPE_TO_ARRAY_TYPECODE)}"
+            )
+        self.num_rows = size if isinstance(size, int) else size[0]
+        self.dtype = dtype
+        self.device = device
+        self.max_concurrency = max_concurrency
+
+        # Without UVA, large-but-cold tensors live on the GPU directly.
+        uva_instead_of_gpu = uva_instead_of_gpu and is_uva_available()
+
+        if not uva_instead_of_gpu:
+            # Create a GPU tensor (default)
+            self.gpu = torch.zeros(size, dtype=dtype, device=device)
+        else:
+            # For a large but not-frequently-accessed tensor, we can use UVA instead of
+            # GPU to save GPU memory
+            self._uva_buf = UvaBuffer(size, dtype)
+            self.gpu = self._uva_buf.uva()
+
+        self._staged_write_indices: list[int] = []
+        self._staged_write_starts: list[int] = []
+        self._typecode = TORCH_DTYPE_TO_ARRAY_TYPECODE[dtype]
+        self._staged_write_contents: array.array[Any] = array.array(self._typecode)
+        self._staged_write_cu_lens: list[int] = []
+        self._staged_write_max_len = 0
+        self._staged_write_chunks: list[_Chunk] = []
+        self._staged_write_len = 0
+
+        new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
+
+        self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_contents = new_buffer(1, dtype=dtype)
+
+    def stage_write(
+        self, index: int, start: int, x: Collection[int] | Collection[float]
+    ) -> None:
+        """Stage writing `x` to row `index` from column `start`.
+
+        A 1-D numpy array or an array.array is kept by reference and copied
+        only by apply_write, so it must not be modified until then. Its values
+        are cast to this tensor's dtype, and out-of-range values wrap silently.
+        """
+        assert index >= 0
+        assert start >= 0
+        n = len(x)
+        if not n:
+            return
+        contents = self._staged_write_contents
+        if isinstance(x, list):
+            contents.fromlist(x)  # fromlist sizes the array once.
+        elif isinstance(x, _BUFFER_TYPES):
+            if contents:
+                self._staged_write_chunks.append(contents)
+                self._staged_write_contents = array.array(self._typecode)
+            self._staged_write_chunks.append(x)
+        else:
+            contents.extend(x)
+        self._staged_write_len += n
+        self._staged_write_indices.append(index)
+        self._staged_write_starts.append(start)
+        self._staged_write_cu_lens.append(self._staged_write_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, n)
+
+    def stage_write_elem(self, index: int, x: int) -> None:
+        assert index >= 0
+        self._staged_write_contents.append(x)
+        self._staged_write_len += 1
+        self._staged_write_indices.append(index)
+        self._staged_write_starts.append(0)
+        self._staged_write_cu_lens.append(self._staged_write_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, 1)
+
+    def apply_write(self) -> None:
+        n = len(self._staged_write_indices)
+        if n == 0:
+            return
+
+        indices_uva = self.write_indices.copy_to_uva(self._staged_write_indices)
+        starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
+        cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
+
+        write_contents = self.write_contents.copy_chunks_to_uva(
+            self._staged_chunks(), self._staged_write_len
+        )
+
+        # Write diffs to the GPU buffer
+        _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
+            self.gpu,
+            self.gpu.stride(0),
+            indices_uva,
+            starts_uva,
+            write_contents,
+            cu_lens_uva,
+            None,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
+            MULTI_GROUP=False,
+        )
+        # Clear the staged writes
+        self.clear_staged_writes()
+
+    def clear_staged_writes(self) -> None:
+        self._staged_write_indices.clear()
+        self._staged_write_starts.clear()
+        # An array cannot be resized while a buffer view of it is still alive.
+        self._staged_write_contents = array.array(self._typecode)
+        self._staged_write_cu_lens.clear()
+        self._staged_write_max_len = 0
+        self._staged_write_chunks.clear()
+        self._staged_write_len = 0
+
+    def _staged_chunks(self) -> list[_Chunk]:
+        if not self._staged_write_contents:
+            return self._staged_write_chunks
+        return [*self._staged_write_chunks, self._staged_write_contents]
+
+
+class FusedStagedWriter:
+    """Applies the staged writes of several `StagedWriteTensor`s at once."""
+
+    def __init__(
+        self, device: torch.device, max_writes: int, max_concurrency: int | None = None
+    ):
+        new_pool = partial(
+            UvaBufferPool, dtype=torch.int32, max_concurrency=max_concurrency
+        )
+        self.group_ids = new_pool(max_writes)
+        self.indices = new_pool(max_writes)
+        self.starts = new_pool(max_writes)
+        self.cu_lens = new_pool(max_writes)
+        self.contents = new_pool(1)
+        self.device = device
+
+    def apply(
+        self,
+        tensors: Sequence[StagedWriteTensor],
+        output_ptrs: torch.Tensor,
+        output_strides: torch.Tensor,
+    ) -> None:
+        """Apply and clear the staged writes of `tensors` with one kernel."""
+        group_ids: list[int] = []
+        indices: list[int] = []
+        starts: list[int] = []
+        contents: list[_Chunk] = []
+        cu_lens: list[int] = []
+        max_len = 0
+        content_base = 0
+
+        for group_id, t in enumerate(tensors):
+            n = len(t._staged_write_indices)
+            if n == 0:
+                continue
+
+            group_ids.extend([group_id] * n)
+            indices.extend(t._staged_write_indices)
+            starts.extend(t._staged_write_starts)
+            contents.extend(t._staged_chunks())
+            cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+            content_base += t._staged_write_len
+            max_len = max(max_len, t._staged_write_max_len)
+
+        if not group_ids:
+            return
+
+        group_ids_uva = self.group_ids.copy_to_uva(group_ids)
+        indices_uva = self.indices.copy_to_uva(indices)
+        starts_uva = self.starts.copy_to_uva(starts)
+        cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
+        contents_uva = self.contents.copy_chunks_to_uva(contents, content_base)
+
+        _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
+            output_ptrs,
+            output_strides,
+            indices_uva,
+            starts_uva,
+            contents_uva,
+            cu_lens_uva,
+            group_ids_uva,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
+            MULTI_GROUP=True,
+        )
+        for t in tensors:
+            t.clear_staged_writes()
+
+
+def _num_write_chunks(max_len: int) -> int:
+    # One program per _WRITE_BLOCK_SIZE-element chunk.
+    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
+
+
+@triton.jit
+def _apply_write_kernel(
+    output_ptr,  # MULTI_GROUP: ptr-to-ptrs [num_groups]; else: data ptr
+    output_stride,  # MULTI_GROUP: ptr-to-strides [num_groups]; else: row stride
+    write_indices_ptr,
+    write_starts_ptr,
+    write_contents_ptr,
+    write_cu_lens_ptr,
+    write_group_ids_ptr,  # [num_writes], used only when MULTI_GROUP
+    BLOCK_SIZE: tl.constexpr,
+    MULTI_GROUP: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
+    start_idx = tl.load(write_starts_ptr + pid)
+
+    cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
+    cu_end = tl.load(write_cu_lens_ptr + pid)
+    content_len = cu_end - cu_start
+
+    if MULTI_GROUP:
+        # Each write targets a different output tensor (KV cache group);
+        # resolve its base pointer and row stride per write.
+        group_id = tl.load(write_group_ids_ptr + pid)
+        row_ptr = _load_ptr(output_ptr + group_id, tl.int32)
+        row_stride = tl.load(output_stride + group_id)
+    else:
+        row_ptr = output_ptr
+        row_stride = output_stride
+    row_ptr += row_idx * row_stride + start_idx
+
+    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < content_len
+    content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
+    tl.store(row_ptr + block, content, mask=mask)
+
+
+@triton.jit
+def _load_ptr(ptr_to_ptr, elem_dtype):
+    ptr = tl.load(ptr_to_ptr)
+    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
+    return tl.multiple_of(ptr, 16)

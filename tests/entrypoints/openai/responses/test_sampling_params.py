@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Unit tests for ResponsesRequest.to_sampling_params() parameter mapping."""
+
+import pytest
+import torch
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
+)
+from pydantic import ValidationError
+
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponseTextConfig,
+)
+from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import StructuredOutputsParams
+
+
+class TestResponsesRequestSamplingParams:
+    """Test that ResponsesRequest correctly maps parameters to SamplingParams."""
+
+    def test_basic_sampling_params(self):
+        """Test basic sampling parameters are correctly mapped."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            temperature=0.8,
+            top_p=0.95,
+            top_k=50,
+            min_p=0.1,
+            max_output_tokens=100,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.temperature == 0.8
+        assert sampling_params.top_p == 0.95
+        assert sampling_params.top_k == 50
+        assert sampling_params.min_p == 0.1
+        assert sampling_params.max_tokens == 100
+
+    def test_min_p_default(self):
+        """Test that min_p defaults to 0.0 when unset (parity with top_k)."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.min_p == 0.0
+
+    def test_extra_sampling_params(self):
+        """Test extra sampling parameters are correctly mapped."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            repetition_penalty=1.2,
+            seed=42,
+            stop=["END", "STOP"],
+            stop_token_ids=[42, 43],
+            ignore_eos=True,
+            spaces_between_special_tokens=False,
+            thinking_token_budget=128,
+            vllm_xargs={"custom": "value"},
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.repetition_penalty == 1.2
+        assert sampling_params.seed == 42
+        assert sampling_params.stop == ["END", "STOP"]
+        assert sampling_params.stop_token_ids == [42, 43]
+        assert sampling_params.ignore_eos is True
+        assert sampling_params.spaces_between_special_tokens is False
+        assert sampling_params.thinking_token_budget == 128
+        assert sampling_params.extra_args == {"custom": "value"}
+
+    def test_stop_string_conversion(self):
+        """Test that single stop string is converted to list."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            stop="STOP",
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.stop == ["STOP"]
+
+    def test_default_values(self):
+        """Test default values for optional parameters."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.repetition_penalty == 1.0  # None → 1.0
+        assert sampling_params.stop == []  # Empty list
+        assert sampling_params.thinking_token_budget is None
+        assert sampling_params.extra_args == {}  # Empty dict
+
+    def test_null_top_logprobs_is_same_as_omitted(self):
+        """`top_logprobs: null` must not drop the requested output logprobs."""
+        request = ResponsesRequest.model_validate(
+            {
+                "input": "test input",
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": None,
+            }
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.logprobs == 0
+
+    def test_seed_bounds_validation(self):
+        """Test that seed values outside torch.long bounds are rejected."""
+        # Test seed below minimum
+        with pytest.raises(ValidationError) as exc_info:
+            ResponsesRequest(
+                model="test-model",
+                input="test input",
+                seed=torch.iinfo(torch.long).min - 1,
+            )
+        assert "greater_than_equal" in str(exc_info.value).lower()
+
+        # Test seed above maximum
+        with pytest.raises(ValidationError) as exc_info:
+            ResponsesRequest(
+                model="test-model",
+                input="test input",
+                seed=torch.iinfo(torch.long).max + 1,
+            )
+        assert "less_than_equal" in str(exc_info.value).lower()
+
+        # Test valid seed at boundaries
+        request_min = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            seed=torch.iinfo(torch.long).min,
+        )
+        assert request_min.seed == torch.iinfo(torch.long).min
+
+        request_max = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            seed=torch.iinfo(torch.long).max,
+        )
+        assert request_max.seed == torch.iinfo(torch.long).max
+
+    def test_structured_outputs_passed_through(self):
+        """Test that structured_outputs field is passed to SamplingParams."""
+        structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            structured_outputs=structured_outputs,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.grammar == "root ::= 'hello'"
+
+    def test_text_format_json_object_enables_structured_outputs(self):
+        """text.format json_object enables structured outputs for sampling."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            text=ResponseTextConfig.model_validate({"format": {"type": "json_object"}}),
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.json_object is True
+        assert sampling_params.structured_outputs.json is None
+        assert request.structured_outputs is None
+
+    def test_structured_outputs_and_json_schema_conflict(self):
+        """Test that specifying both structured_outputs and json_schema raises."""
+        structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
+        text_config = ResponseTextConfig()
+        text_config.format = ResponseFormatTextJSONSchemaConfig(
+            type="json_schema",
+            name="test",
+            schema={"type": "object"},
+        )
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            structured_outputs=structured_outputs,
+            text=text_config,
+        )
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            request.to_sampling_params(default_max_tokens=1000)
+
+        assert "Cannot specify both structured_outputs and text.format" in str(
+            exc_info.value
+        )

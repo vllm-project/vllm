@@ -1,0 +1,2186 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::HashMap;
+
+use serde::Serialize;
+use serde_json::Value as JsonValue;
+use thiserror_ext::AsReport as _;
+use tracing::{info, trace, warn};
+use vllm_text::Prompt;
+use vllm_text::backend::hf::{
+    HfChatTemplate, HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
+};
+
+use self::format::{
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption, ProbeContext,
+};
+use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
+use crate::error::Result;
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
+use crate::{
+    AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
+};
+
+mod developer;
+mod error;
+mod format;
+mod generation;
+mod template;
+mod tojson;
+
+pub use template::{load_chat_template, resolve_chat_template};
+
+pub use self::format::ChatTemplateContentFormatOption;
+
+/// Extract the effective chat-template kwargs visible to the renderer from the request,
+/// using the provided defaults as the base.
+fn effective_template_kwargs(
+    default_template_kwargs: &HashMap<String, JsonValue>,
+    request: &ChatRequest,
+) -> HashMap<String, JsonValue> {
+    let mut kwargs = default_template_kwargs.clone();
+    kwargs.extend(request.chat_options.template_kwargs.clone());
+
+    if let Some(reasoning_effort) = &request.chat_options.reasoning_effort {
+        kwargs.insert(
+            "reasoning_effort".to_string(),
+            serde_json::json!(reasoning_effort),
+        );
+        if !request.chat_options.template_kwargs.contains_key("enable_thinking") {
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::json!(reasoning_effort.as_str() != Some("none")),
+            );
+        }
+    }
+
+    kwargs
+}
+
+/// Template-visible placeholder tokens per supported modality.
+///
+/// A `None` token means the loaded model does not support that modality, and
+/// content parts of that modality are rejected during rendering.
+#[derive(Debug, Clone, Default)]
+pub struct MultimodalRenderInfo {
+    pub image_token: Option<String>,
+    pub video_token: Option<String>,
+    pub audio_token: Option<String>,
+}
+
+/// Hugging Face chat-template renderer backed by the local Jinja chat-template
+/// state.
+pub struct HfChatRenderer {
+    default_template: Option<CompiledChatTemplate>,
+    /// The model's template for requests with tools, from a list-form
+    /// `chat_template` entry named `tool_use`; falls back to the default.
+    tool_use_template: Option<CompiledChatTemplate>,
+    default_template_kwargs: HashMap<String, JsonValue>,
+    content_format: ContentFormatOption,
+    special_tokens: Option<HfSpecialTokens>,
+    multimodal: Option<MultimodalRenderInfo>,
+    /// Whether a request may override the chat template.
+    trust_request_chat_template: bool,
+    /// Fuel budget for request-supplied templates; `None` disables it.
+    request_template_fuel: Option<u64>,
+}
+
+impl HfChatRenderer {
+    /// Create a renderer from the given template string.
+    ///
+    /// Templates are probed for their content format when compiled, rendering
+    /// with `special_tokens` and `default_template_kwargs`, so both are given
+    /// here.
+    pub fn new(
+        template: Option<String>,
+        default_template_kwargs: HashMap<String, JsonValue>,
+        special_tokens: Option<HfSpecialTokens>,
+        content_format: ContentFormatOption,
+    ) -> Result<Self> {
+        let mut renderer = Self {
+            default_template: None,
+            tool_use_template: None,
+            default_template_kwargs,
+            content_format,
+            special_tokens,
+            multimodal: None,
+            trust_request_chat_template: false,
+            request_template_fuel: request_template_fuel(
+                std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
+            )
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+        };
+        renderer.default_template =
+            template.map(|template| renderer.compile_template(template, None)).transpose()?;
+        Ok(renderer)
+    }
+
+    /// Use a separate model template for requests with tools, as Transformers
+    /// selects a `tool_use` template when tools are passed.
+    pub fn with_tool_use_template(mut self, template: Option<String>) -> Result<Self> {
+        self.tool_use_template =
+            template.map(|template| self.compile_template(template, None)).transpose()?;
+        Ok(self)
+    }
+
+    /// Compile `template` with this renderer's content format, limiting each
+    /// render to `fuel` template instructions.
+    fn compile_template(
+        &self,
+        template: String,
+        fuel: Option<u64>,
+    ) -> Result<CompiledChatTemplate> {
+        let probe = ProbeContext {
+            special_tokens: self.special_tokens.as_ref(),
+            template_kwargs: Some(&self.default_template_kwargs),
+        };
+        CompiledChatTemplate::new(template, self.content_format, fuel, &probe)
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))
+    }
+
+    pub fn with_multimodal(mut self, multimodal: Option<MultimodalRenderInfo>) -> Self {
+        self.multimodal = multimodal;
+        self
+    }
+
+    /// Allow requests to override the chat template
+    /// (`--trust-request-chat-template`).
+    pub fn with_trust_request_chat_template(mut self, trust_request_chat_template: bool) -> Self {
+        self.trust_request_chat_template = trust_request_chat_template;
+        self
+    }
+
+    /// Create a renderer from the given model files and loading options.
+    pub fn load(
+        files: &ResolvedModelFiles,
+        options: LoadModelBackendsOptions,
+        multimodal: Option<MultimodalRenderInfo>,
+    ) -> Result<Self> {
+        let HfTokenizerConfig {
+            special_tokens,
+            chat_template,
+            ..
+        } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+        let mut template = chat_template
+            .as_ref()
+            .and_then(HfChatTemplate::default_template)
+            .map(str::to_owned);
+        // A configured template or a dedicated template file replaces every
+        // tokenizer_config template, `tool_use` included.
+        let mut tool_use_template = chat_template
+            .as_ref()
+            .and_then(HfChatTemplate::tool_use_template)
+            .map(str::to_owned);
+        let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
+
+        if let Some(configured_template) = options.chat_template.as_deref() {
+            template = Some(
+                resolve_chat_template(configured_template)
+                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+            );
+            tool_use_template = None;
+            info!("using configured chat template override");
+        } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
+            // If independent chat template file(s) exist and contain non-empty content,
+            // they take priority over template entries in the tokenizer config
+            let file_template = load_chat_template(chat_template_path)
+                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+
+            if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                info!(
+                    path = %chat_template_path.display(),
+                    "loaded dedicated chat template file, overriding tokenizer_config chat_template"
+                );
+                template = file_template;
+                tool_use_template = None;
+            } else {
+                warn!(
+                    path = %chat_template_path.display(),
+                    "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
+                );
+            }
+        }
+
+        Ok(Self::new(
+            template,
+            options.default_chat_template_kwargs,
+            special_tokens,
+            options.chat_template_content_format,
+        )?
+        .with_tool_use_template(tool_use_template)?
+        .with_multimodal(multimodal)
+        .with_trust_request_chat_template(options.trust_request_chat_template))
+    }
+
+    /// Apply the chat template to one chat request, rendering the prompt string
+    /// to be tokenized and submitted to the model.
+    ///
+    /// If the request carries a per-request `chat_template` override, a
+    /// temporary template is compiled from that string and used instead of
+    /// the model's default. Overrides are refused unless request templates
+    /// are trusted, and render under a fuel budget; the model's default
+    /// template has none, as in the Python frontend. Without an override, a
+    /// request with tools uses the model's `tool_use` template if it has one,
+    /// as Transformers' `get_chat_template` does.
+    fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        if request.chat_options.chat_template.is_some() && !self.trust_request_chat_template {
+            return Err(Error::UntrustedRequestChatTemplate);
+        }
+        let override_template = request
+            .chat_options
+            .chat_template
+            .as_ref()
+            .map(|template| self.compile_template(template.clone(), self.request_template_fuel))
+            .transpose()?;
+        let model_template = if request.tools().is_empty() {
+            None
+        } else {
+            self.tool_use_template.as_ref()
+        }
+        .or(self.default_template.as_ref());
+        let template = override_template
+            .as_ref()
+            .or(model_template)
+            .ok_or(Error::MissingChatTemplate)?;
+
+        self.apply_chat_template_inner(template, request)
+    }
+
+    fn apply_chat_template_inner(
+        &self,
+        effective_template: &CompiledChatTemplate,
+        request: &ChatRequest,
+    ) -> Result<RenderedPrompt> {
+        let lowered = effective_template.developer_role().lower(&request.messages);
+        let content_format = effective_template.content_format_for(&lowered);
+        let mut messages =
+            to_template_messages(&lowered, content_format, self.multimodal.as_ref())?;
+
+        // Handling of `continue_final_message`:
+        // Append a sentinel tag to the final message content, render as usual, then
+        // truncate the rendered prompt at the tag so any template suffix after the
+        // final message content (e.g. the end-of-turn marker) is dropped.
+        let final_message_text = if request.chat_options.continue_final_message() {
+            let final_message = messages.last_mut().ok_or(Error::EmptyMessages)?;
+            Some(append_continue_final_message_tag(final_message)?)
+        } else {
+            None
+        };
+
+        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
+        trace!(
+            message_count = messages.len(),
+            ?content_format,
+            ?messages,
+            ?tools,
+            "applying chat template"
+        );
+
+        let effective_template_kwargs =
+            effective_template_kwargs(&self.default_template_kwargs, request);
+        let prompt = effective_template
+            .apply(TemplateContext {
+                messages: &messages,
+                add_generation_prompt: request.chat_options.add_generation_prompt(),
+                continue_final_message: request.chat_options.continue_final_message(),
+                tools: tools.as_deref(),
+                documents: request.documents.as_deref(),
+                template_kwargs: Some(&effective_template_kwargs),
+                special_tokens: self.special_tokens.as_ref(),
+            })
+            .map_err(|error| match error.thrown_message() {
+                Some(message) => Error::ChatTemplateThrown {
+                    message: message.to_owned(),
+                },
+                None => Error::ChatTemplate(error.to_report_string()),
+            })?;
+
+        let prompt = match &final_message_text {
+            Some(final_message_text) => {
+                truncate_prompt_at_continue_final_message_tag(prompt, final_message_text)?
+            }
+            None => prompt,
+        };
+
+        trace!(
+            prompt_len = prompt.len(),
+            prompt, "rendered chat template prompt"
+        );
+
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs,
+        })
+    }
+}
+
+impl ChatRenderer for HfChatRenderer {
+    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        self.apply_chat_template(request)
+    }
+
+    fn renders_request_chat_template(&self) -> bool {
+        true
+    }
+}
+
+/// Chat message in the JSON shape expected by Jinja chat templates.
+// TODO: borrow more fields directly from the original `ChatMessage`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize)]
+struct TemplateMessage<'a> {
+    role: &'a str,
+    content: TemplateContent,
+    // Developer-role messages may provide message-local tools in the same shape
+    // as top-level request tools.
+    tools: Option<Vec<TemplateTool>>,
+    // Reasoning-capable HF templates are inconsistent on the exact field name,
+    // so expose both variants for compatibility.
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
+    // Function-call-capable templates commonly expect assistant tool calls
+    // under this OpenAI-compatible field name.
+    tool_calls: Option<Vec<TemplateToolCall>>,
+    // Tool-role messages refer back to the assistant call they are answering.
+    tool_call_id: Option<String>,
+}
+
+/// Chat content in the two shapes HF templates commonly expect.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum TemplateContent {
+    String(String),
+    OpenAi(Vec<TemplateContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TemplateContentPart {
+    Text {
+        text: String,
+    },
+    Image,
+    Video,
+    Audio,
+    /// Kept structured, like Python, for templates that expand the referenced
+    /// tool.
+    ToolReference {
+        name: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolCall {
+    id: String,
+    r#type: &'static str, // always "function"
+    function: TemplateToolFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolFunction {
+    name: String,
+    arguments: JsonValue,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TemplateTool {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    function: TemplateToolDefinition,
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolDefinition {
+    name: String,
+    description: Option<String>,
+    parameters: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defer_loading: Option<bool>,
+}
+
+/// Convert chat messages into the JSON shape expected by Jinja chat templates.
+fn to_template_messages<'a>(
+    messages: &'a [ChatMessage],
+    content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<Vec<TemplateMessage<'a>>> {
+    messages
+        .iter()
+        .map(|message| to_template_message(message, content_format, multimodal))
+        .collect()
+}
+
+fn to_template_message<'a>(
+    message: &'a ChatMessage,
+    content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<TemplateMessage<'a>> {
+    Ok(match message {
+        ChatMessage::System { content } => TemplateMessage {
+            role: "system",
+            content: to_template_content(content, content_format, multimodal)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage::Developer { content, tools } => TemplateMessage {
+            role: "developer",
+            content: to_template_content(content, content_format, multimodal)?,
+            tools: tools.as_deref().map(to_template_tools),
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage::User { content } => TemplateMessage {
+            role: "user",
+            content: to_template_content(content, content_format, multimodal)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage::Assistant { content } => {
+            let reasoning = content.reasoning();
+            let tool_calls = to_template_tool_calls(content);
+            // Each text block is one part of the request's `content`, so the
+            // parts reach the template like any other role's.
+            let text_parts = content
+                .iter()
+                .filter_map(|block| match block {
+                    AssistantContentBlock::Text { text } => Some(ChatContentPart::text(text)),
+                    AssistantContentBlock::Reasoning { .. }
+                    | AssistantContentBlock::ToolCall(_) => None,
+                })
+                .collect();
+            let content =
+                to_template_content(&ChatContent::Parts(text_parts), content_format, multimodal)?;
+            TemplateMessage {
+                role: "assistant",
+                content,
+                tools: None,
+                reasoning: reasoning.clone(),
+                reasoning_content: reasoning,
+                tool_calls,
+                tool_call_id: None,
+            }
+        }
+        ChatMessage::ToolResponse {
+            content,
+            tool_call_id,
+        } => TemplateMessage {
+            role: "tool",
+            content: to_template_tool_content(content, content_format, multimodal)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.clone()),
+        },
+        ChatMessage::Custom { role, content } => TemplateMessage {
+            role,
+            content: to_template_content(content, content_format, multimodal)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    })
+}
+
+fn to_template_tool_calls(content: &[AssistantContentBlock]) -> Option<Vec<TemplateToolCall>> {
+    let mut tool_calls = Vec::new();
+
+    for tool_call in content.tool_calls() {
+        tool_calls.push(TemplateToolCall {
+            id: tool_call.id.clone(),
+            r#type: "function",
+            function: TemplateToolFunction {
+                name: tool_call.name.clone(),
+                arguments: JsonValue::Object(tool_call_arguments_or_empty(&tool_call.arguments)),
+            },
+        });
+    }
+
+    (!tool_calls.is_empty()).then_some(tool_calls)
+}
+
+fn to_template_content(
+    content: &ChatContent,
+    content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<TemplateContent> {
+    Ok(match content_format {
+        ChatTemplateContentFormat::String => {
+            TemplateContent::String(to_template_string_content(content, multimodal)?)
+        }
+        ChatTemplateContentFormat::OpenAi => {
+            TemplateContent::OpenAi(to_template_openai_content(content, multimodal)?)
+        }
+    })
+}
+
+/// Text-only tool results reach the template as one string in both formats,
+/// like Python: most templates only handle string tool content, while clients
+/// such as Claude Code send tool results as text parts.
+fn to_template_tool_content(
+    content: &ChatContent,
+    content_format: ChatTemplateContentFormat,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<TemplateContent> {
+    let text_only = match content {
+        ChatContent::Text(_) => true,
+        ChatContent::Parts(parts) => {
+            parts.iter().all(|part| matches!(part, ChatContentPart::Text { .. }))
+        }
+    };
+    if text_only {
+        Ok(TemplateContent::String(to_template_string_content(
+            content, multimodal,
+        )?))
+    } else {
+        to_template_content(content, content_format, multimodal)
+    }
+}
+
+fn to_template_openai_content(
+    content: &ChatContent,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<Vec<TemplateContentPart>> {
+    match content {
+        ChatContent::Text(text) => Ok(vec![TemplateContentPart::Text { text: text.clone() }]),
+        ChatContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ChatContentPart::Text { text } => {
+                    Ok(TemplateContentPart::Text { text: text.clone() })
+                }
+                // All multimodal contents are normalized to `{ "type": <modality> }`.
+                ChatContentPart::ImageUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                    Ok(TemplateContentPart::Image)
+                }
+                ChatContentPart::VideoUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.video_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                    Ok(TemplateContentPart::Video)
+                }
+                ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.audio_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
+                    Ok(TemplateContentPart::Audio)
+                }
+                ChatContentPart::ToolReference { name } => {
+                    Ok(TemplateContentPart::ToolReference { name: name.clone() })
+                }
+            })
+            .collect(),
+    }
+}
+
+fn to_template_string_content(
+    content: &ChatContent,
+    multimodal: Option<&MultimodalRenderInfo>,
+) -> Result<String> {
+    match content {
+        ChatContent::Text(text) => Ok(text.clone()),
+        ChatContent::Parts(parts) => {
+            // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
+            // media as its modality's placeholder in place, a tool reference as the tool's
+            // name, empty text parts are dropped, and the segments are joined with "\n".
+            // Python's default moves placeholders to the front instead.
+            let segments: Vec<&str> = parts
+                .iter()
+                .filter(|part| !part.is_empty_text())
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => Ok(text.as_str()),
+                    ChatContentPart::ImageUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_url")),
+                    ChatContentPart::VideoUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.video_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url")),
+                    ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
+                        multimodal
+                            .and_then(|multimodal| multimodal.audio_token.as_deref())
+                            .ok_or(Error::UnsupportedMultimodalContent("audio"))
+                    }
+                    ChatContentPart::ToolReference { name } => Ok(name.as_str()),
+                })
+                .collect::<Result<_>>()?;
+            Ok(segments.join("\n"))
+        }
+    }
+}
+
+/// Sentinel appended to the final message content when `continue_final_message`
+/// is requested, used to locate the truncation point in the rendered prompt.
+///
+/// Same literal as `transformers`. Occurrences of this string earlier in the
+/// prompt are harmless because truncation uses the rightmost match, and the
+/// appended sentinel ends up last as long as the template renders messages in
+/// order.
+const CONTINUE_FINAL_MESSAGE_TAG: &str = "CONTINUE_FINAL_MESSAGE_TAG ";
+
+/// Append [`CONTINUE_FINAL_MESSAGE_TAG`] to the trailing text of the final
+/// message, returning the original text for post-render validation.
+// TODO: transformers v5 also allows continuing a non-`content` field (e.g.
+// `reasoning_content`) by passing a field name; only the boolean form is
+// supported here.
+fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Result<String> {
+    let text = match &mut message.content {
+        TemplateContent::String(text) => Some(text),
+        // Pick the last text part in the message.
+        TemplateContent::OpenAi(parts) => parts.iter_mut().rev().find_map(|part| match part {
+            TemplateContentPart::Text { text } => Some(text),
+            TemplateContentPart::Image
+            | TemplateContentPart::Video
+            | TemplateContentPart::Audio
+            | TemplateContentPart::ToolReference { .. } => None,
+        }),
+    };
+    let text = text.ok_or_else(|| {
+        Error::ChatTemplate(
+            "continue_final_message is set but there is no text to continue \
+             in the final message"
+                .to_string(),
+        )
+    })?;
+
+    let original = text.clone();
+    text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
+    Ok(original)
+}
+
+/// Truncate the rendered prompt at [`CONTINUE_FINAL_MESSAGE_TAG`] so that it
+/// ends exactly with the final message content, dropping any template suffix
+/// such as end-of-turn markers.
+fn truncate_prompt_at_continue_final_message_tag(
+    mut rendered: String,
+    final_message_text: &str,
+) -> Result<String> {
+    let tag_loc = rendered
+        .rfind(CONTINUE_FINAL_MESSAGE_TAG.trim_end())
+        .filter(|_| rendered.contains(final_message_text.trim()));
+    let Some(tag_loc) = tag_loc else {
+        return Err(Error::ChatTemplate(format!(
+            "continue_final_message is set but the final message does not appear \
+             in the prompt after applying the chat template! This can happen if \
+             the chat template deletes portions of the final message. Final \
+             message to continue: {}",
+            final_message_text.trim(),
+        )));
+    };
+
+    if rendered[tag_loc..].starts_with(CONTINUE_FINAL_MESSAGE_TAG) {
+        // The template preserved spacing, so a plain cut at the tag suffices.
+        rendered.truncate(tag_loc);
+    } else {
+        // The template trimmed the trailing spacing of the message content, so
+        // apply the same trimming to the retained prefix.
+        rendered.truncate(tag_loc);
+        rendered.truncate(rendered.trim_end().len());
+    }
+    Ok(rendered)
+}
+
+fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
+    tools
+        .iter()
+        .map(|tool| TemplateTool {
+            tool_type: "function",
+            function: TemplateToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                strict: tool.strict,
+                defer_loading: tool.defer_loading,
+            },
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use expect_test::expect;
+    use serde_json::Value;
+    use thiserror_ext::AsReport as _;
+    use vllm_text::Prompt;
+    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
+
+    use super::developer::tests::ALTERNATING_TURNS;
+    use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
+    use crate::EffortValue;
+    use crate::request::{
+        ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        GenerationPromptMode, ResolvedToolContext,
+    };
+    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
+
+    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
+    const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
+    const STEP5_VL_TEMPLATE: &str = include_str!("../../../tests/templates/step5_vl.jinja");
+
+    fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        ChatRequest {
+            messages,
+            tool_context,
+            request_id: "render-test".to_string(),
+            ..ChatRequest::for_test()
+        }
+    }
+
+    #[test]
+    fn dynamic_tools_are_exposed_as_effective_template_tools() {
+        let messages = vec![
+            ChatMessage::developer(
+                "",
+                Some(vec![ChatTool {
+                    name: "lookup".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    defer_loading: None,
+                }]),
+            ),
+            ChatMessage::user("hello"),
+        ];
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            request_id: "render-test".to_string(),
+            ..ChatRequest::for_test()
+        };
+
+        let rendered = render(
+            Some("{% set developer_role = 'developer' %}{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "2:developer:lookup:lookup");
+        assert_eq!(request.tool_choice(), &ChatToolChoice::Auto);
+        assert_eq!(request.tools().len(), 1);
+    }
+
+    fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
+        // Rendering tests may override the template per request; the trust
+        // gate has its own test.
+        HfChatRenderer::new(
+            template.map(str::to_owned),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::Auto,
+        )?
+        .with_trust_request_chat_template(true)
+        .render(request)?
+        .prompt
+        .into_text()
+        .map_err(|_| unreachable!("HF renderer should return text prompt"))
+    }
+
+    #[test]
+    fn generation_blocks_allow_content_format_detection_and_request_overrides() {
+        let template = "{% for message in messages %}{% generation %}{% for part in message.content %}{{ part.text }}{% endfor %}{% endgeneration %}{% endfor %}";
+        let mut request = sample_request(vec![ChatMessage::user("hello")]);
+        let default = render(Some(template), &request).unwrap();
+        request.chat_options.chat_template = Some(template.to_string());
+        let overridden = render(Some("unused"), &request).unwrap();
+        expect![[r#"
+            (
+                "hello",
+                "hello",
+            )
+        "#]]
+        .assert_debug_eq(&(default, overridden));
+    }
+
+    fn render_mm(
+        template: &str,
+        request: &ChatRequest,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<crate::RenderedPrompt> {
+        HfChatRenderer::new(
+            Some(template.to_string()),
+            HashMap::new(),
+            None,
+            content_format,
+        )?
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<image>".to_string()),
+            video_token: Some("<video>".to_string()),
+            audio_token: Some("<audio>".to_string()),
+        }))
+        .render(request)
+    }
+
+    fn image_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::image_url("data:image/png;base64,test"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn video_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::video_url("https://example.com/demo.mp4"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn audio_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
+            ChatContentPart::audio_url("https://example.com/demo.mp3"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    #[test]
+    fn string_content_format_replaces_image_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &image_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<image>\nb".to_string()));
+    }
+
+    #[test]
+    fn string_content_format_replaces_video_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &video_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<video>\nb".to_string()));
+    }
+
+    #[test]
+    fn string_content_format_replaces_audio_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a\n<audio>\n<audio>\nb".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_image_url_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'image' %}<|image_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &image_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_video_url_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'video' %}<|video_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &video_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<|video_pad|>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_audio_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'audio' %}<|audio_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &audio_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
+        );
+    }
+
+    #[test]
+    fn developer_messages_follow_template_system_support() {
+        // Codex: instructions, its base prompt as a developer message, and a
+        // developer context update mid-conversation.
+        let codex = sample_request(vec![
+            ChatMessage::system("instructions"),
+            ChatMessage::developer("base", None),
+            ChatMessage::user("question"),
+            ChatMessage::assistant_text("answer"),
+            ChatMessage::developer("update", None),
+            ChatMessage::user("follow-up"),
+        ]);
+        // The caller's own non-leading system message stays as sent.
+        let caller_system = sample_request(vec![
+            ChatMessage::developer("base", None),
+            ChatMessage::user("question"),
+            ChatMessage::system("update"),
+            ChatMessage::user("follow-up"),
+        ]);
+
+        // No user turn follows the developer message: it joins the previous one.
+        let before_assistant = sample_request(vec![
+            ChatMessage::user("question"),
+            ChatMessage::developer("update", None),
+            ChatMessage::assistant_text("answer"),
+            ChatMessage::user("follow-up"),
+        ]);
+
+        let render = |template, request| match render(Some(template), request) {
+            Ok(prompt) => prompt,
+            Err(error) => error.to_report_string(),
+        };
+        // Qwen3 renders a system message anywhere; Qwen3.5 only first, and
+        // Llama 2 also requires alternating user and assistant turns.
+        expect![[r#"
+            [
+                "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer<|im_end|>\n<|im_start|>system\nupdate<|im_end|>\n<|im_start|>user\nfollow-up<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>system\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>system\nupdate<|im_end|>\n<|im_start|>user\nfollow-up<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer<|im_end|>\n<|im_start|>user\nupdate\n\nfollow-up<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "System message must be at the beginning.",
+                "system=instructions\n\nbase;user=question;assistant=answer;user=update\n\nfollow-up;",
+                "user=question\n\nupdate;assistant=answer;user=follow-up;",
+            ]
+        "#]]
+        .assert_debug_eq(&[
+            render(QWEN3_0_6B_TEMPLATE, &codex),
+            render(QWEN3_0_6B_TEMPLATE, &caller_system),
+            render(QWEN3_5_0_8B_TEMPLATE, &codex),
+            render(QWEN3_5_0_8B_TEMPLATE, &caller_system),
+            render(ALTERNATING_TURNS, &codex),
+            render(ALTERNATING_TURNS, &before_assistant),
+        ]);
+    }
+
+    #[test]
+    fn developer_messages_choose_content_format_by_lowered_role() {
+        // A leading developer message renders as the system message it is
+        // lowered to, so the user turn renders as without one.
+        let render = |first| {
+            let request = sample_request(vec![
+                first,
+                ChatMessage::user(vec![
+                    ChatContentPart::text("question"),
+                    ChatContentPart::image_url("data:image/png;base64,a"),
+                ]),
+            ]);
+            render_mm(
+                QWEN3_5_0_8B_TEMPLATE,
+                &request,
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .prompt
+            .into_text()
+            .unwrap()
+        };
+        let with_system = render(ChatMessage::system("base"));
+        assert_eq!(render(ChatMessage::developer("base", None)), with_system);
+        assert!(with_system.contains("<|vision_start|><|image_pad|><|vision_end|>"));
+    }
+
+    #[test]
+    fn developer_fallback_keeps_media_in_place() {
+        // A developer message after the leading run joins the user turn
+        // next to it, so its media placeholder stays in media order.
+        let request = sample_request(vec![
+            ChatMessage::developer("base", None),
+            ChatMessage::user(vec![
+                ChatContentPart::text("question"),
+                ChatContentPart::image_url("data:image/png;base64,a"),
+            ]),
+            ChatMessage::developer(
+                vec![
+                    ChatContentPart::text("update"),
+                    ChatContentPart::image_url("data:image/png;base64,b"),
+                ],
+                None,
+            ),
+        ]);
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
+            &request,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .prompt
+        .into_text()
+        .unwrap();
+        expect![[r#"
+            <|im_start|>system
+            base<|im_end|>
+            <|im_start|>user
+            question<|vision_start|><|image_pad|><|vision_end|>update<|vision_start|><|image_pad|><|vision_end|><|im_end|>
+            <|im_start|>assistant
+            <think>
+
+            </think>
+
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn video_parts_are_rejected_when_model_lacks_video_support() {
+        let error = HfChatRenderer::new(
+            Some("{{ messages[0].content }}".to_string()),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap()
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<image>".to_string()),
+            video_token: None,
+            audio_token: None,
+        }))
+        .render(&video_request())
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UnsupportedMultimodalContent("video_url")
+        ));
+    }
+
+    #[test]
+    fn chat_template_supports_pycompat_templates() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "<think>hello")]);
+
+        let rendered = render(
+            Some(
+                "{% for message in messages %}{% if message.content.startswith('<think>') %}think{% else %}plain{% endif %}{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "think");
+    }
+
+    #[test]
+    fn chat_template_passes_continue_final_message_to_template() {
+        let mut request = sample_request(vec![ChatMessage::text(
+            ChatRole::Assistant,
+            "The capital of",
+        )]);
+        let template =
+            "{% if continue_final_message %}continue:{% endif %}{{ messages[0].content }}";
+
+        assert_eq!(render(Some(template), &request).unwrap(), "The capital of");
+
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        assert_eq!(
+            render(Some(template), &request).unwrap(),
+            "continue:The capital of"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_truncates_template_suffix() {
+        let mut request = sample_request(vec![
+            ChatMessage::text(ChatRole::User, "What is the capital of France?"),
+            ChatMessage::text(ChatRole::Assistant, "The capital of"),
+        ]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        // The Qwen3 template is unaware of `continue_final_message`; the
+        // end-of-turn marker it appends must still be stripped.
+        let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            What is the capital of France?<|im_end|>
+            <|im_start|>assistant
+            <think>
+
+            </think>
+
+            The capital of"#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn continue_final_message_trims_like_the_template_does() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::Assistant, "Sure, ")]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        // The template trims the trailing spacing of the message content, so
+        // the truncated prompt must be trimmed the same way.
+        let rendered = render(
+            Some("{{ messages[0].content.strip() }}<|im_end|>"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "Sure,");
+    }
+
+    #[test]
+    fn continue_final_message_appends_to_last_text_part() {
+        // The renderer itself is role-agnostic like transformers (the
+        // assistant-final restriction is enforced by request validation
+        // upstream), so a multimodal user message exercises the part
+        // selection: the sentinel must attach to the last *text* part,
+        // skipping the trailing image.
+        let mut request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("Sure,"),
+            ChatContentPart::image_url("data:image/png;base64,test"),
+        ])]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'image' %}<image>{% else %}{{ item.text }}{% endif %}{% endfor %}<|im_end|>",
+            &request,
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap()
+        .prompt;
+
+        // Anything rendered after the continued text (here the image
+        // placeholder and the end marker) is truncated away, matching
+        // transformers.
+        assert_eq!(rendered, Prompt::Text("Sure,".to_string()));
+    }
+
+    #[test]
+    fn continue_final_message_composes_with_aware_templates() {
+        // A template that reads `continue_final_message` and skips its own
+        // end-of-turn marker must produce the same prompt as an unaware one:
+        // the sentinel truncation degenerates to a cut at the very end.
+        let mut request = sample_request(vec![
+            ChatMessage::text(ChatRole::User, "hi"),
+            ChatMessage::text(ChatRole::Assistant, "Sure,"),
+        ]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        let aware = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}{% if not (loop.last and continue_final_message) %}<|im_end|>\n{% endif %}{% endfor %}";
+        let unaware = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}";
+
+        let expected = "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nSure,";
+        assert_eq!(render(Some(aware), &request).unwrap(), expected);
+        assert_eq!(render(Some(unaware), &request).unwrap(), expected);
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_template_drops_final_message() {
+        let mut request = sample_request(vec![
+            ChatMessage::text(ChatRole::User, "hi"),
+            ChatMessage::text(ChatRole::Assistant, "Sure,"),
+        ]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+        let error = render(
+            Some(
+                "{% for m in messages %}{% if m.role == 'user' %}{{ m.content }}{% endif %}{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::ChatTemplate(_)));
+    }
+
+    #[test]
+    fn raise_exception_in_template_is_a_request_validation_error() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+
+        let error = render(
+            Some("{{- raise_exception('No user query found in messages.') }}"),
+            &request,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+            "expected an exception thrown by the template, got: {error:?}"
+        );
+        assert!(error.is_request_validation_error());
+    }
+
+    #[test]
+    fn chat_template_flattens_text_parts_for_string_templates() {
+        for (parts, expected) in [
+            (vec!["hello", " world"], "hello\n world"),
+            (vec!["", "hello", "", "world", ""], "hello\nworld"),
+            (vec!["hello\n", "world"], "hello\n\nworld"),
+            (vec!["hello"], "hello"),
+            (vec![""], ""),
+        ] {
+            let request = sample_request(vec![ChatMessage::user(
+                parts.into_iter().map(ChatContentPart::text).collect::<Vec<_>>(),
+            )]);
+            let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    #[test]
+    fn assistant_and_tool_content_parts_reach_templates() {
+        let tool_call = AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "lookup".to_string(),
+            arguments: "{}".to_string(),
+        });
+        let messages = vec![
+            ChatMessage::assistant_blocks(
+                ["a", "", "b"]
+                    .map(|text| AssistantContentBlock::Text {
+                        text: text.to_string(),
+                    })
+                    .to_vec(),
+            ),
+            ChatMessage::assistant_blocks(vec![tool_call]),
+            ChatMessage::tool_response(
+                ["x", "", "y"].map(ChatContentPart::text).to_vec(),
+                "call_1",
+            ),
+            ChatMessage::tool_response("x", "call_1"),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::image_url("data:image/png;base64,test"),
+                ],
+                "call_1",
+            ),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::tool_reference("get_weather"),
+                ],
+                "call_1",
+            ),
+        ];
+        let weather = ChatTool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: Some(true),
+        };
+        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            ..sample_request(Vec::new())
+        };
+        let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
+        let rendered: String = [
+            ChatTemplateContentFormatOption::String,
+            ChatTemplateContentFormatOption::OpenAi,
+        ]
+        .into_iter()
+        .map(|content_format| {
+            let prompt = render_mm(template, &request, content_format)
+                .unwrap()
+                .prompt
+                .into_text()
+                .unwrap();
+            format!("{content_format:?}:\n{prompt}")
+        })
+        .collect();
+
+        // The `openai` tool row drops the empty part as `string` does; Python's
+        // `openai` collapse keeps it (`"x\n\ny"`).
+        expect![[r#"
+            String:
+            "a\nb"
+            ""
+            "x\ny"
+            "x"
+            "x\n<image>"
+            "x\nget_weather"
+            OpenAi:
+            [{"type": "text", "text": "a"}, {"type": "text", "text": ""}, {"type": "text", "text": "b"}]
+            []
+            "x\ny"
+            "x"
+            [{"type": "text", "text": "x"}, {"type": "image"}]
+            [{"type": "text", "text": "x"}, {"type": "tool_reference", "name": "get_weather"}]
+        "#]].assert_eq(&rendered);
+    }
+
+    #[test]
+    fn chat_template_preserves_developer_tools() {
+        let request = sample_request(vec![ChatMessage::developer(
+            "policy",
+            Some(vec![ChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                }),
+                strict: Some(true),
+                defer_loading: None,
+            }]),
+        )]);
+
+        let rendered = render(
+            Some("{% set developer_role = 'developer' %}{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "developer|policy|get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_passes_custom_roles_unchanged() {
+        let request = sample_request(vec![
+            ChatMessage::custom("root", "identity"),
+            ChatMessage::system("policy"),
+            ChatMessage::user("hello"),
+        ]);
+
+        let rendered = render(
+            Some("{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "root=identity;system=policy;user=hello;");
+    }
+
+    #[test]
+    fn chat_template_keeps_string_text_for_openai_detected_templates() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+
+        let rendered = render(
+            Some(
+                "{%- for message in messages %}{%- if message.content is string %}{%- set content = message.content %}{{ content }}{%- endif %}{%- endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "hello");
+    }
+
+    #[test]
+    fn chat_template_emits_openai_text_blocks_for_structured_templates() {
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text("world"),
+        ])]);
+
+        let rendered = render(
+            Some(
+                "{%- for message in messages %}{%- for item in message.content %}{{ item.text }}|{%- endfor %}{%- endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "hello|world|");
+    }
+
+    #[test]
+    fn chat_template_renders_roles_without_part_support_as_strings() {
+        // Text and image parts are rendered in user messages only; other roles
+        // concatenate their content as a string.
+        let template = "{%- for message in messages %}<{{ message.role }}>{%- if message.role == 'user' and message.content is not string %}{%- for part in message.content %}{%- if part.type == 'text' %}{{ part.text }}{%- elif part.type == 'image' %}[IMG]{%- endif %}{%- endfor %}{%- else %}{{ message.content }}{%- endif %}{%- endfor %}";
+        let mut with_system = image_request();
+        with_system.messages.insert(0, ChatMessage::system("policy"));
+
+        let render = |request: &ChatRequest| {
+            render_mm(template, request, ChatTemplateContentFormatOption::Auto)
+                .unwrap()
+                .prompt
+                .into_text()
+                .unwrap()
+        };
+        expect![[r#"
+            (
+                "<user>a[IMG]b",
+                "<system>policy<user>a\n<image>\nb",
+            )
+        "#]]
+        .assert_debug_eq(&(render(&image_request()), render(&with_system)));
+    }
+
+    #[test]
+    fn chat_template_probes_render_with_special_tokens() {
+        // Parts render only with `bos_token` defined: concatenating an
+        // undefined value fails.
+        let template = "{%- for message in messages %}{%- if message.content is string %}{{ message.content }}{%- else %}{%- for part in message.content %}{{ bos_token + part.text }}{%- endfor %}{%- endif %}{%- endfor %}";
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::text("b"),
+        ])]);
+        let rendered = HfChatRenderer::new(
+            Some(template.to_string()),
+            HashMap::new(),
+            Some(HfSpecialTokens {
+                bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
+                ..Default::default()
+            }),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .apply_chat_template(&request)
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("<s>a<s>b".to_string()));
+    }
+
+    #[test]
+    fn chat_template_per_request_override() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+
+        // Default template renders one way.
+        let default_rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+        assert_eq!(default_rendered, "hello");
+
+        // Per-request override replaces the default template entirely.
+        request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
+        let overridden = render(Some("{{ messages[0].content }}"), &request).unwrap();
+        assert_eq!(overridden, "override:hello");
+    }
+
+    #[test]
+    fn chat_template_refuses_untrusted_request_override() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
+        let renderer = HfChatRenderer::new(
+            Some("{{ messages[0].content }}".to_string()),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let error = renderer.render(&request).unwrap_err();
+        assert!(matches!(error, Error::UntrustedRequestChatTemplate));
+        assert!(error.is_request_validation_error());
+
+        request.chat_options.chat_template = None;
+        assert_eq!(
+            renderer.render(&request).unwrap().prompt.into_text().unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn only_request_templates_have_a_fuel_budget() {
+        // Each message costs a fixed number of instructions, like a chat template's message loop.
+        let template = "{% for m in messages %}{% for _ in range(10) %}{{ m.content }}{% endfor %}{% endfor %}";
+        let mut request =
+            sample_request((0..20_000).map(|_| ChatMessage::text(ChatRole::User, "x")).collect());
+        assert!(render(Some(template), &request).is_ok());
+
+        request.chat_options.chat_template = Some(template.to_string());
+        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+            panic!("expected the request template to run out of fuel");
+        };
+        expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);
+    }
+
+    #[test]
+    fn chat_template_per_request_override_without_default_template() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
+
+        let rendered = render(None, &request).unwrap();
+
+        assert_eq!(rendered, "override:hello");
+    }
+
+    #[test]
+    fn chat_template_requires_a_template() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let error = render(None, &request).unwrap_err();
+
+        assert!(matches!(error, Error::MissingChatTemplate));
+    }
+
+    #[test]
+    fn chat_template_injects_special_tokens_into_context() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let special_tokens = HfSpecialTokens {
+            bos_token: Some(NamedSpecialToken::Text("<bos>".to_string())),
+            ..Default::default()
+        };
+
+        let rendered = HfChatRenderer::new(
+            Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
+            HashMap::new(),
+            Some(special_tokens),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .apply_chat_template(&request)
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|True".to_string()));
+    }
+
+    #[test]
+    fn chat_template_exposes_assistant_reasoning_separately() {
+        let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: "inner".to_string(),
+            },
+            AssistantContentBlock::Text {
+                text: "outer".to_string(),
+            },
+        ])]);
+
+        let rendered = render(
+            Some("{{ messages[0].reasoning_content }}|{{ messages[0].content }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "inner|outer");
+    }
+
+    #[test]
+    fn chat_template_forces_string_content_format_when_configured() {
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ])]);
+
+        let rendered = HfChatRenderer::new(
+            Some(
+                "{%- if messages[0].content is string -%}{{ messages[0].content }}{%- else -%}{%- for item in messages[0].content %}{{ item.text }}|{%- endfor -%}{%- endif -%}".to_string(),
+            ),
+            HashMap::new(), None,
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap()
+        .render(&request)
+        .unwrap()
+        .prompt;
+
+        assert_eq!(rendered, Prompt::Text("hello\n world".to_string()));
+    }
+
+    #[test]
+    fn chat_template_forces_openai_content_format_when_configured() {
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ])]);
+
+        let rendered = HfChatRenderer::new(
+            Some("{{ messages[0].content[0].text }}{{ messages[0].content[1].text }}".to_string()),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap()
+        .render(&request)
+        .unwrap()
+        .prompt;
+
+        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+    }
+
+    #[test]
+    fn chat_template_merges_default_template_kwargs_before_request_kwargs() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+        request.chat_options.template_kwargs.extend([
+            ("reasoning_effort".to_string(), Value::Null),
+            ("mode".to_string(), Value::String("auto".to_string())),
+        ]);
+
+        let renderer = HfChatRenderer::new(
+            Some(
+                "{{ enable_thinking }}|{{ default_only }}|{{ reasoning_effort is none }}|{{ mode }}"
+                    .to_string(),
+            ),
+            HashMap::from([
+                ("enable_thinking".to_string(), Value::Bool(false)),
+                ("default_only".to_string(), Value::String("x".to_string())),
+                ("reasoning_effort".to_string(), Value::String("medium".to_string())),
+                ("mode".to_string(), Value::String("strict".to_string())),
+            ]), None,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap().prompt;
+
+        assert_eq!(rendered, Prompt::Text("True|x|True|auto".to_string()));
+    }
+
+    #[test]
+    fn chat_template_reasoning_effort_overrides_template_kwargs() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("max"));
+        request.chat_options.template_kwargs.insert(
+            "reasoning_effort".to_string(),
+            Value::String("low".to_string()),
+        );
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ reasoning_effort }}".to_string()),
+            HashMap::from([(
+                "reasoning_effort".to_string(),
+                Value::String("medium".to_string()),
+            )]),
+            None,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("max".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("max".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_reasoning_effort_preserves_request_enable_thinking() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ reasoning_effort }}|{{ enable_thinking }}".to_string()),
+            HashMap::new(),
+            None,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("none".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_preserves_typed_effort_values() {
+        for effort in [
+            serde_json::json!(37),
+            serde_json::json!(0.37),
+            serde_json::json!("custom"),
+        ] {
+            let mut request = sample_request(vec![ChatMessage::user("hello")]);
+            request.chat_options.reasoning_effort =
+                Some(serde_json::from_value(effort.clone()).unwrap());
+            request.chat_options.template_kwargs = [
+                ("reasoning_effort".to_string(), serde_json::json!("high")),
+                ("enable_thinking".to_string(), serde_json::json!(true)),
+            ]
+            .into();
+            let rendered = HfChatRenderer::new(
+                Some("{{ reasoning_effort|tojson }}|{{ enable_thinking }}".to_string()),
+                HashMap::new(),
+                None,
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .render(&request)
+            .unwrap();
+            assert_eq!(rendered.prompt, Prompt::Text(format!("{effort}|True")));
+            assert_eq!(
+                rendered.effective_template_kwargs["reasoning_effort"],
+                effort
+            );
+        }
+    }
+
+    #[test]
+    fn chat_template_keeps_native_control_conflicts_and_raw_effort_values() {
+        for effort in [
+            serde_json::json!(37),
+            serde_json::json!(null),
+            serde_json::json!("none"),
+        ] {
+            let mut request = sample_request(vec![ChatMessage::user("hello")]);
+            request.chat_options.template_kwargs = [
+                ("thinking".to_string(), serde_json::json!("custom-mode")),
+                ("enable_thinking".to_string(), serde_json::json!(true)),
+                ("reasoning_effort".to_string(), effort),
+            ]
+            .into();
+            let rendered = HfChatRenderer::new(
+                Some(
+                    "{{ thinking }}|{{ enable_thinking }}|{{ reasoning_effort is none }}"
+                        .to_string(),
+                ),
+                HashMap::new(),
+                None,
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .render(&request)
+            .unwrap();
+            assert!(rendered.prompt.into_text().unwrap().starts_with("custom-mode|True|"));
+            assert_eq!(
+                rendered.effective_template_kwargs,
+                request.chat_options.template_kwargs
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_template_omits_reasoning_for_historical_assistant_messages() {
+        let request = sample_request(vec![
+            ChatMessage::text(
+                ChatRole::User,
+                "Hi. Tell me about the capital of France in short",
+            ),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "\nOkay, the user is asking... I think that's all.\n".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "Paris is the capital of France.".to_string(),
+                },
+            ]),
+            ChatMessage::text(ChatRole::User, "Tell me about Paris more."),
+        ]);
+
+        let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            Hi. Tell me about the capital of France in short<|im_end|>
+            <|im_start|>assistant
+            Paris is the capital of France.<|im_end|>
+            <|im_start|>user
+            Tell me about Paris more.<|im_end|>
+            <|im_start|>assistant
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen3_template_keeps_reasoning_after_the_last_user_query() {
+        let mut request = sample_request(vec![
+            ChatMessage::text(ChatRole::User, "What is 1 + 1?"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "need simple arithmetic".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "2".to_string(),
+                },
+            ]),
+        ]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+        let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            What is 1 + 1?<|im_end|>
+            <|im_start|>assistant
+            <think>
+            need simple arithmetic
+            </think>
+
+            2<|im_end|>
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn chat_template_exposes_tools_to_templates_for_any_tool_choice() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        // Matches Python: `tool_choice=none` still renders tools unless the
+        // server drops them via `--exclude-tools-when-tool-choice-none`.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            request.tool_context = crate::request::ResolvedToolContext::new(
+                &request.messages,
+                tools.clone(),
+                Some(tool_choice),
+                true,
+            )
+            .expect("tool context should resolve");
+
+            let rendered = render(
+                Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
+                &request,
+            )
+            .unwrap();
+
+            assert_eq!(rendered, "get_weather|city");
+        }
+    }
+
+    #[test]
+    fn chat_template_preserves_openai_tool_field_order() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some("{% for key, value in tools[0].function.items() %}{{ key }}|{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "name|description|parameters|");
+    }
+
+    #[test]
+    fn chat_template_preserves_python_optional_tool_fields() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![
+            ChatTool {
+                name: "without_strict".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+                defer_loading: None,
+            },
+            ChatTool {
+                name: "with_strict".to_string(),
+                description: Some("description".to_string()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(false),
+                defer_loading: None,
+            },
+            ChatTool {
+                name: "deferred".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+                defer_loading: Some(true),
+            },
+        ];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some(
+                "{% for tool in tools %}{% for key, value in tool.function.items() %}{{ key }}={{ value|tojson }}|{% endfor %};{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;name=\"deferred\"|description=null|parameters=null|defer_loading=true|;"
+        );
+    }
+
+    #[test]
+    fn chat_template_exposes_assistant_tool_calls_and_tool_messages() {
+        let request = sample_request(vec![
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                crate::AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Paris"}"#.to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("Sunny", "call_1"),
+        ]);
+
+        let rendered = render(
+            Some(
+                "{{ messages[0].tool_calls[0].function.name }}|{{ messages[0].tool_calls[0].function.arguments.city }}|{{ messages[1].tool_call_id }}|{{ messages[1].content }}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "get_weather|Paris|call_1|Sunny");
+    }
+
+    #[test]
+    fn chat_template_tool_call_arguments_that_are_not_an_object_render_as_empty() {
+        let render_arguments = |arguments: &[&str]| {
+            let tool_calls = arguments
+                .iter()
+                .map(|arguments| {
+                    AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: arguments.to_string(),
+                    })
+                })
+                .collect();
+            // `.items()` is what fails on anything but a mapping.
+            render(
+                Some(
+                    "{%- for call in messages[0].tool_calls -%}
+{{ call.function.arguments | tojson }}:
+{%- for key, value in call.function.arguments.items() -%}{{ key }}={{ value }}{%- endfor -%};
+{%- endfor -%}",
+                ),
+                &sample_request(vec![ChatMessage::assistant_blocks(tool_calls)]),
+            )
+            .unwrap()
+        };
+
+        for arguments in [
+            r#"{"cmd": "mkdir -p"#,
+            "   ",
+            "[]",
+            "42",
+            "true",
+            r#""hello""#,
+            "null",
+        ] {
+            assert_eq!(render_arguments(&[arguments]), "{}:;", "{arguments:?}");
+        }
+        // Each call is coerced on its own.
+        assert_eq!(
+            render_arguments(&[r#"{"a": 1}"#, r#"{"cmd": ""#]),
+            r#"{"a": 1}:a=1;{}:;"#
+        );
+    }
+
+    #[test]
+    fn chat_template_tool_call_argument_items_method_is_not_shadowed_by_field() {
+        let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                id: "call_1".to_string(),
+                name: "add".to_string(),
+                arguments: r#"{"items":"operands","x":2,"y":1.0}"#.to_string(),
+            }),
+        ])]);
+
+        let rendered = render(
+            Some(
+                "{%- set arguments = messages[0].tool_calls[0].function.arguments -%}
+{%- for key, value in arguments.items() -%}{{ key }}={{ value }};{%- endfor -%}
+|{{ arguments['items'] }}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "items=operands;x=2;y=1.0;|operands");
+    }
+
+    #[test]
+    fn qwen35_template_renders_prefilled_reasoning_start_when_thinking_enabled() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            hello<|im_end|>
+            <|im_start|>assistant
+            <think>
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen35_template_auto_detects_openai_multimodal_content() {
+        let mut request = image_request();
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
+            &request,
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    fn render_step5_vl(
+        request: &ChatRequest,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<crate::RenderedPrompt> {
+        HfChatRenderer::new(
+            Some(STEP5_VL_TEMPLATE.to_string()),
+            HashMap::new(),
+            Some(HfSpecialTokens {
+                bos_token: Some(NamedSpecialToken::Text(
+                    "<｜begin▁of▁sentence｜>".to_string(),
+                )),
+                ..Default::default()
+            }),
+            content_format,
+        )?
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<im_patch>".to_string()),
+            ..Default::default()
+        }))
+        .render(request)
+    }
+
+    fn step5_vl_image_request() -> ChatRequest {
+        sample_request(vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Describe this image:"),
+                ChatContentPart::image_url("data:image/png;base64,test"),
+                ChatContentPart::text("What is in it?"),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn step5_vl_template_places_im_patch_at_image_part_position_openai_format() {
+        let rendered = render_step5_vl(
+            &step5_vl_image_request(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:<im_patch>What is in it?<|EOT|><|BOT|>assistant\n<think>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    #[test]
+    fn step5_vl_template_places_im_patch_at_image_part_position_string_format() {
+        let rendered = render_step5_vl(
+            &step5_vl_image_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:\n<im_patch>\nWhat is in it?<|EOT|><|BOT|>assistant\n<think>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    #[test]
+    fn qwen35_template_renders_closed_empty_reasoning_span_when_thinking_disabled() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(false));
+
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            hello<|im_end|>
+            <|im_start|>assistant
+            <think>
+
+            </think>
+
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen35_template_omits_assistant_reasoning_prefill_without_generation_prompt() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            hello<|im_end|>
+        "#]]
+        .assert_eq(&rendered);
+    }
+}

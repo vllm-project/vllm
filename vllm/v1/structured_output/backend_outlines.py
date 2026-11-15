@@ -1,0 +1,376 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025-present the Outlines developers
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from re import _constants, _parser  # type: ignore[attr-defined]
+from typing import TYPE_CHECKING
+
+import torch
+from regex import escape as regex_escape
+
+from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import SamplingParams
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputGrammar,
+    StructuredOutputOptions,
+)
+from vllm.v1.structured_output.utils import (
+    OutlinesVocabulary,
+    compile_regex_with_timeout,
+    get_outlines_cache,
+    get_outlines_vocabulary,
+)
+
+if TYPE_CHECKING:
+    import outlines_core as oc
+    import outlines_core.json_schema as json_schema
+else:
+    oc = LazyLoader("oc", globals(), "outlines_core")
+    json_schema = LazyLoader("json_schema", globals(), "outlines_core.json_schema")
+
+
+@dataclass
+class OutlinesBackend(StructuredOutputBackend):
+    def __post_init__(self):
+        self.vocabulary = get_outlines_vocabulary(self.tokenizer)
+        self.cache = get_outlines_cache()
+
+    def _compile_index(
+        self, regex_string: str, vocabulary: OutlinesVocabulary
+    ) -> oc.Index:
+        cache_key = f"{vocabulary._hash}_{regex_string}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        index = compile_regex_with_timeout(
+            lambda pat: oc.Index(pat, vocabulary.inner),
+            regex_string,
+        )
+        self.cache[cache_key] = index
+
+        return index
+
+    def compile_grammar(
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
+    ) -> StructuredOutputGrammar:
+        if request_type == StructuredOutputOptions.JSON:
+            regex = json_schema.build_regex_from_schema(grammar_spec)
+        elif request_type == StructuredOutputOptions.REGEX:
+            regex = grammar_spec
+        elif request_type == StructuredOutputOptions.CHOICE:
+            choices = json.loads(grammar_spec)
+            choices = [regex_escape(c) for c in choices]
+            regex = "(" + "|".join(choices) + ")"
+        else:
+            raise ValueError(
+                f"Invalid request type for Outlines backend ({request_type!s})"
+            )
+        index = self._compile_index(regex, self.vocabulary)
+        max_rollback_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config is not None
+            else 0
+        )
+        return OutlinesGrammar(
+            vocab_size=self.vocab_size,
+            eos_token_id=self.vocabulary.inner.get_eos_token_id(),
+            guide=oc.Guide(index, max_rollback=max_rollback_tokens),
+        )
+
+    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
+        return torch.full(
+            (max_num_seqs, (self.vocab_size + 31) // 32),
+            -1,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+
+    def destroy(self):
+        pass
+
+
+@dataclass
+class OutlinesGrammar(StructuredOutputGrammar):
+    vocab_size: int
+    eos_token_id: int
+    guide: oc.Guide = field(hash=False)
+    num_processed_tokens: int = field(
+        default_factory=lambda: 0, repr=False, hash=False, init=False
+    )
+
+    # outlines_core signals done on DFA accept and never advances on EOS
+    # (its mask allows only EOS in a final state, but advance(EOS) fails),
+    # so accepting EOS in a final state is tracked here instead.
+    _is_terminated: bool = field(default=False, init=False, repr=False, hash=False)
+
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        """Accepts a list of tokens and advances the FSM.
+
+        Returns True if all grammar-constrained tokens were accepted.
+        Tokens after termination (EOS) are ignored. Returns False if the FSM
+        failed to advance.
+        """
+        if self._is_terminated:
+            return True
+        eos_index = next(
+            (i for i, t in enumerate(tokens) if t == self.eos_token_id), None
+        )
+        if eos_index is not None:
+            tokens = tokens[:eos_index]
+        # Advance can fail when the next state reached after advancing with
+        # the current tokens is a dead state. This is because Guide.accepts_tokens()
+        # only checks whether the current tokens can be accepted,
+        # whereas guide.advance() additionally checks the next state
+        # after all tokens are accepted.
+        # We need to be aware that the FSM must be prepared without dead states.
+        if tokens and not self.guide.accepts_tokens(tokens):
+            return False
+        for t in tokens:
+            self.guide.advance(t)
+        if eos_index is not None:
+            if not self.guide.is_finished():
+                if tokens:
+                    self.guide.rollback_state(len(tokens))
+                return False
+            self._is_terminated = True
+        self.num_processed_tokens += len(tokens) + self._is_terminated
+        return True
+
+    def rollback(self, num_tokens: int) -> None:
+        if num_tokens <= 0:
+            return
+        self.num_processed_tokens -= num_tokens
+        if self._is_terminated:
+            self._is_terminated = False
+            num_tokens -= 1
+        if num_tokens:
+            self.guide.rollback_state(num_tokens)
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        if self._is_terminated:
+            return []
+        accepted: list[int] = []
+        for tok in tokens:
+            if tok == self.eos_token_id:
+                if self._is_finished_after(accepted):
+                    accepted.append(tok)
+                break
+            accepted.append(tok)
+            if not self.guide.accepts_tokens(accepted):
+                accepted.pop()
+                break
+        return accepted
+
+    def _is_finished_after(self, tokens: list[int]) -> bool:
+        if not tokens:
+            return self.guide.is_finished()
+        for t in tokens:
+            self.guide.advance(t)
+        finished = self.guide.is_finished()
+        self.guide.rollback_state(len(tokens))
+        return finished
+
+    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
+        mask = bitmask[idx]
+        self.guide.write_mask_into(mask.data_ptr(), mask.numel(), mask.element_size())
+
+    def is_terminated(self) -> bool:
+        return self._is_terminated
+
+    def reset(self):
+        self.num_processed_tokens = 0
+        self._is_terminated = False
+        self.guide.reset()
+
+
+def validate_structured_output_request_outlines(params: SamplingParams):
+    if params.structured_outputs is None:
+        return
+
+    so_params = params.structured_outputs
+
+    if so_params.regex is not None:
+        validate_regex_is_buildable(so_params.regex)
+    elif so_params.json is not None:
+        if isinstance(so_params.json, str):
+            try:
+                # make sure schema is valid json
+                json.loads(so_params.json)
+                schema = so_params.json
+            except json.JSONDecodeError as e:
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
+        else:
+            try:
+                schema = json.dumps(so_params.json)
+            except Exception as e:
+                raise VLLMValidationError(
+                    f"Error serializing structured outputs jsonschema: {e}"
+                ) from e
+        try:
+            pattern = json_schema.build_regex_from_schema(schema)
+        except Exception as e:
+            raise VLLMValidationError(
+                f"Failed to transform json schema into a regex: {e}"
+            ) from e
+        validate_regex_is_buildable(pattern)
+    elif so_params.choice:
+        choices = [regex_escape(str(choice)) for choice in so_params.choice]
+        regex = "(" + "|".join(choices) + ")"
+        validate_regex_is_buildable(regex)
+    elif so_params.json_object:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support json_object specifications"
+        )
+    elif so_params.grammar:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support grammar specifications"
+        )
+    elif so_params.structural_tag:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support structural_tag specifications"
+        )
+    else:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support this structured outputs specification"
+        )
+
+
+def _prefix_needs_context(parsed) -> bool:
+    """Return True if there's a look-around/anchor before any consumer."""
+
+    def subpattern_consumes(parsed) -> bool:
+        """Return True if subpattern can consume at least one character."""
+        tokens = parsed.data if hasattr(parsed, "data") else parsed
+        for ttype, tval in tokens:
+            # literal, character class, or dot always consumes
+            if ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
+                return True
+            # quantified subpattern: check inner pattern
+            elif ttype == _parser.MAX_REPEAT:
+                _, mx, sub = tval
+                if mx != 0 and subpattern_consumes(sub):
+                    return True
+            # alternation: if any branch consumes, the whole does
+            elif ttype == _parser.BRANCH:
+                _, branches = tval
+                if any(subpattern_consumes(br) for br in branches):
+                    return True
+            # grouped subpattern: recurse into its contents
+            elif ttype == _parser.SUBPATTERN and subpattern_consumes(tval[3]):
+                return True
+        # No consumers, return False
+        return False
+
+    tokens = parsed.data if hasattr(parsed, "data") else parsed
+    for ttype, tval in tokens:
+        # Direct anchors or look-around
+        if ttype == _parser.AT or ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
+            return True
+
+        # Nested subpattern: check
+        if ttype == _parser.SUBPATTERN:
+            # tval: (group, add_flags, del_flags, subpattern)
+            if _prefix_needs_context(tval[3]):
+                return True
+            if subpattern_consumes(tval[3]):
+                return False
+
+        # if any branch has a prefix anchor => True,
+        # else if at least one branch consumes => prefix ends => False
+        elif ttype == _parser.BRANCH:
+            saw_consumer = False
+            for br in tval[1]:
+                if _prefix_needs_context(br):
+                    return True
+                if subpattern_consumes(br):
+                    saw_consumer = True
+            if saw_consumer:
+                return False
+
+        # Immediate consumer tokens
+        elif ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
+            return False
+
+        # if subpattern has anchor => True, if it can consume => stop
+        elif ttype == _parser.MAX_REPEAT:
+            if _prefix_needs_context(tval[2]):
+                return True
+            if subpattern_consumes(tval[2]):
+                return False
+
+    return False
+
+
+def _check_unsupported(parsed) -> None:
+    """Check for regex features unsupported by regex-automata."""
+    tokens = parsed.data if hasattr(parsed, "data") else parsed
+    for ttype, tval in tokens:
+        # backreference
+        if ttype in (_parser.GROUPREF, _parser.GROUPREF_EXISTS):
+            raise ValueError("Backreferences are unsupported.")
+
+        # look-around assertion
+        elif ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
+            raise ValueError("Look-Around assertion are unsupported.")
+
+        # unicode word boundaries
+        elif ttype == _parser.AT:
+            if tval in (_constants.AT_BOUNDARY, _constants.AT_NON_BOUNDARY):
+                raise ValueError("Unicode word boundaries are unsupported.")
+
+        elif ttype == _parser.BRANCH:
+            # tval is (None, branches)
+            for branch in tval[1]:
+                _check_unsupported(branch)
+
+        else:
+            nested = tval if isinstance(tval, tuple) else (tval,)
+            for sub in nested:
+                if isinstance(sub, _parser.SubPattern):
+                    _check_unsupported(sub)
+
+
+def validate_regex_is_buildable(pattern: str) -> None:
+    """Validates that the input regex is not using unsupported features
+    of the `regex-automata` crate (outlines_core regex engine) and has a
+    universal start state.
+    definition of universal start state used can be found at:
+    https://docs.rs/regex-automata/latest/regex_automata/dfa/trait.Automaton.html#method.universal_start_state
+    """
+    try:
+        parsed = _parser.parse(pattern)
+
+    except _constants.error as e:
+        raise VLLMValidationError(f"Error parsing regex: {e}") from e
+
+    try:
+        _check_unsupported(parsed)
+    except ValueError as e:
+        raise VLLMValidationError(
+            f"Regex uses unsupported feature for structured outputs: {e}. "
+            "Only basic matching constructs are supported—lookarounds, "
+            "backreferences, and unicode boundaries are not."
+        ) from e
+
+    if _prefix_needs_context(parsed):
+        raise VLLMValidationError(
+            "Regex does not have a anchored universal start state"
+            "This means that the Regex uses anchors (^) or look-arounds "
+            "in a way which requires context before any token is matched."
+            "structured outputs needs regexes that can match without needing "
+            "that context. Try rewriting the pattern without using these "
+            f"constructs. Pattern:\n{pattern}"
+        )

@@ -1,0 +1,1114 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import time
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+
+from openai.types.responses import (
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
+    ResponseFunctionToolCall,
+    ResponseInputItemParam,
+    ResponseMcpCallArgumentsDeltaEvent,
+    ResponseMcpCallArgumentsDoneEvent,
+    ResponseMcpCallCompletedEvent,
+    ResponseMcpCallInProgressEvent,
+    ResponseOutputItem,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponsePrompt,
+    ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseStatus,
+    ResponseTextConfig,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+)
+from openai.types.responses import (
+    ResponseCompletedEvent as OpenAIResponseCompletedEvent,
+)
+from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
+from openai.types.responses import (
+    ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
+)
+from openai.types.responses import (
+    ResponseInProgressEvent as OpenAIResponseInProgressEvent,
+)
+from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.tool import Tool
+from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import (
+    BeforeValidator,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+
+from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
+    MMPayload,
+    PerRequestMetrics,
+    StopParam,
+    TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
+    validate_cache_salt,
+)
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
+from vllm.renderers import (
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+    ThinkingTokenBudget,
+)
+from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
+
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+    cache_write_tokens: int
+    input_tokens_per_turn: list[int] = Field(default_factory=list)
+    cached_tokens_per_turn: list[int] = Field(default_factory=list)
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
+    output_tokens_per_turn: list[int] = Field(default_factory=list)
+    tool_output_tokens_per_turn: list[int] = Field(default_factory=list)
+
+
+class ResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: InputTokensDetails
+    output_tokens: int
+    output_tokens_details: OutputTokensDetails
+    total_tokens: int
+
+
+def serialize_message(msg):
+    """Serializes a single message."""
+    if isinstance(msg, dict):
+        return msg
+    elif hasattr(msg, "to_dict"):
+        return msg.to_dict()
+    else:
+        # fallback to pydantic dump
+        return msg.model_dump(mode="json", by_alias=True)
+
+
+def serialize_messages(msgs):
+    """Serializes multiple messages."""
+    return [serialize_message(msg) for msg in msgs] if msgs else None
+
+
+class ResponseRawMessageAndToken(OpenAIBaseModel):
+    """Class to show the raw message.
+    If message / tokens diverge, tokens is the source of truth"""
+
+    message: str
+    tokens: list[int]
+    type: Literal["raw_message_tokens"] = "raw_message_tokens"
+
+
+ResponseInputOutputMessage: TypeAlias = (
+    list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
+)
+ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
+
+
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
+    """Resolve a named tool choice to the flat `<namespace>__<name>` form."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    exact_names: set[str] = set()
+    local_names: dict[str, list[str]] = {}
+    for tool in tools:
+        if _tool_field(tool, "type") == "namespace":
+            namespace = _tool_field(tool, "name")
+            namespaced_tools = _tool_field(tool, "tools")
+            if not isinstance(namespaced_tools, list) or not isinstance(namespace, str):
+                return tool_name
+            for namespaced_tool in namespaced_tools:
+                local_name = _tool_field(namespaced_tool, "name")
+                if not isinstance(local_name, str):
+                    continue
+                flat_name = flat_namespace_tool_name(namespace, local_name)
+                exact_names.add(flat_name)
+                local_names.setdefault(local_name, []).append(flat_name)
+        else:
+            name = _tool_field(tool, "name")
+            if isinstance(name, str):
+                exact_names.add(name)
+    if tool_name in exact_names:
+        return tool_name
+    candidates = local_names.get(tool_name, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise VLLMValidationError(
+            f"Tool choice '{tool_name}' is ambiguous: it is defined in more "
+            f"than one namespace ({', '.join(candidates)}). Select it by its "
+            "full '<namespace>__<name>' name.",
+            parameter="tool_choice",
+        )
+    raise VLLMValidationError(
+        "Tool choice 'function' not found in 'tools' parameter.",
+        parameter="tool_choice",
+    )
+
+
+# OpenAI's response allows only in_memory / 24h; older request SDKs sent "in-memory"
+PromptCacheRetention = Literal["in_memory", "24h"]
+
+
+class PromptCacheOptions(OpenAIBaseModel):
+    """OpenAI prompt_cache_options; defined here because openai>=2.25 lacks it"""
+
+    mode: Literal["implicit", "explicit"] = "implicit"
+    ttl: Literal["30m"] = "30m"
+    comparison_response_id: str | None = None
+
+
+class PromptCacheOptionsParam(PromptCacheOptions):
+    """Request-side variant; prewarm is request-only in OpenAI's schema."""
+
+    prewarm: bool | None = None
+
+    def to_response(self) -> PromptCacheOptions:
+        return PromptCacheOptions(
+            mode=self.mode,
+            ttl=self.ttl,
+            comparison_response_id=self.comparison_response_id,
+        )
+
+
+class ResponsesRequest(OpenAIBaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/responses/create
+    background: bool | None = False
+    include: (
+        list[
+            Literal[
+                "code_interpreter_call.outputs",
+                "computer_call_output.output.image_url",
+                "file_search_call.results",
+                "message.input_image.image_url",
+                "message.output_text.logprobs",
+                "reasoning.encrypted_content",
+            ],
+        ]
+        | None
+    ) = None
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
+    instructions: str | None = None
+    max_output_tokens: int | None = None
+    max_tool_calls: int | None = None
+    metadata: Metadata | None = None
+    model: str | None = None
+    logit_bias: dict[str, float] | None = None
+    parallel_tool_calls: bool | None = True
+    previous_response_id: str | None = None
+    prompt: ResponsePrompt | None = None
+    reasoning: Reasoning | None = None
+    include_reasoning: bool = Field(
+        default=True,
+        description=(
+            "Whether to include reasoning content in the response. "
+            "When false, reasoning tokens are still generated but "
+            "excluded from the output. This reduces network traffic "
+            "without affecting model inference."
+        ),
+    )
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
+    store: bool | None = True
+    stream: bool | None = False
+    temperature: float | None = None
+    text: ResponseTextConfig | None = None
+    tool_choice: ToolChoice = "auto"
+    tools: list[Tool] = Field(default_factory=list)
+    top_logprobs: TopLogprobsParam = 0
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    truncation: Literal["auto", "disabled"] | None = "disabled"
+    user: str | None = None
+    skip_special_tokens: bool | None = None
+    spaces_between_special_tokens: bool = True
+    include_stop_str_in_output: bool = False
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
+    prompt_cache_key: str | None = Field(
+        default=None,
+        description=(
+            "A key that was used to read from or write to the prompt cache."
+            "Note: This field has not been implemented yet "
+            "and vLLM will ignore it."
+        ),
+    )
+    prompt_cache_options: PromptCacheOptionsParam | None = Field(
+        default=None,
+        description=(
+            "Prompt-caching options. Accepted and echoed in the response; "
+            "vLLM does not act on them."
+        ),
+    )
+    prompt_cache_retention: PromptCacheRetention | None = Field(
+        default=None,
+        description=(
+            "Prompt cache retention policy. Accepted and echoed in the "
+            "response; vLLM does not act on it."
+        ),
+    )
+    safety_identifier: str | None = Field(
+        default=None,
+        description=(
+            "Stable identifier for the end user. Accepted and echoed in the "
+            "response; vLLM does not act on it."
+        ),
+    )
+
+    # --8<-- [start:responses-extra-params]
+    watermarking: bool | None = None
+    request_id: str = Field(
+        default_factory=lambda: f"resp_{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+    priority: int = Field(
+        default=0,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+    mm_payload: MMPayload = Field(
+        default="tensors",
+        description=(
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
+        ),
+    )
+    cache_salt: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-background."
+        ),
+    )
+    # similar to input_messages / output_messages in ResponsesResponse
+    # we take in previous_input_messages (ie in harmony format)
+    # this cannot be used in conjunction with previous_response_id
+    # TODO: consider supporting non harmony messages as well
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    structured_outputs: StructuredOutputsParams | None = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
+
+    repetition_penalty: float | None = None
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
+    stop: StopParam = []
+    stop_token_ids: list[int] | None = []
+    ignore_eos: bool = False
+    thinking_token_budget: ThinkingTokenBudget = None
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with (list of) string or "
+            "numeric values, used by custom extensions."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
+    # --8<-- [end:responses-extra-params]
+
+    @field_validator("prompt_cache_retention", mode="before")
+    @classmethod
+    def _normalize_prompt_cache_retention(cls, value: object) -> object:
+        return "in_memory" if value == "in-memory" else value
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
+    ) -> ChatParams:
+        from .utils import should_continue_final_message
+
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(self.input)
+
+        reasoning = self.reasoning
+        reasoning_effort = map_reasoning_effort(
+            None if reasoning is None else reasoning.effort, reasoning_effort_map
+        )
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
+            reasoning_effort=reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
+
+        return ChatParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                extra_kwargs,
+            ),
+            media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_output_tokens,
+            truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_output_tokens",
+        )
+
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
+
+    _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
+        default=None
+    )
+    """Parser-derived constraints that preserve the public request's text metadata."""
+
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "min_p": 0.0,
+    }
+
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into `StructuredOutputsParams`."""
+        if self._parser_structured_outputs is not None:
+            return self._parser_structured_outputs
+        if self.text is None or self.text.format is None:
+            return self.structured_outputs
+
+        if self.structured_outputs is not None:
+            raise VLLMValidationError(
+                "Cannot specify both structured_outputs and text.format",
+                parameter="structured_outputs",
+            )
+
+        response_format = self.text.format
+        if response_format.type == "json_object":
+            return StructuredOutputsParams(json_object=True)
+        if (
+            response_format.type == "json_schema"
+            and response_format.schema_ is not None
+        ):
+            return StructuredOutputsParams(
+                json=response_format.schema_  # type: ignore[call-arg]
+                # --follow-imports skip hides the class definition but also hides
+                # multiple third party conflicts, so best of both evils
+            )
+        return None
+
+    def to_sampling_params(
+        self,
+        default_max_tokens: int,
+        default_sampling_params: dict | None = None,
+    ) -> SamplingParams:
+        if self.max_output_tokens is None:
+            max_tokens = default_max_tokens
+        else:
+            max_tokens = min(self.max_output_tokens, default_max_tokens)
+
+        default_sampling_params = default_sampling_params or {}
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
+
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
+
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
+        stop = self.stop if self.stop else []
+        if isinstance(stop, str):
+            stop = [stop]
+
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
+
+        return SamplingParams.from_optional(
+            temperature=temperature,
+            watermarking=self.watermarking,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            max_tokens=max_tokens,
+            logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
+            stop=stop,
+            stop_token_ids=self.stop_token_ids,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            repetition_penalty=repetition_penalty,
+            seed=self.seed,
+            ignore_eos=self.ignore_eos,
+            output_kind=(
+                RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
+            ),
+            structured_outputs=self.extract_structured_outputs(),
+            logit_bias=self.logit_bias,
+            thinking_token_budget=self.thinking_token_budget,
+            extra_args=extra_args,
+            skip_clone=True,  # Created fresh per request, safe to skip clone
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+        )
+
+    def is_include_output_logprobs(self) -> bool:
+        """Check if the request includes output logprobs."""
+        if self.include is None:
+            return False
+        return (
+            isinstance(self.include, list)
+            and "message.output_text.logprobs" in self.include
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if not data.get("background"):
+            return data
+        if not data.get("store", True):
+            raise VLLMValidationError(
+                "background can only be used when `store` is true",
+                parameter="background",
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if data.get("prompt") is not None:
+            raise VLLMValidationError(
+                "prompt template is not supported", parameter="prompt"
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def input_item_parsing(cls, data):
+        """Parse input items that are missing required fields or that Pydantic
+        cannot disambiguate in a Union of TypedDict / BaseModel types.
+
+        Specifically handles:
+        - function_call -> ResponseFunctionToolCall
+        - reasoning     -> ResponseReasoningItem (auto-generates id)
+        - message(role=assistant) -> ResponseOutputMessage (auto-generates
+          id/status and annotations)
+
+        Invalid structures are left for Pydantic to reject.
+        """
+        if not isinstance(data, dict):
+            return data
+        input_data = data.get("input")
+
+        # Early return for None, strings, or bytes
+        if input_data is None or isinstance(input_data, (str, bytes)):
+            return data
+
+        # Convert iterators (like ValidatorIterator) to list
+        if not isinstance(input_data, list):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                # Not iterable, leave as-is for Pydantic to handle
+                return data
+
+        processed_input = []
+        for item in input_data:
+            normalized_item = cls._normalize_openresponses_input_item(item)
+
+            if not isinstance(normalized_item, dict):
+                processed_input.append(normalized_item)
+                continue
+
+            item_type = normalized_item.get("type")
+
+            if item_type == "function_call":
+                try:
+                    processed_input.append(ResponseFunctionToolCall(**normalized_item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse function_call to ResponseFunctionToolCall, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(normalized_item)
+
+            elif item_type == "reasoning":
+                try:
+                    processed_input.append(ResponseReasoningItem(**normalized_item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse reasoning to ResponseReasoningItem, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(normalized_item)
+
+            elif item_type == "message" and normalized_item.get("role") == "assistant":
+                if not isinstance(normalized_item.get("content"), list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                try:
+                    processed_input.append(ResponseOutputMessage(**normalized_item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse assistant message to ResponseOutputMessage, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
+            else:
+                processed_input.append(normalized_item)
+
+        data["input"] = processed_input
+        return data
+
+    @staticmethod
+    def _normalize_openresponses_input_item(item: Any) -> Any:
+        """Normalize input items to bridge OpenResponses schema and openai-python.
+
+        The OpenResponses specification treats several fields as optional
+        (`id`, `status` on assistant/reasoning items; `annotations`
+        on output_text content) that the openai-python SDK marks as
+        required.  Fill sensible defaults so payloads conforming to the
+        OpenResponses spec pass SDK validation.
+        """
+        if not isinstance(item, dict):
+            return item
+
+        item_type = item.get("type", "message")
+        should_fill = item_type == "reasoning" or (
+            item_type == "message" and item.get("role") == "assistant"
+        )
+        if not should_fill:
+            return item
+
+        normalized_item = item.copy()
+        # ``type`` is optional in the OpenResponses schema but load-bearing for
+        # SDK validation: without it a filled-in assistant item matches
+        # ``ItemReference`` in the input union and collapses to ``{"id": ...}``,
+        # silently dropping role/content. Stamp back the type we keyed off.
+        normalized_item["type"] = item_type
+        if normalized_item.get("id") in (None, ""):
+            prefix = "rs" if item_type == "reasoning" else "msg"
+            normalized_item["id"] = f"{prefix}_{random_uuid()}"
+        if normalized_item.get("status") in (None, ""):
+            normalized_item["status"] = "completed"
+        if item_type == "reasoning" and normalized_item.get("summary") is None:
+            normalized_item["summary"] = []
+
+        # OpenResponses schema treats ``annotations`` as optional for
+        # output_text content, but the openai SDK requires it.
+        if item_type == "message" and isinstance(normalized_item.get("content"), list):
+            normalized_content = []
+            for content_item in normalized_item["content"]:
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                    and "annotations" not in content_item
+                ):
+                    content_item = {**content_item, "annotations": []}
+                normalized_content.append(content_item)
+            normalized_item["content"] = normalized_content
+
+        return normalized_item
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_custom_tool_format(cls, data):
+        if not isinstance(data, dict):
+            return data
+        tools = data.get("tools")
+        if not isinstance(tools, list):
+            return data
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, "model_dump"):
+                tool_dict = tool.model_dump()
+            else:
+                continue
+            tool_format = tool_dict.get("format")
+            if (
+                tool_dict.get("type") == "custom"
+                and isinstance(tool_format, dict)
+                and tool_format.get("type") == "grammar"
+            ):
+                raise VLLMValidationError(
+                    "Custom tools with a grammar format are not supported; "
+                    "only free-form text custom tools are accepted.",
+                    parameter="tools",
+                )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
+            "type"
+        ) in ("function", "custom")
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            if not tool_name:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            resolved = _resolve_named_tool_choice(tool_name, tools)
+            if resolved != tool_name:
+                data["tool_choice"] = {**tool_choice, "name": resolved}
+
+        return data
+
+
+class ResponsesResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    # error: Optional[ResponseError] = None
+    incomplete_details: IncompleteDetails | None = None
+    instructions: str | None = None
+    metadata: Metadata | None = None
+    model: str
+    object: Literal["response"] = "response"
+    output: list[ResponseOutputItem]
+    parallel_tool_calls: bool
+    temperature: float
+    tool_choice: ToolChoice
+    tools: list[Tool]
+    top_p: float
+    background: bool
+    max_output_tokens: int
+    max_tool_calls: int | None = None
+    previous_response_id: str | None = None
+    prompt: ResponsePrompt | None = None
+    prompt_cache_options: PromptCacheOptions | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: PromptCacheRetention | None = None
+    reasoning: Reasoning | None = None
+    safety_identifier: str | None = None
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"]
+    status: ResponseStatus
+    text: ResponseTextConfig | None = None
+    top_logprobs: int | None = None
+    truncation: Literal["auto", "disabled"]
+    usage: ResponseUsage | None = None
+    user: str | None = None
+
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
+    )
+
+    # --8<-- [start:responses-response-extra-params]
+    # These are populated when enable_response_messages is set to True
+    # NOTE: custom serialization is needed
+    # see serialize_input_messages and serialize_output_messages
+    input_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token input to model."
+        ),
+    )
+    output_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token output of model."
+        ),
+    )
+    # --8<-- [end:responses-response-extra-params]
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly,
+    # TODO: this fixes for TextContent, but need to verify for tools etc
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("output_messages", when_used="json")
+    def serialize_output_messages(self, msgs, _info):
+        return serialize_messages(msgs)
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("input_messages", when_used="json")
+    def serialize_input_messages(self, msgs, _info):
+        return serialize_messages(msgs)
+
+    @classmethod
+    def from_request(
+        cls,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+        model_name: str,
+        created_time: int,
+        output: list[ResponseOutputItem],
+        status: ResponseStatus,
+        usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
+        input_messages: ResponseInputOutputMessage | None = None,
+        output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
+    ) -> "ResponsesResponse":
+        incomplete_details: IncompleteDetails | None = None
+        if status == "incomplete":
+            incomplete_details = IncompleteDetails(reason="max_output_tokens")
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
+        return cls(
+            id=request.request_id,
+            created_at=created_time,
+            incomplete_details=incomplete_details,
+            instructions=request.instructions,
+            metadata=request.metadata,
+            model=model_name,
+            output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
+            parallel_tool_calls=request.parallel_tool_calls
+            if request.parallel_tool_calls is not None
+            else ResponsesRequest.model_fields["parallel_tool_calls"].default,
+            temperature=sampling_params.temperature,
+            tool_choice=request.tool_choice,
+            tools=request.tools,
+            top_p=sampling_params.top_p,
+            background=request.background,
+            max_output_tokens=sampling_params.max_tokens,
+            max_tool_calls=request.max_tool_calls,
+            previous_response_id=request.previous_response_id,
+            prompt=request.prompt,
+            prompt_cache_key=request.prompt_cache_key,
+            prompt_cache_options=(
+                request.prompt_cache_options.to_response()
+                if request.prompt_cache_options is not None
+                else None
+            ),
+            prompt_cache_retention=request.prompt_cache_retention,
+            reasoning=request.reasoning,
+            service_tier=request.service_tier,
+            safety_identifier=request.safety_identifier,
+            presence_penalty=sampling_params.presence_penalty,
+            frequency_penalty=sampling_params.frequency_penalty,
+            status=status,
+            text=request.text,
+            top_logprobs=sampling_params.logprobs,
+            truncation=request.truncation,
+            user=request.user,
+            usage=usage,
+            metrics=metrics,
+            kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
+        )
+
+
+# vLLM Streaming Events
+# Note: we override the response type with the vLLM ResponsesResponse type
+class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+StreamingResponsesResponse: TypeAlias = (
+    ResponseCreatedEvent
+    | ResponseInProgressEvent
+    | ResponseCompletedEvent
+    | ResponseIncompleteEvent
+    | ResponseOutputItemAddedEvent
+    | ResponseOutputItemDoneEvent
+    | ResponseContentPartAddedEvent
+    | ResponseContentPartDoneEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
+    | ResponseReasoningTextDeltaEvent
+    | ResponseReasoningTextDoneEvent
+    | ResponseCodeInterpreterCallInProgressEvent
+    | ResponseCodeInterpreterCallCodeDeltaEvent
+    | ResponseWebSearchCallInProgressEvent
+    | ResponseWebSearchCallSearchingEvent
+    | ResponseWebSearchCallCompletedEvent
+    | ResponseCodeInterpreterCallCodeDoneEvent
+    | ResponseCodeInterpreterCallInterpretingEvent
+    | ResponseCodeInterpreterCallCompletedEvent
+    | ResponseMcpCallArgumentsDeltaEvent
+    | ResponseMcpCallArgumentsDoneEvent
+    | ResponseMcpCallInProgressEvent
+    | ResponseMcpCallCompletedEvent
+)
