@@ -1607,6 +1607,9 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+        for module in self.modules():
+            if isinstance(module, DeepseekV4DecoderLayer) and module.mono is not None:
+                module.mono.prepare(module)
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",

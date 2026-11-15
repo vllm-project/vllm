@@ -16,11 +16,14 @@ from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheSpecKind,
-    SlidingWindowSpec,
     get_kv_quant_mode,
 )
 
@@ -77,6 +80,7 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
         is_mla=lambda: False,
         customize_spec=lambda spec: spec,
         get_supported_kernel_block_sizes=lambda kv_cache_spec=None: [16, 32, 64],
+        get_supported_kernel_block_sizes_for_layers=lambda *_: [16, 32, 64],
     )
     layer = SimpleNamespace(
         attn_type=AttentionType.DECODER,
@@ -87,26 +91,31 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
         num_kv_heads=8,
         head_size=128,
         head_size_v=128,
+        layer_name="layer.0",
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=primary_block_size, skip_page_size_padded=None
         )
     )
-    sw_spec = Attention.get_kv_cache_spec(layer, vllm_config)
-    assert isinstance(sw_spec, SlidingWindowSpec)
-    assert primary_block_size % sw_spec.block_size == 0
+    sw_config = Attention.get_kv_cache_config(layer, vllm_config)
+    assert sw_config is not None
+    assert sw_config.manager_cls is SlidingWindowManager
+    assert primary_block_size % sw_config.spec.block_size == 0
 
-    primary_spec = FullAttentionSpec(
+    primary_spec = AttentionSpec(
         block_size=primary_block_size,
         num_kv_heads=4,
         head_size=256,
         dtype=torch.float8_e4m3fn,
         kv_quant_mode=get_kv_quant_mode("fp8"),
     )
-    unified = unify_kv_cache_spec_page_size({"sw": sw_spec, "full": primary_spec})
-    unified_sw = unified["sw"]
-    assert isinstance(unified_sw, SlidingWindowSpec)
+    unified = unify_kv_cache_spec_page_size(
+        {"sw": sw_config, "full": FullAttentionManager.layer_config(primary_spec)}
+    )
+    assert unified["sw"].manager_cls is SlidingWindowManager
+    unified_sw = unified["sw"].spec
+    assert isinstance(unified_sw, AttentionSpec)
     assert unified_sw.block_size == primary_block_size
     assert unified_sw.page_size_padded is None
 

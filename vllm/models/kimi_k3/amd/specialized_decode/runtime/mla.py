@@ -4,8 +4,9 @@
 K2 after):
 
 - `attend`: AITER's MLA decode on M1a's (gathered, padded) fp8 query
-  (`forward_mqa`), at DCP8.
-- `m1c_inputs`: at DCP1 K2 runs the decode itself (M1c) on M1a's bf16 query.
+  (`forward_mqa`), at DCP8 or ordinary-decode DCP1.
+- `m1c_inputs`: at speculative DCP1 K2 runs the decode itself (M1c) on M1a's
+  bf16 query.
 
 Pure decode only (every row a decode row), as the mono step is.
 """
