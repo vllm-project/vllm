@@ -1136,9 +1136,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Kernel of the fused MQA-logits + top-k prefill path (VLLM_USE_FUSED_MQA_TOPK):
     # "native": vLLM's fused_mqa_topk op, SM100-family GPUs only.
-    # "flashtopk": FlashTopK (vendored in vllm/third_party/flashtopk), SM90 and
-    # SM100-family GPUs; the fused path on Hopper. Its workspace (~1 GiB per
-    # GPU) is held for the process. Default: "native".
+    # "flashtopk": FlashTopK (vendored in vllm/third_party/flashtopk) for chunks
+    # of at least 128K keys, where it prunes keys, and the native op below; on
+    # SM90 (no native op) FlashTopK for every chunk. Default: "native".
     "VLLM_FUSED_MQA_TOPK_BACKEND": env_with_choices(
         "VLLM_FUSED_MQA_TOPK_BACKEND", "native", ["native", "flashtopk"]
     ),

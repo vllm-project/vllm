@@ -439,11 +439,11 @@ def scan_dense(q, kv, kv_scales, weights, ks, ke, out: torch.Tensor, scratch: to
 
 
 def prune_scan(q, q_prune, kv, kv_scales, knsc, weights, w_prune, allowance, ks, ke, origin, inv_delta, th_bucket,
-               cand_val, cand_idx, cand_cnt) -> None:
+               cand_val, cand_idx, cand_cnt, mask: Optional[torch.Tensor] = None) -> None:
     """Key pruning in place of the scan, the same candidates: the score upper bound's mask, then the refine, which
     appends the kept keys whose full score passes the row's raw gate (counts must start at zero). q_prune is the
-    planner's operand, already in the pruning kernel's layout."""
-    mask = prune_mask(q_prune, kv, kv_scales, knsc, w_prune, allowance, ks, ke, origin, inv_delta, th_bucket)
+    planner's operand, already in the pruning kernel's layout; mask (mask_shape), when given, holds the mask."""
+    mask = prune_mask(q_prune, kv, kv_scales, knsc, w_prune, allowance, ks, ke, origin, inv_delta, th_bucket, mask)
     prune_refine(q, kv, kv_scales, knsc, weights, mask, ks, ke, origin, inv_delta, th_bucket, cand_val, cand_idx,
                  cand_cnt)
 

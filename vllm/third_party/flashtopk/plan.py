@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import os
+from types import SimpleNamespace
 from typing import Optional, Tuple
 
 import torch
@@ -45,6 +46,7 @@ import triton
 import triton.language as tl
 
 from .kernels import launch
+from .kernels.common import HEAD_DIM
 from .kernels.prologue import EST_GROUP, EST_WORDS
 
 # The pruning kernels' columns per row: the retained heads and the negative aggregate's two rows.
@@ -296,27 +298,44 @@ def _plan_sample_cols(nk: int, device_index: int) -> Tuple[torch.Tensor, torch.T
     return cols.to(torch.int32), cols
 
 
-class _Plan:
-    """Buffers and sample keys of one call's pruning plan."""
+def plan_scratch(take, num_q: int, nk: int, dtype: torch.dtype) -> SimpleNamespace:
+    """The buffers of a plan over num_q rows and nk keys, each from take(shape, dtype): flat, q_prune padded to the
+    larger row group (SM90's 16 rows)."""
+    padded = triton.cdiv(num_q, 16) * 16
+    return SimpleNamespace(
+        q_prune=take((padded * PRUNE_COLUMNS, HEAD_DIM), dtype),
+        w_prune=take((num_q, PRUNE_COLUMNS), torch.float32),
+        allowance=take((num_q,), torch.float32),
+        est=take((estimate_rows(num_q), EST_WORDS), torch.int32),
+        # Padded to 4 floats, as the TMA of every per-key vector reads.
+        knsc=take(((nk + 3) // 4 * 4,), torch.float32),
+        knsc_samples=take((_PLAN_SAMPLES,), torch.float32),
+    )
 
-    def __init__(self, q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket):
+
+class _Plan:
+    """Buffers and sample keys of one call's pruning plan: `scratch` (plan_scratch), or allocated."""
+
+    def __init__(self, q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket, scratch=None):
         num_q, heads, dim = q.shape
         nk = kv.shape[0]
         dev = q.device
+        if scratch is None:
+            scratch = plan_scratch(lambda shape, dtype: torch.empty(shape, dtype=dtype, device=dev), num_q, nk,
+                                   q.dtype)
         self.layout = 2 if torch.cuda.get_device_capability(dev)[0] == 9 else 1
         group = 16 if self.layout == 2 else 2
         self.padded = triton.cdiv(num_q, group) * group
-        self.q_prune = torch.empty(self.padded * PRUNE_COLUMNS, dim, dtype=q.dtype, device=dev)
-        self.w_prune = torch.empty(num_q, PRUNE_COLUMNS, dtype=torch.float32, device=dev)
-        self.allowance = torch.empty(num_q, dtype=torch.float32, device=dev)
+        self.q_prune = scratch.q_prune[: self.padded * PRUNE_COLUMNS]
+        self.w_prune = scratch.w_prune
+        self.allowance = scratch.allowance
         self.est_rows = estimate_rows(num_q)
-        self.est = torch.empty(self.est_rows, EST_WORDS, dtype=torch.int32, device=dev)
+        self.est = scratch.est
         if th_bucket is None:
             origin = torch.zeros(num_q, dtype=torch.float32, device=dev)
             inv_delta = torch.zeros(num_q, dtype=torch.float32, device=dev)
             th_bucket = torch.zeros(num_q, dtype=torch.int32, device=dev)
-        # Padded to 4 floats, as the TMA of every per-key vector reads.
-        self.knsc = torch.empty((nk + 3) // 4 * 4, dtype=torch.float32, device=dev)
+        self.knsc = scratch.knsc
         self.cols, picked = _plan_sample_cols(nk, dev.index)
         self.k_samples = kv[picked].contiguous()
         self.bf16 = kv_scales is None
@@ -326,7 +345,7 @@ class _Plan:
             self.s_samples = kv_scales.reshape(-1)[picked].float().contiguous()
         # The samples' scale * ||k||, by the kernel and arithmetic of the full table (knsc[picked]). The samples are
         # gathered once here: a plan kernel reading them from their scattered rows took a fifth longer on SM90.
-        self.knsc_samples = torch.empty(_PLAN_SAMPLES, dtype=torch.float32, device=dev)
+        self.knsc_samples = scratch.knsc_samples
         _key_norm_kernel[(triton.cdiv(_PLAN_SAMPLES, 64),)](
             self.k_samples, self.s_samples, self.knsc_samples, _PLAN_SAMPLES, _PLAN_SAMPLES, self.knsc_samples,
             BLOCK=64, GATED=False, HAS_SCALES=not self.bf16,
@@ -433,13 +452,14 @@ def adaptive_threshold(device_index: int, bf16: bool, seq_len_kv: int) -> float:
 
 
 def adaptive_estimate(q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket, flag, scan_ks, prune_ks,
-                      estimate=None):
+                      estimate=None, scratch=None):
     """The plan of the estimate groups' rows, then the GPU's choice: ``flag`` (int32[1]) set when this call's group
     estimate is at or below ``adaptive_threshold``, ``scan_ks`` / ``prune_ks`` the windows' starts for the scan and
     for the pruning kernels (the row's own on the path chosen, past its end on the other); ``estimate`` (FP32[1]),
-    when given, receives the estimate. Returns the plan, which ``adaptive_finish`` completes."""
+    when given, receives the estimate; ``scratch`` (plan_scratch), when given, holds the plan. Returns the plan,
+    which ``adaptive_finish`` completes."""
     num_q = q.shape[0]
-    plan = _Plan(q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket)
+    plan = _Plan(q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket, scratch)
     plan.rows(num_q, True, None)
     threshold = adaptive_threshold(q.device.index, kv_scales is None, kv.shape[0])
     launch.decide(plan.est, ks, ke, scan_ks, prune_ks, flag, threshold, estimate)
@@ -455,17 +475,17 @@ def adaptive_finish(plan, kv, flag):
 
 
 @torch.no_grad()
-def plan_operands(q, weights, kv, kv_scales, ks, ke, origin=None, inv_delta=None, th_bucket=None):
+def plan_operands(q, weights, kv, kv_scales, ks, ke, origin=None, inv_delta=None, th_bucket=None, scratch=None):
     """``(q_prune, w_prune, allowance, knsc, est)`` for every row: the always-prune plan.
 
     ``q_prune`` (FP8 or BF16): per row the retained heads' rows of ``q``, then the aggregate's high and low rows, laid
     out as the pruning kernel reads them (``_operand_row``); ``w_prune`` ``[num_q, 16]`` FP32: the folded weights,
     then the two rows' scales. The bound is ``s_k * (sum_j w_j relu(q_j . k) - relu(w_14 q_14 . k + w_15 q_15 . k)
     + allowance ||k||)``. ``knsc`` ``[seq_len_kv]``: ``scale * ||k||`` rounded up; ``est``: the estimate rows'
-    sample masks (``estimate_shares``).
+    sample masks (``estimate_shares``). ``scratch`` (plan_scratch), when given, holds them.
     """
     num_q = q.shape[0]
-    plan = _Plan(q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket)
+    plan = _Plan(q, weights, kv, kv_scales, ks, ke, origin, inv_delta, th_bucket, scratch)
     key_norms(plan, kv)
     plan.rows(num_q, False, None)
     return plan.operands()
