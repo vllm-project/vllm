@@ -73,7 +73,7 @@ def _compute_eplb_load_stats(
     return avg_tokens, max_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class EplbStats:
     """Model stats used in EPLB rebalancing algorithm."""
 
@@ -100,7 +100,7 @@ class EplbStats:
     """
 
 
-@dataclass
+@dataclass(slots=True)
 class EplbModelState:
     """EPLB metrics."""
 
@@ -1256,7 +1256,7 @@ class EplbState:
         self.model_states[hash_config_cached(model_config)].communicator = communicator
 
 
-@dataclass
+@dataclass(slots=True)
 class EplbLayerState:
     """Runtime EPLB data stored in the MoE layer."""
 

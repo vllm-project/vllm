@@ -477,7 +477,7 @@ def _reduce_tensor(tensor: torch.Tensor):
     return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
 
 
-@dataclass
+@dataclass(slots=True)
 class Handle:
     local_reader_ranks: list[int] = field(default_factory=list)
 
