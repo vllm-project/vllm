@@ -50,7 +50,9 @@ def _reference_means(hf_model, prefix: list[int], candidates: list[list[int]]):
 
 # Eager FP32 checks the layout tightly. The default mode (compiled, CUDA
 # graphs) runs in BF16, since FP32 FlexAttention does not compile there
-# (#63985); it catches positions that only eager mode reads.
+# (#63985); it catches positions that only eager mode reads. vllm_runner
+# captures a single graph of 4 tokens by default, so the default case names
+# capture sizes that cover these prompts, or no graph would be replayed.
 @pytest.mark.parametrize(
     ("enforce_eager", "dtype", "tol"),
     [(True, "float32", 2e-3), (False, "bfloat16", 3e-2)],
@@ -85,6 +87,9 @@ def test_segment_layout_matches_masked_reference(
         dtype=dtype,
         attention_backend="FLEX_ATTENTION",
         enforce_eager=enforce_eager,
+        compilation_config=(
+            None if enforce_eager else {"cudagraph_capture_sizes": [64, 256]}
+        ),
         max_model_len=256,
     ) as vllm_model:
         outputs = vllm_model.llm.encode(
