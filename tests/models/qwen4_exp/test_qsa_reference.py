@@ -11,6 +11,7 @@ import torch
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
 from vllm.models.qwen4_exp.common.qsa_indexer import (
+    QSAIndexerMetadata,
     QSAIndexerMetadataBuilder,
     qsa_kv_cache_dtype,
 )
@@ -260,6 +261,7 @@ def _qsa_sparse_paged_attention_reference(
 def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder.use_deepgemm_prefill = False
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -312,6 +314,7 @@ def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
     builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder.use_deepgemm_prefill = False
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -480,6 +483,7 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
     builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
+    builder.use_deepgemm_prefill = False
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False
@@ -639,6 +643,10 @@ def test_qsa_triton_metadata_matches_pytorch(
         if max_num_work
         else None
     )
+    actual_ranges = tuple(
+        torch.empty(5, dtype=torch.int32, device=device) for _ in range(2)
+    )
+    expected_ranges = tuple(torch.empty_like(tensor) for tensor in actual_ranges)
     actual_buffers = make_buffers()
     actual = qsa_common.build_qsa_metadata_triton(
         common,
@@ -647,6 +655,10 @@ def test_qsa_triton_metadata_matches_pytorch(
         compress_ratio=compress_ratio,
         k_work_metadata_buffer=actual_k_work,
         request_capacity=num_reqs,
+        indexer_ranges=actual_ranges,
+        indexer_width=64,
+        num_decodes=1,
+        num_decode_tokens=3,
     )
 
     expected_k_work = (
@@ -660,9 +672,15 @@ def test_qsa_triton_metadata_matches_pytorch(
         compress_ratio=compress_ratio,
         k_work_metadata_buffer=expected_k_work,
         request_capacity=num_reqs,
+        indexer_ranges=expected_ranges,
+        indexer_width=64,
+        num_decodes=1,
+        num_decode_tokens=3,
     )
 
     for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+    for actual_tensor, expected_tensor in zip(actual_ranges, expected_ranges):
         torch.testing.assert_close(actual_tensor, expected_tensor)
     if actual_k_work is not None:
         torch.testing.assert_close(actual_k_work, expected_k_work)
@@ -878,6 +896,45 @@ def test_qsa_prefill_selection_correctness(
         sequence_lengths.index_select(0, token_to_req.long()) // compress_ratio,
     )
 
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
+        can_use_deepgemm_prefill,
+        init_deepgemm_prefill_constants,
+        prepare_deepgemm_prefill,
+    )
+
+    indexer_prefill_metadata = None
+    if can_use_deepgemm_prefill(q, cache):
+        # Generous limits for this test's 36 rows and 2 narrow requests.
+        init_deepgemm_prefill_constants(q.device, 128, 8192)
+        metadata = QSAIndexerMetadata(
+            block_table=page_table,
+            slot_mapping=torch.full((rows,), -1, device="cuda", dtype=torch.int64),
+            seq_lens=sequence_lengths,
+            query_start_loc=query_start_loc,
+            token_to_req=token_to_req,
+            logical_positions=query_positions,
+            visible_blocks=visible_blocks,
+            k_work_metadata=torch.empty((0, 2), device="cuda", dtype=torch.int32),
+            num_actual_tokens=rows,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=len(query_lens),
+            num_prefill_tokens=rows,
+            max_query_len=max(query_lens),
+            decode_query_len=0,
+            max_seq_len=max(sequence_lengths) + seq_len_slack,
+            storage_block_size=cache.shape[1],
+            compress_ratio=compress_ratio,
+        )
+        width = min(
+            max(64, math.ceil(metadata.max_seq_len / (compress_ratio * 64)) * 64),
+            page_table.shape[1] * cache.shape[1],
+        )
+        ks = token_to_req * width
+        indexer_prefill_metadata = prepare_deepgemm_prefill(
+            metadata, width, ks, ks + visible_blocks
+        )
+
     actual = torch.empty(
         (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
     )
@@ -892,6 +949,7 @@ def test_qsa_prefill_selection_correctness(
         max(query_lens),
         actual,
         max_seq_len=sequence_lengths.max().item() + seq_len_slack,
+        indexer_prefill_metadata=indexer_prefill_metadata,
     )
     expected = _qsa_select_paged_reference(
         q,

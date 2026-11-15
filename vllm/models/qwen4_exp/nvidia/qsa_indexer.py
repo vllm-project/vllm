@@ -433,6 +433,7 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                indexer_prefill_metadata=compressed_metadata.indexer_prefill_metadata,
             )
         expand_qsa_block_indices(
             block_indices,
