@@ -33,7 +33,7 @@ class ServerVad(OpenAIBaseModel):
     threshold: float = Field(default=0.5, gt=0.15, le=1.0)
     """Speech probability at which a 32 ms frame counts as speech."""
     prefix_padding_ms: int = Field(default=300, ge=0)
-    """How far ``audio_start_ms`` reaches back before the detected speech."""
+    """How far `audio_start_ms` reaches back before the detected speech."""
     silence_duration_ms: int = Field(default=500, ge=0)
     """Silence that ends the turn."""
 
@@ -43,8 +43,8 @@ class SemanticVad(OpenAIBaseModel):
 
     type: Literal["semantic_vad"]
     eagerness: Literal["low", "medium", "high", "auto"] = "auto"
-    """How soon a pause is judged: ``high`` ends turns soonest, ``low`` waits
-    longest; ``auto`` is ``medium``."""
+    """How soon a pause is judged: `high` ends turns soonest, `low` waits
+    longest; `auto` is `medium`."""
 
 
 TurnDetection = Annotated[ServerVad | SemanticVad, Field(discriminator="type")]
@@ -57,8 +57,8 @@ class SessionUpdate(OpenAIBaseModel):
     type: Literal["session.update"] = "session.update"
     model: str | None = None
     turn_detection: TurnDetection | None = None
-    """Send ``input_audio_buffer.speech_started`` / ``speech_stopped`` events.
-    ``null`` (the default) turns detection off."""
+    """Send `input_audio_buffer.speech_started` / `speech_stopped` events.
+    `null` (the default) turns detection off."""
 
 
 class SessionCreated(OpenAIBaseModel):
@@ -92,7 +92,7 @@ class InputAudioBufferSpeechStarted(OpenAIBaseModel):
     )
     audio_start_ms: int
     """Where the turn starts, in ms from the first audio of the session,
-    including ``prefix_padding_ms``."""
+    including `prefix_padding_ms`."""
 
 
 class InputAudioBufferSpeechStopped(OpenAIBaseModel):

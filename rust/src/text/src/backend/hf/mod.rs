@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracing::info;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::{
     DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer, Tokenizer,
     UnavailableTokenizer,
@@ -151,6 +152,10 @@ impl TextBackend for HfTextBackend {
 
     fn model_vocab_size(&self) -> usize {
         self.model_vocab_size
+    }
+
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        self.model_config.dtype()
     }
 
     fn model_id(&self) -> &str {

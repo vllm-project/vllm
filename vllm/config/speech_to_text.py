@@ -15,12 +15,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class SpeechToTextParams:
-    """All parameters consumed by ``get_generation_prompt()``.
+    """All parameters consumed by `get_generation_prompt()`.
 
-    ``TranscriptionRequest.build_stt_params()`` constructs this object,
+    `TranscriptionRequest.build_stt_params()` constructs this object,
     mapping API-level fields into typed attributes.  Models only receive
     this object, so new parameters can be added here without changing the
-    ``get_generation_prompt`` signature.
+    `get_generation_prompt` signature.
     """
 
     audio: np.ndarray
@@ -42,7 +42,7 @@ class SpeechToTextParams:
     """
 
     task_type: str = "transcribe"
-    """``"transcribe"`` or ``"translate"``."""
+    """`"transcribe"` or `"translate"`."""
 
     request_prompt: str = ""
     """Optional text prompt to guide the model."""

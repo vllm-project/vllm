@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Turn detection for ``/v1/realtime``: the endpointing state machine on
+"""Turn detection for `/v1/realtime`: the endpointing state machine on
 scripted Silero scores, and the Rust models against ONNX Runtime reference
 scores. The WebSocket path is tested in test_realtime_validation.py."""
 

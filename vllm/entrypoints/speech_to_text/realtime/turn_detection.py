@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Server-side turn detection for ``/v1/realtime``.
+"""Server-side turn detection for `/v1/realtime`.
 
-``server_vad`` ends a turn after a fixed silence, judged frame by frame by
-Silero VAD. ``semantic_vad`` uses a short, eagerness-dependent silence only as a
+`server_vad` ends a turn after a fixed silence, judged frame by frame by
+Silero VAD. `semantic_vad` uses a short, eagerness-dependent silence only as a
 candidate pause and asks Smart Turn v3.2 whether the speech so far is a
 complete turn; an incomplete turn keeps listening until speech resumes or the
 silence reaches the eagerness limit.
 
-Both models run in ``vllm._rust_turn_detection`` (no ONNX Runtime). Their files
+Both models run in `vllm._rust_turn_detection` (no ONNX Runtime). Their files
 are downloaded from the Hugging Face Hub at pinned revisions and checked
 against pinned sha256 digests when loaded. The state machine and its defaults
-follow vLLM-Omni's duplex turn detection (``vllm_omni/engine/duplex/vad.py`` and
-``turn_detection.py``); vLLM-Omni scores pauses with the int8 Smart Turn graph,
+follow vLLM-Omni's duplex turn detection (`vllm_omni/engine/duplex/vad.py` and
+`turn_detection.py`); vLLM-Omni scores pauses with the int8 Smart Turn graph,
 this module with the fp32 one.
 """
 
@@ -117,10 +117,10 @@ def _silero_stream(model) -> FrameScorer:
 class _SileroEndpointer:
     """Speech start and end on Silero's 512-sample frame grid.
 
-    Speech starts once ``MIN_SPEECH_DURATION_MS`` of frames score at or above
-    ``threshold``; the reported start reaches back ``prefix_padding_ms``, but
-    not past the previous reset. Speech ends after ``silence_duration_ms`` of
-    frames below ``threshold - HYSTERESIS``.
+    Speech starts once `MIN_SPEECH_DURATION_MS` of frames score at or above
+    `threshold`; the reported start reaches back `prefix_padding_ms`, but
+    not past the previous reset. Speech ends after `silence_duration_ms` of
+    frames below `threshold - HYSTERESIS`.
     """
 
     def __init__(
@@ -155,7 +155,7 @@ class _SileroEndpointer:
 
     @property
     def speech_pending(self) -> bool:
-        """An onset is being confirmed against ``MIN_SPEECH_DURATION_MS``."""
+        """An onset is being confirmed against `MIN_SPEECH_DURATION_MS`."""
         return self._candidate > 0
 
     def frame(self, frame: np.ndarray) -> TurnEvent | None:
@@ -197,7 +197,7 @@ class _SileroEndpointer:
 
 
 class _Ring:
-    """The most recent ``SMART_TURN_WINDOW_SAMPLES`` of audio."""
+    """The most recent `SMART_TURN_WINDOW_SAMPLES` of audio."""
 
     def __init__(self) -> None:
         self._buffer = np.zeros(SMART_TURN_WINDOW_SAMPLES, dtype=np.float32)
@@ -211,7 +211,7 @@ class _Ring:
         self._write = (self._write + samples.size) % self._buffer.size
 
     def last(self, count: int) -> np.ndarray:
-        """The newest ``count`` samples (at most the window), oldest first."""
+        """The newest `count` samples (at most the window), oldest first."""
         count = min(max(0, count), self._buffer.size)
         start = self._write - count
         if start >= 0:
@@ -223,16 +223,16 @@ class TurnDetector:
     """One per session: feed it the session's audio, get turn boundaries back.
 
     Audio is 16 kHz float32. Calls must be serialized; Smart Turn takes tens of
-    milliseconds on a CPU core, so callers run ``process`` off the event loop.
+    milliseconds on a CPU core, so callers run `process` off the event loop.
     Constructing one may download and load the models, so do that off the
     event loop too.
 
     Args:
-        config: The session's ``turn_detection`` setting.
+        config: The session's `turn_detection` setting.
         start_sample: Session audio already received, where this detector's
             clock starts.
         new_frame_scorer: Starts a Silero stream (the default) or a stand-in.
-        turn_scorer: Smart Turn (the default for ``semantic_vad``) or a
+        turn_scorer: Smart Turn (the default for `semantic_vad`) or a
             stand-in.
 
     """
@@ -278,13 +278,13 @@ class TurnDetector:
 
     @property
     def in_turn(self) -> bool:
-        """A ``speech_started`` has not been followed by ``speech_stopped``."""
+        """A `speech_started` has not been followed by `speech_stopped`."""
         if self._turn_scorer is None:
             return self._endpointer.speech_active
         return self._turn_active
 
     def process(self, audio: np.ndarray) -> list[TurnEvent]:
-        """Advance over ``audio``; return the boundaries it completes, in order.
+        """Advance over `audio`; return the boundaries it completes, in order.
 
         A partial frame at the end is kept for the next call, so boundaries
         fall on the same frame grid however the audio is chunked.

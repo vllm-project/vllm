@@ -3,7 +3,7 @@
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
+position ahead of the target model (`draft_lookahead`). The +1 look-ahead
 feature past the processed boundary is used when its encoder output is present
 and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
@@ -74,6 +74,9 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     manager.is_captured.return_value = True
     manager.supports_modality.side_effect = lambda modality: (
         EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    manager.supports_batch.side_effect = lambda modality, mm_kwargs: (
+        EncoderCudaGraphManager.supports_batch(manager, modality, mm_kwargs)
     )
     runner.cudagraph_manager = manager
     with patch(

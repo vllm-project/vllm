@@ -227,7 +227,7 @@ def _check_mixed_precision_mlp_fusion(worker) -> list[str]:
         get_input_quant_key,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
-    from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+    from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 
     class CountNvfp4Fusion(TorchDispatchMode):
         def __init__(self):
@@ -246,7 +246,7 @@ def _check_mixed_precision_mlp_fusion(worker) -> list[str]:
     generator = torch.Generator(device="cuda").manual_seed(0)
     with set_current_vllm_config(config), torch.inference_mode():
         for name, mlp in worker.get_model().named_modules():
-            if not isinstance(mlp, Qwen2MoeMLP):
+            if not isinstance(mlp, Qwen3MoeMLP):
                 continue
             assert get_input_quant_key(mlp.down_proj) == kNvfp4Dynamic, name
             for num_tokens in (1, 17):

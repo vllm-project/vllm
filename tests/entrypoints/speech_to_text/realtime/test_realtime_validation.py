@@ -208,8 +208,8 @@ async def test_empty_commit_does_not_crash_engine(
 
     Regression test for https://github.com/vllm-project/vllm/issues/34532.
     An empty commit (no prior input_audio_buffer.append) used to trigger
-    ``AssertionError: For realtime you must provide a multimodal_embedding
-    at every step`` which killed the entire engine process, disconnecting
+    `AssertionError: For realtime you must provide a multimodal_embedding
+    at every step` which killed the entire engine process, disconnecting
     every connected client.
     """
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
@@ -354,7 +354,7 @@ async def _stream_with_turn_detection(
     turn_detection: dict,
     chunks: list[str],
 ) -> tuple[list[tuple[str, int]], str]:
-    """One session: turn events and transcription for ``chunks``."""
+    """One session: turn events and transcription for `chunks`."""
     async with websockets.connect(ws_url) as ws:
         event = await receive_event(ws, timeout=30.0)
         assert event["type"] == "session.created"

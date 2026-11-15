@@ -83,12 +83,12 @@ def _tail_runner(
 ) -> ROCmLatentMoERunner:
     """A runner carrying only what the tail reads, so no engine is needed.
 
-    ``_maybe_reduce_final_output`` is left as the real base-class method, so the
+    `_maybe_reduce_final_output` is left as the real base-class method, so the
     all-reduce that stitches the shards is the real collective.
 
-    ``tp_world`` is the size of the TP process group, which is what the hidden
+    `tp_world` is the size of the TP process group, which is what the hidden
     dim is split by. Under expert parallelism the MoE config reports
-    ``tp_size=1``/``ep_size=tp_world`` for that same group, so ``use_ep`` pins
+    `tp_size=1`/`ep_size=tp_world` for that same group, so `use_ep` pins
     that the final reduce still fires.
     """
     runner = object.__new__(ROCmLatentMoERunner)
@@ -160,7 +160,7 @@ def _check_matches_replicated_under_ep(
 ) -> None:
     """The served config: the routed experts are expert-parallel, so the MoE
     config reports no tensor parallelism at all for a group that still splits
-    the hidden dim ``tp_world`` ways."""
+    the hidden dim `tp_world` ways."""
     _check_matches_replicated(device, tp_world, rank, use_ep=True)
 
 
@@ -331,10 +331,10 @@ def test_forward_shards_only_when_the_tail_is_valid(
 
 @pytest.fixture
 def build_runner(monkeypatch: pytest.MonkeyPatch):
-    """Construct through the real subclass ``__init__``, stubbing only the base.
+    """Construct through the real subclass `__init__`, stubbing only the base.
 
-    ``tp_world`` is the size of the TP process group and is varied independently
-    of ``moe_config.tp_size``, because under expert parallelism those two are
+    `tp_world` is the size of the TP process group and is varied independently
+    of `moe_config.tp_size`, because under expert parallelism those two are
     different numbers for the same eight ranks.
     """
     world = {"size": 8}
@@ -379,7 +379,7 @@ def build_runner(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_shards_under_the_kimi_k3_serving_config(build_runner) -> None:
-    """``--tensor-parallel-size 8``, MoE experts tensor-parallel."""
+    """`--tensor-parallel-size 8`, MoE experts tensor-parallel."""
     runner = build_runner(tp_world=8, tp_size=8, ep_size=1)
 
     assert runner._tail_shardable
@@ -389,9 +389,9 @@ def test_shards_under_the_kimi_k3_serving_config(build_runner) -> None:
 def test_shards_under_the_kimi_k3_serving_config_with_expert_parallel(
     build_runner,
 ) -> None:
-    """``--tensor-parallel-size 8 --enable-expert-parallel``, what is served.
+    """`--tensor-parallel-size 8 --enable-expert-parallel`, what is served.
 
-    EP reports ``moe_config.tp_size == 1`` because each rank owns whole experts,
+    EP reports `moe_config.tp_size == 1` because each rank owns whole experts,
     but the hidden dim is still split across all eight TP ranks, so the tail
     must shard exactly as it does without EP.
     """
@@ -404,7 +404,7 @@ def test_shards_under_the_kimi_k3_serving_config_with_expert_parallel(
 def test_shards_by_the_process_group_not_the_dp_flattened_tp_size(
     build_runner,
 ) -> None:
-    """Without EP, ``moe_config.tp_size`` is flattened across DP: TP=2 x DP=2
+    """Without EP, `moe_config.tp_size` is flattened across DP: TP=2 x DP=2
     reports 4 for a TP process group of 2.
 
     Only those 2 ranks share a hidden dim and take part in the final
@@ -434,9 +434,9 @@ def test_falls_back_when_the_config_breaks_the_shard(
 ) -> None:
     """Each of these makes the sharded tail wrong, not merely slower.
 
-    ``dp-without-tp`` is DP=4 with no TP: the hidden dim is not split at all,
+    `dp-without-tp` is DP=4 with no TP: the hidden dim is not split at all,
     so there is nothing to shard and no all-reduce to stitch shards back
-    together, however large ``moe_config.tp_size`` claims to be.
+    together, however large `moe_config.tp_size` claims to be.
     """
     runner = build_runner(**override)
 

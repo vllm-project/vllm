@@ -194,10 +194,10 @@ class RealtimeConnection:
     async def configure_turn_detection(
         self, config: ServerVad | SemanticVad | None
     ) -> None:
-        """Replace the session's turn detector (``None`` turns detection off).
+        """Replace the session's turn detector (`None` turns detection off).
 
         The same setting again keeps the running detector. Otherwise a turn in
-        progress is closed with ``speech_stopped`` at the current position, and
+        progress is closed with `speech_stopped` at the current position, and
         the new detector starts listening there.
         """
         current = self.turn_detector
