@@ -22,6 +22,21 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Support Matrix
+
+What works with each offloading mode, for the KV cache layout vLLM picks by default. "Not yet validated" means no test covers the combination yet; treat it as unsupported until one does. CPU is `CPUOffloadingSpec`; Tiered is `TieringOffloadingSpec`, either storing each worker's pages as they are (direct, the default) or with [`"canonical_layout": true`](#canonical-layout).
+
+| Model family | CPU | Tiered (direct) | Tiered (canonical) | Restrictions |
+| --- | --- | --- | --- | --- |
+| Full attention | Supported | Supported | Supported | Canonical: KV heads must divide evenly across TP ranks, no per-token-head KV cache quantization. |
+| Sliding-window attention | Supported | Not yet validated | Supported | Same as full attention. |
+| MLA | Not yet validated | Not yet validated | Supported | |
+| Sparse MLA (for example DeepSeek-V3.2) | Supported with HiSparse only | Not yet validated | Not yet validated | |
+| Compressed MLA and packed caches (for example DeepSeek-V4) | Not yet validated | Not yet validated | Not supported | Each block is copied whole, as one region. |
+| Mamba/SSM and hybrid models | Supported | Not yet validated | Not supported | Only with the default layout; see [KV Cache Layouts](#kv-cache-layouts). |
+
+Instances that share a secondary tier in direct mode must use the same KV cache layout: direct mode does not record the layout in its storage namespace ([#55904](https://github.com/vllm-project/vllm/issues/55904)). Canonical blocks carry it.
+
 ## Per-request load control
 
 Individual requests can cap how many tokens are loaded from offloaded storage
@@ -162,34 +177,22 @@ The layout is chosen once at startup:
 
 - By default the connector asks for `LBHNC`, or `BLHNC` when HiSparse is enabled. If the attention backend doesn't support that layout, vLLM logs a warning and uses the backend's first choice.
 - `VLLM_KV_CACHE_LAYOUT` overrides the connector's choice. Startup fails if the attention backend doesn't support the layout you set.
-- With the extensible KV cache (`--enable-extensible-kv-cache`, on by default on CUDA and ROCm with the V2 model runner), any KV connector limits the choice to the layouts in which each layer's page of a block is one contiguous run: `LBHNC`, `LBNHC`, `BLHNC` and `BLNHC`. Setting `VLLM_KV_CACHE_LAYOUT` to `LHBNC` or `BHLNC` then fails at startup; `tests/v1/engine/test_engine_args.py::test_extensible_kv_cache_connector_needs_block_compact_layout` tests this for `LHBNC`.
+- With the extensible KV cache (`--enable-extensible-kv-cache`, on by default on CUDA and ROCm with the V2 model runner), any KV connector limits the choice to the layouts in which each layer's page of a block is one contiguous run: `LBHNC`, `LBNHC`, `BLHNC` and `BLNHC`. Setting `VLLM_KV_CACHE_LAYOUT` to `LHBNC` or `BHLNC` then fails at startup.
 
-"Not verified" below means no test covers the combination yet. Treat it as unsupported until one does. The `LHBNC` and `BHLNC` rows apply only with the extensible KV cache off. Test paths are relative to `tests/v1/kv_connector/unit/` unless they say otherwise.
+### Advanced: support by layout
 
-| Layout | CPU | Tiered direct | Tiered canonical | Tests |
-| --- | --- | --- | --- | --- |
-| `LBHNC` | Supported (the default) | Supported | Supported | `test_offloading_connector.py::test_cpu_offloading`, `::test_tiering_offloading`, `::test_fs_tiering_offloading` (end to end, GPU); `offloading_connector/test_canonical_mapping.py` (`split_hnd`, `packed_hnd`) |
-| `LBNHC` | Registration is tested; not verified end to end | Not verified | Supported | `offloading_connector/test_worker.py::test_register_kv_caches`; `offloading_connector/test_canonical_mapping.py` (`split_nhd`, `packed_nhd`) |
-| `LHBNC` | Wrong output after a reload from CPU ([#60004](https://github.com/vllm-project/vllm/issues/60004)); the connector doesn't reject it at startup yet | Not verified | Not verified | None |
-| `BLHNC` | Tested with HiSparse only | Not verified | Not supported (cross-layer); not verified that startup rejects it | `tests/v1/e2e/general/test_hisparse.py::test_hisparse_spill_and_prefix_restore` (GPU) |
-| `BLNHC` | Not verified | Not verified | Not supported (cross-layer); not verified that startup rejects it | None |
-| `BHLNC` | Not verified | Not verified | Not supported (cross-layer); not verified that startup rejects it | None |
+The `LHBNC` and `BHLNC` rows apply only with the extensible KV cache off.
 
-By model family, with the layout vLLM picks by default:
+| Layout | CPU | Tiered (direct) | Tiered (canonical) |
+| --- | --- | --- | --- |
+| `LBHNC` (the default) | Supported | Supported | Supported |
+| `LBNHC` | Not yet validated | Not yet validated | Supported |
+| `LHBNC` | Not supported: wrong output after a reload from CPU ([#60004](https://github.com/vllm-project/vllm/issues/60004)), and not yet rejected at startup ([#60005](https://github.com/vllm-project/vllm/pull/60005)) | Not yet validated | Not yet validated |
+| `BLHNC` | Supported with HiSparse only | Not yet validated | Not supported (cross-layer) |
+| `BLNHC` | Not yet validated | Not yet validated | Not supported (cross-layer) |
+| `BHLNC` | Not yet validated | Not yet validated | Not supported (cross-layer) |
 
-| Model family | CPU | Tiered direct | Tiered canonical | Tests |
-| --- | --- | --- | --- | --- |
-| Full and sliding-window attention | Supported | Supported for full attention; sliding window not verified | Supported, except with per-token-head KV cache quantization | `test_offloading_connector.py::test_cpu_offloading` (Llama-3.2-1B on each attention backend, Gemma-3-1B), `::test_tiering_offloading`; `offloading_connector/test_canonical_mapping.py::test_fail_closed_cases` |
-| MLA | Not verified end to end | Not verified | Supported | `offloading_connector/test_canonical_mapping.py::test_mla_replicas_rotate_writer` |
-| Sparse MLA | Tested with HiSparse only | Not verified | Not verified | `tests/v1/e2e/general/test_hisparse.py::test_hisparse_spill_and_prefix_restore` (DeepSeek-V3.2, dummy weights, GPU) |
-| Compressed MLA and packed caches (layers interleaved within a block, for example DeepSeek-V4) | Each block is copied whole, as one region; registration is tested, end to end is not verified | Not verified | Not supported | `offloading_connector/test_worker.py::test_register_packed_kv_caches_skips_scratch_group`; `offloading_connector/test_canonical_mapping.py::test_fail_closed_cases` |
-| Mamba/SSM and hybrid models | Supported | Not verified | Not supported | `test_offloading_connector.py::test_cpu_offloading` (Mamba-130M, Falcon-H1), `::test_mamba_cpu_offload_boundary`; `offloading_connector/test_canonical_mapping.py::test_fail_closed_cases` |
-
-Known gaps:
-
-- Tiered direct stores pages in the local layout and doesn't record it, so instances that share a secondary tier must use the same layout ([#55904](https://github.com/vllm-project/vllm/issues/55904)). Canonical blocks carry the layout family in their storage namespace.
-- Mamba with `BLHNC`, `BLNHC` or `BHLNC`: local store and restore checks found incorrect addressing. Not verified through the engine.
-- A connector check that also rejects `LHBNC` without the extensible KV cache is in review ([#60005](https://github.com/vllm-project/vllm/pull/60005)). Layout support is tracked in [#63718](https://github.com/vllm-project/vllm/issues/63718).
+Mamba/SSM and hybrid models with `BLHNC`, `BLNHC` or `BHLNC` are not supported: local store and restore checks found incorrect addressing. Layout support is tracked in [#63718](https://github.com/vllm-project/vllm/issues/63718).
 
 ## Info Metric Labels
 
