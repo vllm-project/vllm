@@ -1560,11 +1560,13 @@ class ModelConfig:
         layer_types = self.bidirectional_span_layer_types
         if not layer_types:
             return
-        if unsupported := sorted(set(layer_types) - {"full_attention"}):
+        if unsupported := sorted(
+            set(layer_types) - {"full_attention", "sliding_attention"}
+        ):
             raise ValueError(
                 f"bidirectional_span_layer_types={list(layer_types)}: only "
-                f"full_attention layers can apply bidirectional spans, not "
-                f"{unsupported}."
+                "full_attention and sliding_attention layers can apply "
+                f"bidirectional spans, not {unsupported}."
             )
         if not self._model_info.supports_bidirectional_spans:
             raise ValueError(
@@ -1817,7 +1819,8 @@ class ModelConfig:
     @property
     def bidirectional_span_layer_types(self) -> tuple[str, ...]:
         """Layer types that apply bidirectional attention spans, from the
-        checkpoint's text config; empty if it declares none."""
+        checkpoint's text config; empty if it declares none. Listed
+        sliding-window layers are built without a window."""
         return tuple(
             getattr(self.hf_text_config, "bidirectional_span_layer_types", None) or ()
         )

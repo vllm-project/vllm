@@ -1215,7 +1215,8 @@ class SupportsBidirectionalSpans(Protocol):
     `bidirectional_span_layer_types` lists the layer types that apply them and
     `bidirectional_span_max_length` is the longest span it was trained with.
     The model passes `bidirectional_spans=True` to the
-    [Attention][vllm.model_executor.layers.attention.Attention] of those layers.
+    [Attention][vllm.model_executor.layers.attention.Attention] of those layers,
+    and builds listed sliding-window layers without a window.
     """
 
     supports_bidirectional_spans: ClassVar[Literal[True]] = True

@@ -45,9 +45,22 @@ def test_architectures_without_spans_refuse_such_checkpoints():
         ModelConfig("facebook/opt-125m", hf_overrides=SPANS)
 
 
-def test_only_full_attention_layers_apply_spans():
-    with pytest.raises(ValueError, match="only full_attention"):
-        span_model_config(bidirectional_span_layer_types=["sliding_attention"])
+@pytest.mark.parametrize(
+    "layer_types",
+    [["full_attention", "sliding_attention"], ["sliding_attention"]],
+    ids=["all", "sliding"],
+)
+def test_sliding_window_layers_may_apply_spans(layer_types):
+    config = span_model_config(bidirectional_span_layer_types=layer_types)
+    assert config.bidirectional_span_layer_types == tuple(layer_types)
+    assert config.uses_prefix_lm_ranges
+
+
+def test_other_layer_types_are_refused():
+    with pytest.raises(ValueError, match=r"not \['chunked_attention'\]"):
+        span_model_config(
+            bidirectional_span_layer_types=["full_attention", "chunked_attention"]
+        )
 
 
 @pytest.mark.parametrize("max_length", [None, 0, True, "1024"])

@@ -4,7 +4,8 @@
 reference built from the same masks, with prefix caching and chunked prefill on.
 
 The checkpoint is a stock Gemma 4; `hf_overrides` declares spans on its
-full-attention layers, as a checkpoint trained with them would in its config.
+full-attention layers, or on every layer, which builds its sliding-window layers
+without a window, as a checkpoint trained with them would in its config.
 On such a checkpoint every request states its spans, and an empty list makes
 it causal. For local validation, BIDIRECTIONAL_SPANS_MODEL,
 BIDIRECTIONAL_SPANS_DRAFTER, BIDIRECTIONAL_SPANS_LENGTH and
@@ -53,6 +54,9 @@ MAX_STATE_TOKENS = 3000
 NUM_GENERATED = 16
 # The image cases' state holds an image, so their spans are longer.
 IMAGE_SPAN_LENGTH = 1024
+# Spans on every layer, with the sliding-window layers built without a window.
+ALL_LAYERS = ("full_attention", "sliding_attention")
+SLIDING_LAYERS = ("sliding_attention",)
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_cuda(), reason="needs a CUDA GPU"),
@@ -64,6 +68,11 @@ pytestmark = [
 class Layout:
     span_layer_types: tuple[str, ...] = ("full_attention",)
     drafter: bool = False
+
+    @property
+    def unwindowed(self) -> bool:
+        """Whether the sliding-window layers apply spans, without a window."""
+        return "sliding_attention" in self.span_layer_types
 
 
 STATES = [
@@ -115,16 +124,23 @@ def chunked(num_state: int, size: int) -> list[tuple[int, int]]:
     return [(s, min(s + size, num_state)) for s in range(0, num_state, size)]
 
 
-def text_cases(questions: list[str]) -> list[tuple[list[int], list[tuple[int, int]]]]:
+def text_cases(
+    questions: list[str], window: int | None = None
+) -> list[tuple[list[int], list[tuple[int, int]]]]:
     """States of two to four fixed-size spans, so that several spans and
     prefill chunks are involved whatever the span length, then the question as
-    a span of its own, which holds the last prompt token."""
+    a span of its own, which holds the last prompt token. With a `window`, each
+    state is one span, longer than the window, which would cut the span and the
+    question's view of the state."""
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     out = []
     for i, state in enumerate(STATES):
-        target = min(int((2 + i / 2) * SPAN_LENGTH), MAX_STATE_TOKENS)
+        if window is None:
+            target = min(int((2 + i / 2) * SPAN_LENGTH), MAX_STATE_TOKENS)
+        else:
+            target = min(window + 64 + i * window // 4, MAX_STATE_TOKENS)
         repeats = 1
         while len(tokenizer(" ".join([state] * repeats))["input_ids"]) < target:
             repeats += 1
@@ -132,17 +148,28 @@ def text_cases(questions: list[str]) -> list[tuple[list[int], list[tuple[int, in
         for question in questions:
             ids, num_state = render(tokenizer, state, question)
             assert len(ids) - num_state <= SPAN_LENGTH, "the question needs one span"
-            spans = chunked(num_state, SPAN_LENGTH) + [(num_state, len(ids))]
-            out.append((ids, spans))
+            if window is None:
+                state_spans = chunked(num_state, SPAN_LENGTH)
+            else:
+                assert window < num_state <= 2 * window, (num_state, window)
+                state_spans = [(0, num_state)]
+            out.append((ids, state_spans + [(num_state, len(ids))]))
     return out
 
 
 def span_masks(
-    n: int, spans, layer_types, span_layer_types, window: int, image_ranges=()
+    n: int,
+    spans,
+    layer_types,
+    span_layer_types,
+    window: int,
+    image_ranges=(),
+    windowed=False,
 ):
     """Masks per layer type: the listed types apply the spans and no image
-    ranges; the other sliding-window layers keep their window, with the
-    inclusive image ranges bidirectional inside it (Gemma 4's "vision")."""
+    ranges, without a window unless `windowed`; the other sliding-window layers
+    keep their window, with the inclusive image ranges bidirectional inside it
+    (Gemma 4's "vision")."""
     idx = torch.arange(n, device="cuda")
     causal = idx[None, :] <= idx[:, None]
 
@@ -157,6 +184,8 @@ def span_masks(
     for layer_type in set(layer_types):
         if layer_type in span_layer_types:
             mask = causal | same_range(spans, inclusive=False)
+            if windowed and layer_type == "sliding_attention":
+                mask = mask & in_window
         elif layer_type == "sliding_attention":
             mask = (causal | same_range(image_ranges, inclusive=True)) & in_window
         else:
@@ -165,7 +194,16 @@ def span_masks(
     return masks
 
 
-def hf_forward(model, text_config, ids, spans, image_ranges=(), **mm_inputs):
+def hf_forward(
+    model,
+    text_config,
+    ids,
+    spans,
+    image_ranges=(),
+    span_layer_types=("full_attention",),
+    windowed=False,
+    **mm_inputs,
+):
     """Last-position logits and final hidden state of the transformers model
     under `span_masks`."""
     n = len(ids)
@@ -175,9 +213,10 @@ def hf_forward(model, text_config, ids, spans, image_ranges=(), **mm_inputs):
             n,
             spans,
             text_config.layer_types,
-            ("full_attention",),
+            span_layer_types,
             text_config.sliding_window,
             image_ranges,
+            windowed,
         ),
         position_ids=torch.arange(n, device="cuda")[None],
         output_hidden_states=True,
@@ -274,21 +313,56 @@ def text_config():
     return AutoConfig.from_pretrained(MODEL).text_config
 
 
-@pytest.fixture(scope="module")
-def cases():
-    return text_cases(QUESTIONS)
+def text_references(
+    model, text_config, layout: Layout, with_drafter_cases: bool
+) -> dict[Any, Any]:
+    """The text cases of a layout, their next-token probabilities and final
+    hidden states with and without spans, and, for a layout with a drafter
+    class, greedy continuations of the drafter cases. With sliding-window
+    layers listed, also the probabilities with their window kept."""
+    window = text_config.sliding_window if layout.unwindowed else None
+    cases = text_cases(QUESTIONS, window)
+    drafter_cases = text_cases(DRAFTER_QUESTIONS, window) if with_drafter_cases else []
+    ref: dict[Any, Any] = {"cases": cases, "drafter_cases": drafter_cases}
+
+    def forward(ids, spans, windowed=False):
+        return hf_forward(
+            model,
+            text_config,
+            ids,
+            spans,
+            span_layer_types=layout.span_layer_types,
+            windowed=windowed,
+        )
+
+    for i, (ids, spans) in enumerate(cases):
+        for mode, mode_spans in (("spans", spans), ("causal", [])):
+            logits, hidden = forward(ids, mode_spans)
+            ref["text", i, mode] = torch.softmax(logits, -1).cpu()
+            ref["pooled", i, mode] = torch.nn.functional.normalize(hidden, dim=-1).cpu()
+            if layout.unwindowed:
+                logits, _ = forward(ids, mode_spans, windowed=True)
+                ref["windowed", i, mode] = torch.softmax(logits, -1).cpu()
+    for i, (ids, spans) in enumerate(drafter_cases):
+        for mode, mode_spans in (("spans", spans), ("causal", [])):
+            logits, _ = forward(ids, mode_spans)
+            ref["first", i, mode] = torch.softmax(logits, -1).cpu()
+        tokens: list[int] = []
+        logprobs: list[dict[int, float]] = []
+        for _ in range(NUM_GENERATED):
+            logits, _ = forward(ids + tokens, spans)
+            best = torch.log_softmax(logits, -1).topk(TOP_K)
+            logprobs.append(dict(zip(best.indices.tolist(), best.values.tolist())))
+            tokens.append(int(best.indices[0]))
+        ref["greedy", i] = tokens, logprobs
+    return ref
 
 
 @pytest.fixture(scope="module")
-def drafter_cases():
-    return text_cases(DRAFTER_QUESTIONS)
-
-
-@pytest.fixture(scope="module")
-def references(cases, drafter_cases, text_config):
-    """From transformers, in one load of the model: next-token probabilities
-    and final hidden states with and without spans, greedy continuations of the
-    drafter cases, and the image cases."""
+def all_references(text_config):
+    """From transformers, in one load of the model: the text references of
+    each layout, by its layer types, and with the full-attention layout the
+    image cases."""
     from transformers import AutoModelForImageTextToText
 
     # The boolean masks need SDPA on the language model. The audio tower has
@@ -297,27 +371,17 @@ def references(cases, drafter_cases, text_config):
         MODEL, dtype=torch.bfloat16, attn_implementation={"text_config": "sdpa"}
     )
     model = model.cuda().eval()
-    ref: dict[Any, Any] = {}
+    refs: dict[tuple[str, ...], dict[Any, Any]] = {}
     with torch.no_grad():
-        for i, (ids, spans) in enumerate(cases):
-            for mode, mode_spans in (("spans", spans), ("causal", [])):
-                logits, hidden = hf_forward(model, text_config, ids, mode_spans)
-                ref["text", i, mode] = torch.softmax(logits, -1).cpu()
-                ref["pooled", i, mode] = torch.nn.functional.normalize(
-                    hidden, dim=-1
-                ).cpu()
-        for i, (ids, spans) in enumerate(drafter_cases):
-            for mode, mode_spans in (("spans", spans), ("causal", [])):
-                logits, _ = hf_forward(model, text_config, ids, mode_spans)
-                ref["first", i, mode] = torch.softmax(logits, -1).cpu()
-            tokens: list[int] = []
-            logprobs: list[dict[int, float]] = []
-            for _ in range(NUM_GENERATED):
-                logits, _ = hf_forward(model, text_config, ids + tokens, spans)
-                best = torch.log_softmax(logits, -1).topk(TOP_K)
-                logprobs.append(dict(zip(best.indices.tolist(), best.values.tolist())))
-                tokens.append(int(best.indices[0]))
-            ref["greedy", i] = tokens, logprobs
+        for layout, with_drafter_cases in (
+            (Layout(), True),
+            (Layout(ALL_LAYERS), True),
+            (Layout(SLIDING_LAYERS), False),
+        ):
+            refs[layout.span_layer_types] = text_references(
+                model, text_config, layout, with_drafter_cases
+            )
+        ref = refs[Layout().span_layer_types]
         ref["images"] = image_cases()
         for case in ref["images"]:
             mm_inputs = {k: v.cuda() for k, v in case.pop("mm_inputs").items()}
@@ -336,7 +400,7 @@ def references(cases, drafter_cases, text_config):
                 case[f"ref_{mode}"] = torch.softmax(logits, -1).cpu()
     del model
     free_gpu_memory()
-    return ref
+    return refs
 
 
 def free_gpu_memory() -> None:
@@ -366,13 +430,37 @@ def layout(request) -> Layout:
 
 
 @pytest.fixture(scope="class")
-def llm(layout, references):
-    # A small per-step budget, so that prompts share steps and are split at
-    # span boundaries, with room for the drafter's slots next to a span.
+def references(layout, all_references):
+    return all_references[layout.span_layer_types]
+
+
+@pytest.fixture(scope="class")
+def cases(references):
+    return references["cases"]
+
+
+@pytest.fixture(scope="class")
+def drafter_cases(references):
+    return references["drafter_cases"]
+
+
+def span_max_length(layout: Layout, text_config) -> int:
+    """Spans of SPAN_LENGTH tokens, or without a window, states longer than
+    the window."""
+    if layout.unwindowed:
+        return max(SPAN_LENGTH, 2 * text_config.sliding_window)
+    return SPAN_LENGTH
+
+
+@pytest.fixture(scope="class")
+def llm(layout, references, text_config):
+    # A per-step budget just above the longest span, so that prompts are split
+    # at span boundaries, with room for the drafter's slots next to a span.
+    max_length = span_max_length(layout, text_config)
     engine, proxy = make_llm(
-        hf_overrides=span_overrides(layout, SPAN_LENGTH),
+        hf_overrides=span_overrides(layout, max_length),
         max_model_len=MAX_STATE_TOKENS + 512,
-        max_num_batched_tokens=max(128, SPAN_LENGTH + 16),
+        max_num_batched_tokens=max(128, max_length + 16),
         enable_prefix_caching=True,
         gpu_memory_utilization=0.5,
         limit_mm_per_prompt={"image": 0, "audio": 0},
@@ -451,8 +539,10 @@ def check_against_references(results, plain, refs, refs_causal, bound: float):
     assert mean(effect) > 2 * mean(span_err), (effect, span_err)
 
 
-class TestSpansOnFullAttentionLayers:
-    layout = Layout()
+class SpanTests:
+    """The tests of every text layout without a drafter."""
+
+    reference_bound = 0.02
 
     def test_spans_match_the_reference(self, llm, cases, references):
         llm.reset_prefix_cache()
@@ -463,7 +553,7 @@ class TestSpansOnFullAttentionLayers:
             plain,
             [references["text", i, "spans"] for i in range(len(cases))],
             [references["text", i, "causal"] for i in range(len(cases))],
-            bound=0.02,
+            bound=self.reference_bound,
         )
 
     def test_cached_spans_match_the_reference(self, llm, cases, references):
@@ -557,6 +647,10 @@ class TestSpansOnFullAttentionLayers:
         alone_err = [distance(lp, ref) for (lp, _), ref in zip(alone, refs)]
         assert mean(mixed_err) < max(2 * mean(alone_err), 0.02), (mixed_err, alone_err)
 
+
+class TestSpansOnFullAttentionLayers(SpanTests):
+    layout = Layout()
+
     def test_requests_without_spans_are_refused(self, llm, cases):
         ids, _ = cases[0]
         with pytest.raises(VLLMValidationError, match="must set bidirectional_spans"):
@@ -594,6 +688,7 @@ class TestSpansOnFullAttentionLayers:
 
 class TestSpansWithMTP:
     layout = Layout(drafter=True)
+    first_step_bound = 0.05
 
     def test_drafted_answers_match_the_reference(self, llm, drafter_cases, references):
         # Drafts are verified, so the greedy answers are the target's.
@@ -635,12 +730,60 @@ class TestSpansWithMTP:
         effect = [
             distance(lp, references["first", i, "causal"]) for i, lp in enumerate(first)
         ]
-        assert mean(span_err) < 0.05, span_err
+        assert mean(span_err) < self.first_step_bound, span_err
         assert mean(effect) > 2 * mean(span_err), (effect, span_err)
         counters = {
             m.name: m.value for m in llm.get_metrics() if isinstance(m, Counter)
         }
         assert counters["vllm:spec_decode_num_accepted_tokens"] > 0, counters
+
+
+class TestSpansOnAllLayers(SpanTests):
+    """Spans on every layer, which builds the sliding-window layers without a
+    window, over states longer than the window."""
+
+    layout = Layout(ALL_LAYERS)
+    # On these long states span and causal requests reach errors of 0.065 and
+    # 0.083, and the causal requests' error, the default yardstick, varies
+    # between runs on the same prompts (0.03 to 0.08 at TP=2). The window and
+    # the causal mask are at least 0.2 away.
+    reference_bound = 0.1
+
+    def test_sliding_window_layers_have_no_window(self, llm, cases, references):
+        """Span and causal requests are closer to the reference without the
+        window than to the one with it."""
+        llm.reset_prefix_cache()
+        for mode in ("spans", "causal"):
+            results = run(
+                llm,
+                [prompt(ids, spans if mode == "spans" else []) for ids, spans in cases],
+            )
+            err = [
+                distance(lp, references["text", i, mode])
+                for i, (lp, _) in enumerate(results)
+            ]
+            windowed = [
+                distance(lp, references["windowed", i, mode])
+                for i, (lp, _) in enumerate(results)
+            ]
+            assert mean(windowed) > 2 * mean(err), (mode, windowed, err)
+
+
+class TestSpansOnSlidingWindowLayers(TestSpansOnAllLayers):
+    """Spans on the sliding-window layers only, without their window; the
+    full-attention layers stay causal."""
+
+    layout = Layout(SLIDING_LAYERS)
+
+
+class TestSpansOnAllLayersWithMTP(TestSpansWithMTP):
+    """The drafter's layers keep their own windows and read the target's KV
+    cache, which keeps every token."""
+
+    layout = Layout(ALL_LAYERS, drafter=True)
+    # The first step's error reaches 0.06 on these states, about that of
+    # causal first steps; the spans move it by at least 0.4.
+    first_step_bound = 0.1
 
 
 class TestServerSetSpansOverImages:
@@ -651,6 +794,8 @@ class TestServerSetSpansOverImages:
     attention, the references with and without the image range are close, so
     this does not tell whether the sliding-window layers got it; the attention
     group unit tests cover that routing."""
+
+    layout = Layout()
 
     @pytest.fixture(scope="class")
     def image_llm(self, references):
@@ -693,6 +838,8 @@ class TestServerSetSpansOverImages:
 
 
 class TestSpansOnPoolingRequests:
+    layout = Layout()
+
     def test_pooled_states_match_the_reference(self, cases, references):
         engine, llm = make_llm(
             runner="pooling",

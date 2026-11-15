@@ -468,12 +468,14 @@ def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them(for_captur
     """Gemma 4 with use_bidirectional_attention="vision" and the hybrid KV cache
     manager off: its sliding-window and full-attention layers share a KV cache
     group, but only the sliding-window layers take the image ranges. Layers
-    that apply bidirectional spans take the spans and no image ranges."""
+    that apply bidirectional spans take the spans and no image ranges, whatever
+    their image-range flag (Gemma 4's listed sliding-window layers keep it)."""
     spec = new_kv_cache_spec()
     recorders = {
         "sliding": _MMPrefixRangesRecorder(),
         "full": _MMPrefixRangesRecorder(),
         "spans": _MMPrefixRangesRecorder(),
+        "sliding_spans": _MMPrefixRangesRecorder(),
     }
     groups = [
         AttentionGroup(
@@ -481,8 +483,8 @@ def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them(for_captur
             [name],
             spec,
             0,
-            applies_mm_prefix_ranges=name == "sliding",
-            applies_bidirectional_spans=name == "spans",
+            applies_mm_prefix_ranges=name in ("sliding", "sliding_spans"),
+            applies_bidirectional_spans=name in ("spans", "sliding_spans"),
             metadata_builders=[recorders[name]],  # type: ignore[list-item]
         )
         for name in recorders
@@ -515,6 +517,7 @@ def test_groups_opting_out_of_mm_prefix_ranges_are_built_without_them(for_captur
     assert recorders["full"].mm_req_doc_ranges is None
     expected_spans = None if for_capture else span_ranges
     assert recorders["spans"].mm_req_doc_ranges is expected_spans
+    assert recorders["sliding_spans"].mm_req_doc_ranges is expected_spans
 
 
 def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():

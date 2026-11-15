@@ -10,6 +10,8 @@ A request carries `bidirectional_spans`, a list of half-open `[start, end)` toke
 
 On a layer that applies spans, query token `i` attends to key token `j` if `j <= i`, or if `i` and `j` lie in the same span. On other layers, and for tokens outside every span, the model's usual mask holds. Generated tokens are never in a span. Layers that apply spans take no multimodal PrefixLM image ranges: an image inside a span is already bidirectional there.
 
+Sliding-window layers that apply spans have no window. Listing `sliding_attention` declares that the checkpoint was trained without a window on those layers, so vLLM builds them without one for every request, with or without spans, and the rule above holds on them as on full-attention layers. They keep their head size, RoPE parameters and KV sharing. They keep KV for every token of a request instead of the last `sliding_window` tokens, so long prompts need several times the KV cache memory of the windowed layout; size `--max-model-len` and `--gpu-memory-utilization` for it. Options that select layers by their window, such as `kv_cache_dtype_skip_layers=["sliding_window"]`, do not select them. With Gemma 4's `use_bidirectional_attention: "vision"`, under which only sliding-window layers take image ranges, listing `sliding_attention` therefore makes an image bidirectional only inside a span, and causal in a request without spans.
+
 ## Which models support spans
 
 A model supports spans when its implementation does (it implements [SupportsBidirectionalSpans][vllm.model_executor.models.interfaces.SupportsBidirectionalSpans]) and the checkpoint declares them in its text config:
@@ -21,10 +23,10 @@ A model supports spans when its implementation does (it implements [SupportsBidi
 }
 ```
 
-- `bidirectional_span_layer_types` lists the layer types that apply spans. Only `full_attention` layers can apply spans for now.
+- `bidirectional_span_layer_types` lists the layer types that apply spans: `full_attention`, `sliding_attention` or both. Listing `sliding_attention` removes the window from those layers (see [Semantics](#semantics)). Other layer types are refused.
 - `bidirectional_span_max_length` is the longest span the checkpoint was trained with. Longer spans are refused.
 
-Gemma 4 (`Gemma4ForCausalLM`, `Gemma4ForConditionalGeneration` and the unified variant) implements spans on its full-attention layers. vLLM refuses to start a checkpoint that declares spans on an architecture that does not implement them.
+Gemma 4 (`Gemma4ForCausalLM`, `Gemma4ForConditionalGeneration` and the unified variant) implements spans on its full-attention and sliding-window layers. Its MTP and DSpark drafters keep the windows their own configs set. vLLM refuses to start a checkpoint that declares spans on an architecture that does not implement them.
 
 A checkpoint that declares spans is never served causally by accident: every request must set `bidirectional_spans`, and an empty list states a causal request. Requests without the field are refused, so requests that cannot set it, such as text prompts and chat conversations, cannot be served, and the structured decisions endpoints are off for such a checkpoint.
 
@@ -78,7 +80,7 @@ A token in a span depends on every token of its span, including the tokens after
 
 Reuse is per full KV block. With a speculative decoding method whose block hashes cover lookahead tokens, a block also depends on the first tokens after it, so the block before a span that starts at a block boundary, and the last block of a span followed by other tokens, are not reused.
 
-External KV connectors must load KV that is valid under a request's spans. vLLM refuses to start a checkpoint that declares spans with a connector that does not declare it (`KVConnectorBase_V1.supports_bidirectional_spans`). The offloading connectors that `--kv-offloading-size` selects with the native backend look blocks up by these hashes and are supported. Disaggregated prefill connectors are not.
+External KV connectors must load KV that is valid under a request's spans. vLLM refuses to start a checkpoint that declares spans with a connector that does not declare it (`KVConnectorBase_V1.supports_bidirectional_spans`). The offloading connectors that `--kv-offloading-size` selects with the native backend look blocks up by these hashes and are supported. Disaggregated prefill connectors are not. Block hashes do not identify the checkpoint, so engines that share KV through a connector must serve the same checkpoint with the same config, including `bidirectional_span_layer_types`.
 
 ## Scheduling
 
@@ -98,6 +100,6 @@ vLLM refuses to start a checkpoint that declares spans with:
 - a KV connector that does not declare span support, which includes disaggregated prefill,
 - an attention backend that does not apply PrefixLM ranges, such as `CPU_ATTN`.
 
-Spans are refused on requests with streaming input or prompt logprobs. Sliding-window layers and hybrid (Mamba) models do not apply spans yet.
+Spans are refused on requests with streaming input or prompt logprobs. Hybrid (Mamba) models do not apply spans yet.
 
 Layers that apply spans run on a backend that applies PrefixLM ranges. When that is the composite `TRITON_FLASH_ATTN` backend, as on H100, it does not support full CUDA graphs with speculative decoding, so vLLM falls back to piecewise CUDA graphs (`cudagraph_mode=PIECEWISE`) and logs a warning at startup.
