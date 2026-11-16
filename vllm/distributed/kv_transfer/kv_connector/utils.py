@@ -467,7 +467,7 @@ def get_current_attn_backend(
 # ---- Per-engine transfer info ----
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EngineTransferInfo:
     """Common per-remote-engine transfer state, computed at handshake.
 
