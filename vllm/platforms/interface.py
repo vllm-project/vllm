@@ -433,10 +433,10 @@ class Platform:
                 f"Backend {backend} is not supported for vit attention"
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA

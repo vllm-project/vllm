@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -62,4 +64,4 @@ def test_backend_summary_failure_does_not_fail_the_load():
 
     with pytest.raises(TypeError):
         format_backend_summary(Opaque())
-    log_backend_summary(Opaque())
+    log_backend_summary(Opaque(), SimpleNamespace(model="opaque"))

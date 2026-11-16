@@ -45,6 +45,8 @@ Backends selected for Qwen3MoeForCausalLM:
 
 Each row is one backend: the kind of layer, how many layers run it, the kernel or attention backend selected, and the layer names with index ranges collapsed. Unquantized linear layers show their weight dtype instead of a kernel. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
 
+The table replaces the individual `Using <backend> ...` and `Selected <kernel> for ...` lines, which are now logged at DEBUG where each selection is made, along with the candidates that were considered: set `VLLM_LOGGING_LEVEL=DEBUG` to see them. Selections that explain a fallback or an override are still logged at INFO or WARNING.
+
 For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
 
 ## Enable more logging

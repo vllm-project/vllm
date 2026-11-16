@@ -121,7 +121,7 @@ class BaseModelLoader(ABC):
 
             process_weights_after_loading(model, model_config, target_device)
             log_online_quantization_time(vllm_config)
-            log_backend_summary(model)
+            log_backend_summary(model, model_config)
 
             gc.collect()
             torch.accelerator.empty_cache()
@@ -129,20 +129,28 @@ class BaseModelLoader(ABC):
         return model.eval()
 
 
-def log_backend_summary(model: nn.Module) -> None:
-    """Log which backend each kind of layer selected."""
+def log_backend_summary(model: nn.Module, model_config: ModelConfig) -> None:
+    """Log which backend each kind of layer selected. The individual
+    selections are logged at DEBUG where they are made."""
     from vllm.model_inspection import format_backend_summary
 
     try:
         summary = format_backend_summary(model)
-    except Exception:
+    except Exception as e:
         # Only a log: a layer it cannot describe must not fail the load.
-        logger.debug("Could not summarize model backends", exc_info=True)
+        logger.warning_once(
+            "Could not summarize the backends selected for %s (%r). Set "
+            "VLLM_LOGGING_LEVEL=DEBUG to log each selection.",
+            model_config.model,
+            e,
+        )
         return
     if summary is not None:
+        # A draft model can share its class with the target: name the model.
         logger.info_once(
-            "Backends selected for %s:\n%s",
+            "Backends selected for %s (%s):\n%s",
             type(model).__name__,
+            model_config.model,
             summary,
             scope="global",
         )
