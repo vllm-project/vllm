@@ -432,11 +432,18 @@ def test_glm5next_nope_kv_a_padding_block_scale():
     assert torch.equal(padded[:512].view(torch.uint8), weight.view(torch.uint8))
     assert not padded[512:].float().any()
     scale = torch.rand(4, 2)
-    _, padded = _mla_proj_checkpoint_tensor(
-        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config, 64
-    )
-    assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
-    assert torch.equal(padded[:4], scale)
+    # Fp8Config's `weight_scale_inv`, and Quark's `weight_scale` for a layer
+    # built by QuarkConfig (its scale parameter keeps that name)
+    for scale_name, params in (
+        ("weight_scale_inv", _glm5_mla_params()),
+        ("weight_scale", {}),
+    ):
+        name, padded = _mla_proj_checkpoint_tensor(
+            f"{prefix}.{scale_name}", scale, params, config, 64
+        )
+        assert name == f"{prefix}.{scale_name}"
+        assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
+        assert torch.equal(padded[:4], scale)
 
 
 def test_indexer_wk_stays_bf16_under_online_quantization(model_config):

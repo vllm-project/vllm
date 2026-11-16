@@ -1629,7 +1629,9 @@ def _mla_proj_checkpoint_tensor(
         if name.endswith(".weight"):
             pad = tensor.new_zeros(kv_a_pad_size, *tensor.shape[1:])
             tensor = torch.cat([tensor, pad])
-        elif is_fp8_proj and name.endswith(".weight_scale_inv"):
+        elif name.endswith((".weight_scale_inv", ".weight_scale")) and tensor.ndim == 2:
+            # block scales; Quark names them `weight_scale` (not renamed above
+            # when its own layer, with a `weight_scale` parameter, loads them)
             block_n = cdiv(config.kv_lora_rank, tensor.shape[0])
             rows = cdiv(config.kv_lora_rank + kv_a_pad_size, block_n)
             pad = tensor.new_ones(rows - tensor.shape[0], *tensor.shape[1:])
