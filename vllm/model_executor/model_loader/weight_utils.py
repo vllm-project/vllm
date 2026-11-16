@@ -592,6 +592,7 @@ def get_safetensors_files_in_index(hf_folder: str, index_file: str) -> list[str]
     """Return the files the safetensors index lists, or None without an index.
 
     The files may sit in a subdirectory, like tensors/, and may be missing.
+    Raises ValueError if the index lists a file outside hf_folder.
     """
     index_file_name = os.path.join(hf_folder, index_file)
     if not os.path.isfile(index_file_name):
@@ -600,7 +601,18 @@ def get_safetensors_files_in_index(hf_folder: str, index_file: str) -> list[str]
     # torch state_dict to safetensors file holding that weight.
     with open(index_file_name) as f:
         weight_map = json.load(f)["weight_map"]
-    return sorted({os.path.join(hf_folder, name) for name in weight_map.values()})
+    files = {os.path.join(hf_folder, name) for name in weight_map.values()}
+    # Compare paths without resolving links: Hub snapshot files link to blobs
+    # outside the snapshot folder.
+    folder = os.path.abspath(hf_folder)
+    outside = [
+        f
+        for f in sorted(files)
+        if os.path.commonpath([folder, os.path.abspath(f)]) != folder
+    ]
+    if outside:
+        raise ValueError(f"{index_file} lists files outside {hf_folder}: {outside}")
+    return sorted(files)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded

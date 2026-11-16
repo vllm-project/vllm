@@ -55,6 +55,27 @@ def test_filter_duplicate_safetensors_files_missing_weight():
         assert "model-00003-of-00002.safetensors" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+def test_filter_duplicate_safetensors_files_outside_folder(tmp_path, absolute):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "model.safetensors").touch()
+    other = tmp_path / "other.safetensors"
+    other.touch()
+    weight_map = {"a": "model.safetensors"}
+    weight_map["b"] = str(other) if absolute else "../other.safetensors"
+    (model / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map})
+    )
+
+    with pytest.raises(ValueError, match="other.safetensors"):
+        filter_duplicate_safetensors_files(
+            [str(model / "model.safetensors")],
+            str(model),
+            "model.safetensors.index.json",
+        )
+
+
 def test_filter_duplicate_safetensors_files_all_exist():
     with tempfile.TemporaryDirectory() as tmpdir:
         existing_files = []
