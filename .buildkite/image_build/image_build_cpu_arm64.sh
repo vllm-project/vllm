@@ -9,7 +9,17 @@ fi
 REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
-IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
+
+# When TORCH_NIGHTLY=1, build against torch nightly and tag it with the
+# -torch-nightly-arm64-cpu suffix the Arm CPU test steps pull on the nightly
+# lane (ci-infra get_image appends -torch-nightly before -arm64-cpu).
+PYTORCH_NIGHTLY_ARGS=()
+if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-torch-nightly-arm64-cpu"
+  PYTORCH_NIGHTLY_ARGS=(--build-arg PYTORCH_NIGHTLY=1)
+else
+  IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
+fi
 
 # authenticate with AWS ECR
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
@@ -23,6 +33,7 @@ else
   docker build --file docker/Dockerfile.cpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
+    "${PYTORCH_NIGHTLY_ARGS[@]}" \
     --tag "$IMAGE" \
     --target vllm-test \
     --progress plain .

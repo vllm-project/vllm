@@ -232,19 +232,79 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       VLLM_CI_ENV=0 pytest -x -v -s tests/models/multimodal/generation/test_qwen2_5_vl.py"
 
-- label: "Arm CPU Test Shard %N"
+# test_onednn.py runs whole, in a job of its own. Its tests are
+# unseeded, so running a subset changes later inputs and test_onednn_gemm can
+# miss its bf16 tolerance. Automatic sharding would split a file this long by
+# test.
+- label: Arm CPU oneDNN Kernel Test
+  key: arm-cpu-onednn-test
+  depends_on:
+  - cpu-arm64-image-build
+  soft_fail: false
+  device: arm_cpu
+  working_dir: "/vllm-workspace"
+  timeout_in_minutes: 40
+  automatic_shard: false
+  env:
+    VLLM_CPU_KVCACHE_SPACE: "16"
+    VLLM_CPU_CI_ENV: "1"
+  commands:
+  - pytest -x -v -s tests/kernels/test_onednn.py
+
+- label: Arm CPU Test
   key: arm-cpu-test
   depends_on:
   - cpu-arm64-image-build
   soft_fail: false
   device: arm_cpu
-  no_plugin: true
+  working_dir: "/vllm-workspace"
+  timeout_in_minutes: 40
+  automatic_shard: true
+  env:
+    VLLM_CPU_KVCACHE_SPACE: "16"
+    VLLM_CPU_CI_ENV: "1"
   commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
-    "$$BUILDKITE_PARALLEL_JOB"
-    "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
-  parallelism: 3
+  - pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
+  - pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+  - pytest -x -v -s tests/kernels/core/test_cpu_activation.py
+  - pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
+  - pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+  - pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
+  - pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
+  - pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
+  - pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
+  - pytest -x -v -s tests/v1/worker/cpu
+  - pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
+  - pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
+  - pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'
+  - pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
+  - pytest -x -v -s tests/quantization/test_cpu_int8_w4a8.py
+
+# Not pytest, so it stays one job.
+- label: Arm CPU Example and Serving Test
+  key: arm-cpu-serving-test
+  depends_on:
+  - cpu-arm64-image-build
+  soft_fail: false
+  device: arm_cpu
+  working_dir: "/vllm-workspace"
+  timeout_in_minutes: 40
+  env:
+    VLLM_CPU_KVCACHE_SPACE: "16"
+    VLLM_CPU_CI_ENV: "1"
+  commands:
+  - python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m
+  - |
+    for model in Qwen/Qwen3-0.6B Qwen/Qwen3.5-0.8B; do
+      VLLM_CPU_OMP_THREADS_BIND=0-31 vllm serve $$model --max-model-len 2048 &
+      server_pid=$$!
+      # Explicit exits: the generator can run this block where `set -e` is off.
+      timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+      vllm bench serve --backend vllm --dataset-name random --model $$model --num-prompts 20 --endpoint /v1/completions || exit 1
+      # Free the port before the next server starts.
+      kill $$server_pid || true
+      wait $$server_pid || true
+    done
 
 - label: ":docker: Build Zen CPU image"
   key: zen-cpu-image-build
