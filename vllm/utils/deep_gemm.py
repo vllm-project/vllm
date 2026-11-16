@@ -97,7 +97,7 @@ class DeepGemmQuantScaleFMT(Enum):
     def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
         """Return the oracle decision, initializing it on first use.
 
-        The cache is normally populated by `_lazy_init_symbols()` (e.g. during
+        The cache is normally populated by `_lazy_init()` (e.g. during
         engine startup), but standalone consumers such as `QuantFP8` with an
         explicit `use_ue8m0=True` can reach this before any DeepGEMM kernel
         wrapper has run. Resolve the DeepGEMM symbols and initialize the
@@ -106,7 +106,7 @@ class DeepGemmQuantScaleFMT(Enum):
         """
         cached = getattr(cls, "_oracle_cache", None)
         if cached is None:
-            _lazy_init_symbols()
+            _lazy_init()
             cls.init_oracle_cache()
             cached = cls._oracle_cache  # type: ignore[attr-defined]
         return cached
@@ -188,7 +188,7 @@ def is_deep_gemm_e8m0_used() -> bool:
         )
         return False
 
-    _lazy_init_symbols()
+    _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
         logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
@@ -295,21 +295,23 @@ def _apply_pdl(mod, enable: bool = True) -> None:
         logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
 
 
-@functools.cache
-def _configure_pdl() -> None:
-    if has_deep_gemm():
-        dg = _import_deep_gemm()
-        if dg is not None and current_platform.is_arch_support_pdl():
-            _apply_pdl(dg, True)
+_pdl_configured = False
+
+
+def _maybe_configure_pdl() -> None:
+    # set_pdl initializes CUDA, so only apply it once this process has done so.
+    global _pdl_configured
+    if _pdl_configured or not torch.cuda.is_initialized():
+        return
+    _pdl_configured = True
+    dg = _import_deep_gemm() if has_deep_gemm() else None
+    if dg is not None and current_platform.is_arch_support_pdl():
+        _apply_pdl(dg, True)
 
 
 def _lazy_init() -> None:
-    _lazy_init_symbols()
-    _configure_pdl()
-
-
-def _lazy_init_symbols() -> None:
     """Import deep_gemm and resolve symbols on first use."""
+    _maybe_configure_pdl()
     global _cublaslt_gemm_nt_impl
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
@@ -430,7 +432,7 @@ def _lazy_init_symbols() -> None:
 
 
 def get_num_sms() -> int:
-    _lazy_init_symbols()
+    _lazy_init()
     dg = _import_deep_gemm()
     if dg is None:
         raise RuntimeError("DeepGEMM is not available")
@@ -438,7 +440,7 @@ def get_num_sms() -> int:
 
 
 def set_num_sms(num_sms: int) -> None:
-    _lazy_init_symbols()
+    _lazy_init()
     dg = _import_deep_gemm()
     if dg is None:
         raise RuntimeError("DeepGEMM is not available")
@@ -446,7 +448,7 @@ def set_num_sms(num_sms: int) -> None:
 
 
 def get_mk_alignment_for_contiguous_layout() -> list[int]:
-    _lazy_init_symbols()
+    _lazy_init()
     if _get_mk_alignment_for_contiguous_layout_impl is None:
         return _missing()
     mk_align_size = _get_mk_alignment_for_contiguous_layout_impl()
@@ -467,7 +469,7 @@ def get_theoretical_mk_alignment_for_contiguous_layout(
     Older callers that omit `num_groups` are interpreted as passing already
     per-expert em (legacy behaviour preserved for backward compat).
     """
-    _lazy_init_symbols()
+    _lazy_init()
     if _get_theoretical_mk_alignment_for_contiguous_layout_impl is None:
         return _missing()
     if num_groups is None:
@@ -494,7 +496,7 @@ def set_mk_alignment_for_contiguous_layout(value: int) -> None:
     OOB-indexing the B-weights tensor (manifests as IMA under CUDA-graph
     replay).
     """
-    _lazy_init_symbols()
+    _lazy_init()
     dg = _import_deep_gemm()
     if dg is None:
         raise RuntimeError("DeepGEMM is not available")
@@ -940,7 +942,7 @@ def fp8_fp4_paged_mqa_logits(
 def has_deep_gemm_sparse_mqa() -> bool:
     """Whether the installed DeepGEMM provides the sparse-indexer kernels
     (`fp8_fp4_(paged_)sparse_mqa_logits`, added in DeepGEMM 2.8, SM100-only)."""
-    _lazy_init_symbols()
+    _lazy_init()
     return (
         _fp8_fp4_sparse_mqa_logits_impl is not None
         and _fp8_fp4_paged_sparse_mqa_logits_impl is not None

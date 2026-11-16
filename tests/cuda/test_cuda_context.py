@@ -3,6 +3,7 @@
 
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -207,6 +208,36 @@ def test_capability_queries_leave_cuda_uninitialized():
     has_deep_gemm_sparse_mqa()
     assert not torch.cuda.is_initialized()
     assert not check_cuda_context()[0]
+
+
+@create_new_process_for_each_test("spawn")
+def test_sparse_mqa_lookup_configures_pdl_after_cuda_init():
+    import vllm.utils.deep_gemm as deep_gemm
+
+    mock_deep_gemm = MagicMock()
+    cuda_initialized = False
+
+    with (
+        patch.object(deep_gemm, "has_deep_gemm", return_value=True),
+        patch.object(deep_gemm, "_import_deep_gemm", return_value=mock_deep_gemm),
+        patch.object(
+            deep_gemm.current_platform, "is_arch_support_pdl", return_value=True
+        ),
+        patch.object(
+            deep_gemm.torch.cuda,
+            "is_initialized",
+            side_effect=lambda: cuda_initialized,
+        ),
+    ):
+        assert deep_gemm.has_deep_gemm_sparse_mqa()
+        mock_deep_gemm.set_pdl.assert_not_called()
+
+        cuda_initialized = True
+        assert deep_gemm.has_deep_gemm_sparse_mqa()
+        mock_deep_gemm.set_pdl.assert_called_once_with(True)
+
+        assert deep_gemm.has_deep_gemm_sparse_mqa()
+        mock_deep_gemm.set_pdl.assert_called_once_with(True)
 
 
 if __name__ == "__main__":
