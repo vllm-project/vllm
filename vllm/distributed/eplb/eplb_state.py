@@ -469,7 +469,11 @@ class EplbState:
         )
 
     def create_policy(self) -> AbstractEplbPolicy:
-        """Create the policy shared by every model in this EPLB state."""
+        """Create the policy shared by every model in this EPLB state.
+
+        `rebalance_experts` runs on the background worker thread for asynchronous
+        planning and on the main thread for synchronous planning and profiling.
+        """
         policy = self.parallel_config.eplb_config.policy
         return EPLB_POLICIES["default" if policy is None else policy]()
 
