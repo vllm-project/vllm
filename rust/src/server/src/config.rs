@@ -384,9 +384,6 @@ pub struct Config {
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,
-    /// Whether the engine runs with `--kv-sharing-fast-prefill`, which makes its
-    /// prompt logprobs incorrect, so requests asking for them are rejected.
-    pub kv_sharing_fast_prefill: bool,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the

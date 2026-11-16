@@ -485,19 +485,6 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
 
-    /// In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
-    /// some layers can skip tokens corresponding to prefill. This flag enables
-    /// attention metadata for eligible layers to be overridden with metadata
-    /// necessary for implementing this optimization in some models (e.g. Gemma3n).
-    /// In Model Runner V2, batches containing LoRA requests use regular prefill;
-    /// batches without LoRA requests can still use fast prefill.
-    ///
-    /// Prompt logprobs are incorrect under it, so requests asking for them are
-    /// rejected.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    #[serde(default)]
-    pub kv_sharing_fast_prefill: bool,
-
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -1057,7 +1044,6 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
-            kv_sharing_fast_prefill: self.kv_sharing_fast_prefill,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1147,7 +1133,6 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
-            kv_sharing_fast_prefill: self.kv_sharing_fast_prefill,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1536,9 +1521,6 @@ impl ServeArgs {
 
         let mut managed_engine = self.managed_engine.clone();
         managed_engine.python_args.extend(self.runtime.model.python_args());
-        if self.runtime.kv_sharing_fast_prefill {
-            managed_engine.python_args.push("--kv-sharing-fast-prefill".to_string());
-        }
         if let Some(logging_config) = self.runtime.logging_config_json() {
             managed_engine
                 .python_args

@@ -1688,13 +1688,32 @@ async fn test_app_with_chat_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_ready_and_engine_request_check(
+        default_ready_response(),
+        build_chat,
+        check_request,
+    )
+    .await
+}
+
+/// Like [`test_app_with_chat_and_engine_request_check`], with a custom engine
+/// ready response.
+async fn test_app_with_ready_and_engine_request_check<F>(
+    ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
+    build_chat: impl FnOnce(EngineCoreLlm) -> ChatLlm,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready_response,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -5384,19 +5403,19 @@ async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
     );
 }
 
-/// Under `--kv-sharing-fast-prefill`, a request asking for prompt logprobs,
-/// directly or through completions `echo` with `logprobs`, is a 400 naming the
-/// parameter; other requests still run.
+/// When the engine does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), a request asking for them, directly or through
+/// completions `echo` with `logprobs`, is a 400 naming the parameter; other
+/// requests still run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn kv_sharing_fast_prefill_rejects_prompt_logprobs() {
-    let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
-        |llm| {
-            ChatLlm::from_shared_backend(
-                llm.with_kv_sharing_fast_prefill(true),
-                Arc::new(FakeChatBackend::new()),
-            )
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
+    let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
+        vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
         },
+        |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
         |request| {
             let params = request.sampling_params.as_ref().expect("sampling params");
             assert_eq!(params.prompt_logprobs, None);

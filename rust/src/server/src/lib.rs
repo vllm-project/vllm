@@ -173,7 +173,6 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_kv_sharing_fast_prefill(config.kv_sharing_fast_prefill)
         .with_stream_interval(config.stream_interval);
     let text = TextLlm::new(llm, text_backend)
         .with_served_model_name(metrics_model_name)

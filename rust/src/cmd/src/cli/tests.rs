@@ -291,7 +291,6 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
-                        kv_sharing_fast_prefill: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -414,6 +413,47 @@ fn serve_args_auto_forward_enable_lora_to_python() {
         ]
     "#]]
     .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+/// `--kv-sharing-fast-prefill` is an engine flag: `vllm-rs serve` forwards it
+/// to the managed engine, and the Python launcher's `--args-json` may carry it.
+/// The engine reports its effect on prompt logprobs in the ready response.
+#[test]
+fn kv_sharing_fast_prefill_is_an_engine_flag() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--kv-sharing-fast-prefill",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--kv-sharing-fast-prefill",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+
+    let args_json = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-0.6B",
+        "kv_sharing_fast_prefill": true,
+    });
+    Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json.to_string(),
+    ])
+    .unwrap();
 }
 
 #[test]
@@ -1018,48 +1058,6 @@ fn serve_args_tool_strict_level_requires_xgrammar() {
         format!("{error:#}").contains("requires the xgrammar structured outputs backend"),
         "{error:#}"
     );
-}
-
-/// `--kv-sharing-fast-prefill` reaches the frontend config on both startup
-/// paths, and `vllm-rs serve` forwards it to the managed engine.
-#[test]
-fn kv_sharing_fast_prefill_reaches_config_and_managed_engine() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--kv-sharing-fast-prefill",
-    ])
-    .unwrap();
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
-    assert!(config.kv_sharing_fast_prefill);
-    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
-    assert!(engine.python_args.iter().any(|arg| arg == "--kv-sharing-fast-prefill"));
-
-    let args_json = serde_json::json!({
-        "model_tag": "Qwen/Qwen3-0.6B",
-        "kv_sharing_fast_prefill": true,
-    });
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-listener-fd",
-        "999999",
-        "--output-listener-fd",
-        "999998",
-        "--args-json",
-        &args_json.to_string(),
-    ])
-    .unwrap();
-    let Command::Frontend(args) = cli.command else {
-        panic!("expected frontend args");
-    };
-    assert!(args.into_config().kv_sharing_fast_prefill);
 }
 
 #[test]
@@ -2339,7 +2337,6 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
-                        kv_sharing_fast_prefill: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -3299,7 +3296,6 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
-                        kv_sharing_fast_prefill: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -3605,7 +3601,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
-            kv_sharing_fast_prefill: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3740,7 +3735,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
-            kv_sharing_fast_prefill: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3988,7 +3982,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
-            kv_sharing_fast_prefill: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,

@@ -775,17 +775,22 @@ async fn generate_propagates_unexpected_close_errors() {
     llm.shutdown().await.unwrap();
 }
 
-/// Under `--kv-sharing-fast-prefill` the engine computes incorrect prompt
-/// logprobs, so requests asking for them fail before submission, including
-/// `prompt_logprobs=0`; other requests still reach the engine.
+/// When the engine reports that it does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), requests asking for them fail before
+/// submission, including `prompt_logprobs=0`; other requests still reach the
+/// engine.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_sharing_fast_prefill_rejects_prompt_logprobs() {
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
 
-    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         b"engine-fast-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
+        },
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -809,9 +814,7 @@ async fn kv_sharing_fast_prefill_rejects_prompt_logprobs() {
         },
     );
 
-    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc)
-        .await
-        .with_kv_sharing_fast_prefill(true);
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
 
     let mut prompt_logprobs = sample_generate_request("req-prompt-logprobs", 1);
     prompt_logprobs.sampling_params.prompt_logprobs = Some(0);
@@ -826,7 +829,7 @@ async fn kv_sharing_fast_prefill_rejects_prompt_logprobs() {
         assert!(
             matches!(
                 error,
-                Error::PromptLogprobsWithKvSharingFastPrefill { parameter } if parameter == expected
+                Error::PromptLogprobsUnsupported { parameter } if parameter == expected
             ),
             "{error:?}"
         );
