@@ -84,6 +84,31 @@ fn shutdown_signal() -> CancellationToken {
     token
 }
 
+/// Raise the open-file soft limit (`RLIMIT_NOFILE`) up to the hard limit so
+/// high-concurrency serving does not hit `EMFILE` under a 1024 default.
+fn raise_nofile_limit() {
+    let prev_soft = match rlimit::Resource::NOFILE.get() {
+        Ok((soft, _hard)) => soft,
+        Err(error) => {
+            warn!(%error, "failed to read open-file limit");
+            return;
+        }
+    };
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(new) if new > prev_soft => {
+            info!(
+                previous = prev_soft,
+                soft_limit = new,
+                "raised open-file soft limit"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(%error, soft_limit = prev_soft, "failed to raise open-file soft limit");
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let process_label =
         match env::args_os().nth(1).as_deref().and_then(OsStr::to_str).unwrap_or_default() {
@@ -97,6 +122,12 @@ fn main() -> ExitCode {
         Cli::parse()
     };
     vllm_tracing::init_tracing(process_label, cli.log_level(), cli.log_formatter());
+    if matches!(
+        cli.command,
+        Command::Frontend(_) | Command::Serve(_) | Command::Render(_)
+    ) {
+        raise_nofile_limit();
+    }
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
