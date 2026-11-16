@@ -9,8 +9,11 @@ sees the layout direct mode actually restored (the NCCL engine does it at its
 first target update), and reduces each traced `copy_` to a box of the
 checkpoint tensor and a strided region of the target's storage
 (`geometry.py`). A name is
-direct only if every byte it writes is a copy of one incoming byte; anything
-else is a fallback, which the engine sends in full through `load_weights`.
+direct only if every element it writes is a copy of one incoming element,
+either as bytes or through the same dtype conversion the loader's `copy_`
+applied (a destination may be in another dtype than the checkpoint tensor);
+anything else is a fallback, which the engine sends in full through
+`load_weights`.
 The plan holds for every later update of the same model.
 
 `load_planned` loads full checkpoint tensors through `get_dest`; the NCCL
@@ -81,7 +84,9 @@ class LoadPlan:
         its tensor's shape, into that tensor is exactly what the loader would
         have written. `None`: fallback, send the full tensor through
         `load_weights`. Write only between `start_reload` and
-        `finish_reload`; never read.
+        `finish_reload`; never read. A tensor may be in another dtype than
+        the checkpoint tensor (the loader casts at `copy_`), so write it with
+        `copy_`, not by receiving bytes into it.
 
         `load_planned` copies full tensors through it; an engine that sends
         only `get_boxes` copies its slices the same way."""
@@ -220,12 +225,18 @@ def _write(
     if src._geom is None:
         raise Fallback(src._lost or "not a view of the checkpoint tensor")
     # A cast is the loader's own elementwise copy_ conversion: replay it
-    # into a destination viewed in its dtype.
-    cast = (
-        copy.dtype
-        if src.dtype != copy.dtype and not _same_bits(src.dtype, copy.dtype)
-        else None
-    )
+    # into a destination viewed in its dtype. The replay converts from the
+    # checkpoint dtype, so a cast of a reinterpreting view (same width,
+    # another dtype) cannot be replayed.
+    if src.dtype == copy.dtype or _same_bits(src.dtype, copy.dtype):
+        cast = None
+    elif src.dtype == dtype:
+        cast = copy.dtype
+    else:
+        raise Fallback(
+            f"casts {src.dtype} (a view of the {dtype} checkpoint tensor) "
+            f"to {copy.dtype} at copy_"
+        )
     target = targets.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
@@ -267,7 +278,8 @@ def _same_bits(a: torch.dtype, b: torch.dtype) -> bool:
 
 
 def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
-    """The live tensor of `write`, in the checkpoint dtype."""
+    """The live tensor of `write`: in its cast dtype, else the checkpoint
+    dtype `dtype`."""
     dtype = write.dtype or dtype
     target = targets.by_name[(write.module, write.tensor)]
     r = write.dst

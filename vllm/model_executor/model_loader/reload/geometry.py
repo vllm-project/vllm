@@ -7,6 +7,10 @@ the byte runs a write covers. No torch state."""
 import itertools
 from dataclasses import dataclass
 from math import prod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 Box = tuple[tuple[int, int], ...]  # half-open (start, stop) per dim, HF coords
 
@@ -34,7 +38,7 @@ class Write:
     dst: Region
     # the destination dtype when the loader casts at copy_ (None: the
     # checkpoint dtype, a byte copy)
-    dtype: object = None
+    dtype: "torch.dtype | None" = None
 
 
 def box_and_region(

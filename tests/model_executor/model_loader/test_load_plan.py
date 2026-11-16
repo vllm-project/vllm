@@ -441,6 +441,7 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
         (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
         (lambda p, w: torch.add(w, 0, out=p), "without Tensor.copy_ (add.out)"),
         (lambda p, w: (w.to("cpu").float().numpy(), p.copy_(w)), "reads tensor values"),
+        (lambda p, w: p.copy_(w.view(torch.int16)), "a view of the torch.bfloat16"),
     ],
     ids=[
         "arith",
@@ -451,6 +452,7 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
         "expand",
         "out",
         "numpy",
+        "view-cast",
     ],
 )
 def test_fallbacks(loader, reason):
@@ -611,13 +613,19 @@ def test_e8m0_into_uint8_through_copy_weight_is_a_view():
     assert write.dtype is None
     ((_, dest),) = plan.get_dest(name)
     assert dest.dtype == torch.float8_e8m0fnu
-    scales = torch.arange(256).to(torch.uint8)
-    make, _ = _single(copy_weight_, shape=(256,), dtype=torch.uint8)
-    model = _cold_start(make, {name: scales.flip(0).view(torch.float8_e8m0fnu)})
-    start_reload(model)
-    plan = _plan(model, {name: ((256,), torch.float8_e8m0fnu)})
-    _planned_reload(model, plan, {name: scales.view(torch.float8_e8m0fnu)})
-    assert torch.equal(model.layer.weight.view(torch.uint8), scales)
+    sent = _checkpoint(shapes, seed=2)[name]  # the last planned update
+    assert torch.equal(model.layer.weight, sent.view(torch.uint8))
+
+
+def test_cast_of_a_reinterpreting_view_falls_back():
+    """U8 scales the loader views as E8M0 and casts into bf16: the replay
+    would convert the uint8 checkpoint bytes, not the E8M0 values."""
+    make, _ = _single(
+        lambda p, w: p.copy_(w.view(torch.float8_e8m0fnu)), shape=(8,), dtype=BF16
+    )
+    _, plan = _check_plan_equals_cold_start(make, {"layer.weight": ((8,), torch.uint8)})
+    assert plan.get_dest("layer.weight") is None
+    assert "a view of the torch.uint8" in plan.entries["layer.weight"].reason
 
 
 @pytest.mark.parametrize(
