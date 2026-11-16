@@ -55,7 +55,7 @@ def exact_replay_stages(
     return stages
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplayStage:
     """A later replay stage: `select` picks its rows out of the previous stage's
     outputs, `rows` are their batch rows."""
@@ -66,7 +66,7 @@ class ReplayStage:
     run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplayBatch:
     """One forward's replay batch; `run_graph` is set when it runs in a graph.
     `stages` run after it on fewer rows each (layer-wise exact replay)."""

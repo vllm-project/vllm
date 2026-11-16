@@ -20,7 +20,9 @@ pub use self::config::{
     HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
     NamedSpecialToken, load_model_config, load_tokenizer_config,
 };
-pub use self::model_files::{ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
+pub use self::model_files::{
+    HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,
+};
 pub use self::overrides::HfOverrides;
 use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
@@ -263,6 +265,7 @@ mod tests {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init,
+            hf_token: None,
         };
 
         assert!(ResolvedModelFiles::from_sources(&sources(false)).await.is_err());

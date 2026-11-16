@@ -942,7 +942,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
@@ -1017,7 +1017,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -3469,12 +3469,12 @@ async fn render_chat_returns_preprocessed_media_for_generate() {
     assert!(features.mm_hash.is_some());
 
     // The media decodes the way Inference.Generate decodes it.
-    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
-        super::media::from_proto(rendered.media, None).expect("decode media")
-    else {
-        panic!("expected preprocessed media");
-    };
-    assert!(decoded[0].data.is_some());
+    let decoded = super::media::from_proto(rendered.media, None).expect("decode media");
+    assert!(
+        !decoded.preprocessed.is_empty(),
+        "expected preprocessed media"
+    );
+    assert!(decoded.preprocessed[0].data.is_some());
 }
 
 #[tokio::test]
@@ -3586,6 +3586,30 @@ async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
         }))
         .await
         .expect_err("undecodable image");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Tools sent while tool parsing is disabled are the client's error, as in
+/// HTTP chat completions.
+#[tokio::test]
+async fn render_chat_rejects_tools_when_tool_parsing_is_disabled() {
+    let state = render_state();
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        chat: state.chat.with_parser_selections(
+            vllm_chat::ParserSelection::None,
+            vllm_chat::ParserSelection::None,
+        ),
+        ..state
+    }));
+
+    let status = service
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(weather_chat_request()),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("tools need a tool parser");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
 }

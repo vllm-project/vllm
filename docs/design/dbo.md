@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This system currently only targets DP+EP deployments.
+The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This targets DP+EP deployments. For TP deployments without expert parallelism, the `all-reduce-overlap` [schedule](#schedules) overlaps the TP all-reduces instead.
 
 ## Introduction
 
@@ -29,7 +29,7 @@ Below is the overlap schedule that is currently implemented in vLLM.
 
 ## Running with DBO
 
-To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve command. This must be run in conjunction with `--data-parallel-size N` where N is greater than 1 and `--enable-expert-parallel`. Additionally, there are two configuration knobs.
+To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve command. To overlap the all-to-all, this must be run in conjunction with `--data-parallel-size N` where N is greater than 1 and `--enable-expert-parallel`. With tensor parallelism on one DP rank and no expert parallelism, `--enable-dbo` runs the `all-reduce-overlap` [schedule](#schedules) instead. Additionally, there are two configuration knobs.
 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
@@ -43,7 +43,7 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## Limitations
 
-DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`.
+DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`.
 
 ## DBO Components
 
@@ -59,7 +59,7 @@ For a step with `num_ubatches > 1`, the runner calls `UBatchRunner.prepare` to s
 
 ### UBatchRunner
 
-`UBatchRunner`, in `vllm/v1/worker/gpu/ubatch_utils.py`, is built by `maybe_build_ubatch_runner` when DBO is enabled and there is more than one DP rank.
+`UBatchRunner`, in `vllm/v1/worker/gpu/ubatch_utils.py`, is built by `maybe_build_ubatch_runner` when DBO is enabled and there is more than one DP rank, or the [schedule](#schedules) is `all-reduce-overlap`.
 
 The batch is sliced before its attention metadata is built. `prepare` splits the batch at the midpoint of the DP-padded token count. A uniform batch of multi-token queries (speculative decoding verification) is split on a request boundary instead, so that each microbatch stays a uniform decode. `prepare` then builds the attention metadata for each microbatch and stores it in that microbatch's own `ForwardContext`. A microbatch that falls entirely inside the padding has no query tokens, and runs like a dummy batch.
 
@@ -84,3 +84,12 @@ The `dbo_register_recv_hook` method registers a callback that can be returned by
 The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
 The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
+
+## Schedules
+
+`--dbo-schedule` selects what the two microbatches overlap. Left unset, it is `all-reduce-overlap` with tensor parallelism on one DP rank and no expert parallelism, and `dispatch-combine-overlap` otherwise. Both run on the same runtime (`UBatchContext`, the token thresholds); they differ in where the microbatches hand off.
+
+* `dispatch-combine-overlap` is the schedule above: the hand-offs are the all-to-all yield points inside the `FusedMoEModularKernel`, and one microbatch's dispatch / combine overlaps the other's compute.
+* `all-reduce-overlap` makes each TP all-reduce a hand-off, in `GroupCoordinator._all_reduce_out_place`: the all-reduce runs on the comm stream while the other microbatch computes. It needs tensor parallelism on one DP rank without expert parallelism.
+
+Under `all-reduce-overlap` there is no DP handshake: the runner decides per step by the thresholds alone, and a split step runs eagerly. No all-to-all backend is needed, and multimodal models are supported, since the vision encoder runs outside the split.
