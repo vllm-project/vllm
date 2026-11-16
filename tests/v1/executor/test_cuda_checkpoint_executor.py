@@ -263,10 +263,12 @@ def test_transport_requires_suspension_and_no_nvls(
     with (
         patch.object(MultiprocExecutor, "__init__", return_value=None),
         patch.object(MultiprocExecutor, "shutdown"),
+        patch.object(CUDACheckpointExecutor, "_lock_worker_memory") as lock,
     ):
         if accepted:
             obj = CUDACheckpointExecutor(config)
             assert obj._checkpoint_flashinfer == fusion
+            lock.assert_called_once_with()
             obj.shutdown()
         else:
             with pytest.raises(ValueError, match="NCCL checkpoint configuration"):
@@ -321,6 +323,54 @@ def test_sleep_worker_rpc_has_deadline(executor):
         assert rpc.call_args.kwargs["timeout"] == 120
         obj.collective_rpc("wake_up", timeout=7)
         assert rpc.call_args.kwargs["timeout"] == 7
+
+
+@pytest.mark.parametrize(
+    "locked,warned", [([True, True], False), ([True, False], True)], ids=["ok", "fails"]
+)
+def test_worker_memory_locked_before_first_sleep(executor, locked, warned):
+    from vllm.v1.executor.cuda_checkpoint_executor import _lock_process_memory
+
+    obj, calls = executor
+    with (
+        patch.object(MultiprocExecutor, "collective_rpc", return_value=locked) as rpc,
+        patch("vllm.v1.executor.cuda_checkpoint_executor.logger") as log,
+    ):
+        obj._lock_worker_memory()
+        assert [c.args[0] for c in rpc.call_args_list] == [_lock_process_memory]
+        obj.sleep()
+        obj.wake_up()
+    assert [c.args[0] for c in rpc.call_args_list] == [_lock_process_memory]
+    assert log.warning_once.called == warned
+
+
+@pytest.mark.parametrize(
+    "ats,limit,locked,mlockall_calls",
+    [(True, -1, True, 1), (True, 8 << 20, False, 0), (False, -1, True, 0)],
+    ids=["ats-unlimited", "ats-limited", "no-ats"],
+)
+def test_lock_process_memory_only_on_ats_with_unlimited_memlock(
+    ats, limit, locked, mlockall_calls
+):
+    import resource
+
+    from vllm.v1.executor.cuda_checkpoint_executor import _lock_process_memory
+
+    libc = Mock()
+    libc.mlockall.return_value = 0
+    limit = resource.RLIM_INFINITY if limit == -1 else limit
+    with (
+        patch(
+            "vllm.v1.executor.cuda_checkpoint_executor._uses_host_page_tables",
+            return_value=ats,
+        ),
+        patch("resource.getrlimit", return_value=(limit, limit)),
+        patch("ctypes.CDLL", return_value=libc),
+    ):
+        assert _lock_process_memory(None) == locked
+    assert libc.mlockall.call_count == mlockall_calls
+    if mlockall_calls:
+        assert libc.mlockall.call_args.args == (1 | 2 | 4,)
 
 
 def test_worker_termination_reaps_real_processes():
