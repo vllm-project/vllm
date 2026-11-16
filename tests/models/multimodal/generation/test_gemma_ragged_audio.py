@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import numpy as np
 import pytest
+import torch
 
 from tests.models.registry import HF_EXAMPLE_MODELS
+from tests.models.utils import check_logprobs_close
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.lora.request import LoRARequest
 
 MODELS = {
     "Gemma3nForConditionalGeneration": "google/gemma-3n-E2B-it",
@@ -138,3 +143,109 @@ def test_single_frame_audio_keeps_engine_usable(vllm_runner) -> None:
             assert len(outputs) == 1
             assert outputs[0].finished
             assert outputs[0].outputs[0].token_ids, "Expected generated tokens"
+
+
+@pytest.mark.core_model
+def test_ragged_audio_with_different_adapters(
+    vllm_runner, ragged_clips, tmp_path, monkeypatch
+) -> None:
+    from safetensors.torch import save_file
+    from transformers import AutoConfig, AutoProcessor
+
+    # Queue both requests before the first encoder step.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    model_name = MODELS["Gemma4ForConditionalGeneration"]
+    config = AutoConfig.from_pretrained(model_name)
+    audio_size = config.audio_config.hidden_size
+    projected_size = config.audio_config.output_proj_dims
+    modules = {
+        "audio_tower.output_proj": (audio_size, projected_size),
+        "embed_audio.embedding_projection": (
+            projected_size,
+            config.text_config.hidden_size,
+        ),
+        "audio_tower.layers.0.self_attn.relative_k_proj": (audio_size, audio_size),
+    }
+    adapter_paths = []
+    for index in range(2):
+        path = tmp_path / f"audio-adapter-{index}"
+        path.mkdir()
+        generator = torch.Generator(device="cpu").manual_seed(42 + index)
+        weights = {}
+        for name, (inputs, outputs) in modules.items():
+            for suffix, shape, scale in (
+                ("A", (8, inputs), 8),
+                ("B", (outputs, 8), 4),
+            ):
+                weights[f"base_model.model.{name}.lora_{suffix}.weight"] = (
+                    torch.randn(shape, generator=generator, device="cpu") / scale
+                ).to(torch.bfloat16)
+        save_file(weights, str(path / "adapter_model.safetensors"))
+        (path / "adapter_config.json").write_text(
+            json.dumps(
+                {
+                    "r": 8,
+                    "lora_alpha": 8,
+                    "target_modules": [name.rsplit(".", 1)[-1] for name in modules],
+                }
+            )
+        )
+        adapter_paths.append(str(path))
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": None},
+                    {"type": "text", "text": "Transcribe this audio."},
+                ],
+            }
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    next_id = iter(range(1, 9))
+    with vllm_runner(
+        model_name,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_seqs=2,
+        enable_lora=True,
+        enable_tower_connector_lora=True,
+        max_loras=2,
+        max_lora_rank=8,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0},
+    ) as runner:
+
+        def generate(indices):
+            # Fresh IDs also force fresh encoder results for each comparison.
+            requests = [
+                LoRARequest(str(i := next(next_id)), i, adapter_paths[index])
+                for index in indices
+            ]
+            return runner.generate_w_logprobs(
+                [prompt] * len(indices),
+                SamplingParams(
+                    temperature=0, max_tokens=4, ignore_eos=True, logprobs=5
+                ),
+                audios=[[ragged_clips[index]] for index in indices],
+                lora_request=requests,
+            )
+
+        singles = [generate([index])[0] for index in range(2)]
+        for order in ([0, 1], [1, 0]):
+            for actual, index in zip(generate(order), order):
+                expected = singles[index]
+                assert len(actual[0]) == len(expected[0]) == 4
+                check_logprobs_close(
+                    outputs_0_lst=[actual],
+                    outputs_1_lst=[expected],
+                    name_0="batched audio",
+                    name_1="single audio",
+                )
