@@ -43,7 +43,7 @@ Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## Limitations
 
-DBO cannot be combined with LoRA, pipeline parallelism, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`.
+DBO cannot be combined with LoRA, prefill context parallelism, multimodal, encoder-decoder or hybrid models, or encoder-only models. Multimodal models are supported under `all-reduce-overlap`. CUDA graphs must be Full or disabled: the runner rejects `PIECEWISE`. With pipeline parallelism, each stage microbatches its own forward pass (non-first stages slice the received intermediate tensors per microbatch) and the stages still send and receive whole batches.
 
 ## DBO Components
 
