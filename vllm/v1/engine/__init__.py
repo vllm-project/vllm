@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -13,7 +13,7 @@ import torch
 
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -236,6 +236,38 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
+
+
+class EngineCoreHashRequest(msgspec.Struct, array_like=True):  # type: ignore[call-arg]
+    """Tensor-free inputs for the hash utility RPC."""
+
+    prompt_token_ids: list[int]
+    mm_features: list[MultiModalFeatureSpec] | None
+    lora_request: LoRARequest | None
+    cache_salt: str | None
+
+    @classmethod
+    def from_request(cls, request: EngineCoreRequest) -> "EngineCoreHashRequest":
+        if request.prompt_embeds is not None or request.prompt_token_ids is None:
+            raise ValueError("The hash endpoint requires token IDs")
+        return cls(
+            prompt_token_ids=list(request.prompt_token_ids),
+            mm_features=[
+                replace(
+                    feature,
+                    data=None,
+                    mm_position=PlaceholderRange(
+                        offset=feature.mm_position.offset,
+                        length=feature.mm_position.length,
+                    ),
+                )
+                for feature in request.mm_features
+            ]
+            if request.mm_features
+            else None,
+            lora_request=request.lora_request,
+            cache_salt=request.cache_salt,
+        )
 
 
 class EngineCoreEventType(enum.IntEnum):

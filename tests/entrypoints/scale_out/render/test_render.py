@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 from fastapi.responses import JSONResponse
 
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -41,6 +41,119 @@ from vllm.sampling_params import SamplingParams
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.fixture(scope="module")
+def hash_server():
+    args = [
+        "--enforce-eager",
+        "--enable-scale-out",
+        "--max-model-len",
+        "256",
+        "--max-num-seqs",
+        "2",
+        "--api-key",
+        "test-key",
+        "--chat-template",
+        "{{ messages[0]['content'] }}",
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat", [False, True])
+async def test_hash_endpoint_matches_rendered_tokens_after_generation(
+    hash_server, chat
+):
+    text = "Hello world " * 100
+    payload = {
+        "model": MODEL_NAME,
+        "cache_salt": "tenant-a",
+        "max_tokens": 8,
+        "temperature": 0,
+        **(
+            {"messages": [{"role": "user", "content": text}]}
+            if chat
+            else {"prompt": text}
+        ),
+    }
+    kind = "chat/completions" if chat else "completions"
+    async with httpx.AsyncClient(
+        base_url=hash_server.url_for(""), timeout=60
+    ) as client:
+        assert (await client.post("/hash", json=payload)).status_code == 401
+        client.headers["Authorization"] = "Bearer test-key"
+        response = await client.post("/hash", json=payload)
+        assert response.status_code == 200, response.text
+        hashes = response.json()
+        assert hashes["prompts"][0]["block_hashes"]
+        assert "token_ids" not in hashes["prompts"][0]
+        rendered = await client.post(f"/v1/{kind}/render", json=payload)
+        assert rendered.status_code == 200, rendered.text
+        prompt = rendered.json() if chat else rendered.json()[0]
+        tokens = {
+            "model": MODEL_NAME,
+            "token_ids": prompt["token_ids"],
+            "cache_salt": "tenant-a",
+        }
+        token_hashes = await client.post("/hash", json=tokens)
+        assert token_hashes.status_code == 200, token_hashes.text
+        assert token_hashes.json() == hashes
+        generation = await client.post(f"/v1/{kind}", json=payload)
+        assert generation.status_code == 200, generation.text
+        assert (
+            generation.json()["usage"]["prompt_tokens"]
+            == hashes["prompts"][0]["num_tokens"]
+        )
+        assert (await client.post("/hash", json=payload)).json() == hashes
+        tokens["cache_salt"] = "tenant-b"
+        assert (await client.post("/hash", json=tokens)).json()["prompts"] != hashes[
+            "prompts"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_hash_endpoint_completion_batch_preserves_prompt_order(hash_server):
+    prompts = ["Hello world " * 100, "Hello there " * 100]
+    async with httpx.AsyncClient(
+        base_url=hash_server.url_for(""),
+        timeout=60,
+        headers={"Authorization": "Bearer test-key"},
+    ) as client:
+        response = await client.post(
+            "/hash", json={"model": MODEL_NAME, "prompt": prompts}
+        )
+        assert response.status_code == 200, response.text
+        batch = response.json()["prompts"]
+        assert len(batch) == len(prompts)
+        for prompt, expected in zip(prompts, batch):
+            single = await client.post(
+                "/hash", json={"model": MODEL_NAME, "prompt": prompt}
+            )
+            assert single.status_code == 200, single.text
+            assert single.json()["prompts"] == [expected]
+            assert expected["block_hashes"]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"token_ids": [-1]},
+        {"token_ids": [1], "messages": []},
+        {"token_ids": [1], "cache_salt": ""},
+        {"token_ids": [1], "content_parts": [{"type": "image_url", "url": "x"}]},
+    ],
+)
+def test_hash_endpoint_rejects_invalid_or_ambiguous_input(payload):
+    from pydantic import TypeAdapter, ValidationError
+
+    from vllm.entrypoints.scale_out.render.hash_api_router import HashRequest
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises((ValidationError, VLLMValidationError)):
+        TypeAdapter(HashRequest).validate_python(payload)
 
 
 @pytest.mark.parametrize("multiple", [False, True])

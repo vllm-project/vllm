@@ -43,6 +43,7 @@ from vllm.multimodal.cache import (
     engine_receiver_cache_from_config,
 )
 from vllm.outputs import RequestError
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -82,6 +83,7 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     CheckpointState,
     EEPNotificationType,
+    EngineCoreHashRequest,
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
@@ -519,6 +521,41 @@ class EngineCore:
             config_fields,
             supported_pooling_tasks,
         )
+
+    def hash_requests(self, requests: list[EngineCoreHashRequest]) -> dict[str, Any]:
+        """Hash preprocessed prompts without scheduling or allocating KV blocks."""
+        config = self.prefix_hash_config
+        if config is None or self.request_block_hasher is None:
+            raise ValueError("Enable prefix caching to use the hash endpoint")
+
+        prompts = []
+        for core_request in requests:
+            # Utility RPC arguments inside containers are decoded as lists.
+            if not isinstance(core_request, EngineCoreHashRequest):
+                core_request = msgspec.convert(core_request, type=EngineCoreHashRequest)
+            request = Request(
+                request_id="hash",
+                prompt_token_ids=core_request.prompt_token_ids,
+                sampling_params=SamplingParams(max_tokens=1),
+                pooling_params=None,
+                mm_features=core_request.mm_features,
+                lora_request=core_request.lora_request,
+                cache_salt=core_request.cache_salt,
+                block_hasher=self.request_block_hasher,
+            )
+            prompts.append(
+                {
+                    "num_tokens": request.num_prompt_tokens,
+                    "block_hashes": [h.hex() for h in request.block_hashes],
+                }
+            )
+        return {
+            "hash_algorithm": config.hash_algo,
+            "hash_block_size": config.hash_block_size,
+            "num_hash_lookahead_tokens": config.num_lookahead_tokens,
+            "groups": self.get_kv_cache_group_metadata(),
+            "prompts": prompts,
+        }
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return serializable KV cache metadata for external event consumers

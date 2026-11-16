@@ -91,6 +91,7 @@ def register_scale_out_api_routers(
 ):
     from .derender.api_router import router as derender_render
     from .render.api_router import router as render_render
+    from .render.hash_api_router import router as hash_router
 
     args = getattr(app.state, "args", None)
     # `vllm launch render` and `vllm serve --tokens-only` are dedicated to
@@ -114,6 +115,7 @@ def register_scale_out_api_routers(
         from .token_in_token_out.api_router import router as token_router
 
         for route in (
+            *hash_router.routes,
             *render_render.routes,
             *derender_render.routes,
             *token_router.routes,
@@ -129,6 +131,7 @@ def register_scale_out_api_routers(
         return
 
     app.include_router(render_render)
+    app.include_router(hash_router)
     app.include_router(derender_render)
 
     if "generate" in supported_tasks:

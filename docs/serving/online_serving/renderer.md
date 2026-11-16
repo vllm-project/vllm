@@ -19,6 +19,8 @@ vllm serve <model> --enable-scale-out
 
 ## API Reference
 
+- [Prefix Hash API](hash.md) (`/hash`, requires a running engine)
+
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)

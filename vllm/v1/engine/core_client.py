@@ -45,6 +45,7 @@ from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     CheckpointState,
     EEPNotificationType,
+    EngineCoreHashRequest,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
@@ -378,6 +379,11 @@ class EngineCoreClient(ABC):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        raise NotImplementedError
+
+    async def hash_requests_async(
+        self, requests: list[EngineCoreHashRequest]
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def handle_fault(
@@ -1353,6 +1359,12 @@ class AsyncMPClient(MPClient):
                 f"Engines returned different {method} results: {results}"
             )
         return results[0]
+
+    async def hash_requests_async(
+        self, requests: list[EngineCoreHashRequest]
+    ) -> dict[str, Any]:
+        # A shared-port DP endpoint must return hashes valid on every rank.
+        return await self.call_utility_consensus_async("hash_requests", requests)
 
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity

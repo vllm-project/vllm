@@ -319,6 +319,10 @@ class EngineClient(ABC):
         """Get supported tasks."""
         raise NotImplementedError
 
+    async def hash_requests(self, requests: list[EngineCoreRequest]) -> dict[str, Any]:
+        """Return engine-native prefix hashes and resolved cache geometry."""
+        raise NotImplementedError
+
     async def init_weight_transfer_engine(
         self, init_request: WeightTransferInitRequest
     ) -> None:
