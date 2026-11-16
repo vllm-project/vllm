@@ -131,7 +131,7 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 # measuring rather than assuming.
 
 
-@dataclass
+@dataclass(slots=True)
 class _SharedPack:
     """One generation of one slot-sharing group: the rendezvous state for a
     single chunk, identified by the consumers' issue index."""

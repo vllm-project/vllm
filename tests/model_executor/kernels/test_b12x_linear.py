@@ -462,7 +462,7 @@ def test_b12x_mxfp8_process_weights_packs_modelopt_layout(monkeypatch) -> None:
 def test_b12x_mxfp8_reload_reuses_packed_tensor_addresses(monkeypatch) -> None:
     import vllm.model_executor.kernels.linear.mxfp8.b12x as b12x_mod
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class PackedWeight:
         values: torch.Tensor
         scales: torch.Tensor
