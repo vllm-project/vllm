@@ -107,6 +107,7 @@ impl Error {
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
             | Self::Llm(LlmError::Unsupported { .. })
             | Self::Llm(LlmError::PromptLogprobsUnsupported { .. })
+            | Self::Llm(LlmError::PromptExceedsUnchunkedLimit { .. })
             | Self::Llm(LlmError::RemoteInvalidRequest { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },

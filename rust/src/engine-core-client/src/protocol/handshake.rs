@@ -149,9 +149,18 @@ pub struct EngineCoreReadyResponse {
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]
     pub supports_prompt_logprobs: bool,
+    /// Whether the engine schedules prompts in chunks. `false` when the engine
+    /// disabled chunked prefill during initialization, e.g. for a model
+    /// without KV cache; a prompt must then fit in one scheduling step.
+    #[serde(default = "enable_chunked_prefill_default")]
+    pub enable_chunked_prefill: bool,
 }
 
 fn supports_prompt_logprobs_default() -> bool {
+    true
+}
+
+fn enable_chunked_prefill_default() -> bool {
     true
 }
 
