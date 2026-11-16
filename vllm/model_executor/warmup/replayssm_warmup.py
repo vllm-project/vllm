@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -63,7 +63,7 @@ def _temporary_replayssm_autotune_state(
     max_num_reqs: int,
     *,
     prepare_dummy_block_tables: bool = True,
-) -> Iterator[None]:
+) -> Generator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
     reset_tensors: list[torch.Tensor] = []
