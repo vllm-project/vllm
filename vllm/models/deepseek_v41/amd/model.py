@@ -10,8 +10,10 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -55,6 +57,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -73,7 +76,11 @@ from vllm.models.deepseek_v41.amd.mhc import (
     mhc_pre_delayed_overlap,
     supports_mhc_overlap,
 )
-from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
+from vllm.models.deepseek_v41.amd.mono_decode import (
+    MonoDecodeLayer,
+    link_layers,
+)
+from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -165,10 +172,6 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        raise NotImplementedError(
-            "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
-        )
     backend = vllm_config.attention_config.backend
     if backend is not None and backend not in (
         AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
@@ -186,6 +189,28 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
     return DeepseekV41ROCMAiterMLAAttention
+
+
+def _validate_pcp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or parallel_config.use_ubatching
+        or vllm_config.speculative_config is not None
+        or vllm_config.kv_transfer_config is not None
+        or vllm_config.cache_config.enable_prefix_caching
+        or vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        or vllm_config.kernel_config.monokernel
+    ):
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP on ROCm currently requires PP=DP=DCP=1, with no "
+            "microbatching, speculative decoding, KV transfer, prefix caching, "
+            "MegaMoE, or monokernel."
+        )
 
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
@@ -300,6 +325,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+        # Mega-MHC runs those seams in one launch from packed copies of the fn
+        # weights. Its scratch is per stream and must exist before capture,
+        # which DBO's ubatch streams do not guarantee.
+        self.use_mega_mhc = (
+            self.fuse_seam_norm
+            and self.hc_mult == 4
+            and not vllm_config.parallel_config.use_ubatching
+            and bool(rocm_aiter_ops.is_mega_mhc_available())
+        )
+        self.hc_attn_fn_packed: torch.Tensor | None = None
+        self.hc_ffn_fn_packed: torch.Tensor | None = None
         # Decode steps of an eligible layer may run as the mono decode layer.
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
@@ -310,6 +346,18 @@ class DeepseekV4DecoderLayer(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
             self.mono.build_runner(self.attn_norm.weight.device)
+        if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
+            return
+        # Reloads and in-place updates end here too; refilled in place, so
+        # captured graphs read the new weights.
+        for name in ("hc_attn_fn", "hc_ffn_fn"):
+            refill_derived(
+                self,
+                f"{name}_packed",
+                rocm_aiter_ops.mega_mhc_pack_fn(getattr(self, name)),
+            )
+        if self.mhc_overlap is not None:
+            self.mhc_overlap.prepare_mega_mhc(self.hidden_size, self.hc_ffn_fn.device)
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -407,6 +455,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
         else:
             pre_args = (
@@ -437,6 +486,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
             else:
                 (
@@ -454,6 +504,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     comb_res_mix=res_mix,
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    fn_packed=self.hc_attn_fn_packed,
                 )
         if not fuse_attn_norm:
             x = self.attn_norm(x)
@@ -488,6 +539,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             comb_res_mix=res_mix,
             norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
             norm_eps=self.ffn_norm.variance_epsilon,
+            fn_packed=self.hc_ffn_fn_packed,
         )
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
@@ -527,6 +579,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             comb_res_mix=res_mix,
             norm_weight=self.attn_norm.weight if fuse_attn_norm else None,
             norm_eps=self.attn_norm.variance_epsilon,
+            fn_packed=self.hc_attn_fn_packed,
         )
         if not fuse_attn_norm:
             x = self.attn_norm(x)
@@ -534,6 +587,8 @@ class DeepseekV4DecoderLayer(nn.Module):
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
+    _mono_link_key: tuple[int, ...] | None = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -542,6 +597,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        _validate_pcp_config(vllm_config)
         self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
@@ -712,6 +768,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _link_mono(self) -> None:
+        key = tuple(self.aux_hidden_state_layers)
+        if key != self._mono_link_key:
+            self._mono_link_key = key
+            link_layers(
+                list(islice(self.layers, self.start_layer, self.end_layer)), key
+            )
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -820,11 +884,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
+
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+        self._link_mono()
         (
             hidden_states,
             residual,
@@ -851,6 +923,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # ran_layers, so that flag alone must not post again on the full batch.
         collapsed = False
         if self.decoder_replay_layers is not None:
+            if self.decoder_replay_layers.uses_replay_batch():
+                mono_flush()
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -863,6 +937,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             aux_hidden_states.extend(late_aux)
             final_aux_recon = None
             collapsed = True
+        mono_flush()
         if ran_layers and not collapsed:
             if (
                 self.end_layer in self.aux_hidden_state_layers
@@ -942,6 +1017,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.decoder_replay_layers is not None
                 and idx + 1 == self.decoder_replay_start
             ):
+                mono_flush()
                 aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
@@ -978,6 +1054,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # and sequence parallel is unsupported while replay is on.
         cut_aux: list[torch.Tensor] = []
         if self.decoder_replay_start in self.aux_hidden_state_layers:
+            mono_flush()
             cut_aux.append(
                 self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
             )
@@ -1003,6 +1080,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             None,
             positions.shape[0],
         )
+        mono_flush()
         assert residual is not None and post_mix is not None
         assert res_mix is not None and pre_mix is not None
         if (

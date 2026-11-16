@@ -13,6 +13,23 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## GLM-5.3-Flash
+
+`zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
+Rust frontend for image and video inputs. Its Python multimodal preprocessor
+has been removed. Enable the Rust frontend explicitly:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash
+```
+
+You can also use `vllm-rs serve zai-org/GLM-5.3-Flash`. Selecting
+`--tokenizer-mode glm5_next` alone does not enable the Rust frontend.
+Python `LLM` and the Python API server reject multimodal initialization for
+this checkpoint. For Python text-only inference, set
+`limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -295,7 +312,6 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
     llm = LLM(
         model=model_path,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
         limit_mm_per_prompt={"video": 1},
     )
@@ -1284,6 +1300,8 @@ You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
 #### Image Embedding Inputs
 
