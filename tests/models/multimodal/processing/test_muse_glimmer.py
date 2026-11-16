@@ -138,3 +138,36 @@ def test_video_budget_covers_loader_frames(loader_frames: int | None, num_frames
     real = processed["mm_placeholders"]["video"][0].get_num_embeds()
     assert real <= tokens["video"]
     assert dummy["mm_placeholders"]["video"][0].get_num_embeds() == tokens["video"]
+
+
+@pytest.mark.parametrize(("loader_frames", "num_frames"), [(None, 98), (128, 130)])
+def test_video_above_profiled_frames_is_rejected(
+    loader_frames: int | None, num_frames: int
+):
+    ctx = build_model_context(
+        MODEL_ID,
+        model_config_kwargs={
+            "max_model_len": 20480,
+            "media_io_kwargs": (
+                {"video": {"num_frames": loader_frames}} if loader_frames else {}
+            ),
+        },
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video = np.zeros((num_frames, 336, 336, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+
+    with pytest.raises(ValueError, match="more than the"):
+        processor(
+            processor.dummy_inputs.get_dummy_text({"video": 1}),
+            mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+            hf_processor_mm_kwargs={},
+        )

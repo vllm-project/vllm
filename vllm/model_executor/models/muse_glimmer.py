@@ -79,7 +79,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, VideoProcessorItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -91,7 +91,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.dummy_inputs import MIN_DUMMY_SIDE
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -247,22 +247,29 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
             int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
         )
 
-    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
+    def get_max_video_frames(self) -> int | None:
         video_processor = self.get_hf_processor().video_processor
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
+        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
+        if loader_frames < 0:
+            return None
+        return round_up(
+            max(int(video_processor.num_frames), loader_frames),
+            int(video_kwargs["temporal_patch_size"]),
+        )
+
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
         num_videos = max(num_videos, 1)
         groups = max(
             1,
             seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
-        temporal_patch_size = int(video_kwargs["temporal_patch_size"])
-        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
-        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
-        if loader_frames < 0:
-            return groups * temporal_patch_size
-        max_frames = max(int(video_processor.num_frames), loader_frames)
-        max_groups = max(1, cdiv(max_frames, temporal_patch_size))
-        return min(groups, max_groups) * temporal_patch_size
+        num_frames = groups * int(video_kwargs["temporal_patch_size"])
+        if (max_frames := self.get_max_video_frames()) is not None:
+            num_frames = min(num_frames, max_frames)
+        return num_frames
 
 
 class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessingInfo]):
@@ -312,6 +319,24 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        videos = mm_items.get("video")
+        max_frames = self.info.get_max_video_frames()
+        if isinstance(videos, VideoProcessorItems) and max_frames is not None:
+            for item_idx in range(videos.get_count()):
+                if (num_frames := videos.get_num_frames(item_idx)) > max_frames:
+                    raise ValueError(
+                        f"Video has {num_frames} frames, more than the "
+                        f"{max_frames} that Muse-Glimmer profiles at startup. "
+                        "Raise the video `num_frames` in `--media-io-kwargs` "
+                        "to accept longer videos."
+                    )
+        return super()._apply_hf_processor_main(mm_items, hf_kwargs)
+
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
