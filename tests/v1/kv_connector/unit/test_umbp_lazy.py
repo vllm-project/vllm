@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler as umbp_scheduler
+from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.kv_connector.umbp_test_utils import (
     _hybrid_kv_cache_config,
     _kv_cache_config,
@@ -40,12 +41,8 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.request import Request
 
 _BLOCK_SIZE = 16
@@ -503,15 +500,15 @@ def test_lazy_offload_does_not_resubmit_an_in_flight_key(lazy_scheduler):
 
 
 def test_lazy_offload_skips_non_transferable_groups(lazy_scheduler):
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
     config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["transferred"], spec),
-            KVCacheGroupSpec(["local"], spec, enable_kv_transfer=False),
+            new_kv_cache_group(["transferred"], spec),
+            new_kv_cache_group(["local"], spec, enable_kv_transfer=False),
         ],
     )
     scheduler, pool = lazy_scheduler(kv_cache_config=config)
@@ -528,17 +525,14 @@ def test_lazy_offload_skips_non_transferable_groups(lazy_scheduler):
 
 def test_lazy_target_matches_cache_group_geometry():
     config = _hybrid_kv_cache_config()
-    swa = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=2,
-        head_size=8,
-        dtype=torch.float16,
+    swa = SlidingWindowManager.layer_config(
+        AttentionSpec(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16),
         sliding_window=40,
     )
     config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[*config.kv_cache_groups, KVCacheGroupSpec(["swa"], swa)],
+        kv_cache_groups=[*config.kv_cache_groups, new_kv_cache_group(["swa"], swa)],
     )
 
     target = UMBPStoreConnectorScheduler._estimate_lazy_target_blocks(
