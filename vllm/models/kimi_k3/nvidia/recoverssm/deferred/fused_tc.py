@@ -500,7 +500,10 @@ class KdaFusedTC(KdaFusedWS):
         b0 = bars.iterator
         # ops full / done per block, gate done per prep group, F_B full / free per
         # buffer, quarter full / replayed / MMAs done per quarter buffer, the
-        # item's MMAs.
+        # item's MMAs. Every reader of a block (rows, MMA, loader) releases it:
+        # refilled before one of them saw its ops_full phase, the block would
+        # complete the next phase too, and that reader's parity wait would never
+        # return.
         barriers = {
             "ops_full": b0, "done": b0 + 2, "gate": b0 + 4, "fb_full": b0 + 6,
             "fb_free": b0 + 8, "q_full": b0 + 10, "q_mma": b0 + 14, "mma": b0 + 18,
@@ -510,7 +513,7 @@ class KdaFusedTC(KdaFusedWS):
         if tid == 0:
             for i in cutlass.range_constexpr(2):
                 cute.arch.mbarrier_init(barriers["ops_full"] + i, PREP_THREADS)
-                cute.arch.mbarrier_init(barriers["done"] + i, ROW_THREADS)
+                cute.arch.mbarrier_init(barriers["done"] + i, ROW_THREADS + 2)
                 cute.arch.mbarrier_init(barriers["gate"] + i, 1)
                 cute.arch.mbarrier_init(barriers["fb_full"] + i, 1)
                 cute.arch.mbarrier_init(barriers["fb_free"] + i, 2)
@@ -589,7 +592,7 @@ class KdaFusedTC(KdaFusedWS):
         groups released tile k's), and per item quarter q: the replayed quarter
         back (none for n = 0), then once its MMAs and the store read it, the next
         item's quarter q into the same buffer."""
-        q_full, q_mma = barriers["q_full"], barriers["q_mma"]
+        q_full, q_mma, done = barriers["q_full"], barriers["q_mma"], barriers["done"]
         q_ready, fb_free = barriers["q_ready"], barriers["fb_free"]
         count = tiles * TILE
         for k in cutlass.range_constexpr(2):
@@ -611,6 +614,9 @@ class KdaFusedTC(KdaFusedWS):
                 if cutlass.const_expr(q == 0):
                     b = j % 2
                     live, head, n, slot = meta[b, 0], meta[b, 2], meta[b, 4], meta[b, 6]
+                    cute.arch.sync_warp()
+                    if lane == 0:
+                        cute.arch.mbarrier_arrive(done + b)
                 if (live != 0) & (n > 0):
                     coord = (slot * self.heads + head, q)
                     self.tma_box(tma[2], tma[3], buf, sw128(Float32, K, 32), (K, 32),
@@ -643,12 +649,15 @@ class KdaFusedTC(KdaFusedWS):
         S_lo X into the shared one (one thread issues)."""
         xc_s, meta = ops[0], ops[-1]
         ops_full, q_ready = barriers["ops_full"], barriers["q_ready"]
-        q_mma, mma_done = barriers["q_mma"], barriers["mma"]
+        q_mma, mma_done, done = barriers["q_mma"], barriers["mma"], barriers["done"]
         for j in cutlass.range(count, unroll=1):
             b = j % 2
             wait(ops_full + b, (j // 2) % 2)
             live = meta[b, 0] != 0
             x_address = Uint32(xc_s[b, None].iterator.toint())
+            cute.arch.sync_warp()
+            if lane == 0:
+                cute.arch.mbarrier_arrive(done + b)
             for quarter in cutlass.range_constexpr(4):
                 wait(q_ready + quarter, j % 2)
                 if live:
