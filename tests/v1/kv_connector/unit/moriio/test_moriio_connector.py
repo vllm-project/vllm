@@ -723,6 +723,9 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
         ),
     ):
         handshake_port = _find_free_port()
+        notify_port = _find_free_port()
+        while notify_port == handshake_port:
+            notify_port = _find_free_port()
         # Create connector
         assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
@@ -731,6 +734,9 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
                 "proxy_ping_port": 12345,
                 "http_port": 12346,
                 "handshake_port": handshake_port,
+                # The notify listener now fails startup when its port is
+                # taken; do not depend on the default port being free.
+                "notify_port": notify_port,
             }
         )
         with set_current_vllm_config(vllm_config):
