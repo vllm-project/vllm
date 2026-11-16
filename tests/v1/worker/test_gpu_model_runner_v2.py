@@ -244,28 +244,40 @@ def test_profile_run_creates_aux_output_connector_before_forward(
 
 
 @pytest.mark.parametrize(
-    "max_num_tokens,max_num_reqs,max_model_len,expected",
+    "max_num_tokens,max_num_reqs,max_model_len,spec,expected",
     [
         # max_num_batched_tokens > max_num_reqs * max_model_len, as after
         # auto-fit (first case) or when set explicitly (second case).
-        (2048, 1, 32, [32]),
-        (8192, 2, 2048, [2048, 2048]),
+        (2048, 1, 32, None, [32]),
+        (8192, 2, 2048, None, [2048, 2048]),
         # No cap applies, so the split is unchanged.
-        (2048, 4, 2048, [512] * 4),
-        (10, 4, 2048, [2, 2, 3, 3]),
+        (2048, 4, 2048, None, [512] * 4),
+        (10, 4, 2048, None, [2, 2, 3, 3]),
+        # Draft model (num_query_per_req, draft_slots): each request also
+        # reserves a draft slot, leaving one token per request.
+        (256, 256, 256, (1, 1), [1] * 128),
+        (256, 200, 256, (1, 1), [1] * 128),
+        # DFlash-style query rows with no draft slots.
+        (512, 512, 512, (4, 0), [4] * 128),
     ],
 )
-def test_dummy_run_requests_fit_in_max_model_len(
-    max_num_tokens, max_num_reqs, max_model_len, expected
+def test_dummy_run_requests_fit_in_budget(
+    max_num_tokens, max_num_reqs, max_model_len, spec, expected
 ):
-    """Block tables only fit max_model_len tokens per request, so a dummy
-    request must not be longer, or attention reads past the row."""
+    """Dummy requests must fit in max_model_len (the block table row) and,
+    with their draft slots, in max_num_batched_tokens."""
     scheduled = []
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_num_tokens = max_num_tokens
     runner.max_num_reqs = max_num_reqs
     runner.max_model_len = max_model_len
     runner.speculator = None
+    if spec is not None:
+        num_query_per_req, draft_slots = spec
+        runner.speculator = SimpleNamespace(num_query_per_req=num_query_per_req)
+        runner.speculative_config = SimpleNamespace(
+            max_num_new_slots_for_drafting=draft_slots
+        )
     runner.lora_config = None
     runner.is_first_pp_rank = True
     runner.is_last_pp_rank = False
