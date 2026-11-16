@@ -43,6 +43,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.models.deepseek_v41.amd.mono.stages.dims import Dims
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -73,12 +74,10 @@ CDNA_VERSIONS = (3, 4)
 
 
 def _routed_inter_942() -> int:
-    """The routed experts' real intermediate width on this rank at the
-    deployment's TP size (2304 / 4 = 576 at TP4, 2304 / 8 = 288 at TP8).
-    vLLM pads it to a multiple of 128, and the gfx942 copies keep only the
-    real columns. Read at weight-copy time, not import time, so a test that
-    sets the TP group per case gets that case's width."""
-    return 2304 // get_tensor_model_parallel_world_size()
+    """The routed experts' real intermediate width on this rank (576 at TP4,
+    288 at TP8). Read at weight-copy time, so a test that sets the TP group
+    per case gets that case's width."""
+    return Dims(get_tensor_model_parallel_world_size()).inter_real
 
 
 MERGE_WIDTHS: dict[tuple[int, bool], tuple[int, ...]] = {

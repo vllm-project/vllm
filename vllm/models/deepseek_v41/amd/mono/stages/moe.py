@@ -1476,9 +1476,7 @@ def down_weights_942(c, e, task):
     lane, a, d = c["lane"], c["args"], c["d"]
     j = lane // 16
     kd, kc = d.inter_real // 8, d.inter_real // 32
-    # TP4 rows have 18 K blocks, so their last step is two blocks. TP8 rows
-    # have 9 K blocks, so their last step is one block, which
-    # `weights942.fp4_tile_major` stores as one dword a lane.
+    # The last step of a row is two K blocks at TP4, one at TP8.
     assert kc % 4 in (0, 1, 2), kc
     # The tile's 16 rows are 16 kd dwords, a 64-byte step of them 256 dwords.
     tile0 = (e * HIDDEN + task * 16) * kd
@@ -1507,9 +1505,7 @@ def down_weights_942(c, e, task):
         )
         wd += [fx.Int32(v[i]) for i in range(2)]
     if const_expr(kc % 4 == 1):
-        # The one-block tail of a TP8 row is 16 rows x 16 bytes, stored with
-        # lane 16 j + r's dword at dword `lane`. So each lane loads exactly
-        # its own dword, and no lane reads into the next tile.
+        # TP8: one dword a lane.
         wd.append(
             fx.Int32(
                 bo.buffer_load(
