@@ -1769,3 +1769,80 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype):
+    """The Triton chunk path stores each row's chunk-aligned checkpoint, leaves
+    rows without one untouched, and keeps its output and final state."""
+    lower_bound = -3.0
+    H, D = 2, 128
+    torch.manual_seed(5)
+    cu_seqlens_list = [0, 200, 330, 400, 600]
+    offsets = [128, 64, 0, 192]
+    T, N = cu_seqlens_list[-1], len(offsets)
+    q, k, v, raw_g = [
+        torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE) for _ in range(4)
+    ]
+    raw_beta = torch.randn(1, T, H, dtype=torch.bfloat16, device=DEVICE)
+    A_log = torch.randn(H, dtype=torch.float32, device=DEVICE) * 0.5
+    dt_bias = torch.randn(H, D, dtype=torch.float32, device=DEVICE) * 0.1
+    initial_state = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int32, device=DEVICE)
+
+    def run(**checkpoint_kwargs):
+        return chunk_kda_with_fused_gate(
+            q=q,
+            k=k,
+            v=v.clone(),
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            g_bias=dt_bias,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            **checkpoint_kwargs,
+        )
+
+    out, final_state = run()
+    checkpoint_state = torch.full(
+        (N, H, D, D), float("nan"), dtype=state_dtype, device=DEVICE
+    )
+    checkpoint_out, checkpoint_final_state = run(
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=torch.tensor(offsets, dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(checkpoint_out, out)
+    torch.testing.assert_close(checkpoint_final_state, final_state)
+    assert checkpoint_state[offsets.index(0)].isnan().all()
+
+    gate = lower_bound * torch.sigmoid(
+        A_log.exp()[None, None, :, None] * (raw_g.float() + dt_bias[None, None])
+    )
+    beta = raw_beta.float().sigmoid()
+    q_norm = l2norm_fwd(q.contiguous())
+    k_norm = l2norm_fwd(k.contiguous())
+    for i, offset in enumerate(offsets):
+        if offset == 0:
+            continue
+        tokens = slice(cu_seqlens_list[i], cu_seqlens_list[i] + offset)
+        _, expected = naive_recurrent_kda(
+            q_norm[:, tokens],
+            k_norm[:, tokens],
+            v[:, tokens],
+            gate[:, tokens],
+            beta[:, tokens],
+            initial_state=initial_state[i : i + 1].transpose(-1, -2),
+            output_final_state=True,
+        )
+        assert expected is not None
+        assert_close(
+            f"checkpoint{i}",
+            expected[0].transpose(-1, -2).to(state_dtype),
+            checkpoint_state[i],
+            0.005,
+        )

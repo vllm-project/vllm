@@ -349,6 +349,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 )
                 choices.append(choice_data)
 
+                if self.enable_log_outputs and self.request_logger and message.content:
+                    self.request_logger.log_outputs(
+                        request_id=f"{request_id}_{prompt_idx}",
+                        outputs=message.content,
+                        output_token_ids=output.token_ids,
+                        finish_reason=choice_data.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
+
         mm_total: Counter[str] = Counter()
         for counts in mm_token_counts or ():
             mm_total.update(counts)
