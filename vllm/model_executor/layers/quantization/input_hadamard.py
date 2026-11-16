@@ -137,7 +137,13 @@ class InputHadamardLinearMethod(LinearMethodBase):
                     )
                 del layer.input_rotation
         self.quant_method.process_weights_after_loading(layer)
-        layer.input_hadamard = hadamard_matrix(self.size, layer.weight.device)
+        # A buffer, not a plain attribute, so the gated-norm fusion pass can
+        # match the rotation the same way it matches a weight.
+        hadamard = hadamard_matrix(self.size, layer.weight.device)
+        if "input_hadamard" in layer._buffers:
+            layer.input_hadamard = hadamard
+        else:
+            layer.register_buffer("input_hadamard", hadamard, persistent=False)
 
     def apply(
         self,
