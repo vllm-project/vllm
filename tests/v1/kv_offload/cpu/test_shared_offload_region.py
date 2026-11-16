@@ -7,6 +7,7 @@ import ctypes
 import errno
 import mmap
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -48,6 +49,7 @@ def _make_region(
     rank: int = 0,
     barrier=None,
     populate_shard: tuple[int, int] | None = None,
+    mmap_path: str | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -58,6 +60,7 @@ def _make_region(
         cpu_page_size=cpu_page_size,
         barrier=barrier,
         populate_shard=populate_shard,
+        mmap_path=mmap_path,
     )
 
 
@@ -494,6 +497,61 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
+# ---------------------------------------------------------------------------
+# mmap_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def region_dir():
+    """A fresh directory on /dev/shm, the filesystem regions live on."""
+    with tempfile.TemporaryDirectory(prefix="vllm_offload_", dir="/dev/shm") as d:
+        yield d
+
+
+def test_mmap_path_places_every_segment_file(iid, region_dir, monkeypatch):
+    """With mmap_path, every segment file is created there and nothing at the
+    per-engine path, and cleanup removes them all."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    path = os.path.join(region_dir, "region.mmap")
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+        mmap_path=path,
+    )
+    segments = region._segments
+    try:
+        assert [p for p, _, _ in segments] == [path, f"{path}.1", f"{path}.2"]
+        assert all(os.path.exists(p) for p, _, _ in segments)
+        assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+    finally:
+        region.cleanup()
+    assert not any(os.path.exists(p) for p, _, _ in segments)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_mmap_path_checks_free_space_where_the_region_lives(
+    iid, region_dir, monkeypatch, relative
+):
+    """The creator checks free space in mmap_path's directory, not /dev/shm;
+    a relative path resolves against the working directory."""
+    check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", check)
+    monkeypatch.chdir(region_dir)
+    path = "region.mmap" if relative else os.path.join(region_dir, "region.mmap")
+    with _region(iid, mmap_path=path):
+        assert os.path.exists(os.path.join(region_dir, "region.mmap"))
+    check.assert_called_once_with(
+        4 * PAGE_SIZE,
+        shm_path=region_dir,
+        allocation_name=f"CPU KV offload shared region in {region_dir}",
+    )
+
+
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
     helper must never be invoked on a kernel that accepts the advice.
@@ -660,6 +718,27 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     """Rows split over three shm files mapped back to back: each worker sees
     the other's writes in every file, and the creator removes every file."""
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    # The reservation must not need a writable temp directory.
+    monkeypatch.setattr(tempfile, "tempdir", "/nonexistent")
+    map_segments = SharedOffloadRegion._map_segments
+
+    def check_reservation(region):
+        base = ctypes.addressof(ctypes.c_char.from_buffer(region.mmap_obj))
+        in_reservation = False
+        with open("/proc/self/smaps") as smaps:
+            for line in smaps:
+                fields = line.split()
+                if "-" in fields[0]:
+                    start, end = (int(value, 16) for value in fields[0].split("-"))
+                    in_reservation = start <= base < end
+                elif in_reservation and fields[0] == "VmFlags:":
+                    assert "ac" not in fields[1:]
+                    break
+            else:
+                pytest.fail("Reservation mapping was absent from smaps")
+        map_segments(region)
+
+    monkeypatch.setattr(SharedOffloadRegion, "_map_segments", check_reservation)
     regions = [
         SharedOffloadRegion(
             engine_id=iid,
@@ -689,6 +768,50 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
         for region in regions:
             region.cleanup()
     assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
+@pytest.mark.parametrize("num_segments", [1, 3])
+def test_single_chunk_segments_preserve_shared_canonical_views(
+    iid, monkeypatch, num_segments
+):
+    """Backing boundaries must not change flat HiSparse views or peer writes."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    huge_page = 2 << 20
+    pool_bytes = 5 * huge_page + PAGE_SIZE
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=1,
+            rank=0,
+            kv_bytes_per_chunk=pool_bytes,
+            cpu_page_size=pool_bytes,
+            num_segments=num_segments,
+        )
+        for _ in range(2)
+    ]
+    paths = [path for path, _, _ in regions[0]._segments]
+    try:
+        assert len(paths) == num_segments
+        segments = regions[0]._segments
+        assert all(offset % huge_page == 0 for _, offset, _ in segments)
+        assert sum(length for _, _, length in segments) == pool_bytes
+        if num_segments > 1:
+            assert [length for _, _, length in segments] == [
+                2 * huge_page,
+                2 * huge_page,
+                huge_page + PAGE_SIZE,
+            ]
+        a = regions[0].create_next_canonical_view(pool_bytes)
+        b = regions[1].create_next_canonical_view(pool_bytes)
+        a.fill_(17)
+        assert (b == 17).all()
+        b[2 * huge_page - 1 : 2 * huge_page + 1] = 29
+        assert (a[2 * huge_page - 1 : 2 * huge_page + 1] == 29).all()
+        del a, b
+    finally:
+        for region in regions:
+            region.cleanup()
+    assert not any(os.path.exists(path) for path in paths)
 
 
 # ---------------------------------------------------------------------------
@@ -872,7 +995,7 @@ def host_register(monkeypatch):
     """Mock the cross-platform host_register/host_unregister helpers with
     registrations capped at seven pages. The same unregister mock backs both
     pin_mmap_region's rollback path and the region's cleanup() on exit from
-    ``_region``.
+    `_region`.
     """
     register = MagicMock(return_value=True)
     unregister = MagicMock()
@@ -1180,6 +1303,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 

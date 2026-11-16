@@ -50,6 +50,10 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
+from vllm.models.kimi_k3.nvidia.ops.kda_conv import (
+    packed_causal_conv1d_fn,
+    packed_causal_conv1d_supported,
+)
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMRecords,
     kda_recoverssm_verify,
@@ -115,21 +119,12 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes: list[int],
         replicated_shard_id: int,
         tp_size: int,
-        padding_size: int = 0,
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
-        self.padding_size = padding_size
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
         super().__init__(input_size, output_sizes, **kwargs)
-        if padding_size:
-            # Exclude padding rows from the load-completion count.
-            set_weight_attrs(
-                self.weight,
-                {"weight_loader_numel": self.weight[:-padding_size].numel()},
-            )
-            self.weight.data[-padding_size:].zero_()
 
     def weight_loader(
         self,
@@ -149,8 +144,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -174,8 +167,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -649,8 +640,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             else 16
         )
         self.in_proj_padding = -local_output_size % alignment
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
@@ -1325,9 +1314,33 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         metadata=m,
                     ).transpose(0, 1)
 
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                if (
+                    has_initial_state is not None
+                    and non_spec_query_start_loc is not None
+                    and non_spec_state_indices_tensor is not None
+                    and packed_causal_conv1d_supported(
+                        mixed_qkv_ns,
+                        conv_weights,
+                        conv_state,
+                        self.local_projection_size,
+                    )
+                ):
+                    # One launch over the packed Q|K|V columns: no FP32 copies of
+                    # the inputs, same FP32 math and conv state as the stock calls.
+                    q_ns, k_ns, v_ns = packed_causal_conv1d_fn(
+                        mixed_qkv_ns,
+                        conv_weights,
+                        None,
+                        conv_state,
+                        non_spec_query_start_loc,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                        self.local_projection_size,
+                    ).unbind(0)
+                else:
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)

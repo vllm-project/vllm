@@ -11,6 +11,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backends.mamba2_attn import (
@@ -19,6 +20,7 @@ from vllm.v1.attention.backends.mamba2_attn import (
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 compute_chunk_metadata = BaseMambaAttentionMetadataBuilder._compute_chunk_metadata
@@ -92,9 +94,11 @@ def _create_mamba2_builder(
         block_size=MAMBA_BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
-        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-        prefill_checkpoint_alignment=prefill_checkpoint_alignment,
+    )
+    register_mamba_layers(
+        vllm_config,
+        ["layer.0"],
+        prefill_checkpoint_alignment if num_prefill_checkpoint_blocks else None,
     )
     builder = Mamba2AttentionMetadataBuilder(
         kv_cache_spec=spec,
@@ -189,7 +193,7 @@ class _CheckpointingMambaLayer(MambaBase):
         return (torch.float32,)
 
 
-def _first_layer_spec(alignments: list[int | None]) -> MambaSpec:
+def _first_layer_params(alignments: list[int | None]) -> MambaManager.Params:
     layers = {
         f"layer.{i}": _CheckpointingMambaLayer(alignment)
         for i, alignment in enumerate(alignments)
@@ -204,25 +208,28 @@ def _first_layer_spec(alignments: list[int | None]) -> MambaSpec:
         compilation_config=SimpleNamespace(static_forward_context=layers),
         num_speculative_tokens=0,
     )
-    spec = layers["layer.0"].get_kv_cache_spec(vllm_config)
-    assert isinstance(spec, MambaSpec)
-    return spec
+    layer_config = layers["layer.0"].get_kv_cache_config(vllm_config)
+    assert layer_config is not None
+    params = layer_config.manager_config.params
+    assert isinstance(params, MambaManager.Params)
+    return params
 
 
 @pytest.mark.parametrize("alignment", [1, 16, None])
-def test_layer_checkpoint_alignment_reaches_the_kv_cache_spec(alignment):
-    """The scheduler learns a layer's checkpoint grid only from its spec, and a
-    checkpoint block reserved without one would cache a state never written."""
-    spec = _first_layer_spec([alignment])
+def test_layer_checkpoint_alignment_reaches_the_kv_cache_config(alignment):
+    """The scheduler learns a layer's checkpoint grid only from its KV cache
+    config, and a checkpoint block reserved without one would cache a state
+    never written."""
+    params = _first_layer_params([alignment])
 
-    assert spec.num_prefill_checkpoint_blocks == int(alignment is not None)
-    assert spec.prefill_checkpoint_alignment == alignment
+    assert params.num_prefill_checkpoint_blocks == int(alignment is not None)
+    assert params.prefill_checkpoint_alignment == alignment
 
 
 def test_no_checkpoint_block_unless_every_mamba_layer_declares_one():
     """If any Mamba layer cannot export checkpoints, the scheduler splits the
     prefill, so a checkpoint block would never be written."""
-    spec = _first_layer_spec([1, None])
+    params = _first_layer_params([1, None])
 
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
+    assert params.num_prefill_checkpoint_blocks == 0
+    assert params.prefill_checkpoint_alignment is None

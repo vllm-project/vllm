@@ -7,6 +7,8 @@ a position the chunk kernel will actually write, and the conv window saved
 there must be the one a resumed prefill would have left.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -14,6 +16,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
@@ -51,7 +54,9 @@ BLOCK_SIZE = 64
 
 class _StubSpeculativeConfig:
     method = "dspark"
-    parallel_drafting = False
+    max_num_new_slots_for_drafting = 0
+    enable_adaptive_verification = False
+    speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
@@ -74,17 +79,16 @@ def _builder(
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
+    register_mamba_layers(
+        vllm_config,
+        ["layer.0"],
+        KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None,
+    )
     builder = KimiK3ROCmKDAMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
-            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None
-            ),
-            num_speculative_blocks=num_spec,
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -472,14 +476,8 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _spec_for(monkeypatch, **attrs) -> MambaSpec:
-    """Run the layer's `get_kv_cache_spec` over stubbed state shapes."""
-    monkeypatch.setattr(
-        KimiK3DeltaAttention, "get_state_shape", lambda self: ((16, 64),)
-    )
-    monkeypatch.setattr(
-        KimiK3DeltaAttention, "get_state_dtype", lambda self: (torch.float16,)
-    )
+def _checkpoint_alignment_for(**attrs) -> int | None:
+    """Run the layer's `get_kv_cache_checkpoint_alignment`."""
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
@@ -490,20 +488,14 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     vllm_config.cache_config.mamba_cache_mode = "align"
-    vllm_config.cache_config.mamba_block_size = BLOCK_SIZE
-    spec = layer.get_kv_cache_spec(vllm_config)
-    assert isinstance(spec, MambaSpec)
-    return spec
+    return layer.get_kv_cache_checkpoint_alignment(vllm_config)
 
 
-def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
-    # The scheduler learns the kernel's granularity only from the spec, so
-    # reserving a block without publishing the alignment would hash a state
-    # that is never written.
-    spec = _spec_for(monkeypatch)
-
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+def test_opt_in_publishes_chunk_walk_alignment() -> None:
+    # The scheduler learns the kernel's granularity only from this alignment,
+    # so reserving a block without publishing it would hash a state that is
+    # never written.
+    assert _checkpoint_alignment_for() == KDA_CHECKPOINT_ALIGNMENT
 
 
 @pytest.mark.parametrize(
@@ -511,21 +503,30 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     [
         ("use_prefill_checkpoint", False),
         ("kda_prefill_backend", "triton"),
-        ("kda_prefill_backend", "gluon"),
         ("use_safe_gate", False),
     ],
 )
-def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> None:
-    spec = _spec_for(monkeypatch, **{attr: value})
-
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
+def test_paths_that_cannot_export_stay_opted_out(attr, value) -> None:
+    assert _checkpoint_alignment_for(**{attr: value}) is None
 
 
-def test_speculative_decoding_does_not_opt_out(monkeypatch) -> None:
+def test_gluon_backend_keeps_the_checkpoint() -> None:
+    # AITER's chunk_kda cannot export the snapshot, but the steps that carry
+    # one run on the fused kernel, which this module already requires.
+    alignment = _checkpoint_alignment_for(kda_prefill_backend="gluon")
+
+    assert alignment == KDA_CHECKPOINT_ALIGNMENT
+
+
+def test_gluon_backend_opts_out_without_the_fused_kernel(monkeypatch) -> None:
+    import vllm.models.kimi_k3.amd.kda as kda
+
+    monkeypatch.setattr(kda, "is_fused_kda_chunk_supported", lambda: False)
+
+    assert _checkpoint_alignment_for(kda_prefill_backend="gluon") is None
+
+
+def test_speculative_decoding_does_not_opt_out() -> None:
     # num_spec reaches the kernels as a wider conv row and an interleaved
     # batch, both of which the layer handles.
-    spec = _spec_for(monkeypatch, num_spec=8)
-
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+    assert _checkpoint_alignment_for(num_spec=8) == KDA_CHECKPOINT_ALIGNMENT

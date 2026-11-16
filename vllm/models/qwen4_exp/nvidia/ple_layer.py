@@ -30,7 +30,6 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
@@ -200,12 +199,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return 1 if self.cache_config.mamba_cache_mode == "align" else None
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        if isinstance(spec, MambaSpec) and spec.num_prefill_checkpoint_blocks:
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        alignment = super().get_kv_cache_checkpoint_alignment(vllm_config)
+        if alignment is not None:
             # Offsets lie on the grid, so the window holds only inputs.
             assert get_mamba_prefill_checkpoint_grid(vllm_config) >= self.conv_state_len
-        return spec
+        return alignment
 
     def _short_conv_dilated_dispatch(
         self,
