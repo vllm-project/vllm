@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import subprocess
+from typing import Any
+
+import pybase64 as base64
 import pytest
 import torch
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
-from vllm.renderers.chat_utils.content_parser import (
-    MultiModalContentParser,
-)
 from vllm.utils.serial_utils import tensor2base64
 
 from .utils import (
@@ -639,69 +640,136 @@ def test_parse_chat_messages_video_passes_the_frame_caps_once(
     assert seen == limits * 2
 
 
-class _RecordingMediaConnector:
-    """Media connector stub that records which tracks were fetched."""
-
-    def __init__(self) -> None:
-        self.fetched_audio = 0
-
-    def fetch_video(self, video_url: str, video_processor: str | None = None):
-        return object()
-
-    def fetch_audio(self, video_url: str):
-        self.fetched_audio += 1
-        return object()
+@pytest.fixture(scope="module")
+def qwen25omni_model_config_audio_video():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"audio": 2, "video": 2},
+    )
 
 
-class _StubItemTracker:
-    """Minimal tracker surface used by `parse_video`."""
+def _make_video_data_url(*, with_audio: bool, tmp_path) -> str:
+    """Generate a real 2-second MP4, with or without an audio track."""
+    video_src = ["-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=4"]
+    path = tmp_path / ("with_audio.mp4" if with_audio else "silent.mp4")
+    if with_audio:
+        cmd = [
+            *video_src,
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ]
+    else:
+        cmd = [*video_src, "-c:v", "mpeg4", "-an", str(path)]
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *cmd], check=True)
+    return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode()
 
-    video_processor_name = None
 
-    def add(self, modality: str, item: tuple[object, str | None]) -> str:
-        return f"<{modality}>"
+def _video_messages(*data_urls: str) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = [{"type": "text", "text": "Describe."}]
+    parts += [{"type": "video_url", "video_url": {"url": url}} for url in data_urls]
+    return [{"role": "user", "content": parts}]
 
 
-@pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expect_audio"),
-    [
-        ({}, False),
-        ({"use_audio_in_video": True}, True),
-        ({"videos_kwargs": {"use_audio_in_video": True}}, True),
-        (
-            {
-                "use_audio_in_video": False,
-                "videos_kwargs": {"use_audio_in_video": True},
-            },
-            True,
-        ),
-        (
-            {
-                "use_audio_in_video": True,
-                "videos_kwargs": {"use_audio_in_video": False},
-            },
-            False,
-        ),
-    ],
-)
-def test_parse_video_resolves_use_audio_in_video_scope(
-    monkeypatch, mm_processor_kwargs, expect_audio
+@pytest.mark.asyncio
+async def test_parse_chat_messages_silent_video_degrades_to_video_only(
+    qwen25omni_model_config_audio_video, tmp_path
 ):
-    """`use_audio_in_video` decides whether the video's audio track is fetched.
+    """A silent video must not fail the request when `use_audio_in_video` is on.
 
-    It may be configured flat or inside the HF `videos_kwargs` scope, with the
-    scoped value taking precedence.
+    The missing audio track is dropped (with a warning), the video is kept, and
+    a second video with audio still contributes its track. Sync and async
+    parsers must behave alike.
     """
-    connector = _RecordingMediaConnector()
-    monkeypatch.setattr(
-        MultiModalContentParser,
-        "_connector",
-        property(lambda self: connector),
-    )
+    silent = _make_video_data_url(with_audio=False, tmp_path=tmp_path)
+    with_audio = _make_video_data_url(with_audio=True, tmp_path=tmp_path)
+    kwargs = {"use_audio_in_video": True}
 
-    parser = MultiModalContentParser(
-        _StubItemTracker(), mm_processor_kwargs=mm_processor_kwargs
-    )
-    parser.parse_video("https://example.com/video.mp4")
+    cases = {
+        "silent only": (_video_messages(silent), {"video": 1, "audio": 1}),
+        "with audio": (_video_messages(with_audio), {"video": 1, "audio": 1}),
+        "mixed": (_video_messages(silent, with_audio), {"video": 2, "audio": 2}),
+    }
+    for name, (messages, expected) in cases.items():
+        for mode in ("sync", "async"):
+            if mode == "sync":
+                _, mm_data, _ = parse_chat_messages(
+                    messages,
+                    qwen25omni_model_config_audio_video,
+                    content_format="string",
+                    mm_processor_kwargs=kwargs,
+                )
+            else:
+                _, mm_data, _ = await parse_chat_messages_async(
+                    messages,
+                    qwen25omni_model_config_audio_video,
+                    content_format="string",
+                    mm_processor_kwargs=kwargs,
+                )
+            counts = {
+                modality: len(items) for modality, items in (mm_data or {}).items()
+            }
+            assert counts == expected, f"{name} ({mode}): {counts}"
 
-    assert connector.fetched_audio == int(expect_audio)
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_silent_video_uuid_bookkeeping(
+    qwen25omni_model_config_audio_video, tmp_path
+):
+    """A dropped audio track keeps mm_data/mm_uuids aligned via a placeholder
+    UUID so the engine cache can match it."""
+    silent = _make_video_data_url(with_audio=False, tmp_path=tmp_path)
+    kwargs = {"use_audio_in_video": True}
+
+    for mode in ("sync", "async"):
+        if mode == "sync":
+            _, mm_data, mm_uuids = parse_chat_messages(
+                _video_messages(silent),
+                qwen25omni_model_config_audio_video,
+                content_format="string",
+                mm_processor_kwargs=kwargs,
+            )
+        else:
+            _, mm_data, mm_uuids = await parse_chat_messages_async(
+                _video_messages(silent),
+                qwen25omni_model_config_audio_video,
+                content_format="string",
+                mm_processor_kwargs=kwargs,
+            )
+        assert mm_data is not None and mm_uuids is not None
+        assert mm_data["audio"] == [None], f"{mode}: {mm_data['audio']}"
+        assert len(mm_uuids["audio"]) == 1
+        assert mm_uuids["audio"][0], f"{mode}: placeholder uuid missing"
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_audio_decode_errors_raise(
+    qwen25omni_model_config_audio_video, tmp_path
+):
+    """Only a missing audio stream degrades; other decode failures propagate."""
+    corrupt = "data:video/mp4;base64," + base64.b64encode(b"not a real mp4").decode()
+
+    for mode in ("sync", "async"):
+        with pytest.raises(ValueError):
+            if mode == "sync":
+                parse_chat_messages(
+                    _video_messages(corrupt),
+                    qwen25omni_model_config_audio_video,
+                    content_format="string",
+                    mm_processor_kwargs={"use_audio_in_video": True},
+                )
+            else:
+                await parse_chat_messages_async(
+                    _video_messages(corrupt),
+                    qwen25omni_model_config_audio_video,
+                    content_format="string",
+                    mm_processor_kwargs={"use_audio_in_video": True},
+                )

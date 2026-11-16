@@ -14,17 +14,22 @@ from typing_extensions import override
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.media.audio import NoAudioStreamError
 from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
+from vllm.utils import random_uuid
 
 from .types import InputAudio, ModalityStr, MultiModalEmbedsPayload
 
 if TYPE_CHECKING:
     from .item_tracker import AsyncMultiModalItemTracker, MultiModalItemTracker
+
+logger = init_logger(__name__)
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -301,9 +306,22 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if video_url and _loads_audio_from_video(
             self._tracker.model_config, self._mm_processor_kwargs
         ):
-            audio = self._connector.fetch_audio(video_url)
-            audio_placeholder = self._tracker.add("audio", (audio, uuid))
-            self._add_placeholder("audio", audio_placeholder)
+            try:
+                audio = self._connector.fetch_audio(video_url)
+            except NoAudioStreamError:
+                # Only a valid video without an audio track degrades to
+                # video-only; keep mm_data/mm_uuids aligned with a sentinel
+                # UUID so the engine can match the pair. Corrupt or
+                # over-limit audio still raises.
+                logger.warning(
+                    "Video %s has no audio stream; skipping audio extraction.",
+                    video_url,
+                )
+                audio_uuid = uuid or random_uuid()
+                self._tracker.add("audio", (None, audio_uuid))
+            else:
+                audio_placeholder = self._tracker.add("audio", (audio, uuid))
+                self._add_placeholder("audio", audio_placeholder)
 
     def parse_video_embeds(
         self,
@@ -488,6 +506,27 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         return audio, uuid
 
+    async def _video_audio_with_uuid_async(
+        self, video_url: str | None, uuid: str | None
+    ):
+        # A video without an audio track degrades to video-only. The returned
+        # None carries a UUID so `_resolve_items` keeps the pair: a bare
+        # (None, None) entry would trip the empty-media validation.
+        uuid = uuid or random_uuid()
+        try:
+            audio = (
+                await self._connector.fetch_audio_async(video_url)
+                if video_url
+                else None
+            )
+        except NoAudioStreamError:
+            logger.warning(
+                "Video %s has no audio stream; skipping audio extraction.",
+                video_url,
+            )
+            audio = None
+        return audio, uuid
+
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
         placeholder = self._tracker.add(
             "audio", partial(self._audio_with_uuid_async, audio_url, uuid)
@@ -533,7 +572,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             self._tracker.model_config, self._mm_processor_kwargs
         ):
             audio_placeholder = self._tracker.add(
-                "audio", partial(self._audio_with_uuid_async, video_url, uuid)
+                "audio", partial(self._video_audio_with_uuid_async, video_url, uuid)
             )
             self._add_placeholder("audio", audio_placeholder)
 
