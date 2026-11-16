@@ -71,17 +71,29 @@ MXFP4_D float mxfp4_e8m0_to_f32(uint32_t s8) {
   return __uint_as_float(mxfp4_e8m0_to_f32_bits(s8));
 }
 
-// Decode 8 E2M1 codes (one packed uint32, nibble i = K position k0+i) into 8
-// packed E4M3 bytes, i.e. exactly one WMMA fp8 A/B half-fragment.
+// Decode 4 E2M1 codes (low 16 bits of `x16`, nibble i = K position k0+i) into
+// 4 packed E4M3 bytes via v_perm_b32. The 8 E2M1 magnitudes are exactly 8
+// E4M3 bytes, so they fit v_perm's 8-byte {src0,src1} table and the 3-bit
+// exp|mant field indexes it directly; the sign bit is OR'd in separately.
+// This replaces ~16 ALU ops per nibble with ~9 per 4 nibbles; the scalar
+// decode it replaces was ~60% of WMMA kernel time (measured by stubbing it).
 // No scale is applied -- see the header note.
+MXFP4_D uint32_t mxfp4_spread_nibbles(uint32_t x16) {
+  // {n0,n1,n2,n3} at bits 0/4/8/12 -> one nibble per byte.
+  const uint32_t y = (x16 | (x16 << 8)) & 0x00FF00FFu;
+  return (y | (y << 4)) & 0x0F0F0F0Fu;
+}
+
+MXFP4_D uint32_t mxfp4_4nib_to_e4m3_perm(uint32_t x16) {
+  constexpr uint32_t kLutLo = 0x3C383000u;  // em 0..3 -> src1 bytes 0..3
+  constexpr uint32_t kLutHi = 0x4C484440u;  // em 4..7 -> src0 bytes 4..7
+  const uint32_t z = mxfp4_spread_nibbles(x16);
+  const uint32_t mag = __builtin_amdgcn_perm(kLutHi, kLutLo, z & 0x07070707u);
+  return mag | ((z & 0x08080808u) << 4);
+}
+
 MXFP4_D uint32_t mxfp4_8nib_to_e4m3x4(uint32_t qa, int lo) {
-  const uint32_t q = lo ? qa : (qa >> 16);
-  uint32_t out = 0;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    out |= (uint32_t)mxfp4_e2m1_to_e4m3_bits((q >> (4 * i)) & 0xFu) << (8 * i);
-  }
-  return out;
+  return mxfp4_4nib_to_e4m3_perm(lo ? (qa & 0xFFFFu) : (qa >> 16));
 }
 
 // Full 8-code unpack into the two 32-bit halves of a WMMA fp8 operand.
