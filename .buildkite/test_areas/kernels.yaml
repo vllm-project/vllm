@@ -610,9 +610,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) Quantization Kernels"
+      label: ":amd: (MI300 DPX) Quantization Kernels"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -1326,6 +1326,7 @@ steps:
 
 - label: ":amd: (MI355) Mamba SSM Kernels"
   key: amd-mamba-ssm-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_1
   num_devices: 1

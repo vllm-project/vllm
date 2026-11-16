@@ -331,9 +331,10 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
-      mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
-      load) on Blackwell, or with block-FP8 (128x128) weights on Hopper;
-      requires expert parallelism and NVSHMEM
+      mega-kernel with NVFP4 weights on Blackwell (SM100/SM103, where MXFP4
+      checkpoints are requantized at load, or SM107 for NVFP4 checkpoints
+      only), or with block-FP8 (128x128) weights on Hopper; requires expert
+      parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -447,6 +448,12 @@ class KernelConfig:
     - "enable": Cache every layer's copy; startup fails if they do not fit in
       the budget
     """
+
+    b12x_moe_uncompressed_scales: bool = False
+    """Decode `csf`-compressed NVFP4 MoE block scales at load. By default the
+    B12X MoE backend keeps them compressed on the GPU and expands the routed
+    experts' scales on each call, which saves memory (2.57 GiB on
+    Qwen3.8-Flash-Next-FP4-Local) at some latency at higher batch sizes."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod

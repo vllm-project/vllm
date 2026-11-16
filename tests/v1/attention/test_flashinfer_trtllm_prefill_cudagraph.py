@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.flashinfer import (
     TRTLLMPrefill,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def test_trtllm_prefill_query_offsets_use_a_persistent_buffer(monkeypatch):
@@ -51,7 +51,7 @@ def test_trtllm_prefill_query_offsets_use_a_persistent_buffer(monkeypatch):
     )
 
     block_size = 16
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
