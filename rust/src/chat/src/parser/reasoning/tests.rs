@@ -107,23 +107,6 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
 }
 
 #[test]
-fn factory_routes_mistral_models() {
-    let factory = ReasoningParserFactory::new();
-    assert_eq!(
-        factory.resolve_name_for_model("mistralai/Magistral-Small-2509"),
-        Some(names::MISTRAL)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("mistral-large-latest"),
-        Some(names::MISTRAL)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("magistral-medium-2506"),
-        Some(names::MISTRAL)
-    );
-}
-
-#[test]
 fn factory_rejects_unknown_parser_names() {
     let tokenizer = Arc::new(TestTokenizer::new());
     let factory = ReasoningParserFactory::new();

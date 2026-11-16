@@ -114,8 +114,6 @@ impl ReasoningParserFactory {
             .register_pattern("mm-m2", names::MINIMAX_M2)
             .register_pattern("cohere", names::COHERE_CMD)
             .register_pattern("command", names::COHERE_CMD)
-            .register_pattern("magistral", names::MISTRAL)
-            .register_pattern("mistral", names::MISTRAL)
             .register_pattern("nano", names::NEMOTRON_V3)
             .register_pattern("nemotron", names::NEMOTRON_V3);
 
