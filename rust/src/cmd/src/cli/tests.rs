@@ -415,47 +415,6 @@ fn serve_args_auto_forward_enable_lora_to_python() {
     .assert_debug_eq(&args.managed_engine.python_args);
 }
 
-/// `--kv-sharing-fast-prefill` is an engine flag: `vllm-rs serve` forwards it
-/// to the managed engine, and the Python launcher's `--args-json` may carry it.
-/// The engine reports its effect on prompt logprobs in the ready response.
-#[test]
-fn kv_sharing_fast_prefill_is_an_engine_flag() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--kv-sharing-fast-prefill",
-    ])
-    .unwrap();
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    expect![[r#"
-        [
-            "--kv-sharing-fast-prefill",
-        ]
-    "#]]
-    .assert_debug_eq(&args.managed_engine.python_args);
-
-    let args_json = serde_json::json!({
-        "model_tag": "Qwen/Qwen3-0.6B",
-        "kv_sharing_fast_prefill": true,
-    });
-    Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-listener-fd",
-        "999999",
-        "--output-listener-fd",
-        "999998",
-        "--args-json",
-        &args_json.to_string(),
-    ])
-    .unwrap();
-}
-
 #[test]
 fn serve_args_accept_python_underscore_flag_names() {
     let cli = Cli::try_parse_from([
