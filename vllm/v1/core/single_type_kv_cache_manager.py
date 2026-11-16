@@ -1987,6 +1987,12 @@ class MambaManager(SingleTypeKVCacheManager):
         prefill_end: int,
     ) -> bool:
         checkpoint_idx = cdiv(query_end, self.block_size) - 2
+        # Mid-block resume: the checkpoint goes in the resumed block, which is
+        # private to the request and read before the forward overwrites it.
+        reuses_resumed_block = (
+            query_start % self.block_size != 0
+            and checkpoint_idx == query_start // self.block_size
+        )
         blocks = self.req_to_blocks[request_id]
         return (
             self.has_prefill_checkpoint_blocks
@@ -2001,7 +2007,8 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             and checkpoint_idx >= 0
             and (
-                checkpoint_idx >= len(blocks)
+                reuses_resumed_block
+                or checkpoint_idx >= len(blocks)
                 or blocks[checkpoint_idx].is_null
                 or (
                     request_id in self._allocated_block_reqs
