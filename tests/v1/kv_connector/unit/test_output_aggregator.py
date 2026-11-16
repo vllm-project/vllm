@@ -18,7 +18,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (
     MooncakeStoreKVEvents,
 )
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVLoadFailureReport,
+    ModelRunnerOutput,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -71,6 +75,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         invalid_block_ids: set[int] | None = None,
         failed_recving: set[str] | None = None,
         expected_finished_count: int = 0,
+        load_failure_reports: list[KVLoadFailureReport] | None = None,
         kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
         kv_cache_events: KVConnectorKVEvents | None = None,
     ):
@@ -80,6 +85,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             invalid_block_ids=invalid_block_ids or set(),
             failed_recving=failed_recving or set(),
             expected_finished_count=expected_finished_count,
+            load_failure_reports=load_failure_reports,
             kv_connector_worker_meta=kv_connector_worker_meta,
             kv_cache_events=kv_cache_events,
         )
@@ -348,3 +354,91 @@ def test_salvaged_event_votes_are_one_shot():
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
+
+
+def make_load_failure_report(request_id: str) -> KVLoadFailureReport:
+    return KVLoadFailureReport(
+        request_id=request_id,
+        failed_block_ids=[7],
+        token_span=(16, 32),
+        rollback_boundary=16,
+        observed_failed_layers=[3],
+        healthy_above_span=True,
+        restored_extent=64,
+    )
+
+
+def test_aggregate_load_failure_reports_from_all_ranks():
+    """Every TP rank reports the same fault and the scheduler's consensus
+    machinery consumes the per-rank reports: the aggregated output must
+    carry ALL ranks' reports, not just the output rank's."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    report_rank0 = make_load_failure_report("req-1")
+    report_rank1 = make_load_failure_report("req-2")
+    output1 = DummyModelRunnerOutput(load_failure_reports=[report_rank0])
+    output2 = DummyModelRunnerOutput(load_failure_reports=[report_rank1])
+
+    aggregated = aggregator.aggregate([output1, output2])
+
+    assert aggregated is output1
+    kv_output = aggregated.kv_connector_output
+    assert kv_output.load_failure_reports == [report_rank0, report_rank1]
+    assert {r.request_id for r in kv_output.load_failure_reports} == {
+        "req-1",
+        "req-2",
+    }
+
+
+def test_aggregate_with_empty_or_absent_report_fields():
+    """Ranks carrying None/empty for the report field (or no
+    kv_connector_output at all) must not break the aggregation."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    output1 = DummyModelRunnerOutput()
+    output2 = DummyModelRunnerOutput()
+
+    aggregated = aggregator.aggregate([output1, output2])
+
+    assert aggregated is output1
+    assert not aggregated.kv_connector_output.load_failure_reports
+
+    # Explicitly empty lists must not break the aggregation either.
+    output1 = DummyModelRunnerOutput(load_failure_reports=[])
+    output2 = DummyModelRunnerOutput(load_failure_reports=[])
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    aggregated = aggregator.aggregate([output1, output2])
+    assert not aggregated.kv_connector_output.load_failure_reports
+
+    # A rank whose kv_connector_output is None entirely is skipped, and
+    # the surviving rank's report still carries through.
+    report = make_load_failure_report("req-1")
+    output1 = DummyModelRunnerOutput(load_failure_reports=[report])
+    output2 = DummyModelRunnerOutput()
+    output2.kv_connector_output = None
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    aggregated = aggregator.aggregate([output1, output2])
+    assert aggregated.kv_connector_output.load_failure_reports == [report]
+
+
+def test_single_rank_passes_reports_through():
+    """Single-rank compatibility: the lone rank's reports pass through
+    the aggregation unchanged."""
+    aggregator = KVOutputAggregator(expected_finished_count=1)
+    report = make_load_failure_report("req-1")
+    output1 = DummyModelRunnerOutput(load_failure_reports=[report])
+
+    aggregated = aggregator.aggregate([output1])
+
+    assert aggregated is output1
+    assert aggregated.kv_connector_output.load_failure_reports == [report]
+
+
+def test_aggregate_invalid_block_ids_union_across_ranks_unchanged():
+    """invalid_block_ids remains a set union across ranks (the
+    pre-existing behavior the carry-through must not regress)."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    output1 = DummyModelRunnerOutput(invalid_block_ids={1, 2})
+    output2 = DummyModelRunnerOutput(invalid_block_ids={2, 3})
+
+    aggregated = aggregator.aggregate([output1, output2])
+
+    assert aggregated.kv_connector_output.invalid_block_ids == {1, 2, 3}
