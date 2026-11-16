@@ -123,7 +123,8 @@ def salt_aux_session(
     params = request.sampling_params
     salt = request.cache_salt
     if params is not None and params.aux_session is not None:
-        salt = _SESSION_SALT + json.dumps([params.aux_session, salt])
+        prefix = vllm_config.aux_output_config.object_key_prefix
+        salt = _SESSION_SALT + json.dumps([prefix, params.aux_session, salt])
         num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             request.prompt_token_ids, request.prompt_embeds
         )

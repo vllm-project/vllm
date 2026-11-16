@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -77,6 +78,11 @@ def aux_object_names(keys: Sequence[str], pipeline_parallel_size: int = 1) -> li
     return [
         f"{key}/pp{stage}" for key in keys for stage in range(pipeline_parallel_size)
     ]
+
+
+def aux_session_pattern(key_prefix: str, session: str) -> str:
+    """Pattern for `remove_by_regex` that matches every object of a session."""
+    return "^" + re.escape(f"{key_prefix}/{session}/")
 
 
 def read_aux_rows(

@@ -19,7 +19,10 @@ from vllm.config import AuxOutputConfig, KVTransferConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
 )
-from vllm.distributed.aux_output_connector.object_store import read_aux_rows
+from vllm.distributed.aux_output_connector.object_store import (
+    aux_session_pattern,
+    read_aux_rows,
+)
 from vllm.distributed.aux_output_connector.session_objects import (
     SessionObjectWriter,
     salt_aux_session,
@@ -1554,6 +1557,18 @@ def test_reset_writes_the_objects_its_preempted_session_request_completed():
     engine.step(resumed, {"r": [0]})
     engine.run()
     engine.close()
+
+
+def test_session_release_removes_every_object_of_the_session():
+    engine = _tier_engine(connector=None)
+    _run_turn(engine, 0, "first", 48, lookahead=1)
+    _run_turn(engine, 0, "other", 48, lookahead=1, session="s2")
+    engine.close()
+    listed = {key for keys in engine.keys.values() for key in keys}
+    assert set(engine.client.objects) - listed
+    engine.client.remove_by_regex(aux_session_pattern("job", "s"), True)
+    assert engine.client.objects
+    assert all(key.startswith("job/s2/") for key in engine.client.objects)
 
 
 def test_session_key_of_a_block_whose_hash_follows_the_stop_is_a_tail():

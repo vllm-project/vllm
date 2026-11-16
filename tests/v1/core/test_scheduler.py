@@ -386,6 +386,12 @@ def test_session_salt_replaces_frontend_hashes(session, salt, key_prefix, kept):
     assert (request.block_hashes == other.block_hashes) == (session == "s")
 
 
+def test_session_requests_under_other_object_key_prefixes_share_no_blocks():
+    first = _preprocess_session_request("a", "s", key_prefix="a")
+    second = _preprocess_session_request("b", "s", key_prefix="b")
+    assert not set(first.block_hashes) & set(second.block_hashes)
+
+
 @pytest.mark.parametrize(
     "segments,expected",
     [

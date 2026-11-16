@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections import defaultdict
 
 from vllm.distributed.aux_output_connector.object_store import MooncakeAuxObjectStore
@@ -21,6 +22,12 @@ class FakeMooncake:
                 self.objects.setdefault(key, value)
                 self.payloads[key].append(value)
         return self.code
+
+    def remove_by_regex(self, pattern, force):
+        removed = [key for key in self.objects if re.match(pattern, key)]
+        for key in removed:
+            del self.objects[key]
+        return len(removed)
 
     def get(self, key):
         return self.objects.get(key, b"")
