@@ -959,6 +959,7 @@ def safe_apply_chat_template(
             "Chat template does not support the 'developer' message role. "
             "Converting developer messages to 'system' role.",
         )
+    # Some templates (e.g. GLM-5.3) expand tool_reference from `tools` natively.
     if not _detect_tool_reference_support(chat_template):
         conversation = _expand_tool_references(conversation, tools)
     resolved_kwargs = resolve_chat_template_kwargs(
