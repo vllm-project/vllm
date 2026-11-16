@@ -87,6 +87,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.speculative_config = None
     runner.speculator = None
     runner.pcp_manager = None
+    runner.pp_handler = None
     runner.num_speculative_steps = 0
     runner.encoder_cache = None
     runner.is_pooling_model = False
