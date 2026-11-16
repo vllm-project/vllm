@@ -174,11 +174,11 @@ def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
 
         llm.apply_model(check_kernel_type)
 
-        # Repeated greedy runs need not match token for token: bf16 rounding
-        # can differ by an ulp between engine steps, which flips the argmax
-        # where this tiny 4-bit model has near-tied logits (seen on 16-SM MIG
-        # slices). A broken kernel would emit tokens outside each other's
-        # top-k, so compare logprobs instead of exact strings.
+        # vLLM only guarantees bitwise-identical repeated runs in batch-invariant
+        # mode. This tiny 4-bit model has near-tied logits, so on CI the two
+        # greedy runs have diverged at token 5 ("after" vs "of"). A broken
+        # kernel would emit tokens outside each other's top-k, so compare
+        # logprobs instead of exact strings.
         out1 = llm.generate_greedy_logprobs([prompt], max_tokens=10, num_logprobs=5)
         out2 = llm.generate_greedy_logprobs([prompt], max_tokens=10, num_logprobs=5)
         check_logprobs_close(
