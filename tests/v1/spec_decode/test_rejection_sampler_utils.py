@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 import torch
 
+from vllm import SamplingParams
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.states import SamplingStates
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.fly import compute_fly_entropy
@@ -93,10 +95,13 @@ def _build_rejection_sample_inputs(
     draft_temp = temperature if draft_temperature is None else draft_temperature
     if draft_temp > 0:
         scaled_draft_logits_1d = scaled_draft_logits_1d / draft_temp
-    draft_probs = torch.softmax(scaled_draft_logits_1d, dim=0)
-    draft_tokens = torch.multinomial(
-        draft_probs.expand(num_trials, -1), K, replacement=True
-    )
+    if draft_temperature == 0.0:
+        draft_tokens = draft_logits_1d.argmax().expand(num_trials, K)
+    else:
+        draft_probs = torch.softmax(scaled_draft_logits_1d, dim=0)
+        draft_tokens = torch.multinomial(
+            draft_probs.expand(num_trials, -1), K, replacement=True
+        )
     draft_sampled_2d = torch.zeros(num_trials, K + 1, dtype=torch.int64, device=device)
     draft_sampled_2d[:, 1:] = draft_tokens
     draft_sampled = draft_sampled_2d.reshape(-1)
@@ -130,7 +135,7 @@ def _build_rejection_sample_inputs(
         seed=seed,
     )
     if draft_temperature is not None:
-        inputs["draft_temperature"] = draft_temperature
+        inputs["draft_temperature"] = torch.full_like(temp_tensor, draft_temperature)
     return inputs
 
 
@@ -684,7 +689,7 @@ def test_draft_temperature_matches_rescaled_proposals(
     inputs["temperature"] = temperatures
     target_scales = torch.where(temperatures > 0, temperatures, 1.0)
     inputs["target_logits"] /= target_scales.repeat_interleave(K + 1).unsqueeze(1)
-    inputs["draft_temperature"] = draft_temperature
+    inputs["draft_temperature"] = torch.full_like(temperatures, draft_temperature)
     inputs["draft_sampled"] = _gumbel_drafted_tokens(inputs, draft, num_trials, K)
 
     sampled, num_sampled = _rejection_sample(
@@ -701,6 +706,61 @@ def test_draft_temperature_matches_rescaled_proposals(
     torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
     emitted = torch.arange(K + 1, device="cuda")[None, :] < num_sampled[:, None]
     torch.testing.assert_close(sampled[emitted], expected[emitted], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_mixed_draft_temperatures_match_individual_proposal_distributions(
+    use_block_verification: bool,
+):
+    """Cached zero-temperature rows must use the uncached one-hot distribution."""
+    torch.manual_seed(42)
+    k, num_reqs = 3, 4
+    target = torch.randn(NARROW_VOCAB_SIZE, device="cuda")
+    draft = -target
+    inputs = _build_rejection_sample_inputs(target, draft, k, 1.0, num_reqs)
+    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device="cuda")
+    draft_temperatures = torch.tensor([99.0, 0.0, 0.0, 0.5, 1.0], device="cuda")[1:]
+    inputs["temperature"] = temperatures
+    inputs["draft_temperature"] = draft_temperatures
+    scales = torch.where(temperatures > 0, temperatures, 1.0)
+    inputs["target_logits"] /= scales.repeat_interleave(k + 1).unsqueeze(1)
+    inputs["draft_sampled"] = _gumbel_drafted_tokens(inputs, draft, num_reqs, k)
+    inputs["draft_logits"][:2] = float("nan")
+    sampled, lengths = _rejection_sample(
+        **inputs, num_speculative_steps=k, use_block_verification=use_block_verification
+    )
+
+    for row, draft_temp in enumerate((0.0, 0.0, 0.5, 1.0)):
+        lo, hi = row * (k + 1), (row + 1) * (k + 1)
+        reference = inputs.copy()
+        reference.pop("draft_temperature")
+        for name in (
+            "target_logits",
+            "draft_sampled",
+            "pos",
+            "expanded_idx_mapping",
+            "expanded_local_pos",
+        ):
+            reference[name] = inputs[name][lo:hi]
+        reference["idx_mapping"] = inputs["idx_mapping"][row : row + 1]
+        reference["cu_num_logits"] = inputs["cu_num_logits"][:2]
+        reference["draft_logits"] = (
+            None
+            if draft_temp == 0.0
+            else inputs["draft_logits"] * scales[:, None, None] / draft_temp
+        )
+        expected, expected_length = _rejection_sample(
+            **reference,
+            num_speculative_steps=k,
+            use_block_verification=use_block_verification,
+        )
+        torch.testing.assert_close(
+            lengths[row : row + 1], expected_length, rtol=0, atol=0
+        )
+        emitted = torch.arange(k + 1, device="cuda") < expected_length[0]
+        torch.testing.assert_close(
+            sampled[row, emitted], expected[0, emitted], rtol=0, atol=0
+        )
 
 
 def _gumbel_drafted_tokens(
@@ -729,7 +789,7 @@ def _gumbel_drafted_tokens(
         (
             inputs["temperature"]
             if inputs.get("draft_temperature") is None
-            else torch.full_like(inputs["temperature"], inputs["draft_temperature"])
+            else inputs["draft_temperature"]
         ),
         inputs["seed"],
         inputs["pos"].view(num_trials, k + 1)[:, :k].reshape(-1).contiguous(),
@@ -742,7 +802,7 @@ def _gumbel_drafted_tokens(
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
-@pytest.mark.parametrize("draft_temperature", [None, 0.5, 2.0])
+@pytest.mark.parametrize("draft_temperature", [None, 0.0, 0.5, 2.0])
 def test_gumbel_drafted_rejection_sample_is_unbiased(
     num_speculative_steps: int, draft_temperature: float | None
 ):
@@ -1227,19 +1287,19 @@ def test_verify_rejects_unproposed_drafts():
     # decode step after a P/D remote KV load.
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
     prefill_len = first_pos + 1
+    sampling_states = SamplingStates(num_trials, VOCAB_SIZE)
+    for row in range(num_trials):
+        sampling_states.add_request(row, SamplingParams(temperature=1.0, seed=row))
+    sampling_states.apply_staged_writes()
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(
         apply_sampling_params=lambda logits, *args: logits,
-        sampling_states=SimpleNamespace(
-            temperature=SimpleNamespace(gpu=inputs["temperature"]),
-            seeds=SimpleNamespace(gpu=inputs["seed"]),
-        ),
+        sampling_states=sampling_states,
         use_fp64_gumbel=False,
         trace_replay_state=None,
         may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K
-    rejection_sampler.draft_temperature = None
     rejection_sampler.synthetic_conditional_rates = None
     rejection_sampler.use_block_verification = True
     rejection_sampler.fly_window_size = 0
