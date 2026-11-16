@@ -832,8 +832,10 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        # Set block size based on the attention backends
-        current_platform.update_block_size_for_backend(vllm_config)
+        # Set block size based on the attention backends of every pipeline stage
+        from vllm.v1.worker.utils import update_block_size_for_backend
+
+        update_block_size_for_backend(vllm_config)
 
         # Initialize message queues after init_device() since multi-node setups
         # (nnodes_within_dp > 1) require distributed groups to be initialized
