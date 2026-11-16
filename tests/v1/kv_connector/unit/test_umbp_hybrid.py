@@ -873,8 +873,12 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
-    """A hash-only tail survives request cleanup, then restores byte for byte."""
+@pytest.mark.parametrize("request_state", ["running", "finished"])
+def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
+    """A boundary inside an attention block restores byte for byte.
+
+    Core hands it off while the request runs, or keeps it as the finished tail.
+    """
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -944,13 +948,24 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
     )
     sources = [pool.blocks[1], pool.blocks[2]]
-    pool.touch(sources)
-    assert not scheduler.register_finished_partial_tail(
-        request, source_ids, [(1, 2, 12)]
-    )
-    assert scheduler.request_finished(request, source_ids) == (False, None)
-    pool.free_blocks(sources)
-    output = make_scheduler_output(finished={"tail"})
+    if request_state == "finished":
+        pool.touch(sources)
+        assert not scheduler.register_finished_partial_tail(
+            request, source_ids, [(1, 2, 12)]
+        )
+        assert scheduler.request_finished(request, source_ids) == (False, None)
+        pool.free_blocks(sources)
+        output = make_scheduler_output(finished={"tail"})
+    else:
+        output = make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="tail", num_computed_tokens=0, block_ids=source_ids
+                )
+            ],
+            scheduled_tokens={"tail": 12},
+            block_state=SimpleNamespace(boundary_state_offloads={"tail": [(1, 2, 12)]}),
+        )
     try:
         metadata = scheduler.build_connector_meta(output)
         assert len(metadata.store_plans) == 2
@@ -975,8 +990,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         scheduler.update_state_after_alloc(
             request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
         )
-        output.finished_req_ids = set()
-        worker.start_load_kv(None, scheduler.build_connector_meta(output))
+        worker.start_load_kv(
+            None, scheduler.build_connector_meta(make_scheduler_output())
+        )
         deadline = time.monotonic() + 10
         while (finished := worker.get_finished(set())) == (None, None):
             assert time.monotonic() < deadline, "load completion was not reported"
