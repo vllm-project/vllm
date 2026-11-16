@@ -128,7 +128,6 @@ ABI = KernelAbi(
         "w13s",
         "w2",
         "w2s",
-        "w2s_g0",
         "peers",
         "rank",
         "epoch",
@@ -334,7 +333,6 @@ def build(key: LayerBuild):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
-        w2s_g0: Int32,
         peers: Int64,
         rank: Int32,
         epoch: Int64,
@@ -453,7 +451,9 @@ def build(key: LayerBuild):
             return issued if tiled.resident(S) else pre_down
 
         def mlp_half(pending):
-            mw = moe.Weights(w_gate, w13, w13s, w2, w2s, w2s_g0)
+            # the share's scale groups follow from the rank: a kernel argument
+            # for them changed every build's register allocation
+            mw = moe.Weights(w_gate, w13, w13s, w2, w2s, rank)
             pre = moe.prefetch(g, shape, mw)  # in flight through the mix
             router_w = (moe.router_weights(w_gate), moe.router_plan())
             routed = mix(
@@ -594,7 +594,6 @@ def build(key: LayerBuild):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
-        w2s_g0: Int32,
         peers: Int64,
         rank: Int32,
         epoch: Int64,
@@ -643,7 +642,6 @@ def build(key: LayerBuild):
             w13s,
             w2,
             w2s,
-            w2s_g0,
             peers,
             rank,
             epoch,

@@ -83,16 +83,16 @@ def experts_rip(mlp) -> int:
 def expert_slices(mlp) -> list[dict[str, int]] | None:
     """Where each TP rank's share of the routed experts starts in the layer's
     expert tensors, as the kernels' arguments (`Launcher`): byte offsets added
-    to `w13`, `w13s` and `w2`, and `w2s_g0`, the share's first K group of the
-    down projection's scales (`wide.stages.moe.share_groups`). TP shards
-    start at 0. Whole experts (`--enable-hc-sp-replicated-moe`, read by a
-    build at their full intermediate) start at the rank's `RI` rows of gate
-    and up (whole 32-row scale blocks) and `RI` columns of down (whole 32-wide
-    K groups, a 16-row tile's in order at 16 x 16 bytes each). None for any
-    other layout."""
+    to `w13`, `w13s` and `w2` (the kernels find a share's down-projection
+    scales from the rank, `wide.stages.moe.share_g0`). TP shards start at 0.
+    Whole experts (`--enable-hc-sp-replicated-moe`, read by a build at their
+    full intermediate) start at the rank's `RI` rows of gate and up (whole
+    32-row scale blocks) and `RI` columns of down (whole 32-wide K groups, a
+    16-row tile's in order at 16 x 16 bytes each). None for any other
+    layout."""
     tp, rip = mlp.experts.moe_config.tp_size, experts_rip(mlp)
     if tp == L.TP:
-        return [dict(w13=0, w13s=0, w2=0, w2s_g0=0)] * L.TP
+        return [dict(w13=0, w13s=0, w2=0)] * L.TP
     if tp != 1 or rip != L.MOE_INTER:
         return None
     s = moe.Shape(1, rip)
@@ -101,7 +101,6 @@ def expert_slices(mlp) -> list[dict[str, int]] | None:
             w13=r * L.RI * s.w13_row_bytes,
             w13s=r * L.RI * s.w13_scale_cols,
             w2=r * (L.RI // 2) * moe.TILE,
-            w2s_g0=r * L.RI // 32,
         )
         for r in range(L.TP)
     ]

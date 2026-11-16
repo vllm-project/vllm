@@ -528,13 +528,20 @@ def pipelined(steps: int, depth: int, issue, compute):
         compute(k, ring.pop(0))
 
 
+def share_g0(rank):
+    """The first K group of the down projection's scales in rank `rank`'s
+    share of whole experts (`share_groups`' `g0`): a share is `RI` columns,
+    `RI // 32` groups."""
+    return rank * (RI // 32)
+
+
 def share_groups(g0, lane):
     """A lane's down-projection scale words in a build of whole experts
     (`Shape.rip` = `MOE_INTER`), which reads a rank's share in place: the
     lane's K group `4 k + lane // 16` of the share is group `c = g0 + 4 k +
     lane // 16` of the whole tensor (`g0`: the share's first group,
-    `runtime.guards.expert_slices`), which `e8m0_shuffle` keeps in word `(R
-    * tiles + c // 8) * 64 + (c % 4) * 16 + row % 16` of 32-row block `R`, at
+    `share_g0`), which `e8m0_shuffle` keeps in word `(R * tiles + c // 8) *
+    64 + (c % 4) * 16 + row % 16` of 32-row block `R`, at
     byte pair `(c // 4) % 2`. Returns (the word's lane part, `c0 = g0 + lane
     // 16`: step `k` reads column block `(c0 + 4 k) // 8`, the shift for
     `swap_pairs`: 16 where the byte pair is not the shard's `k % 2` that
@@ -882,16 +889,16 @@ class Weights(TraceInvariant):
     """A layer's MoE weights (byte addresses): the router gate, the experts'
     gate/up and down codes and scales (the shared expert is expert EXPERTS),
     and `w2s_g0`, the first K group of the down projection's scales a build
-    of whole experts reads (`share_groups`)."""
+    of whole experts reads at TP rank `rank` (`share_g0`, `share_groups`)."""
 
-    def __init__(self, w_gate, w13, w13s, w2, w2s, w2s_g0):
+    def __init__(self, w_gate, w13, w13s, w2, w2s, rank):
         self.w_gate, self.w13, self.w13s = (
             fx.Int64(w_gate),
             fx.Int64(w13),
             fx.Int64(w13s),
         )
         self.w2, self.w2s = fx.Int64(w2), fx.Int64(w2s)
-        self.w2s_g0 = fx.Int32(w2s_g0)
+        self.w2s_g0 = fx.Int32(share_g0(rank))
 
 
 class Bufs(TraceInvariant):

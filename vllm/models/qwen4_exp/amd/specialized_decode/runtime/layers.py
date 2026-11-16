@@ -140,7 +140,6 @@ class Launcher:
             "w13s": ex.w13_weight_scale.data_ptr() + share["w13s"],
             "w2": ex.w2_weight.data_ptr() + share["w2"],
             "w2s": ex.w2_weight_scale,
-            "w2s_g0": share["w2s_g0"],
             "peers": self.peer_table,
             "rank": self.rank,
             "epoch": self.epoch,

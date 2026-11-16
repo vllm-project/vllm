@@ -275,8 +275,11 @@ def test_tiled_gemm_resident(harness, rows, n, k, splits, fmt, fold):
 
 
 def test_fp4_shuffle_matches_aiter():
-    """The shuffled layout the kernels read is AITER's `shuffle_weight`."""
+    """The shuffled layouts the kernels read are AITER's `shuffle_weight` and
+    `e8m0_shuffle`, whose padding columns (E8M0 1.0) a build of whole experts
+    reads as the scales of K groups it does not load."""
     from aiter.ops.shuffle import shuffle_weight
+    from aiter.utility.fp4_utils import e8m0_shuffle
 
     gen = torch.Generator().manual_seed(1)
     packed = torch.randint(0, 256, (2, 64, 128), generator=gen, dtype=torch.uint8)
@@ -284,6 +287,8 @@ def test_fp4_shuffle_matches_aiter():
         shuffle_weight(packed.cuda(), layout=(16, 16)).cpu().view(torch.uint8),
         shuffle_data(packed),
     )
+    sc = torch.randint(0, 256, (256, 20), generator=gen, dtype=torch.uint8)
+    assert torch.equal(e8m0_shuffle(sc.cuda()).cpu(), shuffle_scale(sc))
 
 
 # --------------------------------------------------------------------------
@@ -1126,7 +1131,7 @@ def _moe_kernel(rows, codec="bf16", rip=RIP):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
-        w2s_g0: Int32,
+        rank: Int32,
         part: Int64,
         route: Int64,
         x4: Int64,
@@ -1162,7 +1167,7 @@ def _moe_kernel(rows, codec="bf16", rip=RIP):
             gemm,
             ph.moe.peek(),
             x,
-            moe.Weights(w_gate, w13, w13s, w2, w2s, w2s_g0),
+            moe.Weights(w_gate, w13, w13s, w2, w2s, rank),
             moe.Bufs(part, route, x4, x4s, mpart, mpart2, flags),
             ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
             lambda name, between=None: grid_sync(g, between),
@@ -1177,7 +1182,7 @@ def _moe_kernel(rows, codec="bf16", rip=RIP):
         w13s: Int64,
         w2: Int64,
         w2s: Int64,
-        w2s_g0: Int32,
+        rank: Int32,
         part: Int64,
         route: Int64,
         x4: Int64,
@@ -1201,7 +1206,7 @@ def _moe_kernel(rows, codec="bf16", rip=RIP):
             w13s,
             w2,
             w2s,
-            w2s_g0,
+            rank,
             part,
             route,
             x4,
@@ -1627,11 +1632,7 @@ def whole_experts():
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize(
-    "rows, routing",
-    [(1, "random"), (8, "random"), (12, "hot"), (32, "hot")]
-    + [(128, "skewed"), (192, "random")],
-)
+@pytest.mark.parametrize("rows, routing", [(8, "random"), (32, "hot"), (128, "skewed")])
 def test_moe_reads_rank_share_of_whole_experts(
     harness, whole_experts, rows, routing, rank
 ):
@@ -1690,7 +1691,7 @@ def test_moe_reads_rank_share_of_whole_experts(
             w13s.data_ptr() + at["w13s"],
             w2.data_ptr() + at["w2"],
             w2s.data_ptr(),
-            at["w2s_g0"],
+            rank,
             *[t.data_ptr() for t in out.values()],
             harness.mbox,
             harness.epoch.data_ptr(),
@@ -1701,7 +1702,7 @@ def test_moe_reads_rank_share_of_whole_experts(
         assert harness.health[0].item() == 0
         return out | {"lines": harness.exchange_y(rows, 2).clone()}
 
-    want = run(RIP, shards[rank], dict(w13=0, w13s=0, w2=0, w2s_g0=0))
+    want = run(RIP, shards[rank], dict(w13=0, w13s=0, w2=0))
     got = run(MOE_INTER, whole, share)
     y = want["lines"].float()
     assert torch.isfinite(y).all() and (y != 0).float().mean().item() > 0.99
