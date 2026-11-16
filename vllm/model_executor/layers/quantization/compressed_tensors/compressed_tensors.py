@@ -19,7 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -74,6 +74,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -211,7 +212,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
@@ -1084,6 +1085,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
+        self.supports_pre_processed_weights = (
+            layer.scheme.supports_pre_processed_weights
+        )
 
     def apply(
         self,
@@ -1264,6 +1268,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
         layer.register_buffer("_k_scale", layer.k_scale.detach())
