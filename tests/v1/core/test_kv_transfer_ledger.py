@@ -107,10 +107,32 @@ def test_drop_exports_keeps_imports():
     ledger.import_started(_req("i"))
     dropped = ledger.drop_exports()
     assert sorted(e.request_id for e in dropped) == ["g", "h"]
-    assert ledger.is_referenced("s") and ledger.pins_blocks()
-    ledger.close("s", EXPORT)
+    assert all(e.state == TransferState.DROPPING for e in dropped)
+    # A dropped export still pins its blocks until the connector reports it.
+    assert ledger.is_referenced("g") and ledger.has_retained()
+    # Dropping again does not return the same exports.
+    assert ledger.drop_exports() == []
+    for rid in ("g", "h", "s"):
+        ledger.close(rid, EXPORT)
     assert not ledger.has_retained() and ledger.needs_driving()
     assert ledger.is_referenced("i") and not ledger.is_referenced("g")
+
+
+def test_retracted_import_pins_blocks_until_closed():
+    ledger = KVTransferLedger()
+    r = _req("m")
+    ledger.import_started(r)
+    assert ledger.live_imports()[0].request is r
+    ledger.retract("m")
+    assert ledger.is_retracted("m") and ledger.pins_blocks()
+    ledger.complete("m", IMPORT)
+    assert ledger.is_retracted("m")
+    ledger.close("m", IMPORT)
+    assert not ledger.is_retracted("m") and not ledger.live_imports()
+    # A finished request's import is not live.
+    ledger.import_started(r)
+    ledger.mark_finished(r)
+    assert not ledger.live_imports()
 
 
 def test_pins_blocks_only_for_open_imports_and_exports():
@@ -125,4 +147,6 @@ def test_pins_blocks_only_for_open_imports_and_exports():
     ledger.open_export(_req("k"), droppable=True)
     assert ledger.pins_blocks()
     ledger.drop_exports()
+    assert ledger.pins_blocks()  # dropping: a read may still be running
+    ledger.close("k", EXPORT)
     assert not ledger.pins_blocks()

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.v1.core.utils import uniform_spec
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
@@ -1194,3 +1195,92 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@pytest.mark.parametrize("stage", ["pending", "in_flight", "failed", "received"])
+def test_clearing_keep_pause_turns_remote_loads_into_local_prefills(stage):
+    """A keep pause that clears the cache needs every block back, and the
+    remote KV was computed with the weights being replaced. Each remote load
+    becomes a local prefill, after a load in flight settles; a failed load is
+    then not an error, even under the "fail" policy."""
+    vllm_config = create_vllm_config(kv_load_failure_policy="fail")
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = BLOCK_SIZE * 2
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_prefill=True,
+    )
+    request_id = request.request_id
+    scheduler.add_request(request)
+    if stage != "pending":
+        scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    if stage == "received":
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            create_model_runner_output([], finished_recving={request_id}),
+        )
+
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.retract_kv_transfers()
+    if stage in ("in_flight", "failed"):
+        # The remote may still write the blocks until the load settles.
+        assert not scheduler.quiesced("keep", clear_cache=True)
+        assert not scheduler.reset_prefix_cache(reset_running_requests=True)
+        (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request_id)
+        scheduler.update_from_output(
+            scheduler.schedule(),
+            create_model_runner_output(
+                [],
+                finished_recving={request_id},
+                invalid_block_ids=set(block_ids) if stage == "failed" else None,
+            ),
+        )
+
+    assert request.status == RequestStatus.WAITING
+    assert request.num_computed_tokens == 0
+    assert not request.kv_transfer_params["do_remote_prefill"]
+    assert scheduler.quiesced("keep", clear_cache=True)
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[request_id] == NUM_TOKENS
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request], use_eos=True)
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_reset_prefix_cache_releases_admitted_remote_load():
+    """A received remote load that the token budget has not admitted yet
+    holds blocks while waiting; a reset that preempts running requests must
+    release it too instead of failing."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 2,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_recving={request.request_id}),
+    )
+    # Promote it without running it, as when the budget runs out.
+    assert scheduler._handle_blocked_waiting_request(request)
+    assert request.status == RequestStatus.WAITING
+    assert request in scheduler.kv_holding_waiting
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.num_computed_tokens == 0
+    assert request not in scheduler.kv_holding_waiting

@@ -217,6 +217,11 @@ class SchedulerInterface(ABC):
         Returns how many requests' blocks were released."""
         return 0
 
+    def retract_kv_transfers(self) -> None:
+        """Release the blocks KV transfers hold for a pause that keeps
+        requests but clears the cache (see Scheduler.retract_kv_transfers)."""
+        return
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

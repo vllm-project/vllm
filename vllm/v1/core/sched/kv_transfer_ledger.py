@@ -42,6 +42,10 @@ class TransferState(enum.Enum):
     OPEN = enum.auto()
     # The worker reported completion; the scheduler has not consumed it yet.
     CLOSING = enum.auto()
+    # EXPORT only: dropped (abort, or a pause that clears the cache). The
+    # connector fails later reads and reports the export finished once no
+    # read in flight uses its blocks; until then the blocks stay pinned.
+    DROPPING = enum.auto()
 
 
 @dataclass
@@ -52,8 +56,11 @@ class TransferEntry:
     # The request finished (e.g. was aborted) while the entry was open.
     request_finished: bool = False
     # EXPORT only: the blocks are kept only for a remote reader, so an abort
-    # may free them without waiting for the connector.
+    # may drop them instead of waiting for the reader.
     droppable: bool = False
+    # IMPORT only: the scheduler no longer wants this KV (a pause that clears
+    # the cache). Once the load settles, the request prefills locally.
+    retracted: bool = False
 
     @property
     def request_id(self) -> str:
@@ -150,15 +157,40 @@ class KVTransferLedger:
         return entry
 
     def drop_exports(self) -> list[TransferEntry]:
-        """Forget every droppable export: the engine stops holding blocks for
-        remote readers (abort). The caller frees the blocks. Other exports
-        stay until the connector reports them finished."""
-        keys = [
-            k
-            for k, e in self._entries.items()
-            if k[1] == TransferDirection.EXPORT and e.droppable
+        """Mark every droppable export DROPPING and return the newly marked
+        ones: the engine stops holding blocks for remote readers. They still
+        pin their blocks until the connector reports them finished, or until
+        the caller closes them (a connector that cannot report). Other
+        exports stay until the connector reports them finished."""
+        dropped = []
+        for (_, direction), entry in self._entries.items():
+            if (
+                direction == TransferDirection.EXPORT
+                and entry.droppable
+                and entry.state == TransferState.OPEN
+            ):
+                entry.state = TransferState.DROPPING
+                dropped.append(entry)
+        return dropped
+
+    def live_imports(self) -> list[TransferEntry]:
+        """Imports of requests that have not finished, in any state."""
+        return [
+            e
+            for (_, direction), e in self._entries.items()
+            if direction == TransferDirection.IMPORT and not e.request_finished
         ]
-        return [e for k in keys if (e := self.close(*k)) is not None]
+
+    def retract(self, request_id: str) -> None:
+        """The scheduler no longer wants this import's KV; its load is still
+        in flight and keeps pinning the blocks until it settles."""
+        entry = self._entries.get((request_id, TransferDirection.IMPORT))
+        if entry is not None:
+            entry.retracted = True
+
+    def is_retracted(self, request_id: str) -> bool:
+        entry = self._entries.get((request_id, TransferDirection.IMPORT))
+        return entry is not None and entry.retracted
 
     def mark_finished(self, request: Request) -> None:
         """The request finished while entries may still be open."""
@@ -188,7 +220,7 @@ class KVTransferLedger:
 
     def pins_blocks(self) -> bool:
         """Some transfer still references local blocks: an export a remote
-        reads, or an import a remote writes. A pending import (nothing
+        reads (dropped or not), or an import a remote writes. A pending import (nothing
         allocated yet) and a received one (blocks now the request's own) do
         not. This is what a cache reset or a memory release must wait for."""
         return self._num_exports > 0 or self._num_open_imports > 0
