@@ -164,6 +164,13 @@ impl ChatBackend for HfChatBackend {
         self.multimodal_model_info.as_ref()
     }
 
+    fn set_mm_device_do_normalize(&mut self, enabled: bool) -> Result<()> {
+        if let Some(info) = self.multimodal_model_info.as_mut() {
+            info.set_mm_device_do_normalize(enabled)?;
+        }
+        Ok(())
+    }
+
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,

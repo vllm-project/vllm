@@ -1403,7 +1403,7 @@ class Glm5NextForConditionalGeneration(
     # cache); the mamba-state classmethods delegate to the text model.
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
-    supports_mm_device_do_normalize = False
+    supports_mm_device_do_normalize = True
 
     # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
     # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),

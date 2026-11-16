@@ -163,6 +163,12 @@ impl MultimodalModelContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncoderInputNormalization {
+    Frontend,
+    Device,
+}
+
 /// Static model-specific tensor-layout behavior for one modality.
 #[derive(Clone)]
 struct ResolvedMultimodalSpec {
@@ -174,6 +180,7 @@ struct ResolvedMultimodalSpec {
     /// differs from the per-modality default (e.g. `"patches"` for
     /// DeepSeek-V4.1 images).
     encoder_input_key: Option<String>,
+    encoder_input_normalization: EncoderInputNormalization,
 }
 
 impl ResolvedMultimodalSpec {
@@ -184,6 +191,7 @@ impl ResolvedMultimodalSpec {
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
             encoder_input_key: raw.encoder_input_key_for(modality),
+            encoder_input_normalization: EncoderInputNormalization::Frontend,
         }
     }
 
@@ -289,9 +297,38 @@ struct VisionModalitySupport {
     /// Built by the spec with this modality's preprocessor config resolved
     /// into it; reused across requests.
     processor: Arc<dyn VisionPreProcessor>,
-    /// The modality's preprocessor config, consulted per request by the
+    /// The original modality preprocessor config, consulted per request by the
     /// video sampling policy and media-aware prompt replacements.
     config: PreProcessorConfig,
+}
+
+impl VisionModalitySupport {
+    fn with_encoder_input_normalization(
+        &self,
+        context: &MultimodalModelContext,
+        normalization: EncoderInputNormalization,
+    ) -> Result<Self> {
+        let mut config = self.config.clone();
+        if normalization == EncoderInputNormalization::Device {
+            config.do_normalize = Some(false);
+            config.do_rescale = Some(false);
+        }
+        let modality = self.spec.modality;
+        let processor = context
+            .resolve_vision_processor(self.spec.raw, &config, modality)?
+            .ok_or_else(|| multimodal!("{modality} processor no longer resolves"))?;
+        if normalization == EncoderInputNormalization::Device && !processor.emits_pixel_bytes() {
+            bail_multimodal!(
+                "model `{}` does not support device normalization for {modality} inputs: processor does not emit raw pixel bytes",
+                context.model_id
+            );
+        }
+
+        let mut updated = self.clone();
+        updated.spec.encoder_input_normalization = normalization;
+        updated.processor = processor;
+        Ok(updated)
+    }
 }
 
 /// Model-owned audio preprocessor plus the resolved model contract for its output.
@@ -595,6 +632,27 @@ impl MultimodalModelInfo {
             placeholder: ResolvedPlaceholder::resolve(raw_spec, context, Modality::Audio)?,
             processor,
         }))
+    }
+
+    pub fn set_mm_device_do_normalize(&mut self, enabled: bool) -> Result<()> {
+        let normalization = if enabled {
+            EncoderInputNormalization::Device
+        } else {
+            EncoderInputNormalization::Frontend
+        };
+        let image = self
+            .image
+            .as_ref()
+            .map(|support| support.with_encoder_input_normalization(&self.context, normalization))
+            .transpose()?;
+        let video = self
+            .video
+            .as_ref()
+            .map(|support| support.with_encoder_input_normalization(&self.context, normalization))
+            .transpose()?;
+        self.image = image;
+        self.video = video;
+        Ok(())
     }
 
     /// Return the template-visible placeholder token for one modality, when
@@ -1523,6 +1581,23 @@ mod tests {
 
         assert_eq!(info.placeholder_token(Modality::Image), Some("<|image|>"));
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    #[test]
+    fn device_normalization_rejects_float_only_processors() {
+        let mut info = llama4_info();
+        let error = info.set_mm_device_do_normalize(true).unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Multimodal(message)
+                if message.contains("does not support device normalization for image inputs")
+                    && message.contains("does not emit raw pixel bytes")
+        ));
+        assert_eq!(
+            info.image.as_ref().unwrap().spec.encoder_input_normalization,
+            EncoderInputNormalization::Frontend
+        );
     }
 
     // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.

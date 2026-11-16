@@ -1125,30 +1125,12 @@ class ModelConfig:
         self, mm_device_do_normalize: bool | None
     ) -> bool:
         if mm_device_do_normalize is None:
-            if envs.VLLM_USE_RUST_FRONTEND:
-                logger.debug(
-                    "VLLM_USE_RUST_FRONTEND is set. "
-                    "Rust frontend does not currently support mm_device_do_normalize, "
-                    "forcing mm_device_do_normalize = False."
-                )
-                mm_device_do_normalize = False
-            else:
-                mm_device_do_normalize = (
-                    self._model_info.supports_mm_device_do_normalize
-                )
-                logger.debug(
-                    "mm_device_do_normalize is %s by default.",
-                    "enabled" if mm_device_do_normalize else "disabled",
-                )
+            mm_device_do_normalize = self._model_info.supports_mm_device_do_normalize
+            logger.debug(
+                "mm_device_do_normalize is %s by default.",
+                "enabled" if mm_device_do_normalize else "disabled",
+            )
         else:
-            if mm_device_do_normalize and envs.VLLM_USE_RUST_FRONTEND:
-                logger.warning(
-                    "VLLM_USE_RUST_FRONTEND is set. "
-                    "Rust frontend does not currently support mm_device_do_normalize, "
-                    "forcing mm_device_do_normalize = False."
-                )
-                mm_device_do_normalize = False
-
             if (
                 mm_device_do_normalize
                 and not self._model_info.supports_mm_device_do_normalize

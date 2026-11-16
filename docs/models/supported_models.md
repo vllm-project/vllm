@@ -676,6 +676,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>Q</sup> `Qwen*-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen*`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
 !!! note
+    `Glm5NextForConditionalGeneration` requires the Rust frontend for image and
+    video inputs. Rust sends raw `uint8` patches to the Python engine for
+    normalization on the engine device. Python multimodal preprocessing remains
+    deprecated; Python frontend inference is text-only with both modalities disabled.
+    See [GLM-5.3-Flash multimodal inputs](../features/multimodal_inputs.md#glm-53-flash).
+
+!!! note
     `Alpamayo2Super` serves the reasoning model of `nvidia/Alpamayo2-Super`: visual
     question answering, grounding, chain-of-causation reasoning with meta-actions, and
     auto-labeling. The trajectory expert is not loaded, so trajectories are not produced.

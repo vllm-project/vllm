@@ -807,6 +807,26 @@ def test_paused_dp_rank_ignores_start_wave(paused):
     assert core.engines_running != paused
 
 
+@pytest.mark.parametrize(
+    ("model_id", "requested", "expected"),
+    [
+        ("Qwen/Qwen2.5-VL-3B-Instruct", True, True),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", False, False),
+        (MODEL_NAME, None, False),
+    ],
+)
+def test_ready_response_mm_device_do_normalize_from_config(
+    model_id, requested, expected
+):
+    vllm_config = EngineArgs(
+        model=model_id,
+        enforce_eager=True,
+        mm_device_do_normalize=requested,
+    ).create_engine_config()
+
+    assert EngineCoreProc._get_mm_device_do_normalize(vllm_config) is expected
+
+
 def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)

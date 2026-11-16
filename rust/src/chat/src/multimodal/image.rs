@@ -83,3 +83,108 @@ impl MultimodalModelInfo {
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use image::{DynamicImage, Rgb, RgbImage};
+    use llm_multimodal::{ImageDetail, ImageSource};
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
+    use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+    use super::super::tests::{glm53_flash_info, qwen3_vl_info};
+    use super::*;
+
+    fn solid_frame(pixel: [u8; 3]) -> Arc<ImageFrame> {
+        Arc::new(ImageFrame::new(
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(28, 28, Rgb(pixel))),
+            bytes::Bytes::new(),
+            ImageDetail::Auto,
+            ImageSource::InlineBytes,
+            "image".to_string(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn engine_capability_selects_raw_u8_or_float_images() {
+        let mut glm = glm53_flash_info(Default::default());
+        glm.set_mm_device_do_normalize(true).unwrap();
+        let prepared = glm
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::U8);
+        assert_eq!(primary.shape, [64, 3 * 2 * 14 * 14]);
+        let row = [
+            vec![255; 2 * 14 * 14],
+            vec![128; 2 * 14 * 14],
+            vec![7; 2 * 14 * 14],
+        ]
+        .concat();
+        assert_eq!(
+            primary.data.as_raw_view().unwrap().as_ref(),
+            row.repeat(64).as_slice()
+        );
+
+        let mut qwen = qwen3_vl_info();
+        qwen.set_mm_device_do_normalize(false).unwrap();
+        let prepared = qwen
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("Qwen image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::F32);
+    }
+
+    #[tokio::test]
+    async fn disabling_device_normalization_restores_frontend_float_images() {
+        let mut glm = glm53_flash_info(Default::default());
+        glm.set_mm_device_do_normalize(true).unwrap();
+        glm.set_mm_device_do_normalize(true).unwrap();
+        glm.set_mm_device_do_normalize(false).unwrap();
+        glm.set_mm_device_do_normalize(false).unwrap();
+
+        for support in [glm.image.as_ref().unwrap(), glm.video.as_ref().unwrap()] {
+            assert_eq!(support.config.do_normalize, None);
+            assert_eq!(support.config.do_rescale, None);
+        }
+
+        let prepared = glm
+            .prepare_images(
+                vec![solid_frame([255, 128, 7])],
+                vec![None],
+                ModelDtype::Float32,
+                VisionPreprocessingContext::default(),
+            )
+            .await
+            .unwrap();
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[IMAGE_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM image primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::F32);
+        let bytes = primary.data.as_raw_view().unwrap();
+        let first = f32::from_ne_bytes(bytes[..4].try_into().unwrap());
+        let expected = (1.0_f32 - 0.48145466) / 0.26862954;
+        assert!((first - expected).abs() < 1e-6, "first pixel was {first}");
+    }
+}

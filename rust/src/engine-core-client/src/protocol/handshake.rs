@@ -145,6 +145,10 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// Whether multimodal encoder inputs are normalized on the engine device.
+    /// Older engines omit this field and require frontend normalization.
+    #[serde(default)]
+    pub mm_device_do_normalize: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

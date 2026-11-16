@@ -70,6 +70,16 @@ The kernel accepts `uint8`, `float16`, `bfloat16` and `float32` inputs. The `uin
 
 The transfer path **Entrypoint (API server / offline LLM) → Engine Core(scheduler + workers) → Device Memory** stays in `uint8`. On the device,`fused_mm_input_norm_triton` computes in fp32 internally and writes the requested `visual_dtype` (a per-call argument to `forward_*`, commonly `bf16`) directly, without materialising a global fp32 intermediate.
 
+For GLM-5.3-Flash with the Rust frontend, the Python engine reports the effective
+`mm_device_do_normalize` value in the `EngineCoreReadyResponse` ready handshake.
+When it is `True`, Rust decodes, resizes, and patchifies image and video inputs,
+then sends raw `uint8` patches for device normalization. When it is `False`,
+including when explicitly configured, Rust performs frontend floating-point
+normalization instead of rejecting the configuration. Rust follows the handshake
+value rather than inferring the normalization path from the model type or
+architecture. Python frontend multimodal preprocessing remains deprecated and is
+not used by this path.
+
 #### Toggle: `mm_device_do_normalize`
 
 GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
@@ -85,6 +95,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `gemma-3`                  | `Gemma3ForConditionalGeneration`           | `google/gemma-3-4b-it`, etc.                          |
 | `gemma-4`                  | `Gemma4ForConditionalGeneration`           | `google/gemma-4-E2B-it`, etc.                         |
 | `glm-4v`                   | `Glm4vForConditionalGeneration`            | `zai-org/GLM-4.1V-9B-Thinking`, etc.                  |
+| `glm-5.3-flash`            | `Glm5NextForConditionalGeneration`         | `zai-org/GLM-5.3-Flash`                               |
 | `glm-ocr`                  | `GlmOcrForConditionalGeneration`           | `zai-org/GLM-OCR`                                     |
 | `intern-s1-pro`            | `InternS1ProForConditionalGeneration`      | `internlm/Intern-S1-Pro`                              |
 | `intern-s2-mobius`         | `InternS2MobiusForConditionalGeneration`   | `internlm/Intern-S2-Mobius`                           |
