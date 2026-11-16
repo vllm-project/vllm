@@ -141,7 +141,9 @@ _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
 # see the request would otherwise keep its transfer id forever.
 _MAX_UNMATCHED_WRITE_FAILURES = 4096
 # A write_done for a request that already finished (e.g. aborted while waiting
-# for its KV) never matches; it is dropped after defer_timeout or at this cap.
+# for its KV) never matches; it is dropped after this many seconds, or oldest
+# first at the cap. Independent of defer_timeout, which may be set low.
+_UNMATCHED_WRITE_COMPLETION_TTL_S = 60.0
 _MAX_UNMATCHED_WRITE_COMPLETIONS = 4096
 
 
@@ -1917,11 +1919,12 @@ class MoRIIOConnectorWorker:
         self._writer = MoRIIOWriter(self)
         # Completions that arrived before transfer_id_to_request_id was populated,
         # with the time each first arrived. Retried each step until the mapping is
-        # established, or dropped once older than defer_timeout.
+        # established, or dropped once older than _UNMATCHED_WRITE_COMPLETION_TTL_S.
         self._unmatched_write_completions: OrderedDict[TransferId, float] = (
             OrderedDict()
         )
         self._num_expired_write_completions = 0
+        self._num_evicted_write_completions = 0
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
@@ -3029,27 +3032,39 @@ class MoRIIOConnectorWorker:
         """Drop write_done notifications that no request will ever match.
 
         The mapping for a completion that raced ahead of start_load_kv arrives
-        within a step or two. One still unmatched after defer_timeout belongs to
-        a request that finished first, e.g. one aborted while waiting for its KV.
+        within a step or two. One still unmatched after
+        `_UNMATCHED_WRITE_COMPLETION_TTL_S` belongs to a request that finished
+        first, e.g. one aborted while waiting for its KV. Past the cap the oldest
+        are dropped, which may include a live one.
         """
         pending = self._unmatched_write_completions
-        deadline = time.monotonic() - self.moriio_config.defer_timeout
+        deadline = time.monotonic() - _UNMATCHED_WRITE_COMPLETION_TTL_S
         expired = 0
-        while pending and (
-            len(pending) > _MAX_UNMATCHED_WRITE_COMPLETIONS
-            or next(iter(pending.values())) <= deadline
-        ):
+        while pending and next(iter(pending.values())) <= deadline:
             pending.popitem(last=False)
             expired += 1
+        evicted = 0
+        while len(pending) > _MAX_UNMATCHED_WRITE_COMPLETIONS:
+            pending.popitem(last=False)
+            evicted += 1
         if expired:
             self._num_expired_write_completions += expired
             logger.warning(
                 "MoRIIO WRITE: dropped %d write_done notification(s) that no "
-                "request on this rank matched before defer_timeout elapsed or "
-                "the %d-entry cap was reached (%d so far).",
+                "request on this rank matched within %.0fs (%d so far).",
                 expired,
-                _MAX_UNMATCHED_WRITE_COMPLETIONS,
+                _UNMATCHED_WRITE_COMPLETION_TTL_S,
                 self._num_expired_write_completions,
+            )
+        if evicted:
+            self._num_evicted_write_completions += evicted
+            logger.error(
+                "MoRIIO WRITE: more than %d unmatched write_done notifications; "
+                "dropped the %d oldest (%d so far). A request whose write_done "
+                "was dropped before its mapping arrived never completes.",
+                _MAX_UNMATCHED_WRITE_COMPLETIONS,
+                evicted,
+                self._num_evicted_write_completions,
             )
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
