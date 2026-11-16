@@ -25,8 +25,8 @@ class MlaValue:
     """W_UV and the sigmoid gate, [B, H, 512] BF16 latent -> [B, H*128]. One
     128-thread CTA per (32 outputs, head, 16 rows); warp w owns outputs
     8w..8w+7 over the whole latent (BF16 MMA, FP32 accumulation). W_UV must have a
-    contiguous latent axis (the absorbed kv_b_proj view). Rows are tokens, ``q`` per
-    request (``lengths`` per request)."""
+    contiguous latent axis (the absorbed kv_b_proj view). Rows are tokens, `q` per
+    request (`lengths` per request)."""
 
     def __init__(self, heads: int, batch: int, q: int = 1):
         self.heads, self.batch, self.q = heads, batch, q
@@ -109,13 +109,13 @@ VALUE_BMM_HEADS = 64
 
 
 def value_bmm(heads: int, batch: int) -> bool:
-    """Whether ``batch`` rows of ``heads`` local heads take the batched GEMM."""
+    """Whether `batch` rows of `heads` local heads take the batched GEMM."""
     return heads >= VALUE_BMM_HEADS and batch >= VALUE_BMM_FROM
 
 
 class MlaGate:
-    """The sigmoid gate of the W_UV output rows: ``values`` [H, B, 128] BF16 (the
-    batched GEMM's), ``gate`` [B, H * 128] -> ``output`` [B, H * 128], as MlaValue
+    """The sigmoid gate of the W_UV output rows: `values` [H, B, 128] BF16 (the
+    batched GEMM's), `gate` [B, H * 128] -> `output` [B, H * 128], as MlaValue
     rounds and gates them (BF16 value times the FP32 sigmoid, rounded to BF16;
     rows of empty requests zero). One 256-thread CTA per (16 rows, head): each
     thread 8 outputs of one row."""

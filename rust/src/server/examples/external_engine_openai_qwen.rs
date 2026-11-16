@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
         custom_histogram_buckets: Default::default(),
         log_stats_interval: Some(Duration::from_secs(10)),
         disable_request_id_randomization: false,
+        keep_alive_on_engine_death: false,
         shutdown_timeout: Duration::ZERO,
         manages_engine: false,
         keep_alive_timeout: Duration::from_secs(5),

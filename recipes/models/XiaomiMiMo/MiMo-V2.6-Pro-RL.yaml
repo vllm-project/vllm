@@ -4,7 +4,7 @@ meta:
   provider: "MiMo (Xiaomi)"
   description: "Xiaomi's flagship omnimodal MoE (1.02T total / 42B active) with hybrid attention, FP8-compute/mxfp4-stored weights, 1M context, and a DFlash speculative decoder — the default MOPD checkpoint fixes the RL release's tool-call repetition"
   date_added: 2026-09-22
-  date_updated: 2026-10-07
+  date_updated: 2026-11-11
   tasks:
     - text
     - multimodal
@@ -53,8 +53,15 @@ features:
       - "--speculative-config"
       - '{"method":"dflash","model":"$DFLASH_DIR","num_speculative_tokens":7}'
 
+  encoder_parallel:
+    description: "Run the vision encoder data-parallel instead of sharding it across TP ranks"
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
 opt_in_features:
   - spec_decoding
+  - encoder_parallel
 
 variants:
   # MOPD supersedes the RL release as the default served checkpoint (same
@@ -71,8 +78,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
   rl:
     # The original 2026-09-22 RL checkpoint. No `model_id` override: it serves
     # the recipe's own repo, like DeepSeek-V4-Pro's "FP8 (Preview)" variant.
@@ -85,8 +90,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
 
 compatible_strategies:
   - single_node_tp
@@ -100,10 +103,13 @@ hardware_overrides:
     # allreduce, which is a real cost at this TP. Verified 2026-09-23 on an
     # 8x MI355X node, vllm/vllm-openai-rocm:nightly @ 0961bbae2.
     extra_args:
-      - "--gpu-memory-utilization"
-      - "0.93"
       - "--kv-cache-dtype"
       - "fp8"
+      # Faster than the DiffKV default; see vllm#64064.
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "--block-size"
+      - "16"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
@@ -180,7 +186,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -196,8 +201,9 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.93 \
     --kv-cache-dtype fp8 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --block-size 16 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -208,9 +214,10 @@ guide: |
   MXFP4 MoE weights run natively on CDNA 4, so no load-time requantization is
   needed. `VLLM_ROCM_USE_AITER=1` is off by default and is required to reach
   the AITER MXFP4 MoE and FP8 block-scaled GEMM kernels. Attention resolves to
-  `TRITON_ATTN_DIFFKV`, the only backend covering this model's asymmetric head
-  dims (QK 192 / V 128) together with attention sinks and sliding-window
-  attention.
+  `TRITON_ATTN_DIFFKV` by default; `ROCM_AITER_UNIFIED_ATTN` (selected above)
+  also covers these asymmetric head dims, with attention sinks and
+  sliding-window attention, and is faster
+  ([vllm-project/vllm#64064](https://github.com/vllm-project/vllm/pull/64064)).
 
   On MI355X, **Tensor Parallel** defaults to **TP4**: 4x288 GiB clears the 680 GiB
   requirement, so TP4 halves the GPUs per server and doubles the servers per node.
@@ -239,7 +246,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DFLASH_DIR\",\"num_speculative_tokens\":7}" \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -280,5 +286,6 @@ guide: |
   - [MiMo-V2.6 blog post](https://mimo.xiaomi.com/mimo-v2-6)
   - [vLLM PR #57784 — mxfp4 MoE / bf16 router / DFlash for MiMo V2](https://github.com/vllm-project/vllm/pull/57784)
   - [vLLM PR #57933 — MiMo tool-call/reasoning parsers for the Rust frontend](https://github.com/vllm-project/vllm/pull/57933)
+  - [vLLM PR #64064 — ROCM_AITER_UNIFIED_ATTN for MiMo-V2.6 (`--attention-backend ROCM_AITER_UNIFIED_ATTN`)](https://github.com/vllm-project/vllm/pull/64064)
   - [SGLang MiMo cookbook](https://docs.sglang.io/cookbook/autoregressive/Xiaomi/MiMo-V2.5)
   - [vLLM ROCm GPU install docs](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/?device=rocm)

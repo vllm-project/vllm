@@ -50,8 +50,8 @@ def compile_dcp_value(
     cap=64,
     pushed=False,
 ):
-    """DcpValue of one batch (DSA layout over the ``q_heads``-padded mailbox of
-    ``cap`` rows; ``partials``: the DcpBox's; ``pushed``: the sparse decode pushed
+    """DcpValue of one batch (DSA layout over the `q_heads`-padded mailbox of
+    `cap` rows; `partials`: the DcpBox's; `pushed`: the sparse decode pushed
     the rows, attn_sparse)."""
     return compile_value(
         heads,
@@ -80,7 +80,7 @@ def publish_args(box, parity):
 
 
 def local_slots(metadata, topk, dcp, rank, interleave, stride_rows):
-    """This rank's flat rows of the global top-k ids ``topk`` [B, K] (compacted to
+    """This rank's flat rows of the global top-k ids `topk` [B, K] (compacted to
     a prefix) and their counts."""
     from vllm.v1.attention.backends.mla.sparse_utils import (
         triton_filter_and_convert_dcp_index,
@@ -104,9 +104,9 @@ def local_slots(metadata, topk, dcp, rank, interleave, stride_rows):
 def run_value(
     kernel, box, parity, publish, heads, core, lengths, uv, projected, out, w_uv=None
 ):
-    """DcpValue over the sparse decode's ``core`` output: its padded-head latent
-    rows, LSE and per-row valid counts (``lengths``: the requests' global lengths)
-    -> ``out`` [B, H * 128]. Under "proj" ``w_uv`` is the gathered W_UV [DCP * H,
+    """DcpValue over the sparse decode's `core` output: its padded-head latent
+    rows, LSE and per-row valid counts (`lengths`: the requests' global lengths)
+    -> `out` [B, H * 128]. Under "proj" `w_uv` is the gathered W_UV [DCP * H,
     512, 128] the bmm projects the rows through first."""
     latent, lse, valid = core
     batch = projected.shape[0]
