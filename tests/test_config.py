@@ -2500,8 +2500,7 @@ def test_draft_model_enables_async_scheduling_by_default():
 def test_spec_decode_rejects_budget_smaller_than_decode_step(
     max_num_batched_tokens: int, should_raise: bool
 ):
-    """One decode step needs 1 + num_speculative_tokens tokens; a smaller
-    budget used to crash engine startup with an out-of-bounds gather."""
+    """One decode step needs 1 + num_speculative_tokens tokens."""
     parallel_config = ParallelConfig(distributed_executor_backend="uni")
     model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=64)
     speculative_config = SpeculativeConfig(
@@ -2517,7 +2516,7 @@ def test_spec_decode_rejects_budget_smaller_than_decode_step(
         return VllmConfig(
             model_config=model_config,
             scheduler_config=SchedulerConfig(
-                max_model_len=64,
+                max_model_len=model_config.max_model_len,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_num_seqs=2,
                 is_encoder_decoder=False,
