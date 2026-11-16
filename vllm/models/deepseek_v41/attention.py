@@ -86,8 +86,9 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
@@ -194,9 +195,30 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
 # UE8M0 scale per 32 dims, each token's 512 data bytes followed by its 16 scale
 # bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
 # V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
-# pad byte (584 B, 576 B pages).
+# pad byte (584 B, 576 B pages). The Ampere kernels decode the V4.1 records
+# too (nvidia/specialized_decode/ampere).
 def _use_v41_mxfp8_kv_record() -> bool:
-    return current_platform.is_device_capability_family(100)
+    if current_platform.is_device_capability_family(100):
+        return True
+    if not current_platform.is_cuda():
+        return False
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import is_ampere
+
+    return is_ampere()
+
+
+def _indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
+    """Whether the index K cache is MXFP4. The Ampere kernels decide it
+    themselves (nvidia/specialized_decode/ampere)."""
+    if current_platform.is_cuda():
+        from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import (
+            indexer_uses_fp4,
+            is_ampere,
+        )
+
+        if is_ampere():
+            return indexer_uses_fp4(vllm_config)
+    return dsa_indexer_uses_fp4(vllm_config)
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -264,6 +286,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # The compressor of kv-source layers; a platform subclass swaps in one
+    # that writes its compressed KV record with its own kernel.
+    compressor_cls: ClassVar[type[DeepseekCompressor]] = DeepseekCompressor
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -341,6 +366,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         returns one that writes and scores its own cache layout."""
         return DeepseekV4Indexer
 
+    def _indexer_cache_cls(self) -> type["DeepseekV4IndexerCache"]:
+        """The index K cache layer, which names the indexer metadata
+        backend. A platform subclass returns one with its own builder."""
+        return DeepseekV4IndexerCache
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -402,6 +432,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         is_backbone = layer_id < config.num_hidden_layers
         self.is_kv_source = is_backbone and layer_id in self.kv_source_layers
+        self.always_gathers_compressed_kv = self.is_kv_source
         self.is_index_source = is_backbone and layer_id in self.index_source_layers
         if self.compress_ratio > 0:
             if not self.kv_source_layers or not self.index_source_layers:
@@ -506,9 +537,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # wk/k_norm); non-owning index sources share the K cache of the
             # latest kv source below them (its indexer produces the keys).
             if self.is_kv_source:
-                index_k_cache = DeepseekV4IndexerCache(
+                index_k_cache = self._indexer_cache_cls()(
                     head_dim=_indexer_k_cache_head_dim(
-                        config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
+                        config.index_head_dim, _indexer_uses_fp4(vllm_config)
                     ),
                     dtype=torch.uint8,
                     prefix=f"{prefix}.indexer.k_cache",
@@ -639,7 +670,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # source's compressed cache through the forward context.
         self.compressor = None
         if self.is_kv_source:
-            self.compressor = DeepseekCompressor(
+            self.compressor = self.compressor_cls(
                 vllm_config=vllm_config,
                 compress_ratio=self.compress_ratio,
                 hidden_size=self.hidden_size,
@@ -1253,13 +1284,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Only kv-source layers own a compressed-KV cache; consumers read the
         # source's cache through the forward context, and cr==0 layers are
         # pure SWA. The SWA cache is allocated separately as
         # DeepseekV4SWACache.
         if not self.is_kv_source:
             return None
+        return FullAttentionManager.layer_config(
+            self.get_compressed_kv_cache_spec(vllm_config)
+        )
+
+    def get_compressed_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
@@ -1322,7 +1358,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # head_dim already carries the fp8 scale padding
         # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
         # nvfp4_ds_mla is packed too: its compressed record is NVFP4 but the
@@ -1335,7 +1371,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         page_alignment = (
             576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
         )
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -1360,6 +1396,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                 else None
             ),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self): ...
 
@@ -1427,7 +1464,7 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1280
         self.compress_ratio = compress_ratio
         self.owns_k = owns_k
-        self.use_fp4_kv = dsa_indexer_uses_fp4(vllm_config)
+        self.use_fp4_kv = _indexer_uses_fp4(vllm_config)
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",

@@ -6,27 +6,34 @@ from math import lcm
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     chunk_hashes_for_block_size,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     MambaSpec,
-    SlidingWindowSpec,
 )
 
 
+def _group(layer_names, layer: KVCacheLayerConfig, **kwargs) -> KVCacheGroup:
+    return KVCacheGroup.from_layers(dict.fromkeys(layer_names, layer), **kwargs)
+
+
 def _mamba_align(block_size=32):
-    return MambaSpec(
-        block_size=block_size,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    return MambaManager.layer_config(
+        MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
     )
 
@@ -42,7 +49,7 @@ def _make_coord(
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors `resolve_kv_cache_block_sizes` for
     the test fixtures."""
-    block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    block_sizes = [g.block_size for g in groups]
     scheduler_block_size = lcm(*block_sizes)
     return MooncakeStoreCoordinator(
         groups,
@@ -94,23 +101,19 @@ def test_external_cached_block_pool_unknown_hash():
 # ----- Helpers -----
 
 
-def _full(block_size=16, sliding_window=None):
-    return FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=sliding_window,
+def _attn_spec(block_size):
+    return AttentionSpec(
+        block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
     )
 
 
+def _full(block_size=16):
+    return FullAttentionManager.layer_config(_attn_spec(block_size))
+
+
 def _swa(block_size=16, sliding_window=32):
-    return SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=sliding_window,
+    return SlidingWindowManager.layer_config(
+        _attn_spec(block_size), sliding_window=sliding_window
     )
 
 
@@ -122,7 +125,7 @@ def _hashes(n: int) -> list[BlockHash]:
 
 
 def test_coordinator_single_full_attention_all_hits():
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
@@ -132,7 +135,7 @@ def test_coordinator_single_full_attention_all_hits():
 
 
 def test_coordinator_single_full_attention_partial_prefix():
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(hs[0])), (0, bytes(hs[1]))})
@@ -142,7 +145,7 @@ def test_coordinator_single_full_attention_partial_prefix():
 
 
 def test_coordinator_single_full_attention_no_hits():
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, set())
@@ -154,7 +157,7 @@ def test_coordinator_single_full_attention_no_hits():
 def test_coordinator_single_swa_tautological_pool_masks_pre_window():
     """SWA tautological-pool: hit_length spans full prefix, mask is
     tail-window only."""
-    groups = [KVCacheGroupSpec(["L0"], _swa(block_size=16, sliding_window=32))]
+    groups = [_group(["L0"], _swa(block_size=16, sliding_window=32))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)  # 4 chunks * 16 tokens
     cmap = ExternalCachedBlockPool(16)
@@ -170,8 +173,8 @@ def test_coordinator_single_swa_tautological_pool_masks_pre_window():
 
 def test_coordinator_hybrid_full_plus_swa_all_hit():
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _swa(16, 32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
@@ -184,8 +187,8 @@ def test_coordinator_hybrid_full_plus_swa_all_hit():
 
 def test_coordinator_hybrid_hole_in_full_clips_both():
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _swa(16, 32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
@@ -202,8 +205,8 @@ def test_coordinator_group_block_size_double_hash():
     """Group block_size=32 over hash_block_size=16 hashes: adjacent
     hashes merge before pool lookup."""
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _full(32)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _full(32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
@@ -226,8 +229,8 @@ def test_coordinator_fine_grained_partial_tail_hit():
     both groups have the sub-block boundary hash, the reconciled hit lands on
     the hash boundary (48), not the block boundary (32)."""
     groups = [
-        KVCacheGroupSpec(["L0"], _full(32)),
-        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+        _group(["L0"], _full(32)),
+        _group(["L1"], _mamba_align(32)),
     ]
     coord = _make_coord(groups, hash_block_size=16, enable_partial_hash_hits=True)
     hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
@@ -245,8 +248,8 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     """If only one group has the sub-block boundary, min-convergence clips the
     reconciled hit back to the block boundary (32)."""
     groups = [
-        KVCacheGroupSpec(["L0"], _full(32)),
-        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+        _group(["L0"], _full(32)),
+        _group(["L1"], _mamba_align(32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
@@ -264,7 +267,7 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
 
 
 def test_store_mask_full_attention_all_true():
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16)
     masks = coord.store_mask(64)
     assert masks == (None,)
@@ -272,8 +275,8 @@ def test_store_mask_full_attention_all_true():
 
 def test_store_mask_zero_aligned_returns_empty_per_group():
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _swa(16, 32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     masks = coord.store_mask(0)
@@ -287,7 +290,7 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     participate in any future hit."""
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
-    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], full), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=8)
     masks = coord.store_mask(64)
     # Full-attn: 2 chunks * 32 tokens.
@@ -301,7 +304,7 @@ def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
     boundary should now span two SWA tail blocks."""
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=16)
-    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], full), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=8)
     masks = coord.store_mask(64)
     assert masks[0] is None
@@ -313,7 +316,7 @@ def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
 def test_store_mask_swa_prefix_stable_as_aligned_length_grows():
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
-    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], full), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=8)
 
     shorter = coord.store_mask(64)[1]
@@ -335,11 +338,11 @@ def test_store_mask_dsv4_5_groups_full_mla_plus_4_swa():
     swa_4_sw16 = _swa(block_size=4, sliding_window=16)
     swa_8_sw64 = _swa(block_size=8, sliding_window=64)
     groups = [
-        KVCacheGroupSpec(["L0"], full_mla),
-        KVCacheGroupSpec(["L1"], swa_64_sw128),
-        KVCacheGroupSpec(["L2"], swa_64_sw512),
-        KVCacheGroupSpec(["L3"], swa_4_sw16),
-        KVCacheGroupSpec(["L4"], swa_8_sw64),
+        _group(["L0"], full_mla),
+        _group(["L1"], swa_64_sw128),
+        _group(["L2"], swa_64_sw512),
+        _group(["L3"], swa_4_sw16),
+        _group(["L4"], swa_8_sw64),
     ]
     coord = _make_coord(groups, hash_block_size=4)
     assert coord.lcm_block_size == 256
@@ -365,7 +368,7 @@ def test_store_mask_fast_path_all_block_sizes_equal_lcm():
     fast path returns all-True without invoking find_longest_cache_hit."""
     full = _full(block_size=64)
     swa = _swa(block_size=64, sliding_window=128)
-    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], full), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=64)
     assert coord.lcm_block_size == 64
     masks = coord.store_mask(256)
@@ -377,7 +380,7 @@ def test_store_mask_fast_path_single_attention_group():
     """Two groups sharing the same SWA spec collapse to one attention group;
     no lcm filter applies, every chunk is True."""
     swa = _swa(block_size=16, sliding_window=32)
-    groups = [KVCacheGroupSpec(["L0"], swa), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], swa), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=16)
     assert len(coord.attention_groups) == 1
     masks = coord.store_mask(64)
@@ -392,7 +395,7 @@ def _retention_groups():
     densely keeps one tail block per 32-token boundary."""
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
-    return [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    return [_group(["L0"], full), _group(["L1"], swa)]
 
 
 def test_store_mask_dense_default_matches_every_lcm_boundary():
@@ -456,7 +459,7 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
     store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
         group_hashes = chunk_hashes_for_block_size(
-            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+            hashes, coord.hash_block_size, group.block_size
         )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
@@ -475,22 +478,20 @@ def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
     """An external SWA hit allocates the MTP re-prefill tail below the window,
     so the store must keep it and the load must restore it; otherwise those
     blocks hold stale KV under valid prefix hashes."""
-    swa = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=8,
+    sliding_window = 8
+    swa = SlidingWindowManager.layer_config(
+        _attn_spec(8),
+        sliding_window=sliding_window,
         extra_retained_tokens=extra_retained_tokens,
     )
-    groups = [KVCacheGroupSpec(["L0"], _full(32)), KVCacheGroupSpec(["L1"], swa)]
+    groups = [_group(["L0"], _full(32)), _group(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=8, retention_interval=0)
     hashes = _hashes(96 // coord.hash_block_size)
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(96, num_prompt_tokens=96)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
         group_hashes = chunk_hashes_for_block_size(
-            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+            hashes, coord.hash_block_size, group.block_size
         )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
@@ -504,7 +505,7 @@ def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
     assert hit == 64
     loaded = [i for i, v in enumerate(coord.load_mask(hashes, hit)[1]) if v]
     # add_local_computed_blocks pads only the blocks below the retained window.
-    first_allocated = (hit - swa.sliding_window - extra_retained_tokens + 1) // 8
+    first_allocated = (hit - sliding_window - extra_retained_tokens + 1) // 8
     assert loaded == list(range(first_allocated, hit // 8))
 
 
@@ -522,7 +523,7 @@ def test_store_mask_suffix_matches_full_mask_tail():
     suffix = coord.store_mask(128, start_token=64, num_prompt_tokens=100)
 
     for g_idx, cache_group in enumerate(coord.kv_cache_groups):
-        block_size = cache_group.kv_cache_spec.block_size
+        block_size = cache_group.block_size
         start_chunk = 64 // block_size
         end_chunk = 128 // block_size
         full_mask = full[g_idx]
@@ -550,8 +551,8 @@ def test_store_mask_excludes_mamba_groups_lookup_unaffected():
     probe mamba boundaries: their keys come from the pinned snapshot/CoW
     hand-off path instead."""
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _mamba_align(16)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     masks = coord.store_mask(64)
@@ -570,7 +571,7 @@ def test_store_mask_excludes_mamba_groups_lookup_unaffected():
 def test_lookup_with_eagle_pops_last_full_attention_block():
     """Sanity: with use_eagle, find_longest_cache_hit drops the last block.
     Pairs with the load_mask test below to lock the round-trip contract."""
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
@@ -591,7 +592,7 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     silently skipped — leaving the trailing block of the loaded prefix
     uninitialized in local KV.
     """
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
@@ -613,8 +614,8 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
     in [0, token_len) for the FullAttn group; SWA group keeps its
     tail-window mask."""
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _swa(16, 32)),
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
@@ -636,7 +637,7 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
 
 def test_load_mask_without_eagle_unchanged():
     """Sanity: when eagle is off, load_mask is identical to the pre-fix path."""
-    groups = [KVCacheGroupSpec(["L0"], _full(16))]
+    groups = [_group(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=False)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
@@ -649,12 +650,7 @@ def test_load_mask_without_eagle_unchanged():
 
 
 def _mamba(block_size=16):
-    return MambaSpec(
-        block_size=block_size,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="align",
-    )
+    return _mamba_align(block_size)
 
 
 def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
@@ -666,11 +662,11 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     peek margin lets it match one block PAST the eagle-pruned full-attention
     hit, and adopting that length resumes the recurrent state ahead of the
     verified token prefix (#43559). Gating the margin on `not
-    isinstance(spec, MambaSpec)` pins the hit to the attention-verified 48.
+    issubclass(manager_cls, MambaManager)` pins the hit to the attention-verified 48.
     """
     groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _mamba(16)),
+        _group(["L0"], _full(16)),
+        _group(["L1"], _mamba(16)),
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
@@ -696,9 +692,9 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     """
     swa = _swa(block_size=16, sliding_window=32)
     groups = [
-        KVCacheGroupSpec(["L0"], _full(64)),
-        KVCacheGroupSpec(["L1"], swa),
-        KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
+        _group(["L0"], _full(64)),
+        _group(["L1"], swa),
+        _group(["L2"], swa, is_eagle_group=True),
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     assert coord.eagle_group_ids == {1, 2}
@@ -712,9 +708,9 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     hs = _hashes(128 // 16)
     exists = set()
     for g_idx, g in enumerate(groups):
-        ghashes = chunk_hashes_for_block_size(hs, 16, g.kv_cache_spec.block_size)
+        ghashes = chunk_hashes_for_block_size(hs, 16, g.block_size)
         mask = masks[g_idx]
-        for i in range(128 // g.kv_cache_spec.block_size):
+        for i in range(128 // g.block_size):
             if mask is None or mask[i]:
                 exists.add((g_idx, bytes(ghashes[i])))
     _masks, hit = coord.find_longest_cache_hit(
@@ -726,8 +722,8 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
 @pytest.mark.cpu_test
 def test_lookahead_lookup_and_store_masks_match():
     groups = [
-        KVCacheGroupSpec(["full"], _full(64)),
-        KVCacheGroupSpec(
+        _group(["full"], _full(64)),
+        _group(
             ["mtp"],
             _swa(block_size=16, sliding_window=32),
             is_eagle_group=True,
@@ -759,11 +755,11 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     """
     swa_64_sw128 = _swa(block_size=64, sliding_window=128)
     groups = [
-        KVCacheGroupSpec(["full_mla"], _full(block_size=256)),
-        KVCacheGroupSpec(["swa"], swa_64_sw128),
-        KVCacheGroupSpec(["mtp"], swa_64_sw128, is_eagle_group=True),
-        KVCacheGroupSpec(["c4_state"], _swa(block_size=4, sliding_window=8)),
-        KVCacheGroupSpec(["c128_state"], _swa(block_size=8, sliding_window=128)),
+        _group(["full_mla"], _full(block_size=256)),
+        _group(["swa"], swa_64_sw128),
+        _group(["mtp"], swa_64_sw128, is_eagle_group=True),
+        _group(["c4_state"], _swa(block_size=4, sliding_window=8)),
+        _group(["c128_state"], _swa(block_size=8, sliding_window=128)),
     ]
     coord = _make_coord(groups, hash_block_size=4, use_eagle=True)
     token_len = 768
@@ -775,7 +771,7 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     store_masks = coord.store_mask(token_len)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
         group_hashes = chunk_hashes_for_block_size(
-            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+            hashes, coord.hash_block_size, group.block_size
         )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:

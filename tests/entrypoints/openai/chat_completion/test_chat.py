@@ -14,6 +14,7 @@ import requests
 import torch
 from openai import BadRequestError
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -338,7 +339,8 @@ async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
     # finish reason should only return in last block
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
-    assert delta.content
+    # The last chunk may carry only the finish_reason (Rust); the joined text is
+    # checked against the non-streaming output.
     assert "".join(chunks) == output
 
 
@@ -392,16 +394,18 @@ async def test_chat_completion_stream_options(
             )
             assert final_chunk.choices == []
 
-    # Test stream=False, stream_options={"include_usage": None}
-    with pytest.raises(BadRequestError):
-        await client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_completion_tokens=10,
-            temperature=0.0,
-            stream=False,
-            stream_options={"include_usage": None},
-        )
+    # Test stream=False, stream_options={"include_usage": None}. The Rust frontend
+    # treats an all-null stream_options like an omitted one.
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        with pytest.raises(BadRequestError):
+            await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_completion_tokens=10,
+                temperature=0.0,
+                stream=False,
+                stream_options={"include_usage": None},
+            )
 
     # Test stream=False, stream_options={"include_usage": True}
     with pytest.raises(BadRequestError):
@@ -435,7 +439,15 @@ async def test_chat_completion_stream_options(
             last_completion_tokens == 0
             or chunk.usage.completion_tokens > last_completion_tokens
             or (
-                not chunk.choices
+                # The usage-only chunk, or a chunk that carries only the
+                # finish_reason (Rust), adds no tokens.
+                (
+                    not chunk.choices
+                    or (
+                        chunk.choices[0].finish_reason is not None
+                        and not chunk.choices[0].delta.content
+                    )
+                )
                 and chunk.usage.completion_tokens == last_completion_tokens
             )
         )
@@ -789,9 +801,11 @@ async def test_long_seed(client: openai.AsyncOpenAI):
                 seed=seed,
             )
 
+        # Rust rejects the out-of-range integer while deserializing the body.
         assert (
             "greater_than_equal" in exc_info.value.message
             or "less_than_equal" in exc_info.value.message
+            or "expected i64" in exc_info.value.message
         )
 
 
