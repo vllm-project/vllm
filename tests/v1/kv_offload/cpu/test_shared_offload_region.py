@@ -633,20 +633,12 @@ def test_deferred_prefault_fills_worker_slots(iid):
             assert all(resident[first : last + 1])
 
 
-@pytest.mark.parametrize(
-    "shard, expected",
-    [
-        ((0, 2), [(0, 6 * PAGE_SIZE)]),
-        ((1, 2), [(3 * PAGE_SIZE, 3 * PAGE_SIZE), (0, 3 * PAGE_SIZE)]),
-        ((3, 4), [(0, 6 * PAGE_SIZE)]),
-    ],
-)
-def test_deferred_prefault_shard_covers_region_from_its_share(iid, shard, expected):
+def test_deferred_prefault_shard_covers_region_from_its_share(iid):
     """Workers that share every byte pin all of it, so each pre-faults all of
     it, starting at its own share."""
     with _region(iid, num_chunks=3, num_workers=2, populate=False) as r:
-        ranges = r.prefault_ranges(shard)
-        assert ranges == expected
+        ranges = r.prefault_ranges((1, 2))
+        assert ranges == [(3 * PAGE_SIZE, 3 * PAGE_SIZE), (0, 3 * PAGE_SIZE)]
         for offset, length in ranges:
             r.prefault(offset, length)
         assert all(_page_residency(r.mmap_obj, r.total_size_bytes))

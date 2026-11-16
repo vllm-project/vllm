@@ -339,8 +339,7 @@ class SharedOffloadRegion:
             index, count = shard
             share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
             start = min(index * share, self.total_size_bytes)
-            ranges = [(start, self.total_size_bytes - start), (0, start)]
-            return [r for r in ranges if r[1]]
+            return [(start, self.total_size_bytes - start), (0, start)]
         if self.rank is not None:
             return list(self.iter_worker_slot_ranges())
         return [(0, self.total_size_bytes)]
