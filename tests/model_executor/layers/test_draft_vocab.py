@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.layers.draft_vocab import (
     DraftVocab,
@@ -26,6 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
 VOCAB = 200
 HIDDEN = 32
@@ -350,3 +352,25 @@ def test_nvfp4_checkpoint_head_rows_match_full_head(
     # The dynamic rows run with unquantized activations.
     rel_err = (logits[kept] - reference[kept]).norm() / reference[kept].norm()
     assert rel_err < (0.02 if quant_method == "W4A16_NVFP4" else 0.2)
+
+
+@pytest.mark.cpu_test
+def test_dspark_reads_d2t_of_subclasses_that_skip_init(default_vllm_config):
+    """Gemma4, MiniMax-M3 and Muse Spark DSpark drafters skip the parent
+    __init__ and set only `draft_id_to_target_id`; inherited methods use it."""
+    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    model.lm_head = _head(len(DRAFT_IDS))
+    model.logits_processor = LogitsProcessor(len(DRAFT_IDS))
+    model.config = SimpleNamespace(vocab_size=VOCAB)
+    model.draft_id_to_target_id = nn.Parameter(
+        torch.tensor(DRAFT_IDS) - torch.arange(len(DRAFT_IDS)), requires_grad=False
+    )
+
+    ids = torch.arange(len(DRAFT_IDS))
+    assert model.map_draft_to_target(ids).tolist() == DRAFT_IDS
+    hidden = _hidden()
+    draft_logits = model.logits_processor(model.lm_head, hidden)
+    logits = model.compute_logits(hidden)
+    assert logits is not None
+    assert torch.equal(logits[:, DRAFT_IDS], draft_logits)
