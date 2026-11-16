@@ -557,12 +557,13 @@ def test_deepgemm_mxfp8_preserves_weight_and_scale_values(
 def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     dist_init, default_vllm_config, monkeypatch, prequantized, config_source, num_tokens
 ):
-    """BMM metadata set after construction selects grouped weight processing."""
+    """BMM grouped weights survive normal and pre-processed post-loading."""
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8BmmLinearKernel,
     )
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization import get_quantization_config
+    from vllm.model_executor.utils import weights_already_processed
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         fused_inv_rope_fp8_quant,
     )
@@ -628,9 +629,10 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     ).reshape(2, 128, 512)
     assert isinstance(linear.quant_method, ModelOptLinearMethod)
     linear.quant_method.process_weights_after_loading(linear)
-    linear.quant_method.process_weights_after_loading(linear)
     assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8BmmLinearKernel)
     assert linear.weight.shape == (2, 128, 512)
+    processed_weight = linear.weight.view(torch.uint8).clone()
+    processed_scales = linear.weight_scale.contiguous().view(torch.uint8).clone()
     torch.testing.assert_close(
         linear.weight.view(torch.uint8).flatten(),
         weight.view(torch.uint8).flatten(),
@@ -673,6 +675,23 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         output = linear(inputs)
     assert output.shape == reference.shape
     assert (output.float() - reference).norm() / reference.norm() < 0.06
+
+    with weights_already_processed():
+        linear.quant_method.process_weights_after_loading(linear)
+    assert isinstance(linear.quant_method.kernel, DeepGemmMxfp8BmmLinearKernel)
+    torch.testing.assert_close(
+        linear.weight.view(torch.uint8), processed_weight, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        linear.weight_scale.contiguous().view(torch.uint8),
+        processed_scales,
+        rtol=0,
+        atol=0,
+    )
+    with torch.no_grad():
+        restored_output = linear(inputs)
+    torch.testing.assert_close(restored_output, output, rtol=0, atol=0)
+
     if prequantized:
         recipe, tma_aligned_scales = compute_fp8_einsum_recipe(block_size=32)
         projected = deep_gemm_fp8_o_proj(
