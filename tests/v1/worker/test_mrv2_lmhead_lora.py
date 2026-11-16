@@ -59,3 +59,16 @@ def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
     )
     assert prompt == (3, 3, 0, 0)
     assert token == (3, 3, 0, 0)
+
+
+def test_lora_state_accepts_ids_beyond_int32():
+    state = LoraState(max_num_reqs=1)
+    state.add_request("req-a", 0, LoRARequest("adapter", 2**31, "/tmp/adapter"))
+    prompt, token, _requests = state.make_lora_inputs(
+        ["req-a"],
+        np.array([0], dtype=np.int32),
+        np.array([2], dtype=np.int32),
+        np.array([1], dtype=np.int32),
+    )
+    assert prompt == (2**31,)
+    assert token == (2**31, 2**31)
