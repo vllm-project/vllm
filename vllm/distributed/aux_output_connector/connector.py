@@ -537,10 +537,17 @@ class AuxOutputSchedulerConnector:
             del self._sent_hash_counts[request_id]
         if session and not request.is_finished():
             hash_size = self._hash_block_size
-            hashed = min(len(request.block_hashes) * hash_size, num_computed)
-            cut = hashed // self._block_size * self._block_size
-            del request.block_hashes[cut // hash_size :]
-            request.add_cache_salt_segment(cut, self._weight_version, hash_size)
+            version = self._weight_version
+            frontier = len(request.block_hashes) * hash_size
+            cut = min(frontier, num_computed) // self._block_size * self._block_size
+            segments = request.cache_salt_segments
+            ends = [start for start, _ in segments[1:]] + [frontier]
+            if any(
+                salt != version and start < frontier and end > cut
+                for (start, salt), end in zip(segments, ends)
+            ):
+                del request.block_hashes[cut // hash_size :]
+            request.add_cache_salt_segment(cut, version, hash_size)
             request.update_block_hashes()
         computed_from = self._computed_from.pop(request_id, request.num_tokens)
         num_blocks = request.num_computed_tokens // self._block_size

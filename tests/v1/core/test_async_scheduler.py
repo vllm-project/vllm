@@ -41,7 +41,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
-from vllm.v1.kv_offload.base import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingSpec, get_offload_block_hash
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -1409,6 +1409,7 @@ def _tier_engine(
     scheduler = create_scheduler(enable_prefix_caching=True)
     config = scheduler.vllm_config
     config.cache_config.prefix_cache_retention_interval = retention
+    config.cache_config.prefix_match_unit = hash_block_size
     module_path = __name__
     if connector == "OffloadingConnector":
         module_path = None
@@ -1548,21 +1549,26 @@ def test_session_key_of_a_block_whose_hash_follows_the_stop_is_a_tail():
     assert len(engine.client.payloads[second[2]]) == 2
 
 
-def test_preempted_session_request_salts_the_object_it_computes_again():
-    engine = _tier_engine(connector=None, hash_block_size=4, retention=16)
+def _preempt_at_an_object_boundary(engine, versions):
     scheduler = engine.scheduler
     engine.set_version(1)
     (request,) = _session_requests(["r"], 16, 20, hash_block_size=4)
     scheduler.add_request(request)
-    for version in (1, 1, 1) + (2,) * 13:
+    for version in versions:
         engine.set_version(version)
         engine.step(engine.schedule(), {"r": [0]})
-    assert request.cache_salt_segments == [(0, "v1"), (18, "v2")]
+    hashes = list(request.block_hashes)
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
     scheduler.waiting.remove_request(request)
     engine.step(engine.schedule(), {})
     scheduler.waiting.prepend_request(request)
+    return request, hashes
+
+
+def test_preempted_session_request_salts_the_object_it_computes_again():
+    engine = _tier_engine(connector=None, hash_block_size=4, retention=16)
+    request, _ = _preempt_at_an_object_boundary(engine, (1, 1, 1) + (2,) * 13)
     engine.run()
     engine.close()
     assert engine.segments["r"] == [(0, "v1"), (16, "v2"), (32, None)]
@@ -1576,6 +1582,39 @@ def test_preempted_session_request_salts_the_object_it_computes_again():
         block_hasher=get_request_block_hasher(4, sha256),
     )
     assert fresh.block_hashes == request.block_hashes
+
+
+def test_preempted_session_request_keeps_its_hashes_at_the_same_version():
+    engine = _tier_engine(connector=None, hash_block_size=4, retention=16)
+    request, hashes = _preempt_at_an_object_boundary(engine, (1,) * 16)
+    assert all(a is b for a, b in zip(hashes, request.block_hashes, strict=True))
+    engine.run()
+    engine.close()
+
+
+def test_preempted_session_request_offloads_under_its_new_hashes():
+    engine = _tier_engine(hash_block_size=4)
+    engine.scheduler.max_num_scheduled_tokens = 16
+    manager = engine.scheduler.connector.connector_scheduler.manager
+    stored = []
+    prepare_store = manager.prepare_store
+
+    def record(keys, *args, **kwargs):
+        stored.extend(keys)
+        return prepare_store(keys, *args, **kwargs)
+
+    manager.prepare_store = record
+    engine.set_version(1)
+    (request,) = _session_requests(["r"], 48, 4, hash_block_size=4)
+    engine.scheduler.add_request(request)
+    engine.step(engine.schedule(), {})
+    engine.set_version(2)
+    engine.scheduler.running.remove(request)
+    engine.scheduler._preempt_request(request, 0.0)
+    engine.run()
+    engine.close()
+    assert stored
+    assert {get_offload_block_hash(key) for key in stored} <= set(request.block_hashes)
 
 
 @pytest.mark.parametrize("version", ["", None], ids=["empty", "none"])

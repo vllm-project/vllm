@@ -411,7 +411,17 @@ class RequestOffloadState:
             self.config.kv_group_configs, self.group_states
         ):
             stride = group_config.hashes_per_chunk
-            start = stride * (len(group_state.offload_keys) + 1) - 1
+            keys = group_state.offload_keys
+            end = stride * len(keys)
+            if keys and (
+                end > len(self.req.block_hashes)
+                or keys[-1]
+                != make_offload_key(
+                    self.req.block_hashes[end - 1], group_config.group_idx
+                )
+            ):
+                keys.clear()
+            start = stride * (len(keys) + 1) - 1
             for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
