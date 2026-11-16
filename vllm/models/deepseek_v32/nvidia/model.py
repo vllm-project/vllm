@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_embed_norm import (
     make_input_embedding,
 )
 from vllm.model_executor.layers.fused_moe import (
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,10 +79,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
@@ -104,7 +102,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=False,
+                routed_scale_mode=RoutedScaleMode.ROUTER,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -189,10 +187,7 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
@@ -330,11 +325,14 @@ class DeepseekV32Model(torch.nn.Module):
             attn_in = None
 
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
-            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
-            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
+            # PP send/recv needs full-token, TP-replicated tensors.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states + residual)
+                hidden_states = hidden_states[:full_num_tokens]
+            else:
+                hidden_states = residual + tensor_model_parallel_all_reduce(
+                    hidden_states
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

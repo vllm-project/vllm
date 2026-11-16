@@ -5,7 +5,7 @@ import contextlib
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import connection
@@ -88,7 +88,7 @@ class CoreEngine:
         self.state = CoreEngineState.NEW
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqBindAddresses:
     """Frontend endpoints before their owning sockets bind."""
 
@@ -96,7 +96,7 @@ class EngineZmqBindAddresses:
     outputs: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqAddresses:
     """Resolved frontend endpoints advertised to engine processes."""
 
@@ -114,7 +114,7 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqListeners:
     inputs: list[ZmqListener]
     outputs: list[ZmqListener]
@@ -135,7 +135,7 @@ class EngineZmqListeners:
             self.cleanup()
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineHandshakeMetadata:
     """Metadata sent to each engine process during startup handshake,
     including addresses of the front-end ZMQ queues that they should
@@ -206,7 +206,7 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
 @contextlib.contextmanager
 def _configure_uniproc_startup_threads(
     executor_class: type[Executor], local_engine_count: int
-) -> Iterator[None]:
+) -> Generator[None]:
     if (
         not issubclass(executor_class, UniProcExecutor)
         or current_platform.is_cpu()
@@ -1189,7 +1189,7 @@ def bind_engine_zmq_listeners(
 FrontendProcess = BaseProcess | _SubprocessWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class CoreEngineLaunch:
     """Resources and startup barrier for launched engine processes."""
 
@@ -1208,7 +1208,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-) -> Iterator[CoreEngineLaunch]:
+) -> Generator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size
