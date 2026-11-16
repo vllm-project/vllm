@@ -3,7 +3,7 @@
 
 import asyncio
 import os
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import Future
 from types import SimpleNamespace
@@ -229,6 +229,7 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
         parallel_config=SimpleNamespace(enable_fault_tolerance=enable_ft)
     )
     executor.is_failed = False
+    executor.unread_replies = Counter()
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda *_: None)
     executor.response_mqs = [
         _FakeResponseMQ(
@@ -320,3 +321,24 @@ def test_ft_rpc_failure_keeps_next_rpc_responses_aligned(
         "recovered0",
         "recovered1",
     ]
+
+
+@pytest.mark.parametrize("non_block", [False, True])
+@pytest.mark.parametrize("next_reply_rank", [None, 1])
+def test_rpc_failure_keeps_next_rpc_responses_aligned(non_block, next_reply_rank):
+    """A reply that a failed RPC left unread must not answer the next RPC."""
+    executor = _make_failed_step_executor(enable_ft=False)
+    success = WorkerProc.ResponseStatus.SUCCESS
+    failure = WorkerProc.ResponseStatus.FAILURE
+    executor.response_mqs = [
+        _FakeResponseMQ([(failure, "not found"), (success, "next0")]),
+        _FakeResponseMQ([(failure, "not found"), (success, "next1")]),
+    ]
+
+    with pytest.raises(RuntimeError, match="not found"):
+        ret = executor.collective_rpc("add_lora", non_block=non_block)
+        if non_block:
+            ret.result()
+
+    ret = executor.collective_rpc("add_lora", unique_reply_rank=next_reply_rank)
+    assert ret == (["next0", "next1"] if next_reply_rank is None else "next1")
