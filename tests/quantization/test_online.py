@@ -344,16 +344,33 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert computed_key == activation_quant_key
 
 
-def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
-    """`nvfp4_weight_only` quantizes linear layers and leaves MoE unquantized."""
-    args = resolve_quantization_config("nvfp4_weight_only", None)
-    assert args is not None
-    config = OnlineQuantizationConfig(args)
+def test_online_nvfp4_weight_only_shorthand_covers_linear_and_moe() -> None:
+    """`nvfp4_weight_only` quantizes linear and MoE weights with no activation
+    quantization; `linear=` or `moe=` restricts it to one layer kind."""
+    config = OnlineQuantizationConfig(
+        resolve_quantization_config("nvfp4_weight_only", None)
+    )
+    linear = config.resolve_quant_method_cls(_TestLinear, "linear")
+    moe = config.resolve_quant_method_cls(_TestRoutedExperts, "moe")
+    assert linear is not None and linear[4] is Nvfp4WeightOnlyOnlineLinearMethod
+    assert moe is not None and moe[4] is Nvfp4OnlineMoEMethod
+    assert moe[3].activation is None
 
-    resolved = config.resolve_quant_method_cls(_TestLinear, "linear")
-    assert resolved is not None
-    assert resolved[4] is Nvfp4WeightOnlyOnlineLinearMethod
-    assert config.resolve_quant_method_cls(_TestRoutedExperts, "moe") is None
+    per_token = OnlineQuantizationConfig(
+        resolve_quantization_config("nvfp4_per_token", None)
+    ).resolve_quant_method_cls(_TestRoutedExperts, "moe")
+    assert per_token is not None and per_token[3].activation == kNvfp4DynamicToken
+
+    linear_only = OnlineQuantizationConfig(
+        quant_config_args(linear="nvfp4_weight_only")
+    )
+    assert linear_only.resolve_quant_method_cls(_TestRoutedExperts, "moe") is None
+
+    moe_only = OnlineQuantizationConfig(quant_config_args(moe="nvfp4_weight_only"))
+    assert moe_only.resolve_quant_method_cls(_TestLinear, "linear") is None
+    moe_only_moe = moe_only.resolve_quant_method_cls(_TestRoutedExperts, "moe")
+    assert moe_only_moe is not None and moe_only_moe[4] is Nvfp4OnlineMoEMethod
+    assert moe_only_moe[3].activation is None
 
 
 @pytest.mark.skipif(
@@ -420,7 +437,8 @@ def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> No
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
 @pytest.mark.parametrize(
-    "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
+    "scheme",
+    ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4", "nvfp4_weight_only"],
 )
 @pytest.mark.parametrize("requantize", [False, True])
 def test_online_moe_stages_quantized_weights_for_humming(
@@ -2829,6 +2847,33 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.skipif(
+    not is_fp4_marlin_supported(), reason="No NVFP4 W4A16 kernel on this platform."
+)
+def test_online_nvfp4_weight_only_moe(vllm_runner, monkeypatch) -> None:
+    """`nvfp4_weight_only` runs the experts and the dense layers as W4A16."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="nvfp4_weight_only",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            method = layer.block_sparse_moe.experts._quant_method
+            assert isinstance(method, Nvfp4OnlineMoEMethod)
+            assert method.use_a16
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, Nvfp4WeightOnlyOnlineLinearMethod
+            )
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="LUT-B MoE needs a CUDA-like GPU."
 )
 def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
@@ -3000,6 +3045,34 @@ def test_online_nvfp4_native_quant_matches_reference(monkeypatch, dtype) -> None
         (dequant_native - w).abs()[differ], (dequant_ref - w).abs()[differ]
     )
     assert torch.all(dequant_native[weight == 0] == 0)
+
+
+@pytest.mark.skipif(not cutlass_fp4_supported(), reason="No native NVFP4 quant kernel.")
+def test_online_nvfp4_moe_fallback_quant_matches_native(monkeypatch) -> None:
+    """Without the native quant kernel, expert weights quantize to the same
+    scales and dequantize as close as the native packer."""
+    torch.manual_seed(0)
+    weight = torch.randn(2, 64, 128, device=DEVICE, dtype=torch.bfloat16) * 0.02
+    weight[1] *= 8
+    native = _quantize_moe_weight_to_nvfp4(weight)
+    monkeypatch.setattr(online_nvfp4, "cutlass_fp4_supported", lambda: False)
+    fallback = _quantize_moe_weight_to_nvfp4(weight)
+
+    torch.testing.assert_close(fallback[2], native[2], rtol=1e-6, atol=0)
+    for expert in range(2):
+        dequant_native, dequant_fallback = (
+            dequantize_to_dtype(
+                q[expert], s[expert], g[expert], torch.float32, swizzle=False
+            )
+            for q, s, g in (native, fallback)
+        )
+        w = weight[expert].float()
+        torch.testing.assert_close(
+            (dequant_fallback - w).abs().mean(),
+            (dequant_native - w).abs().mean(),
+            rtol=1e-2,
+            atol=0,
+        )
 
 
 @pytest.mark.skipif(

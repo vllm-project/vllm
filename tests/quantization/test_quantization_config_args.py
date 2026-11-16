@@ -121,10 +121,12 @@ def test_args_accepts_dict_form(activation, expected):
 
 
 def test_online_shorthands_do_not_set_activation_defaults():
-    for args in _ONLINE_SHORTHANDS.values():
+    """Shorthands leave the activation to the method's default, except that a
+    weight-only shorthand pins it to no activation quantization."""
+    for name, args in _ONLINE_SHORTHANDS.items():
         for spec in (args.linear, args.moe):
-            if spec is not None:
-                assert "activation" not in spec.fields_set
+            if spec is not None and "activation" in spec.fields_set:
+                assert name.endswith("_weight_only") and spec.activation is None
 
 
 def test_targets_reject_non_string_keys():

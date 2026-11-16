@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
@@ -175,13 +176,22 @@ def _quantize_moe_weight_to_nvfp4(
 
     amax = weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
     amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
-    global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
-    weight_scale_2 = (1.0 / global_scale).to(torch.float32)
 
     # Keep the original BF16/FP16 values as the quantizer input. Folding each
     # expert's FP32 global scale into the weight would add a BF16/FP16 rounding
     # before the group-16 scale and E2M1 values are selected.
     weight = weight.contiguous()
+    if not cutlass_fp4_supported():
+        # GPUs without the native quant kernel run only the W4A16 backends.
+        quantized = [_quantize_nvfp4(w, a) for w, a in zip(weight, amax, strict=True)]
+        return (
+            torch.stack([packed for packed, _, _ in quantized]),
+            torch.stack([scales for _, scales, _ in quantized]),
+            torch.stack([gscale for _, _, gscale in quantized]),
+        )
+
+    global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
+    weight_scale_2 = (1.0 / global_scale).to(torch.float32)
     quantized_experts = [
         scaled_fp4_quant(
             expert_weight,
@@ -204,30 +214,46 @@ def _quantize_moe_weight_to_nvfp4(
 
 
 class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
-    """Online NVFP4 MoE quantization with per-token activation scales.
+    """Online NVFP4 MoE quantization.
 
-    Quantizes fp16/bf16 expert weights to NVFP4 at load time; the FlashInfer
-    TRTLLM kernel computes per-token activation scales at runtime. Blackwell
-    (SM100) only.
+    Quantizes fp16/bf16 expert weights to NVFP4 at load time. With the default
+    per-token activation key, the FlashInfer TRTLLM kernel computes per-token
+    activation scales at runtime (Blackwell SM100 only). With no activation
+    key, activations stay in the model dtype and the experts run on the
+    platform's W4A16 NVFP4 MoE backend.
     """
 
-    activation_quant_key = kNvfp4DynamicToken
+    activation_quant_key: QuantKey | None = kNvfp4DynamicToken
+    accepts_activation_override = True
 
     def __init__(
         self,
         *,
         moe: FusedMoEConfig,
+        activation_quant_key: QuantKey | None = kNvfp4DynamicToken,
     ):
-        if not current_platform.is_device_capability_family(100):
+        if activation_quant_key not in (kNvfp4DynamicToken, None):
+            raise NotImplementedError(
+                f"online NVFP4 MoE supports activation={kNvfp4DynamicToken} or "
+                f"activation=null, got {activation_quant_key}."
+            )
+        if activation_quant_key is not None and not (
+            current_platform.is_device_capability_family(100)
+        ):
             raise ValueError(
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )
         super().__init__(moe)
+        self.activation_quant_key = activation_quant_key
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
             activation_key=self.activation_quant_key,
         )
+
+    @property
+    def use_a16(self) -> bool:
+        return self.activation_quant_key is None
 
     @property
     def per_token_activation(self) -> bool:
@@ -265,6 +291,8 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
 
+        if self.use_a16:
+            return
         # Neutral (1.0) activation global scales: the kernel derives per-token
         # scales at runtime, so the output scalars reduce to the weight scales.
         ones = torch.ones(layer.num_experts, device=w13.device, dtype=torch.float32)
@@ -293,6 +321,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            use_a16=self.use_a16,
             trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
                 per_token_activation=self.per_token_activation,
                 is_act_and_mul=self.moe.is_act_and_mul,
@@ -302,11 +331,13 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
-        replace_parameter(layer, "w13_input_scale", a13_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        replace_parameter(layer, "w2_input_scale", a2_scale)
+        # Weight-only backends (Marlin, Humming) take no activation scales.
+        if not self.use_a16:
+            replace_parameter(layer, "w13_input_scale", a13_scale)
+            replace_parameter(layer, "w2_input_scale", a2_scale)
 
         if self.moe_kernel is None:
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -323,11 +354,13 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         else:
             # Reload creates new scale tensors; derived kernel scales must use
             # their new values before layerwise reload restores captured storage.
+            # Humming keeps the global scales in its own weight format instead.
             assert self.moe_quant_config is not None
-            assert self.moe_quant_config.g1_alphas is not None
-            assert self.moe_quant_config.g2_alphas is not None
-            self.moe_quant_config.g1_alphas.copy_(w13_scale_2)
-            self.moe_quant_config.g2_alphas.copy_(w2_scale_2)
+            if self.nvfp4_backend != NvFp4MoeBackend.HUMMING:
+                assert self.moe_quant_config.g1_alphas is not None
+                assert self.moe_quant_config.g2_alphas is not None
+                self.moe_quant_config.g1_alphas.copy_(w13_scale_2)
+                self.moe_quant_config.g2_alphas.copy_(w2_scale_2)
 
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -342,4 +375,5 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             layer=layer,
+            use_a16=self.use_a16,
         )
