@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from vllm.envs import maybe_convert_bool
+from vllm.envs import env_bool
 
 if TYPE_CHECKING:
     VLLM_CI_NO_SKIP: bool = False
@@ -18,7 +18,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # A model family has many models with the same architecture.
     # By default, a model family tests only one model.
     # Through this flag, all models can be tested.
-    "VLLM_CI_NO_SKIP": lambda: bool(int(os.getenv("VLLM_CI_NO_SKIP", "0"))),
+    "VLLM_CI_NO_SKIP": env_bool("VLLM_CI_NO_SKIP", False),
     # Allow changing the dtype used by vllm in tests
     "VLLM_CI_DTYPE": lambda: os.getenv("VLLM_CI_DTYPE", None),
     # Allow changing the head dtype used by vllm in tests
@@ -26,9 +26,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow changing the head dtype used by transformers in tests
     "VLLM_CI_HF_DTYPE": lambda: os.getenv("VLLM_CI_HF_DTYPE", None),
     # Allow control over whether tests use enforce_eager
-    "VLLM_CI_ENFORCE_EAGER": lambda: maybe_convert_bool(
-        os.getenv("VLLM_CI_ENFORCE_EAGER", None)
-    ),
+    "VLLM_CI_ENFORCE_EAGER": env_bool("VLLM_CI_ENFORCE_EAGER", None),
 }
 
 
