@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseErrorEvent,
     ResponseOutputItem,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -782,6 +783,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     pass
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
+            except VLLMValidationError as e:
+                return self.create_error_response(e, param=e.parameter)
 
         # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -1461,6 +1464,17 @@ class OpenAIServingResponses(GenerateBaseServing):
                     _increment_sequence_number_and_return,
                 ):
                     yield event_data
+            except VLLMValidationError as e:
+                yield _increment_sequence_number_and_return(
+                    ResponseErrorEvent(
+                        type="error",
+                        code="invalid_request_error",
+                        message=str(e),
+                        param=e.parameter,
+                        sequence_number=-1,
+                    )
+                )
+                return
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(

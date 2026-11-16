@@ -1434,7 +1434,7 @@ async def test_mcp_allowlist_enforced_before_execution(
     from openai_harmony import Message
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
+    from transformers import TokenizersBackend
 
     from vllm.exceptions import VLLMValidationError
 
@@ -1451,7 +1451,7 @@ async def test_mcp_allowlist_enforced_before_execution(
         input="test",
         tools=[Mcp(type="mcp", server_label=server_label, allowed_tools=allowed)],
     )
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
         unk_token="[UNK]",
     )

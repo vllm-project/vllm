@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+import socket
+import threading
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
 import vllm.entrypoints.mcp.tool_server as tool_server_module
@@ -42,6 +45,100 @@ _BASE_SERVER_ARGS = [
 _PYTHON_TOOL_INSTRUCTION = (
     "You must use the Python tool to execute code. Never simulate execution."
 )
+
+
+def test_mcp_allowlist_rejects_model_generated_call() -> None:
+    """A generated function call must not bypass the MCP execution policy."""
+    import uvicorn
+    from mcp.server.mcpserver import MCPServer
+
+    calls: list[str] = []
+    mcp_server = MCPServer("python")
+
+    @mcp_server.tool()
+    def python(code: str) -> str:
+        calls.append(code)
+        return "2"
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.listen()
+        tool_server = uvicorn.Server(
+            uvicorn.Config(mcp_server.sse_app(), log_level="warning")
+        )
+        thread = threading.Thread(
+            target=tool_server.run, kwargs={"sockets": [listener]}, daemon=True
+        )
+        thread.start()
+        try:
+            model = "Qwen/Qwen3-0.6B"
+            args = [
+                "--enforce-eager",
+                "--max-model-len",
+                "2048",
+                "--max-num-seqs",
+                "1",
+                "--enable-auto-tool-choice",
+                "--tool-call-parser",
+                "hermes",
+                "--reasoning-parser",
+                "qwen3",
+                "--tool-server",
+                f"127.0.0.1:{port}",
+            ]
+            env = {
+                **BASE_TEST_ENV,
+                "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": "1",
+                "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS": "code_interpreter",
+            }
+            with RemoteOpenAIServer(model, args, env_dict=env) as server:
+                client = server.get_client().with_options(max_retries=0)
+                tools: list[dict[str, Any]] = [
+                    {
+                        "type": "mcp",
+                        "server_label": "code_interpreter",
+                        "allowed_tools": ["python"],
+                    },
+                    {
+                        "type": "function",
+                        "name": "code_interpreter",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "code": {"type": "string", "enum": ["print(1+1)"]},
+                            },
+                            "required": ["code"],
+                            "additionalProperties": False,
+                        },
+                    },
+                ]
+                request = {
+                    "model": model,
+                    "input": "Use code_interpreter to calculate 1+1.",
+                    "tools": tools,
+                    "tool_choice": {"type": "function", "name": "code_interpreter"},
+                    "temperature": 0.0,
+                    "max_output_tokens": 128,
+                    "max_tool_calls": 1,
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                }
+                response = client.responses.create(**request)
+                outputs = [
+                    item.output for item in response.output if item.type == "mcp_call"
+                ]
+                assert outputs == ["2"]
+                assert calls == ["print(1+1)"]
+
+                tools[0]["allowed_tools"] = []
+                with pytest.raises(
+                    BadRequestError, match="not permitted by allowed_tools"
+                ):
+                    client.responses.create(**request)
+                assert calls == ["print(1+1)"]
+        finally:
+            tool_server.should_exit = True
+            thread.join(timeout=10)
 
 
 @pytest.mark.asyncio
