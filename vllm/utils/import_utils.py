@@ -700,19 +700,17 @@ def has_llguidance() -> bool:
 
 def ensure_llguidance_available() -> None:
     """Raise an actionable ImportError if `llguidance` cannot be imported."""
-    try:
-        import llguidance  # noqa: F401
-    except ImportError as e:
-        err_cls = (
-            ModuleNotFoundError if isinstance(e, ModuleNotFoundError) else ImportError
-        )
-        raise err_cls(
+    if not has_llguidance():
+        raise ImportError(
             "The 'guidance' structured output backend requires the "
-            '`llguidance` package. Install it with `pip install "vllm[guidance]"` '
+            "`llguidance` package, which is not installed or failed to import. "
+            "Install it with "
+            '`pip install "llguidance>=1.3.0,<1.8.0"` '
             "(prebuilt Linux wheels for llguidance >= 1.7.0 require "
-            "glibc >= 2.31; on glibc 2.28 use `llguidance<1.7.0` or build "
-            f"from source): {e}"
-        ) from e
+            "glibc >= 2.31; on glibc 2.28 pass `--prefer-binary` / "
+            "`--only-binary llguidance`, pin `llguidance<1.7.0`, or build "
+            "from source)."
+        )
 
 
 def check_torchcodec_available():

@@ -1383,6 +1383,16 @@ class SamplingParams(
             # match a special token. The xgrammar backend declares no special
             # tokens for Mistral tokenizers, so a regex like `.` can match
             # `[TOOL_CALLS]` or `[INST]` as plain text.
+            if not has_llguidance():
+                raise VLLMValidationError(
+                    "Lark grammars with Tekken Mistral tokenizers require the "
+                    "'guidance' structured output backend, which is unavailable "
+                    "because 'llguidance' is not installed or failed to import "
+                    "(install with `pip install 'llguidance>=1.3.0,<1.8.0'`, or "
+                    "pass `--prefer-binary` / `--only-binary llguidance` or "
+                    "`pip install 'llguidance<1.7.0'` on systems with "
+                    "glibc < 2.31)."
+                )
             validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
             self.structured_outputs._backend = "guidance"
             self.structured_outputs._backend_was_auto = True
@@ -1434,8 +1444,10 @@ class SamplingParams(
                             "No compatible structured output backend was found for "
                             "this request. XGrammar and Outlines rejected the "
                             "constraint, and the Guidance backend is unavailable "
-                            "because 'llguidance' is not installed (install with "
-                            "`pip install 'vllm[guidance]'`, or "
+                            "because 'llguidance' is not installed or failed to "
+                            "import (install with "
+                            "`pip install 'llguidance>=1.3.0,<1.8.0'`, or pass "
+                            "`--prefer-binary` / `--only-binary llguidance` or "
                             "`pip install 'llguidance<1.7.0'` on systems with "
                             "glibc < 2.31)."
                         ) from err

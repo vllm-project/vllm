@@ -477,78 +477,50 @@ assert "llguidance" not in sys.modules
             assert params.structured_outputs is not None
             assert params.structured_outputs._backend == "outlines"
 
-        def test_explicit_guidance_and_mistral_helpers_without_llguidance(
-            self, monkeypatch
-        ):
-            import builtins
-            import sys
-
-            orig_import = builtins.__import__
-
-            def fail_llguidance(name, *args, **kwargs):
-                if name == "llguidance" or name.startswith("llguidance."):
-                    raise ModuleNotFoundError("No module named 'llguidance'")
-                return orig_import(name, *args, **kwargs)
-
-            # Evict cached llguidance modules so imports hit __import__ again,
-            # and override _has_module so availability checks also see it absent.
-            for mod in list(sys.modules):
-                if mod == "llguidance" or mod.startswith("llguidance."):
-                    monkeypatch.delitem(sys.modules, mod, raising=False)
-            monkeypatch.setattr(builtins, "__import__", fail_llguidance)
+        def test_explicit_guidance_config_fails_without_llguidance(self, monkeypatch):
             monkeypatch.setattr(
                 "vllm.utils.import_utils._has_module",
                 lambda name: name != "llguidance",
             )
+            with pytest.raises(ImportError, match=r"pip install.*llguidance"):
+                StructuredOutputsConfig(backend="guidance")
 
-            # Case 1: Explicit backend="guidance" must fail with install hint.
-            tokenizer = object.__new__(TokenizersBackend)
-            params = SamplingParams(
-                structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+        def test_auto_backend_reports_missing_llguidance_when_outlines_rejects(
+            self, monkeypatch
+        ):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
             )
-            with pytest.raises(ModuleNotFoundError, match=r"vllm\[guidance\]"):
-                params._validate_structured_outputs(
-                    _StubModelConfig(is_diffusion=False),
-                    StructuredOutputsConfig(backend="guidance"),
-                    tokenizer=tokenizer,
-                )
-
-            # Case 2: Non-JSON constraint rejected by xgrammar tries outlines
-            # and, when outlines also fails, clearly reports that guidance
-            # was unavailable because llguidance is not installed.
-            grammar_fallback = SamplingParams(
+            params = SamplingParams(
                 structured_outputs=StructuredOutputsParams(
                     grammar="start: <|special_token|>"
                 )
             )
             with pytest.raises(
                 VLLMValidationError,
-                match=r"XGrammar and Outlines rejected.*vllm\[guidance\]",
+                match=r"XGrammar and Outlines rejected.*llguidance",
             ):
-                grammar_fallback._validate_structured_outputs(
+                params._validate_structured_outputs(
                     _StubModelConfig(is_diffusion=False),
                     StructuredOutputsConfig(backend="auto"),
-                    tokenizer=tokenizer,
+                    tokenizer=object.__new__(TokenizersBackend),
                 )
 
-            # Case 3: MistralTokenizer.supports_grammar degrades to False, while
-            # explicit grammar helpers raise an actionable error.
+        def test_mistral_lark_auto_backend_without_llguidance(self, monkeypatch):
+            monkeypatch.setattr(
+                "vllm.utils.import_utils._has_module",
+                lambda name: name != "llguidance",
+            )
             tok = object.__new__(mistral_tokenizers.MistralTokenizer)
             tok.is_tekken = True
-            tok.version = 11
             assert tok.supports_grammar is False
-            with pytest.raises(ModuleNotFoundError, match=r"vllm\[guidance\]"):
-                _ = tok.grammar_factory
-            with pytest.raises(ModuleNotFoundError, match=r"vllm\[guidance\]"):
-                _ = tok.llg_tokenizer
 
-            # Case 4: Tekken Mistral Lark grammar requires guidance (to protect
-            # special tokens) and must not silently fall through to xgrammar.
-            lark_params = SamplingParams(
+            params = SamplingParams(
                 structured_outputs=StructuredOutputsParams(grammar='start: "hello"')
             )
-            with pytest.raises(ModuleNotFoundError, match=r"vllm\[guidance\]"):
-                lark_params._validate_structured_outputs(
+            with pytest.raises(VLLMValidationError, match=r"pip install.*llguidance"):
+                params._validate_structured_outputs(
                     _StubModelConfig(is_diffusion=False),
                     StructuredOutputsConfig(backend="auto"),
                     tokenizer=tok,

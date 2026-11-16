@@ -334,8 +334,6 @@ def serialize_guidance_grammar(
     disable_any_whitespace: bool = False,
     disable_additional_properties: bool = False,
 ) -> str:
-    ensure_llguidance_available()
-
     def _process_schema(
         grammar_spec: str | dict[str, Any],
     ) -> str:

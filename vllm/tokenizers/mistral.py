@@ -535,6 +535,11 @@ class MistralTokenizer(TokenizerLike):
     @property
     def supports_grammar(self) -> bool:
         if not has_llguidance():
+            logger.warning_once(
+                "`llguidance` is not installed or failed to import; "
+                "Mistral grammar-based tool calling and special-token "
+                "protection are disabled."
+            )
             return False
         from mistral_common.guidance.grammar_factory import GrammarFactory
 
