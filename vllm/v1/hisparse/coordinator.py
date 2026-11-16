@@ -287,17 +287,16 @@ class HiSparseCoordinator:
         if not copies:
             return
         host_indices = list(copies)
-        adopted_blocks: list[KVCacheBlock] = []
-        adopted_pages: set[int] = set()
+        adopted: list[KVCacheBlock] = []
         for manager, column in zip(self.resident_managers, zip(*copies.values())):
-            pairs = manager.adopt_resident_pages(request_id, host_indices, column)
-            adopted_pages.update(host_idx for host_idx, _ in pairs)
-            adopted_blocks.extend(block for _, block in pairs)
-        state.pinned_clean |= adopted_pages
-        state.stale_pages.update(
-            host_idx for host_idx in adopted_pages if host_idx < state.synced_pages
-        )
-        self.gpu_pool.touch(adopted_blocks)
+            for host_idx, block in manager.adopt_resident_pages(
+                request_id, host_indices, column
+            ):
+                adopted.append(block)
+                state.pinned_clean.add(host_idx)
+                if host_idx < state.synced_pages:
+                    state.stale_pages.add(host_idx)
+        self.gpu_pool.touch(adopted)
 
     def _adopt_pending_copies(
         self, request_id: str, state: _HiSparseRequestState
