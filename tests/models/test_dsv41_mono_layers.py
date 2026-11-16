@@ -73,11 +73,13 @@ def _arch() -> str:
 
 # The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
 # build for TP4 and TP8. 8 rows are two GEMV passes of 6 rows there, the second
-# one padded, and 42 rows are the most that they take.
+# one padded, and 42 rows are the most that they take. Steps of 48 and 96 rows
+# run the large-step MoE block (`largestep`) under --monokernel.
 CASES = {
     "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
-    "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
+    "gfx942": [(4, 8), (4, 42), (4, 48), (8, 8), (8, 42), (8, 48), (8, 96)],
 }
+LARGE_STEP_ROWS = 43  # gfx942: steps of more rows run the large-step block
 
 
 @torch.no_grad()
@@ -271,6 +273,10 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "large_steps": {
+                i: getattr(m.ffn.largestep, "steps", None)
+                for i, m in self._decoder_layers().items()
+            },
         }
 
     def compare_merged_replays(self) -> None:
@@ -511,7 +517,8 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+    ("tp", "rows"),
+    [(2, 8), (4, 8), (4, 42), (4, 48), (8, 8), (8, 28), (8, 42), (8, 48), (8, 96)],
 )
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
@@ -544,16 +551,23 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     )
 
     # both layer kinds took the mono path on every rank, at every decode step,
-    # and on gfx942 from the weight copies made at load
+    # and on gfx942 from the weight copies made at load. A gfx942 step of more
+    # than 42 rows takes vLLM's attention and the large-step MoE block instead,
+    # in every layer at every decode step.
     launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
     copies = arch == "gfx942"
+    large = arch == "gfx942" and rows >= LARGE_STEP_ROWS
     for rank in probe_on:
         assert rank["layers"] == {
             i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
-        assert rank["epoch"] >= launches * STEPS, rank
-        assert rank["epoch"] % launches == 0, rank
+        if large:
+            assert all(n >= STEPS for n in rank["large_steps"].values()), rank
+        else:
+            assert rank["epoch"] >= launches * STEPS, rank
+            assert rank["epoch"] % launches == 0, rank
     assert all(set(r["layers"].values()) == {None} for r in probe_off)
+    assert all(set(r["large_steps"].values()) == {None} for r in probe_off)
     # each decode token's input matches between the runs while the greedy
     # tokens before it do: (prompt length, position) pairs to compare
     same: set[tuple[int, int]] = set()
@@ -611,5 +625,6 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
                     flipped.add(k)
         assert len(flipped) <= len(keys) // flip_divisor, (rank, sorted(flipped))
 
-    if (tp, rows) == (8, 8):
+    # The K2 + K1 merge is CDNA4 only (`DSV41MonoLayer.merges`).
+    if (tp, rows) == (8, 8) and arch == "cdna4":
         _merged_matches_two_launches(vllm_runner, monkeypatch)
