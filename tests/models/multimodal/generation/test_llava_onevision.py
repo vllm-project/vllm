@@ -4,14 +4,12 @@
 import math
 
 import numpy as np
-import pytest
 
 from vllm import SamplingParams
 
 from ....conftest import VllmRunner
 
 
-@pytest.mark.core_model
 def test_llava_onevision_mixed_frame_count_videos(vllm_runner: type[VllmRunner]):
     """Preserve all video tokens when one request has unequal frame counts."""
     frame_counts = (2, 3)
