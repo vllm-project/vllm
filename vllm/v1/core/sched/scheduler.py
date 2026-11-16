@@ -32,7 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
@@ -1681,6 +1681,8 @@ class Scheduler(SchedulerInterface):
             )
             for req in scheduled_new_reqs
         ]
+        for req in scheduled_new_reqs:
+            req.num_sent_mm_features = len(req.mm_features)
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1759,7 +1761,10 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             encoder_input_updates=self._get_encoder_input_updates(
-                num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+                num_scheduled_tokens,
+                new_reqs_data,
+                cached_reqs_data.new_mm_features,
+                scheduled_encoder_inputs,
             ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
@@ -1897,12 +1902,15 @@ class Scheduler(SchedulerInterface):
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
-        self, session: Request, update: StreamingUpdate
+        self, session: Request, update: StreamingUpdate, *, was_running: bool = False
     ) -> None:
-        """Updates the waiting session with the next streaming update.
+        """Updates the stopped session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk,
-        unless the update keeps it (see `KEEP_LAST_OUTPUT_TOKEN`).
+        unless the update keeps it (see `KEEP_LAST_OUTPUT_TOKEN`). A session
+        that continues from that token without new prompt tokens may resume in
+        place: it stays scheduled with its worker state instead of being
+        re-sent to the workers in full.
         """
         # Keep all output tokens, but the final sampled one only if the update
         # opts in.
@@ -1912,8 +1920,28 @@ class Scheduler(SchedulerInterface):
         # sample is the input its multimodal features are added to.
         start = keep_end - 1 if keep_last and not update.prompt_token_ids else keep_end
         assert start >= session.num_computed_tokens
-        del session._all_token_ids[keep_end:]
+        if update.mm_features:
+            for mm_feature in update.mm_features:
+                mm_feature.mm_position = replace(
+                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + start
+                )
+            session.mm_features.extend(update.mm_features)
         del session.block_hashes[start // self.hash_block_size :]
+
+        parked = session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        if (was_running or parked) and self._can_resume_in_place(session, update):
+            session.update_block_hashes()
+            if parked:
+                self.num_waiting_for_streaming_input -= 1
+                self.kv_holding_waiting.remove_request(session)
+                self.deferred_waiting.discard(session)
+                self.running.append(session)
+            session.arrival_time = update.arrival_time
+            session.max_tokens += update.max_tokens
+            session.status = RequestStatus.RUNNING
+            return
+
+        del session._all_token_ids[keep_end:]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -1924,13 +1952,6 @@ class Scheduler(SchedulerInterface):
             keep_end,
         )
 
-        if update.mm_features:
-            for mm_feature in update.mm_features:
-                mm_feature.mm_position = replace(
-                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + start
-                )
-            session.mm_features.extend(update.mm_features)
-
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
         # Update block hashes for the new tokens.
@@ -1940,12 +1961,32 @@ class Scheduler(SchedulerInterface):
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
-        if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+        if parked:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+    def _can_resume_in_place(self, session: Request, update: StreamingUpdate) -> bool:
+        return (
+            keeps_last_output_token(update.sampling_params)
+            and not update.prompt_token_ids
+            and session.sampling_params == update.sampling_params
+            # Preemption releases the KV cache and the worker state.
+            and session.num_computed_tokens > 0
+            # The worker's last sample must be the session's last token. A stop
+            # before max_tokens can leave a step in flight that samples past it.
+            and session.num_output_tokens >= session.max_tokens
+            # Running requests are only scheduled below max_model_len.
+            and session.num_tokens < self.max_model_len
+            # Workers derive M-RoPE positions and prefix-LM attention ranges from
+            # the features at admission.
+            and not self.model_uses_mrope
+            and not self.vllm_config.model_config.is_mm_prefix_lm
+            and not self.use_pp
+            and not self.num_spec_tokens
+        )
 
     def _make_cached_request_data(
         self,
@@ -1960,10 +2001,14 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[tuple[list[int], ...] | None] = []
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        new_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
 
         for req in running_reqs:
             req_id = req.request_id
             req_ids.append(req_id)
+            if len(req.mm_features) > req.num_sent_mm_features:
+                new_mm_features[req_id] = req.mm_features[req.num_sent_mm_features :]
+                req.num_sent_mm_features = len(req.mm_features)
             is_prefill = req.is_prefill_chunk
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
@@ -1999,6 +2044,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            new_mm_features=new_mm_features,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -2495,9 +2541,11 @@ class Scheduler(SchedulerInterface):
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
-                # reset the status to WAITING for streaming requests that continue.
+                # reset the status for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
-                finished = self._handle_stopped_request(request)
+                finished = self._handle_stopped_request(
+                    request, was_running=status_before_stop == RequestStatus.RUNNING
+                )
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
@@ -2511,13 +2559,14 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params["remote_prefill_cached_tokens"] = (
                             prefill_stats.num_cached_tokens
                         )
-                else:
+                elif request.status != RequestStatus.RUNNING:
                     continuing_reqs.append(request)
 
-                if status_before_stop == RequestStatus.RUNNING:
-                    stopped_running_reqs.add(request)
-                else:
+                if status_before_stop != RequestStatus.RUNNING:
                     stopped_preempted_reqs.add(request)
+                elif request.status != RequestStatus.RUNNING:
+                    # Not resumed in place.
+                    stopped_running_reqs.add(request)
 
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
@@ -2813,7 +2862,7 @@ class Scheduler(SchedulerInterface):
             < limit
         )
 
-    def _handle_stopped_request(self, request: Request) -> bool:
+    def _handle_stopped_request(self, request: Request, *, was_running: bool) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
             return True
@@ -2833,7 +2882,7 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
+            self._update_request_as_session(request, update, was_running=was_running)
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -2872,6 +2921,7 @@ class Scheduler(SchedulerInterface):
         self,
         scheduled: dict[str, int],
         new_requests: list[NewRequestData],
+        new_mm_features: dict[str, list[MultiModalFeatureSpec]],
         scheduled_encoder_inputs: dict[str, list[int]],
     ) -> dict[str, dict[int, MultiModalKwargsItem | None]]:
         # Installations (including resume/streaming) replace worker features.
@@ -2885,6 +2935,14 @@ class Scheduler(SchedulerInterface):
                 for i, feature in enumerate(new_request.mm_features)
                 if feature.data is not None and "address" not in feature.data
             }
+        # Features appended to running requests extend the worker features.
+        for req_id, features in new_mm_features.items():
+            start = len(self.requests[req_id].mm_features) - len(features)
+            self._pending_encoder_input_ids.setdefault(req_id, set()).update(
+                start + i
+                for i, feature in enumerate(features)
+                if feature.data is not None and "address" not in feature.data
+            )
 
         updates: dict[str, dict[int, MultiModalKwargsItem | None]] = {}
         for req_id in scheduled:

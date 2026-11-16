@@ -145,6 +145,11 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Multimodal features appended to a request since it was last sent, e.g. by
+    # a streaming input chunk that resumes the request in place.
+    new_mm_features: dict[str, list[MultiModalFeatureSpec]] = field(
+        default_factory=dict
+    )
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
