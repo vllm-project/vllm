@@ -532,8 +532,7 @@ def test_k1_matches_production_kda(
         "rstate": _rel_l2(rstate[rstate_w], want_rstate[rstate_w]),
         "core": _rel_l2(core, want),
     }
-    # AITER's SSM states are themselves ~2e-3 off the Triton chain's
-    assert errs["conv_state"] < 1e-3 and errs["rstate"] < 4e-3, errs
+    assert errs["conv_state"] < 1e-3 and errs["rstate"] < 3e-3, errs
     assert _cos(core, want) > COS_MIN, errs
 
 

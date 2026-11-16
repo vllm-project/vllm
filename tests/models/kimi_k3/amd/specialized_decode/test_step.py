@@ -264,6 +264,4 @@ def _check(out: Path, cases, q: int, m1c: bool) -> None:
                 f"(stock vs stock {noise:.2e})"
             )
             assert r["finite"] and r["graph_deterministic"], (result["case"], rank)
-            # Order and rounding only (measured 7.7e-4 - 3.2e-3, the most at DCP1
-            # verify; at 8+ rows the stock step alone varies by up to 1.4e-3).
-            assert err < 5e-3, (result["case"], rank, err)
+            assert err < (4e-3 if m1c else 2.5e-3), (result["case"], rank, err)
