@@ -44,7 +44,9 @@ def round_float(x, mant: int, emin: int, fmax: float | None = None):
     if fmax is not None:
         x = x.clamp(-fmax, fmax)
     e = (torch.frexp(x.abs()).exponent.long() - 1).clamp(min=emin)
-    q = torch.exp2(e - mant)
+    # float64, or exp2 of an integer tensor gives the quantum in the default
+    # dtype and 2^(e - mant) is past float32's range for a large x.
+    q = torch.exp2((e - mant).double())
     r = torch.where(torch.isfinite(x) & (x != 0), torch.round(x / q) * q, x)
     if fmax is None:
         r = torch.where(r.abs() >= 2.0**128, r * float("inf"), r)
