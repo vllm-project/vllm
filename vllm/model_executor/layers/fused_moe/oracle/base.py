@@ -153,6 +153,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     def select_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
         """Choose a supported backend for this instance's deployment.
 
+        Requantization sources return a placeholder without probing backends.
         The requested backend comes from `self.moe_config.moe_backend`;
         candidate support is checked with `self.weight_key` and
         `self.activation_key`. Automatic selection follows the order returned
@@ -161,6 +162,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         Subclasses can override this method to pass in additional arguments
         or different selection logic.
         """
+        source = self.maybe_skip_for_requantization_source()
+        if source is not None:
+            return source
+
         available_backends = self.get_priority_backends()
         requested = self.moe_config.moe_backend
         if requested != "auto":

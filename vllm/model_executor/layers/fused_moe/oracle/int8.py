@@ -116,11 +116,6 @@ def select_int8_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     Returns `NONE` and a placeholder experts class for requantization sources.
     """
-    # TODO: migrate to oracle base method.
-    source = Int8MoEKernelOracle.maybe_skip_for_requantization_source()
-    if source is not None:
-        return source
-
     backend, experts_cls = Int8MoEKernelOracle(
         config, weight_key, activation_key
     ).select_backend()
