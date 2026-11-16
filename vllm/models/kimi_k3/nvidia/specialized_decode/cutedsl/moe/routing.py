@@ -32,7 +32,7 @@ def bf16_word(lo, hi):
 
 @cute.jit
 def poll_words(words, pointer, valid):
-    """Copy four mailbox words into ``words``; clear ``valid`` if any is unpublished."""
+    """Copy four mailbox words into `words`; clear `valid` if any is unpublished."""
     values = mailbox_load(pointer, count=4)
     for j in cutlass.range_constexpr(4):
         words[j] = values[j]
@@ -42,8 +42,8 @@ def poll_words(words, pointer, valid):
 
 @cute.jit
 def gather_x(xmoe, par, cta, dst, first_chunk, active, tokens=1, h2=None):
-    """Poll this CTA's x_moe rows (and the TP16 H2 slices if ``h2 = (warp, lane,
-    pairs)``) until published, then stage the row chunks at ``dst``."""
+    """Poll this CTA's x_moe rows (and the TP16 H2 slices if `h2 = (warp, lane,
+    pairs)`) until published, then stage the row chunks at `dst`."""
     words = zeros((tokens, 2, 4), Uint32)
     h2_words: Any = None
     if cutlass.const_expr(h2 is not None):
@@ -86,7 +86,7 @@ def score_record(score, biased):
 
 @cute.jit
 def stage_rows(slots, pitch, slot, weights, first, rows, barrier, skip=0):
-    """Bulk-copy weight rows ``first + skip + i`` into slots ``slot + i``."""
+    """Bulk-copy weight rows `first + skip + i` into slots `slot + i`."""
     cute.arch.mbarrier_arrive_and_expect_tx(barrier, rows * 14336)
     for row in range(rows):
         dst = slots + (slot + row) * pitch
@@ -95,9 +95,9 @@ def stage_rows(slots, pitch, slot, weights, first, rows, barrier, skip=0):
 
 
 class Top16Fast:
-    """Eight-warp top16 of 896 experts, lower ids winning ties. ``scores`` holds FP32
-    (score, score+bias) bits per [parity, token, expert]; ``run`` polls ``token``'s
-    parity-``par`` records until published and writes ``ids[16*token:]``. Runs on the
+    """Eight-warp top16 of 896 experts, lower ids winning ties. `scores` holds FP32
+    (score, score+bias) bits per [parity, token, expert]; `run` polls `token`'s
+    parity-`par` records until published and writes `ids[16*token:]`. Runs on the
     first 256 threads of the CTA with named barrier 1 and 13,200 bytes of SMEM."""
 
     def __init__(self, batch):

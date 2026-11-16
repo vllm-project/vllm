@@ -167,8 +167,7 @@ guide: |
   The 12B fits comfortably on a single 40 GB+ GPU.
   ```bash
   vllm serve google/gemma-4-12B-it \
-    --max-model-len 32768 \
-    --gpu-memory-utilization 0.90
+    --max-model-len 32768
   ```
 
   ### Full-Featured Server Launch
@@ -176,7 +175,6 @@ guide: |
   ```bash
   vllm serve google/gemma-4-12B-it \
     --max-model-len 16384 \
-    --gpu-memory-utilization 0.90 \
     --enable-auto-tool-choice \
     --reasoning-parser gemma4 \
     --tool-call-parser gemma4 \
@@ -195,7 +193,6 @@ guide: |
     vllm/vllm-openai:gemma4-unified \
       --model google/gemma-4-12B-it \
       --max-model-len 32768 \
-      --gpu-memory-utilization 0.90 \
       --host 0.0.0.0 --port 8000
   ```
   On CUDA 12.9 hosts, use the `vllm/vllm-openai:gemma4-unified-cu129` tag instead.
@@ -293,7 +290,7 @@ guide: |
   ## Configuration Tips
 
   - Set `--max-model-len` to match your workload.
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache.
+  - On NVIDIA GPUs, leave `--gpu-memory-utilization` unset unless the GPU is shared: vLLM sizes the KV cache from memory measured after warmup ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)). On Intel XPU, `0.90–0.95` maximizes KV cache.
   - Image-only workloads: pass `--limit-mm-per-prompt.audio 0`.
   - Text-only workloads: pass `--limit-mm-per-prompt '{"image": 0, "audio": 0}'` to skip MM profiling.
   - `--async-scheduling` improves throughput.
