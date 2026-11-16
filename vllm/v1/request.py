@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import sys
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -74,6 +75,7 @@ class Request:
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
+        cache_salt_segments: list[tuple[int, str]] | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
@@ -190,6 +192,19 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        self.cache_salt_segments = [
+            (start, sys.intern(salt)) for start, salt in cache_salt_segments or ()
+        ]
+        starts = [start for start, _ in self.cache_salt_segments]
+        if any(b <= a for a, b in zip([-1, *starts], starts)) or not all(
+            salt for _, salt in self.cache_salt_segments
+        ):
+            raise ValueError(
+                "cache_salt_segments must have non-empty salts starting at "
+                "non-negative, strictly increasing token positions"
+            )
+        if self.cache_salt_segments and resumable:
+            raise ValueError("cache_salt_segments do not support streaming input")
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -272,6 +287,7 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,
+            cache_salt_segments=request.cache_salt_segments,
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,

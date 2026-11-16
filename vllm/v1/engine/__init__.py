@@ -228,6 +228,7 @@ class EngineCoreRequest(
     # Prompt block hashes computed by the frontend with the engine's
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
+    cache_salt_segments: list[tuple[int, str]] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
