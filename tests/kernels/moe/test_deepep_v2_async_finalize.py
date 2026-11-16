@@ -53,6 +53,7 @@ class _FakeBuffer:
         self.out = out
         self.calls: list[dict] = []
         self.last_event: _FakeEvent | None = None
+        self.num_max_tokens_per_rank = 8192
 
     def dispatch(self, **kwargs):
         self.calls.append(kwargs)
