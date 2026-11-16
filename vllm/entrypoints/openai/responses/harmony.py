@@ -437,7 +437,7 @@ def _parse_mcp_call(
 def _parse_message_no_recipient(
     message: Message,
     incomplete: bool = False,
-    text_logprobs: list[Logprob] | None = None,
+    logprobs: list[Logprob] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message with no recipient based on its channel."""
     if message.channel == "analysis":
@@ -447,9 +447,7 @@ def _parse_message_no_recipient(
         # Per Harmony format, preambles (commentary with no recipient) and
         # final channel content are both intended to be shown to end-users.
         # See: https://cookbook.openai.com/articles/openai-harmony
-        return [
-            _parse_final_message(message, incomplete=incomplete, logprobs=text_logprobs)
-        ]
+        return [_parse_final_message(message, incomplete=incomplete, logprobs=logprobs)]
 
     raise VLLMValidationError(f"Unknown channel: {message.channel}")
 
@@ -463,7 +461,7 @@ def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str],
     incomplete: bool = False,
-    text_logprobs: list[Logprob] | None = None,
+    logprobs: list[Logprob] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
@@ -504,7 +502,7 @@ def harmony_to_response_output(
     else:
         output_items.extend(
             _parse_message_no_recipient(
-                message, incomplete=incomplete, text_logprobs=text_logprobs
+                message, incomplete=incomplete, logprobs=logprobs
             )
         )
 

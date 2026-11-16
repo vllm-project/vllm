@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import HarmonyContext
 from vllm.entrypoints.openai.responses.harmony import harmony_to_response_output
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     emit_content_delta_events,
@@ -28,7 +29,7 @@ MODEL_NAME = "openai/gpt-oss-20b"
 
 REASONING_TEXT = "Let me think."
 PREAMBLE_TEXT = "Checking é now."
-FINAL_TEXT = "Héllo, 你好 world!"
+FINAL_TEXT = "Héllo, 你好 world 🪿!"
 HARMONY_OUTPUT = (
     f"<|channel|>analysis<|message|>{REASONING_TEXT}<|end|>"
     f"<|start|>assistant<|channel|>commentary<|message|>{PREAMBLE_TEXT}<|end|>"
@@ -82,8 +83,8 @@ def run_context(
 ) -> tuple[HarmonyContext, list[tuple[int, dict[int, Logprob]]]]:
     """Feed token_ids to a HarmonyContext in chunks of chunk_size.
 
-    Returns the context and every non-None entry of
-    last_append_text_logprobs, in order (what streaming would emit).
+    Returns the context and every Segment.token_logprobs that was set, in
+    order (what streaming would emit).
     """
     context = HarmonyContext(
         messages=[],
@@ -102,10 +103,11 @@ def run_context(
                 finished=end == len(token_ids),
             )
         )
-        assert len(context.last_append_text_logprobs) == len(
-            context.last_append_segments
+        streamed.extend(
+            segment.token_logprobs
+            for segment in context.last_append_segments
+            if segment.token_logprobs is not None
         )
-        streamed.extend(e for e in context.last_append_text_logprobs if e is not None)
     return context, streamed
 
 
@@ -113,7 +115,7 @@ def message_logprobs(context: HarmonyContext) -> list[list[int] | None]:
     """Token ids with logprobs for each output message, in order."""
     out = []
     for msg in context.messages[context.num_init_messages :]:
-        entries = context.text_logprobs_by_message.get(id(msg))
+        entries = context.logprobs_by_message.get(id(msg))
         out.append(None if entries is None else [t for t, _ in entries])
     return out
 
@@ -149,7 +151,7 @@ def test_streaming_matches_non_streaming(gpt_oss_tokenizer, chunk_size):
     per_message = [
         entry
         for msg in context.messages
-        for entry in context.text_logprobs_by_message.get(id(msg), [])
+        for entry in context.logprobs_by_message.get(id(msg), [])
     ]
     assert streamed == per_message
 
@@ -159,7 +161,7 @@ def test_no_logprobs_requested(gpt_oss_tokenizer):
         gpt_oss_tokenizer, encode(HARMONY_OUTPUT), 1, with_logprobs=False
     )
     assert streamed == []
-    assert context.text_logprobs_by_message == {}
+    assert context.logprobs_by_message == {}
 
 
 def make_response_logprobs(tokens: list[str]) -> list[ResponseLogprob]:
@@ -175,7 +177,7 @@ def test_streaming_events_carry_logprobs():
     events = emit_content_delta_events(
         Segment(channel="final", recipient=None, delta="Hi"),
         state,
-        text_logprobs=delta_logprobs,
+        logprobs=delta_logprobs,
     )
     delta_event = events[-1]
     assert delta_event.type == "response.output_text.delta"
@@ -183,17 +185,19 @@ def test_streaming_events_carry_logprobs():
 
     done_logprobs = make_response_logprobs(["Hi", "!"])
     message = Message.from_role_and_content(Role.ASSISTANT, "Hi!").with_channel("final")
-    events = emit_previous_item_done_events(message, state, text_logprobs=done_logprobs)
+    events = emit_previous_item_done_events(message, state, logprobs=done_logprobs)
     item_done = events[-1]
     assert item_done.type == "response.output_item.done"
     assert item_done.item.content[0].logprobs == done_logprobs
+    [text_done] = [e for e in events if e.type == "response.output_text.done"]
+    assert [lp.token for lp in text_done.logprobs] == ["Hi", "!"]
 
 
 def test_reasoning_delta_ignores_logprobs():
     events = emit_content_delta_events(
         Segment(channel="analysis", recipient=None, delta="hmm"),
         StreamingState(),
-        text_logprobs=make_response_logprobs(["hmm"]),
+        logprobs=make_response_logprobs(["hmm"]),
     )
     assert all(e.type != "response.output_text.delta" for e in events)
 
@@ -202,8 +206,19 @@ def test_reasoning_delta_ignores_logprobs():
 def test_final_output_carries_logprobs(channel):
     message = Message.from_role_and_content(Role.ASSISTANT, "Hi!").with_channel(channel)
     logprobs = make_response_logprobs(["Hi", "!"])
-    [item] = harmony_to_response_output(message, frozenset(), text_logprobs=logprobs)
+    [item] = harmony_to_response_output(message, frozenset(), logprobs=logprobs)
     assert item.content[0].logprobs == logprobs
 
     [item] = harmony_to_response_output(message, frozenset())
     assert item.content[0].logprobs is None
+
+
+def test_token_bytes_rejoin_split_character():
+    serving = object.__new__(OpenAIServingResponses)
+    serving.use_harmony = True
+    serving.return_tokens_as_token_ids = False
+    token_ids = encode("🪿")
+    assert len(token_ids) > 1
+    # Each token alone decodes to U+FFFD, but its raw bytes join back.
+    joined = b"".join(bytes(serving._token_bytes(t, "\ufffd")) for t in token_ids)
+    assert joined.decode("utf-8") == "🪿"

@@ -199,7 +199,9 @@ async def test_logprobs(client: OpenAI, model_name: str):
     logprobs = _output_text_logprobs(response)
     assert logprobs
     # Logprobs cover exactly the output text, no Harmony control tokens.
-    assert "".join(lp.token for lp in logprobs) == response.output_text
+    # Raw token bytes join back into it even across split characters.
+    joined = bytes(b for lp in logprobs for b in lp.bytes)
+    assert joined.decode("utf-8") == response.output_text
     for lp in logprobs:
         assert lp.logprob <= 0.0
         assert 0 < len(lp.top_logprobs) <= 3
@@ -218,11 +220,14 @@ async def test_streaming_logprobs_match_final_output(client: OpenAI, model_name:
         stream=True,
     )
     delta_logprobs = []
+    text_done_logprobs = []
     done_logprobs = []
     completed = None
     async for event in stream:
         if event.type == "response.output_text.delta":
             delta_logprobs.extend(event.logprobs)
+        elif event.type == "response.output_text.done":
+            text_done_logprobs.extend(event.logprobs)
         elif event.type == "response.output_item.done" and event.item.type == "message":
             for content in event.item.content:
                 done_logprobs.extend(content.logprobs or [])
@@ -238,6 +243,9 @@ async def test_streaming_logprobs_match_final_output(client: OpenAI, model_name:
         lp.logprob for lp in final_logprobs
     ]
     assert done_logprobs == final_logprobs
+    assert [lp.token for lp in text_done_logprobs] == [
+        lp.token for lp in final_logprobs
+    ]
 
 
 @pytest.mark.asyncio

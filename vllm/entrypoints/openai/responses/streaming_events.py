@@ -57,6 +57,7 @@ from openai.types.responses import (
     response_function_web_search,
     response_output_text,
     response_text_delta_event,
+    response_text_done_event,
 )
 from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
@@ -82,6 +83,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extend_custom_tool_input_prefix,
     resolve_responses_tool_call_name,
 )
+from vllm.logprobs import LogprobsOnePosition
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
 from vllm.renderers.chat_utils import make_tool_call_id
@@ -118,6 +120,11 @@ class StreamingState:
     current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
+    # (token_id, logprobs) of output text tokens not yet sent on a delta,
+    # e.g. part of a multi-byte character whose delta is still empty.
+    pending_logprobs: list[tuple[int, LogprobsOnePosition]] = field(
+        default_factory=list
+    )
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
@@ -126,6 +133,7 @@ class StreamingState:
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.pending_logprobs = []
 
 
 def is_mcp_tool_by_namespace(
@@ -402,7 +410,7 @@ def emit_text_output_done_events(
             output_index=state.current_output_index,
             content_index=state.current_content_index,
             text=text,
-            logprobs=[],
+            logprobs=_to_done_logprobs(logprobs or []),
             item_id=state.current_item_id,
         )
     )
@@ -572,7 +580,7 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
-    text_logprobs: list[response_output_text.Logprob] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -589,7 +597,7 @@ def emit_content_delta_events(
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_delta_events(delta, state, text_logprobs)
+        return emit_text_delta_events(delta, state, logprobs)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
@@ -611,7 +619,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
-    text_logprobs: list[response_output_text.Logprob] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -643,7 +651,7 @@ def emit_previous_item_done_events(
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_output_done_events(text, state, text_logprobs)
+        return emit_text_output_done_events(text, state, logprobs)
     return []
 
 
@@ -886,6 +894,24 @@ def _to_stream_logprobs(
             logprob=lp.logprob,
             top_logprobs=[
                 response_text_delta_event.LogprobTopLogprob(
+                    token=tl.token, logprob=tl.logprob
+                )
+                for tl in lp.top_logprobs
+            ],
+        )
+        for lp in logprobs
+    ]
+
+
+def _to_done_logprobs(
+    logprobs: list[response_output_text.Logprob],
+) -> list[response_text_done_event.Logprob]:
+    return [
+        response_text_done_event.Logprob(
+            token=lp.token,
+            logprob=lp.logprob,
+            top_logprobs=[
+                response_text_done_event.LogprobTopLogprob(
                     token=tl.token, logprob=tl.logprob
                 )
                 for tl in lp.top_logprobs

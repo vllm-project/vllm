@@ -53,6 +53,8 @@ from vllm.tool_parsers.structural_tag_registry import (
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
 
+    from vllm.logprobs import LogprobsOnePosition
+
 
 logger = init_logger(__name__)
 
@@ -84,6 +86,9 @@ class Segment(NamedTuple):
     # Index into the token_ids passed to process_chunk of the token that
     # produced this segment. None for segments created by flush().
     token_index: int | None = None
+    # (token_id, logprobs) of an output text token. Set by HarmonyContext
+    # only when logprobs are requested.
+    token_logprobs: tuple[int, LogprobsOnePosition] | None = None
 
 
 @dataclass

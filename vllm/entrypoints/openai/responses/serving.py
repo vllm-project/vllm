@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -803,8 +804,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     incomplete=(
                         i == len(harmony_msgs) - 1 and context.last_append_flush_status
                     ),
-                    text_logprobs=self._create_harmony_text_logprobs(
-                        context.text_logprobs_by_message.get(id(msg), []),
+                    logprobs=self._create_harmony_logprobs(
+                        context.logprobs_by_message.get(id(msg), []),
                         request,
                         tokenizer,
                     ),
@@ -968,7 +969,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 LogprobTopLogprob(
                     token=text,
                     logprob=max(_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._token_bytes(token_id, text),
                 )
             )
         return out
@@ -998,7 +999,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 Logprob(
                     token=text,
                     logprob=max(token_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
+                    bytes=self._token_bytes(token_id, text),
                     top_logprobs=(
                         self._topk_logprobs(
                             logprob, top_logprobs=top_logprobs, tokenizer=tokenizer
@@ -1010,9 +1011,20 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         return out
 
-    def _create_harmony_text_logprobs(
+    def _token_bytes(self, token_id: int, text: str) -> list[int]:
+        """Bytes of a token for the logprobs ``bytes`` field.
+
+        For gpt-oss, these are the token's raw bytes, so tokens that split a
+        multi-byte character can be joined back into it.
+        """
+        if self.use_harmony and not self.return_tokens_as_token_ids:
+            raw = get_encoding().decode([token_id], errors="surrogateescape")
+            return list(raw.encode("utf-8", errors="surrogateescape"))
+        return list(text.encode("utf-8", errors="replace"))
+
+    def _create_harmony_logprobs(
         self,
-        text_logprobs: Sequence[tuple[int, LogprobsOnePosition]],
+        token_logprobs: Sequence[tuple[int, LogprobsOnePosition]],
         request: ResponsesRequest,
         tokenizer: TokenizerLike,
     ) -> list[Logprob] | None:
@@ -1024,8 +1036,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         if not request.is_include_output_logprobs():
             return None
         return self._create_response_logprobs(
-            token_ids=[token_id for token_id, _ in text_logprobs],
-            logprobs=[logprobs for _, logprobs in text_logprobs],
+            token_ids=[token_id for token_id, _ in token_logprobs],
+            logprobs=[logprobs for _, logprobs in token_logprobs],
             tokenizer=tokenizer,
             top_logprobs=request.top_logprobs,
         )
@@ -1323,9 +1335,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
-        # Text tokens with an empty delta (e.g. part of a multi-byte
-        # character) wait here until the next text delta is emitted.
-        pending_text_logprobs: list[tuple[int, LogprobsOnePosition]] = []
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1333,34 +1342,31 @@ class OpenAIServingResponses(GenerateBaseServing):
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            for segment, text_logprob in zip(
-                ctx.last_append_segments, ctx.last_append_text_logprobs, strict=True
-            ):
-                if text_logprob is not None:
-                    pending_text_logprobs.append(text_logprob)
+            for segment in ctx.last_append_segments:
+                if segment.token_logprobs is not None:
+                    state.pending_logprobs.append(segment.token_logprobs)
 
                 if segment.delta:
                     delta_logprobs = None
-                    if text_logprob is not None:
-                        delta_logprobs = self._create_harmony_text_logprobs(
-                            pending_text_logprobs, request, tokenizer
+                    if segment.token_logprobs is not None:
+                        delta_logprobs = self._create_harmony_logprobs(
+                            state.pending_logprobs, request, tokenizer
                         )
-                        pending_text_logprobs = []
+                        state.pending_logprobs = []
                     for event in emit_content_delta_events(
                         segment, state, ctx.function_tool_names, delta_logprobs
                     ):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
-                    pending_text_logprobs = []
                     done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message,
                         state,
                         ctx.function_tool_names,
-                        self._create_harmony_text_logprobs(
-                            ctx.text_logprobs_by_message.get(id(completed_message), []),
+                        self._create_harmony_logprobs(
+                            ctx.logprobs_by_message.get(id(completed_message), []),
                             request,
                             tokenizer,
                         ),
