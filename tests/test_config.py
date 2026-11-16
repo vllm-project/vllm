@@ -42,6 +42,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     WatermarkConfig,
+    replace,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -3207,7 +3208,6 @@ def test_replace_keeps_compile_factors_with_blocked_fp8_weights(tmp_path):
     compiled graphs) must resolve to the same entry before and after replace()."""
     from transformers import LlamaConfig
 
-    from vllm.config import replace
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
@@ -3243,6 +3243,23 @@ def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: boo
         compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
     )
     assert config.compilation_config.is_custom_op_enabled("fused_layernorm") is expected
+
+
+@pytest.mark.parametrize(
+    ("custom_ops", "expected"),
+    [
+        ([], ["+quant_fp8"]),
+        (["+quant_fp8"], ["+quant_fp8"]),
+        (["-quant_fp8"], ["-quant_fp8"]),
+    ],
+)
+def test_enable_custom_op_by_default_is_idempotent(
+    custom_ops: list[str], expected: list[str]
+):
+    config = CompilationConfig(custom_ops=custom_ops)
+    config.enable_custom_op_by_default("quant_fp8")
+    config.enable_custom_op_by_default("quant_fp8")
+    assert config.custom_ops == expected
 
 
 def test_vllm_config_defaults_are_none():
