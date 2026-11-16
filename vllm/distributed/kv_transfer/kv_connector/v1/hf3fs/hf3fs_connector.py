@@ -89,16 +89,6 @@ except Exception:
 # Constants
 DEFAULT_MAX_IO_ENTRIES = 8
 
-
-def _as_int64(ptr: int) -> int:
-    """Reinterpret an unsigned 64-bit device address as signed int64.
-
-    Some accelerators (e.g. Intel XPU) hand out addresses >= 2**63, which do
-    not fit in an int64 tensor as-is. Triton casts the bits back to the same
-    address, so storing the two's-complement value is lossless.
-    """
-    return ptr - (1 << 64) if ptr >= (1 << 63) else ptr
-
 logger = init_logger(__name__)
 
 
@@ -576,8 +566,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         ]
 
         self._kvcache_ptrs = torch.tensor(
-            [_as_int64(cache.data_ptr()) for cache in self._kv_caches.values()],
-            dtype=torch.int64,
+            [cache.data_ptr() for cache in self._kv_caches.values()],
+            dtype=torch.uint64,
             device=self._device,
         )
 

@@ -281,11 +281,11 @@ class Hf3fsClient:
         return t.view(-1).view(torch.uint8)
 
     def _read_shm(self, tensors: list[torch.Tensor]) -> None:
-        """Copy packed pages from the read shm into ``tensors``.
+        """Copy packed pages from the read shm into `tensors`.
 
-        shm -> pinned host buffer -> device (async on ``self.stream``).
-        ``self.stream`` does not wait on other streams: the caller must ensure
-        no pending device work still touches ``tensors``.
+        shm -> pinned host buffer -> device (async on `self.stream`).
+        `self.stream` does not wait on other streams: the caller must ensure
+        no pending device work still touches `tensors`.
         """
         if self._cuda_ops is not None:
             with torch.cuda.stream(self.stream):
@@ -310,9 +310,9 @@ class Hf3fsClient:
         self.stream.synchronize()
 
     def _write_shm(self, tensors: list[torch.Tensor], event: torch.Event) -> None:
-        """Pack ``tensors`` into the write shm once ``event`` has completed.
+        """Pack `tensors` into the write shm once `event` has completed.
 
-        device -> pinned host buffer (async on ``self.stream``) -> shm.
+        device -> pinned host buffer (async on `self.stream`) -> shm.
         """
         if self._cuda_ops is not None:
             with torch.cuda.stream(self.stream):
