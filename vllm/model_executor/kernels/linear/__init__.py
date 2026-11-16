@@ -305,7 +305,7 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
 
 def _xpu_preferred_fp8_block_kernel(
     quantization: str,
-) -> type[Fp8BlockScaledMMLinearKernel] | None:
+) -> type[Any] | None:
     """XPUs without native FP8 (not Xe3p) run block FP8 faster weight-only:
     skip the activation quantization and use W8A16. Returns None to keep the
     normal list order (W8A8 first), which is also the fallback if the forced
