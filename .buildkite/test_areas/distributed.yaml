@@ -558,7 +558,7 @@ steps:
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
 
-- label: ":nvidia: (H100) DeepSeek / HY4 ShardQ Sequence Parallel"
+- label: ":nvidia: (H100) ShardQ Sequence Parallel"
   key: deepseek-shardq-sequence-parallel
   timeout_in_minutes: 30
   device: h100
