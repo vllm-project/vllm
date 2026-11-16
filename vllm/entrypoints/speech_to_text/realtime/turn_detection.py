@@ -9,17 +9,21 @@ complete turn; an incomplete turn keeps listening until speech resumes or the
 silence reaches the eagerness limit.
 
 Both models run in `vllm._rust_turn_detection` (no ONNX Runtime). Their files
-are downloaded from the Hugging Face Hub at pinned revisions and checked
-against pinned sha256 digests when loaded. The state machine and its defaults
+are downloaded from the official Silero repository and the Hugging Face Hub
+at pinned revisions and checked against pinned sha256 digests when loaded.
+The state machine and its defaults
 follow vLLM-Omni's duplex turn detection (`vllm_omni/engine/duplex/vad.py` and
 `turn_detection.py`); vLLM-Omni scores pauses with the int8 Smart Turn graph,
 this module with the fp32 one.
 """
 
 import functools
+import hashlib
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 import numpy as np
@@ -89,13 +93,51 @@ class _Model:
                     import vllm._rust_turn_detection as rt
                     from vllm.transformers_utils.repo_utils import hf_api
 
-                    path = hf_api().hf_hub_download(
-                        getattr(rt, f"{self._prefix}_REPO"),
-                        getattr(rt, f"{self._prefix}_FILE"),
-                        revision=getattr(rt, f"{self._prefix}_REVISION"),
-                    )
+                    if self._prefix == "SILERO":
+                        path = _silero_model_path(rt)
+                    else:
+                        path = hf_api().hf_hub_download(
+                            getattr(rt, f"{self._prefix}_REPO"),
+                            getattr(rt, f"{self._prefix}_FILE"),
+                            revision=getattr(rt, f"{self._prefix}_REVISION"),
+                        )
                     self._model = getattr(rt, self._cls_name)(path)
         return self._model
+
+
+def _silero_model_path(rt) -> str:
+    """Cache the pinned upstream Silero file without exposing partial downloads."""
+    from filelock import FileLock
+    from huggingface_hub.constants import HF_HUB_OFFLINE
+    from huggingface_hub.errors import OfflineModeIsEnabled
+
+    from vllm import envs
+    from vllm.connections import global_http_connection
+
+    directory = Path(envs.VLLM_ASSETS_CACHE) / "turn_detection" / rt.SILERO_REVISION
+    path = directory / Path(rt.SILERO_FILE).name
+    if path.is_file():
+        return str(path)
+    if HF_HUB_OFFLINE:
+        raise OfflineModeIsEnabled(f"Silero model is not cached at {path}")
+    directory.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(path) + ".lock"):
+        if not path.is_file():
+            url = (
+                f"https://raw.githubusercontent.com/{rt.SILERO_REPO}/"
+                f"{rt.SILERO_REVISION}/{rt.SILERO_FILE}"
+            )
+            with TemporaryDirectory(dir=directory) as temporary:
+                download = Path(temporary) / path.name
+                global_http_connection.download_file(url, download, timeout=30)
+                actual = hashlib.sha256(download.read_bytes()).hexdigest()
+                if actual != rt.SILERO_SHA256:
+                    raise ValueError(
+                        f"Silero checksum mismatch: expected {rt.SILERO_SHA256}, "
+                        f"got {actual}"
+                    )
+                download.replace(path)
+    return str(path)
 
 
 SILERO = _Model("SileroVad", "SILERO")
@@ -275,13 +317,6 @@ class TurnDetector:
         self._turn_active = False
         self._turn_start_ms = 0
         self._pause_start_ms: int | None = None
-
-    @property
-    def in_turn(self) -> bool:
-        """A `speech_started` has not been followed by `speech_stopped`."""
-        if self._turn_scorer is None:
-            return self._endpointer.speech_active
-        return self._turn_active
 
     def process(self, audio: np.ndarray) -> list[TurnEvent]:
         """Advance over `audio`; return the boundaries it completes, in order.

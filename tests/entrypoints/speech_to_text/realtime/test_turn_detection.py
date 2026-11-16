@@ -6,7 +6,11 @@ scores. The WebSocket path is tested in test_realtime_validation.py."""
 
 import numpy as np
 import pytest
+from huggingface_hub import constants
+from huggingface_hub.errors import OfflineModeIsEnabled
 
+from vllm import envs
+from vllm.connections import global_http_connection
 from vllm.entrypoints.speech_to_text.realtime import turn_detection as td
 from vllm.entrypoints.speech_to_text.realtime.protocol import SemanticVad, ServerVad
 
@@ -156,6 +160,53 @@ def test_semantic_vad_survives_a_failing_turn_scorer():
         ("speech_started", 20),
         ("speech_stopped", 93 * FRAME_MS),
     ]
+
+
+@pytest.fixture
+def silero_cache(tmp_path, monkeypatch):
+    import vllm._rust_turn_detection as rt
+
+    monkeypatch.setattr(envs, "VLLM_ASSETS_CACHE", str(tmp_path))
+    model_name = rt.SILERO_FILE.rsplit("/", 1)[-1]
+    return rt, tmp_path / "turn_detection" / rt.SILERO_REVISION / model_name
+
+
+def test_offline_silero_cache_requires_a_preseeded_model(silero_cache, monkeypatch):
+    rt, cached = silero_cache
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    with pytest.raises(OfflineModeIsEnabled, match="Silero model is not cached"):
+        td._silero_model_path(rt)
+    assert not cached.parent.exists()
+
+    cached.parent.mkdir(parents=True)
+    # Test cache path selection. The Rust loader verifies the model on use.
+    cached.write_bytes(b"cached")
+    assert td._silero_model_path(rt) == str(cached)
+    assert list(cached.parent.iterdir()) == [cached]
+
+
+@pytest.mark.parametrize("transfer_fails", [True, False])
+def test_silero_download_failure_does_not_publish_cached_file(
+    silero_cache, monkeypatch, transfer_fails
+):
+    rt, cached = silero_cache
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+
+    def download(_url, destination, *, timeout):
+        destination.write_bytes(b"partial or wrong file")
+        if transfer_fails:
+            raise OSError("connection lost")
+
+    monkeypatch.setattr(global_http_connection, "download_file", download)
+    error = (
+        pytest.raises(OSError, match="connection lost")
+        if transfer_fails
+        else pytest.raises(ValueError, match="checksum mismatch")
+    )
+    with error:
+        td._silero_model_path(rt)
+    assert not cached.exists()
+    assert not any(path.is_dir() for path in cached.parent.iterdir())
 
 
 # ONNX Runtime 1.31.1 on the same pinned files, through vLLM-Omni's Silero and

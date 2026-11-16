@@ -24,9 +24,9 @@ use thiserror::Error;
 /// Where the supported model files come from. Callers download them; this crate
 /// only checks that the bytes are the pinned ones.
 pub mod pins {
-    pub const SILERO_REPO: &str = "istupakov/silero-vad-onnx";
-    pub const SILERO_REVISION: &str = "8b14476858ef240c50b3884bb38cc67290c1cc70";
-    pub const SILERO_FILE: &str = "silero_vad.onnx";
+    pub const SILERO_REPO: &str = "snakers4/silero-vad";
+    pub const SILERO_REVISION: &str = "be95df9152c0d7618fa1edfeb296fc3dae32376f";
+    pub const SILERO_FILE: &str = "src/silero_vad/data/silero_vad.onnx";
     pub const SILERO_SHA256: &str =
         "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
 

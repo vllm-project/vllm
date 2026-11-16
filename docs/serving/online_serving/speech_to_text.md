@@ -252,6 +252,15 @@ sending the same setting again keeps the running detector.
 {"type": "session.update", "model": "model-name", "turn_detection": {"type": "semantic_vad", "eagerness": "auto"}}
 ```
 
+The example client prints these events alongside the transcript:
+
+```bash
+python examples/speech_to_text/realtime/openai_realtime_client.py --turn-detection server_vad
+```
+
+File EOF does not add a silence window or force a `speech_stopped` event. With
+`semantic_vad`, speech at the end of a file can therefore leave the last turn open.
+
 For `semantic_vad`, a pause of 300 ms (`high`), 1200 ms (`medium`/`auto`) or 1500 ms (`low`)
 is checked with Smart Turn; if the turn is judged incomplete, it ends once the pause
 reaches 2 s, 4 s or 8 s.
@@ -264,11 +273,20 @@ server does not use (such as `create_response`) are ignored.
 Both models run on CPU in the API server, built into vLLM (no ONNX Runtime), in a pool
 of `VLLM_MAX_AUDIO_PREPROCESS_WORKERS` threads. On one Zen 4 core, Silero costs about
 30 µs per 32 ms of audio and Smart Turn about 60 ms per pause it checks. The model files
-are downloaded from the Hugging Face Hub at pinned revisions the first time a session asks
-for them, and are checked against pinned checksums. For offline deployments, download
-them in advance:
+come from the official Silero GitHub repository and Pipecat's Hugging Face organization
+at pinned revisions. They are downloaded the first time a session asks for them and
+checked against pinned checksums. For offline deployments, choose the same
+`VLLM_ASSETS_CACHE` and `HF_HUB_CACHE` directories for downloading and serving.
+Run the model loaders once with network access, before setting `HF_HUB_OFFLINE=1`,
+to download and verify both files:
 
 ```bash
-hf download istupakov/silero-vad-onnx silero_vad.onnx --revision 8b14476858ef240c50b3884bb38cc67290c1cc70
-hf download pipecat-ai/smart-turn-v3 smart-turn-v3.2-gpu.onnx --revision f766f81d3cfdf7737ac64aad813d91bbfd56bf93
+export VLLM_ASSETS_CACHE=/path/to/vllm-assets
+export HF_HUB_CACHE=/path/to/huggingface/hub
+python - <<'PY'
+from vllm.entrypoints.speech_to_text.realtime.turn_detection import SILERO, SMART_TURN
+
+SILERO.get()
+SMART_TURN.get()
+PY
 ```

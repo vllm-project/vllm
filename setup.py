@@ -71,8 +71,20 @@ def should_require_rust_frontend() -> bool:
     return value.lower() not in ("", "0", "false", "no")
 
 
+def has_compatible_rust_extension_suffix(filename: str) -> bool:
+    suffix = filename.partition(".")[2]
+    # Free-threaded CPython requires its version-specific ABI.
+    return f".{suffix}" == sysconfig.get_config_var("EXT_SUFFIX") or (
+        suffix == "abi3.so" and not is_freethreaded()
+    )
+
+
 def get_precompiled_rust_extension_paths() -> list[Path]:
-    return sorted((ROOT_DIR / "vllm").glob("_rust_*.so"))
+    return sorted(
+        path
+        for path in (ROOT_DIR / "vllm").glob("_rust_*.so")
+        if has_compatible_rust_extension_suffix(path.name)
+    )
 
 
 def get_missing_precompiled_rust_extension_modules() -> list[str]:
@@ -1166,7 +1178,10 @@ class precompiled_wheel_utils:
                             member.filename
                         )
                     ):
-                        file_members.append(member)
+                        if has_compatible_rust_extension_suffix(
+                            Path(member.filename).name
+                        ):
+                            file_members.append(member)
                         continue
 
                     if not extract_extensions:

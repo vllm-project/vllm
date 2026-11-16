@@ -66,6 +66,7 @@ class RealtimeConnection:
         self._is_model_validated = False
 
         self.turn_detector: TurnDetector | None = None
+        self._speech_active = False
         #: Samples appended so far: turn detection's clock.
         self._audio_samples = 0
 
@@ -129,7 +130,6 @@ class RealtimeConnection:
             if err is not None:
                 await self.send_error(err.error.message, "model_not_found")
                 return
-            self._is_model_validated = True
             if "turn_detection" in event:
                 try:
                     session = SessionUpdate(**event)
@@ -138,7 +138,9 @@ class RealtimeConnection:
                         sanitize_message(str(e)), "invalid_turn_detection"
                     )
                     return
-                await self.configure_turn_detection(session.turn_detection)
+                if not await self.configure_turn_detection(session.turn_detection):
+                    return
+            self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
@@ -193,8 +195,8 @@ class RealtimeConnection:
 
     async def configure_turn_detection(
         self, config: ServerVad | SemanticVad | None
-    ) -> None:
-        """Replace the session's turn detector (`None` turns detection off).
+    ) -> bool:
+        """Apply the session's turn detection setting and report success.
 
         The same setting again keeps the running detector. Otherwise a turn in
         progress is closed with `speech_stopped` at the current position, and
@@ -202,7 +204,7 @@ class RealtimeConnection:
         """
         current = self.turn_detector
         if current is not None and current.config == config:
-            return
+            return True
         detector = None
         if config is not None:
             try:
@@ -217,9 +219,10 @@ class RealtimeConnection:
                     f"turn_detection is unavailable: {sanitize_message(str(e))}",
                     "turn_detection_unavailable",
                 )
-                return
+                return False
         await self._close_turn()
         self.turn_detector = detector
+        return True
 
     async def detect_turns(self, audio: np.ndarray) -> None:
         """Run turn detection on appended audio and send its events."""
@@ -231,8 +234,8 @@ class RealtimeConnection:
         except Exception as e:
             # A detector that failed mid-append is out of step with the audio.
             logger.exception("Turn detection failed: %s", e)
-            await self._close_turn()
             self.turn_detector = None
+            await self._close_turn()
             await self.send_error(
                 f"turn detection failed and is now off: {sanitize_message(str(e))}",
                 "turn_detection_failed",
@@ -243,15 +246,20 @@ class RealtimeConnection:
                 await self.send(
                     InputAudioBufferSpeechStarted(audio_start_ms=event.audio_ms)
                 )
+                self._speech_active = True
             else:
                 await self.send(
                     InputAudioBufferSpeechStopped(audio_end_ms=event.audio_ms)
                 )
+                self._speech_active = False
 
     async def _close_turn(self) -> None:
-        if self.turn_detector is not None and self.turn_detector.in_turn:
+        # An append can fail after its detector state advances, before any
+        # events from that append are sent.
+        if self._speech_active:
             end_ms = round(self._audio_samples * 1000 / SAMPLE_RATE_HZ)
             await self.send(InputAudioBufferSpeechStopped(audio_end_ms=end_ms))
+            self._speech_active = False
 
     async def _run_off_loop(self, fn: Callable[[], T]) -> T:
         loop = asyncio.get_running_loop()

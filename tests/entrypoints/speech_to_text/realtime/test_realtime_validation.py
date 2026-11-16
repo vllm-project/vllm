@@ -4,16 +4,27 @@
 import asyncio
 import json
 import warnings
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
 import pybase64 as base64
 import pytest
 import websockets
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.speech_to_text.realtime import connection as realtime_connection
+from vllm.entrypoints.speech_to_text.realtime.api_router import router
 from vllm.entrypoints.speech_to_text.realtime.connection import RealtimeConnection
+from vllm.entrypoints.speech_to_text.realtime.serving import OpenAIServingRealtime
+from vllm.entrypoints.speech_to_text.realtime.turn_detection import (
+    FRAME_SAMPLES,
+    TurnDetector,
+)
 from vllm.multimodal.media.audio import load_audio
 
 MISTRAL_FORMAT_ARGS = [
@@ -26,6 +37,129 @@ MISTRAL_FORMAT_ARGS = [
 ] + ROCM_EXTRA_ARGS
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
+
+
+@pytest.fixture
+def realtime_websocket():
+    """Run the WebSocket route without a transcription engine."""
+
+    class EngineClient:
+        model_config = None
+        renderer = None
+        input_processor = None
+
+    engine = EngineClient()
+    models = OpenAIServingModels(engine, [BaseModelPath(MODEL_NAME, MODEL_NAME)])
+    serving = OpenAIServingRealtime(engine, models, request_logger=None)
+    app = FastAPI()
+    app.include_router(router)
+    app.state.openai_serving_realtime = serving
+    try:
+        with TestClient(app) as client, client.websocket_connect("/v1/realtime") as ws:
+            assert ws.receive_json()["type"] == "session.created"
+            yield ws
+    finally:
+        serving.turn_detection_executor.shutdown(wait=True)
+
+
+def _use_frame_scores(monkeypatch, scores):
+    scores = iter(scores)
+
+    def score(_frame):
+        probability = next(scores, None)
+        if probability is None:
+            raise RuntimeError("Silero failed")
+        return probability
+
+    monkeypatch.setattr(
+        realtime_connection,
+        "TurnDetector",
+        partial(
+            TurnDetector, new_frame_scorer=lambda: score, turn_scorer=lambda _: 0.9
+        ),
+    )
+
+
+def _session_update(turn_detection):
+    return {
+        "type": "session.update",
+        "model": MODEL_NAME,
+        "turn_detection": turn_detection,
+    }
+
+
+def _append_frames(ws, count):
+    audio = base64.b64encode(bytes(2 * count * FRAME_SAMPLES)).decode()
+    ws.send_json({"type": "input_audio_buffer.append", "audio": audio})
+
+
+@pytest.mark.parametrize("vad_type", ["server_vad", "semantic_vad"])
+@pytest.mark.timeout(15)
+def test_ignored_turn_detection_flags_preserve_active_turn(
+    realtime_websocket, monkeypatch, vad_type
+):
+    _use_frame_scores(monkeypatch, [0.9] * 4)
+    ws = realtime_websocket
+    ws.send_json(_session_update({"type": vad_type, "create_response": False}))
+    _append_frames(ws, 3)
+    assert ws.receive_json()["type"] == "input_audio_buffer.speech_started"
+
+    ws.send_json(_session_update({"type": vad_type, "create_response": True}))
+    # The extra frame distinguishes a stop on the flag change from the
+    # expected stop when the client disables detection.
+    _append_frames(ws, 1)
+    ws.send_json(_session_update(None))
+    assert ws.receive_json() == {
+        "type": "input_audio_buffer.speech_stopped",
+        "audio_end_ms": 128,
+    }
+
+
+@pytest.mark.parametrize("client_saw_start", [False, True])
+@pytest.mark.timeout(15)
+def test_turn_detection_failure_closes_only_a_reported_start(
+    realtime_websocket, monkeypatch, client_saw_start
+):
+    ws = realtime_websocket
+    scores = [0.9] * 3 + ([0.0] if client_saw_start else [])
+    _use_frame_scores(monkeypatch, scores)
+    ws.send_json(_session_update({"type": "server_vad", "silence_duration_ms": 0}))
+
+    if client_saw_start:
+        _append_frames(ws, 3)
+        assert ws.receive_json()["type"] == "input_audio_buffer.speech_started"
+        _append_frames(ws, 2)
+        assert ws.receive_json() == {
+            "type": "input_audio_buffer.speech_stopped",
+            "audio_end_ms": 160,
+        }
+    else:
+        _append_frames(ws, 4)
+    event = ws.receive_json()
+    assert event.get("code") == "turn_detection_failed", event
+
+
+@pytest.mark.parametrize(
+    ("threshold", "error"),
+    [(7, "invalid_turn_detection"), (0.5, "turn_detection_unavailable")],
+)
+@pytest.mark.timeout(15)
+def test_rejected_initial_turn_detection_update_does_not_enable_commit(
+    realtime_websocket, monkeypatch, threshold, error
+):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("model could not load")
+
+    monkeypatch.setattr(realtime_connection, "TurnDetector", unavailable)
+    ws = realtime_websocket
+    ws.send_json(_session_update({"type": "server_vad", "threshold": threshold}))
+    assert ws.receive_json()["code"] == error
+
+    ws.send_json({"type": "input_audio_buffer.commit", "final": True})
+    # The following error shows the commit was processed even if it was
+    # incorrectly accepted without a response.
+    ws.send_json({"type": "unused"})
+    assert ws.receive_json()["code"] == "model_not_validated"
 
 
 def test_realtime_generation_preserves_watermarking(monkeypatch):
@@ -419,6 +553,9 @@ async def test_turn_detection_events_alongside_transcription(
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert event["code"] == "invalid_turn_detection"
+            await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
+            event = await receive_event(ws, timeout=10.0)
+            assert event["code"] == "model_not_validated"
 
         for turn_detection in (
             {"type": "server_vad"},

@@ -55,8 +55,8 @@ struct SileroVad {
 impl SileroVad {
     /// Load the pinned `silero_vad.onnx`, checking its sha256.
     #[new]
-    fn new(model_path: &str) -> PyResult<Self> {
-        let model = SileroModel::load(Path::new(model_path)).map_err(to_py)?;
+    fn new(py: Python<'_>, model_path: &str) -> PyResult<Self> {
+        let model = py.detach(|| SileroModel::load(Path::new(model_path))).map_err(to_py)?;
         Ok(Self {
             model: Arc::new(model),
         })
@@ -107,12 +107,15 @@ struct SmartTurn {
 impl SmartTurn {
     /// Load the pinned `smart-turn-v3.2-gpu.onnx`, checking its sha256.
     #[new]
-    fn new(model_path: &str) -> PyResult<Self> {
-        let model = SmartTurnModel::load(Path::new(model_path)).map_err(to_py)?;
-        Ok(Self {
-            model: Arc::new(model),
-            mel: Arc::new(LogMel::new()),
+    fn new(py: Python<'_>, model_path: &str) -> PyResult<Self> {
+        py.detach(|| {
+            let model = SmartTurnModel::load(Path::new(model_path))?;
+            Ok(Self {
+                model: Arc::new(model),
+                mel: Arc::new(LogMel::new()),
+            })
         })
+        .map_err(to_py)
     }
 
     /// Score the last 8 s of `audio` (shorter audio is zero-padded in front).
@@ -132,6 +135,7 @@ fn _rust_turn_detection(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ("SILERO_REPO", pins::SILERO_REPO),
         ("SILERO_REVISION", pins::SILERO_REVISION),
         ("SILERO_FILE", pins::SILERO_FILE),
+        ("SILERO_SHA256", pins::SILERO_SHA256),
         ("SMART_TURN_REPO", pins::SMART_TURN_REPO),
         ("SMART_TURN_REVISION", pins::SMART_TURN_REVISION),
         ("SMART_TURN_FILE", pins::SMART_TURN_FILE),

@@ -4,7 +4,7 @@
 import time
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
@@ -29,6 +29,8 @@ class InputAudioBufferCommit(OpenAIBaseModel):
 class ServerVad(OpenAIBaseModel):
     """End a turn after a fixed silence, judged by Silero VAD."""
 
+    model_config = ConfigDict(extra="ignore")
+
     type: Literal["server_vad"]
     threshold: float = Field(default=0.5, gt=0.15, le=1.0)
     """Speech probability at which a 32 ms frame counts as speech."""
@@ -40,6 +42,8 @@ class ServerVad(OpenAIBaseModel):
 
 class SemanticVad(OpenAIBaseModel):
     """End a turn when Smart Turn v3.2 judges the speech before a pause complete."""
+
+    model_config = ConfigDict(extra="ignore")
 
     type: Literal["semantic_vad"]
     eagerness: Literal["low", "medium", "high", "auto"] = "auto"

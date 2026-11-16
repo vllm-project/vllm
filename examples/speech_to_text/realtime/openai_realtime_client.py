@@ -42,7 +42,13 @@ def audio_to_pcm16_base64(audio_path: str) -> str:
     return base64.b64encode(pcm16.tobytes()).decode("utf-8")
 
 
-async def realtime_transcribe(audio_path: str, host: str, port: int, model: str):
+async def realtime_transcribe(
+    audio_path: str,
+    host: str,
+    port: int,
+    model: str,
+    turn_detection: str | None = None,
+):
     """Connect to the Realtime API and transcribe an audio file."""
     uri = f"ws://{host}:{port}/v1/realtime"
 
@@ -56,7 +62,13 @@ async def realtime_transcribe(audio_path: str, host: str, port: int, model: str)
             return
 
         # Validate model
-        await ws.send(json.dumps({"type": "session.update", "model": model}))
+        session: dict[str, str | dict[str, str]] = {
+            "type": "session.update",
+            "model": model,
+        }
+        if turn_detection is not None:
+            session["turn_detection"] = {"type": turn_detection}
+        await ws.send(json.dumps(session))
 
         # Signal ready to start
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
@@ -97,6 +109,10 @@ async def realtime_transcribe(audio_path: str, host: str, port: int, model: str)
                 if response.get("usage"):
                     print(f"Usage: {response['usage']}")
                 break
+            elif response["type"] == "input_audio_buffer.speech_started":
+                print(f"\nSpeech started at {response['audio_start_ms']} ms")
+            elif response["type"] == "input_audio_buffer.speech_stopped":
+                print(f"\nSpeech stopped at {response['audio_end_ms']} ms")
             elif response["type"] == "error":
                 print(f"\nError: {response['error']}")
                 break
@@ -110,7 +126,11 @@ def main(args):
         audio_path = str(AudioAsset("mary_had_lamb").get_local_path())
         print(f"No audio path provided, using default: {audio_path}")
 
-    asyncio.run(realtime_transcribe(audio_path, args.host, args.port, args.model))
+    asyncio.run(
+        realtime_transcribe(
+            audio_path, args.host, args.port, args.model, args.turn_detection
+        )
+    )
 
 
 if __name__ == "__main__":
@@ -122,6 +142,12 @@ if __name__ == "__main__":
         type=str,
         default="mistralai/Voxtral-Mini-4B-Realtime-2602",
         help="Model that is served and should be pinged.",
+    )
+    parser.add_argument(
+        "--turn-detection",
+        choices=["server_vad", "semantic_vad"],
+        default=None,
+        help="Report speech boundaries alongside transcription (default: off).",
     )
     parser.add_argument(
         "--audio_path",
