@@ -506,6 +506,10 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.pooling_kernel_size
         max_soft_tokens = self.get_video_max_soft_tokens()
+        patch_size = vision_config.patch_size
+        max_patches = max_soft_tokens * vision_config.pooling_kernel_size**2
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        do_resize = video_kwargs.get("do_resize") is not False
         sizes = [
             ImageSize(width=unit * (max_soft_tokens // h), height=unit * h)
             for h in range(1, max_soft_tokens + 1)
@@ -531,19 +535,24 @@ class EmbeddingGemma2ProcessingInfo(Gemma4ProcessingInfo):
                 k = min(max_width // aspect_w, max_height // aspect_h)
                 if k * min(aspect_w, aspect_h) >= MIN_DUMMY_SIDE:
                     sizes.append(ImageSize(width=k * aspect_w, height=k * aspect_h))
-
-        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
-        do_resize = video_kwargs.get("do_resize") is not False
+            if not do_resize:
+                for h in range(1, min(max_patches, max_height // patch_size) + 1):
+                    if w := min(max_patches // h, max_width // patch_size):
+                        sizes.append(
+                            ImageSize(width=patch_size * w, height=patch_size * h)
+                        )
 
         def num_soft_tokens(size: ImageSize) -> int:
             if do_resize:
                 return self._compute_num_soft_tokens(
                     size.width, size.height, max_soft_tokens
                 )
-            if size.width % unit or size.height % unit:
+            if size.width % patch_size or size.height % patch_size:
                 return 0
-            num_tokens = (size.width // unit) * (size.height // unit)
-            return num_tokens if num_tokens <= max_soft_tokens else 0
+            num_patches = (size.width // patch_size) * (size.height // patch_size)
+            if num_patches > max_patches:
+                return 0
+            return num_patches // vision_config.pooling_kernel_size**2
 
         return max(
             sizes,

@@ -166,6 +166,8 @@ def test_video_placeholder_reads_scoped_add_timestamps(configured: bool):
             {"width": 94, "height": 134},
             (91, 130),
         ),
+        ({"do_resize": False}, {"width": 224, "height": 224}, (224, 224)),
+        ({"do_resize": False}, {"width": 500, "height": 280}, (496, 272)),
     ],
 )
 def test_dummy_video_follows_size_hint(

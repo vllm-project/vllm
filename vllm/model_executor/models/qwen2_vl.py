@@ -1181,9 +1181,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             if max(canvas) > 200 * min(canvas):
                 return 0
             if not do_resize:
-                return (
-                    (canvas.height // unit) * (canvas.width // unit) * on_grid(canvas)
-                )
+                num_patches = (canvas.height // unit) * (canvas.width // unit)
+                return num_patches * (on_grid(canvas) and num_patches <= max_patches)
             height, width = smart_resize(
                 height=canvas.height,
                 width=canvas.width,
