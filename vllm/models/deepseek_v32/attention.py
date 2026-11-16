@@ -223,9 +223,7 @@ class DeepseekV32Attention(MLAAttention):
 
         parallel_config = vllm_config.parallel_config
         self.sequence_parallel_moe = (
-            current_platform.is_cuda()
-            and parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
+            current_platform.is_cuda() and parallel_config.use_sequence_parallel_moe
         )
 
         self.skip_topk = False
