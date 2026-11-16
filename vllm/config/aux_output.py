@@ -50,17 +50,8 @@ class AuxOutputConfig:
             for name in ("enable_return_hidden_states", "return_topk_logprobs"):
                 if getattr(self, name):
                     raise ValueError(f"{name} requires object_key_prefix.")
-        outputs = (
-            self.enable_return_routed_experts
-            or self.enable_return_indexer_topk
-            or self.enable_return_hidden_states
-            or self.return_topk_logprobs
-        )
-        if prefix is not None and not (outputs and prefix and "/" not in prefix):
-            raise ValueError(
-                "object_key_prefix requires at least one output and must be "
-                "non-empty and without '/'."
-            )
+        if prefix is not None and not (prefix and "/" not in prefix):
+            raise ValueError("object_key_prefix must be non-empty and without '/'.")
         return self
 
     @property

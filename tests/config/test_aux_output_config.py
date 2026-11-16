@@ -158,10 +158,6 @@ def test_indexer_only_does_not_require_moe_routing():
         ({"object_key_prefix": ""}, "non-empty"),
         ({"object_key_prefix": "runs/1"}, "without '/'"),
         (
-            {"object_key_prefix": "run-1", "enable_return_routed_experts": False},
-            "at least one output",
-        ),
-        (
             {
                 "object_key_prefix": "run-1",
                 "enable_return_routed_experts": False,
@@ -190,7 +186,6 @@ def test_indexer_only_does_not_require_moe_routing():
         "valid",
         "empty-prefix",
         "slash",
-        "no-output",
         "hidden-states-only",
         "topk-logprobs-only",
         "indexer-only",
@@ -262,6 +257,24 @@ def test_prompt_row_outputs_reject_kv_sharing_fast_prefill(output, fast_prefill)
         VllmConfig._verify_aux_output_compatibility(config)
         return
     with pytest.raises(ValueError, match="kv-sharing-fast-prefill"):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
+@pytest.mark.parametrize(
+    "legacy_flag,error",
+    [(True, None), (False, "requires at least one output")],
+    ids=["legacy-flag", "no-output"],
+)
+def test_object_key_prefix_takes_its_output_from_the_legacy_flag(legacy_flag, error):
+    config = _config()
+    config.aux_output_config = EngineArgs(
+        aux_output_config={"object_key_prefix": "job"},
+        enable_return_routed_experts=legacy_flag,
+    ).aux_output_config
+    if error is None:
+        VllmConfig._verify_aux_output_compatibility(config)
+        return
+    with pytest.raises(ValueError, match=error):
         VllmConfig._verify_aux_output_compatibility(config)
 
 

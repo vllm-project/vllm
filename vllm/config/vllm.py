@@ -1253,6 +1253,13 @@ class VllmConfig:
             and not self.aux_output_config.enable_return_routed_experts
         ):
             raise ValueError("max_bytes requires enable_return_routed_experts.")
+        if self.aux_output_config.object_key_prefix is not None and not (
+            self.aux_output_config.enable_return_routed_experts
+            or self.aux_output_config.enable_return_indexer_topk
+            or self.aux_output_config.enable_return_hidden_states
+            or self.aux_output_config.return_topk_logprobs
+        ):
+            raise ValueError("object_key_prefix requires at least one output.")
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
         if (
