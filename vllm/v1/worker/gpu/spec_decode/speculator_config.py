@@ -247,6 +247,15 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         spec.draft_tensor_parallel_size = SpeculativeConfig._verify_and_get_draft_tp(
             spec.target_parallel_config, spec.draft_tensor_parallel_size
         )
+        if spec.draft_decode_context_parallel_size is None:
+            spec.draft_decode_context_parallel_size = (
+                config_cls.default_draft_decode_context_parallel_size(spec)
+            )
+        spec.draft_decode_context_parallel_size = (
+            SpeculativeConfig._verify_and_get_draft_dcp(
+                spec.target_parallel_config, spec.draft_decode_context_parallel_size
+            )
+        )
         spec.draft_model_config.max_model_len = (
             SpeculativeConfig._maybe_override_draft_max_model_len(
                 spec.max_model_len,
@@ -272,6 +281,13 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         return
+
+    @classmethod
+    def default_draft_decode_context_parallel_size(
+        cls, spec: "SpeculativeConfig"
+    ) -> int:
+        """The draft's DCP when `draft_decode_context_parallel_size` is unset."""
+        return spec.target_parallel_config.decode_context_parallel_size
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
