@@ -81,7 +81,10 @@ from vllm.v1.kv_offload.cpu.region_mirror import (
     gather_construction_errors,
     mirror_topology,
 )
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -428,6 +431,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    num_segments=REGION_SEGMENTS,
+                    populate=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
                 if (
@@ -589,6 +594,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         topology = None
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             topology = self._mirror_topology()
+        world_size = self.config.parallel.world_size
+        worker_index = self.config.parallel.rank
         worker_mmap: SharedOffloadRegion | None = None
         worker: CPUOffloadingWorker | None = None
         error: Exception | None = None
@@ -599,9 +606,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 worker_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
                     num_chunks=self.num_chunks,
-                    rank=0 if self.replicated_layout else self.config.parallel.rank,
+                    rank=0 if self.replicated_layout else worker_index,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    num_segments=REGION_SEGMENTS,
+                    # Every worker maps the same bytes in the replicated layout,
+                    # so each pre-faults only its share.
+                    populate_shard=(
+                        (worker_index, world_size) if self.replicated_layout else None
+                    ),
                 )
                 if self.config.canonical_layout:
                     self._validate_canonical_refs(kv_caches)

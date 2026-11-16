@@ -76,7 +76,7 @@ def _select_swap_blocks_fn(
     return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
 
-@dataclass
+@dataclass(slots=True)
 class Transfer:
     job_id: int
     stream: torch.cuda.Stream

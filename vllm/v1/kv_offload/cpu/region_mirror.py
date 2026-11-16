@@ -62,7 +62,7 @@ _SHUTDOWN_TIMEOUT_S = 60.0
 _MAX_TRANSFER_BYTES = 256 * 1024 * 1024
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SlotLayout:
     """Byte range of each worker slot inside every chunk row of a region."""
 
@@ -75,7 +75,7 @@ class SlotLayout:
         return np.frombuffer(region.mmap_obj, dtype=np.uint8).ctypes.data
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MirrorTopology:
     """Placement of this worker relative to the head node (worker rank 0)."""
 
@@ -277,7 +277,7 @@ class RegionMirrorClient:
         self.unregister_kv_caches()
 
 
-@dataclass
+@dataclass(slots=True)
 class _Copy:
     job_id: int
     # Run one at a time, in order; loads queued meanwhile go between them.
