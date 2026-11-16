@@ -267,11 +267,6 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4CPUSparseBackend
 
     def __init__(self, *args, **kwargs) -> None:
-        vllm_config = args[0] if args else kwargs["vllm_config"]
-        if vllm_config.aux_output_config.enable_return_indexer_topk:
-            raise ValueError(
-                "DeepSeek V4 on CPU does not support --enable-return-indexer-topk."
-            )
         super().__init__(*args, **kwargs)
 
         # Swap classes post-construction (no class-swap hook on the shared
@@ -495,6 +490,11 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             kv,
             positions,
             o_padded,
+        )
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        raise ValueError(
+            "DeepSeek V4 on CPU does not support --enable-return-indexer-topk."
         )
 
     def _sparse_indexer_and_attn(

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU checks for raw capture binding and snapshot ownership."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import LlamaConfig
@@ -166,14 +168,16 @@ def test_rocm_monokernel_rejects_indexer_replay_before_loading_layers(capture_co
         MonoDecodeLayer.create(None, capture_config)
 
 
-def test_cpu_attention_rejects_indexer_replay_before_building_layers(
-    capture_config,
-):
+def test_cpu_attention_rejects_indexer_capture(capture_config):
     from vllm.models.deepseek_v4.cpu.cpu_sparse import DeepseekV4CPUAttention
 
-    capture_config.aux_output_config.enable_return_indexer_topk = True
+    attention = DeepseekV4CPUAttention.__new__(DeepseekV4CPUAttention)
+    torch.nn.Module.__init__(attention)
+    attention.prefix = "model.layers.2.self_attn"
+    attention.indexer = SimpleNamespace(topk_tokens=2)
     with pytest.raises(ValueError, match="on CPU does not support"):
-        DeepseekV4CPUAttention(capture_config, "model.layers.0.self_attn")
+        IndexerCapturer(torch.nn.Sequential(attention), capture_config)
+    assert attention.indexer_capture is None
 
 
 def test_capture_helper_skips_unbound_sink_without_a_buffer():
