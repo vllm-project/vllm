@@ -3,57 +3,19 @@
 
 from typing import Literal
 
-from pydantic import (
-    BaseModel,
-    Field,
-    NonNegativeInt,
-    PositiveInt,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
 
-from vllm.entrypoints.generate.base.protocol import validate_cache_salt
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-    GenerateRequest,
-    MultiModalFeatures,
-)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import random_uuid
 
 
-class HashTokensRequest(BaseModel):
-    model: str | None = None
-    token_ids: list[NonNegativeInt] = Field(min_length=1)
-    features: MultiModalFeatures | None = None
-    cache_salt: str | None = None
+class HashTokensRequest(GenerateRequest):
+    sampling_params: SamplingParams = Field(
+        default_factory=lambda: SamplingParams(max_tokens=1)
+    )
     # Raw media needs placeholder expansion through chat rendering.
     content_parts: None = None
     prompt_embeds: None = None
-
-    @field_validator("cache_salt", mode="before")
-    @classmethod
-    def check_cache_salt(cls, value: object) -> object:
-        validate_cache_salt(value)
-        return value
-
-    @model_validator(mode="after")
-    def check_placeholder_bounds(self) -> "HashTokensRequest":
-        if self.features:
-            for ranges in self.features.mm_placeholders.values():
-                if any(p.offset + p.length > len(self.token_ids) for p in ranges):
-                    raise ValueError("mm_placeholders must remain within token_ids")
-        return self
-
-    def to_generate_request(self) -> GenerateRequest:
-        # Hashing accepts metadata-only features without an encoder transfer.
-        return GenerateRequest.model_construct(
-            request_id=f"hash-{random_uuid()}",
-            model=self.model,
-            token_ids=self.token_ids,
-            features=self.features,
-            cache_salt=self.cache_salt,
-            sampling_params=SamplingParams(max_tokens=1),
-        )
 
 
 class HashPrompt(BaseModel):

@@ -36,24 +36,15 @@ async def hash_request(
                 return renderer.create_error_response(
                     "The hash endpoint requires token IDs"
                 )
-    normalized = (
-        request.to_generate_request()
-        if isinstance(request, HashTokensRequest)
-        else request
-    )
     result: GenerateRequest | list[GenerateRequest] | ErrorResponse
-    if isinstance(normalized, ChatCompletionRequest):
-        result = await renderer.render_chat_request(normalized, raw_request)
-    elif isinstance(normalized, CompletionRequest):
-        result = await renderer.render_completion_request(normalized)
+    if isinstance(request, ChatCompletionRequest):
+        result = await renderer.render_chat_request(request, raw_request)
+    elif isinstance(request, CompletionRequest):
+        result = await renderer.render_completion_request(request)
     else:
-        if error := await renderer._check_model(normalized):
+        if error := await renderer._check_model(request):
             return error
-        if normalized.content_parts:
-            return renderer.create_error_response(
-                "Use chat messages or rendered features for multimodal hashing"
-            )
-        result = normalized
+        result = request
     if isinstance(result, ErrorResponse):
         return result
     if renderer.model_config.is_encoder_decoder:
@@ -65,9 +56,7 @@ async def hash_request(
             "Enable prefix caching to use the hash endpoint"
         )
 
-    lora_request = renderer._maybe_get_adapters(
-        normalized, supports_default_mm_loras=True
-    )
+    lora_request = renderer._maybe_get_adapters(request, supports_default_mm_loras=True)
     rendered = result if isinstance(result, list) else [result]
     core_requests = []
     for prompt in rendered:
