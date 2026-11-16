@@ -9,7 +9,12 @@ import stat
 import sys
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    Awaitable,
+    Callable,
+)
 from http import HTTPStatus
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -405,7 +410,7 @@ def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
 @contextlib.asynccontextmanager
 async def open_batch_input(
     path_or_url: str, tmp_dir: str | None
-) -> AsyncIterator[IO[str]]:
+) -> AsyncGenerator[IO[str]]:
     """Yield the batch as a seekable text file, so it can be read twice.
 
     A non-seekable source is staged via `staging_file`. A URL is downloaded to
@@ -516,7 +521,7 @@ async def upload_data(
 @contextlib.asynccontextmanager
 async def batch_output_writer(
     path_or_url: str, output_tmp_dir: str | None
-) -> AsyncIterator[IO[str]]:
+) -> AsyncGenerator[IO[str]]:
     """Yield a file that receives responses in input order.
 
     A local file holds the responses for a prefix of the input if the run

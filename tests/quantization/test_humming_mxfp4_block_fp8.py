@@ -146,8 +146,12 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
     from vllm.model_executor.layers.fused_moe.oracle import mxfp4
     from vllm.platforms import current_platform
 
+    # Patch the class, not the instance: before pytest 9.2, undoing an instance
+    # patch leaves the class attribute shadowed in the instance's __dict__.
     monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda cap: cap == capability
+        type(current_platform),
+        "is_device_capability_family",
+        classmethod(lambda cls, cap: cap == capability),
     )
     monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
     monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
@@ -156,6 +160,50 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
 
     assert str(schema.a_dtype) == "float8e4m3"
     assert schema.input_scale_group_size == expected_group_size
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+@pytest.mark.parametrize(
+    "capability,strict,honors",
+    [
+        # Hopper has no FP4 activations: falls back, and strict cannot run it.
+        ((9, 0), False, False),
+        ((9, 0), True, False),
+        # Slow on SM10x, so it falls back unless strict mode forbids that.
+        ((10, 3), False, False),
+        ((10, 3), True, True),
+        ((12, 1), False, True),
+    ],
+)
+def test_humming_nvfp4_linear_declares_executed_activation(
+    monkeypatch, capability, strict, honors
+):
+    """Humming picks its NVFP4 input schema at weight load, per device. Kernel
+    selection needs the same answer up front so VLLM_STRICT_QUANT_SCHEME can
+    move on to another kernel instead of failing at load."""
+    import humming.schema.humming as humming_schema
+
+    from vllm.model_executor.kernels.linear import HummingNvFp4LinearKernel
+    from vllm.platforms import current_platform
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    # Patch the class, not the instance: before pytest 9.2, undoing an instance
+    # patch leaves a bound `@cache` classmethod in current_platform.__dict__,
+    # which cloudpickle cannot pickle when a later test calls LLM.apply_model.
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(*capability)),
+    )
+    monkeypatch.setattr(
+        type(humming_schema.current_device),
+        "sm_version",
+        property(lambda self: capability[0] * 10 + capability[1]),
+    )
+
+    executed = HummingNvFp4LinearKernel.executed_activation_key(kNvfp4Dynamic)
+    assert executed == (kNvfp4Dynamic if honors else None)
 
 
 def _mxfp6_weight_schema():
