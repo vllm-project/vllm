@@ -917,6 +917,7 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
+        self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
@@ -1182,6 +1183,21 @@ class SamplingParams(
                 "allowed_token_ids contains out-of-vocab token id!",
                 parameter="allowed_token_ids",
                 value=invalid_token_ids,
+            )
+
+    def _validate_spec_decode(
+        self,
+        speculative_config: SpeculativeConfig | None,
+    ) -> None:
+        if speculative_config is None:
+            return
+
+        if speculative_config.remote_draft is not None and self.temperature != 0.0:
+            raise VLLMValidationError(
+                "Remote drafter currently requires greedy target sampling "
+                "(temperature=0).",
+                parameter="temperature",
+                value=self.temperature,
             )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:

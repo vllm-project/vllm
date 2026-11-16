@@ -50,8 +50,11 @@ class _PendingCopy:
 
 
 class DraftTokensHandler:
-    def __init__(self, device: torch.device | None = None):
+    def __init__(
+        self, device: torch.device | None = None, *, variable_length: bool = False
+    ):
         self.device = device
+        self.variable_length = variable_length
         self.copy_stream = new_d2h_stream(device)
 
         # Latest drafts per live request: a row view into an async-copied
@@ -74,7 +77,7 @@ class DraftTokensHandler:
     def set_draft_tokens(
         self, input_batch: InputBatch, draft_tokens: torch.Tensor
     ) -> None:
-        if not input_batch.has_structured_output_reqs:
+        if not self.variable_length and not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch. Record draft token widths only.
             num_draft_tokens = draft_tokens.shape[1]
@@ -82,8 +85,7 @@ class DraftTokensHandler:
                 self._draft_tokens_by_req[req_id] = num_draft_tokens
             return
 
-        # For spec decoding + structured outputs, we must transfer the
-        # draft tokens back to the scheduler for grammar validation.
+        # Transfer actual drafts for grammar validation or per-row lengths.
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         copy_event = torch.cuda.Event(blocking=True)
         current_stream = torch.cuda.current_stream(self.device)
@@ -123,7 +125,10 @@ class DraftTokensHandler:
                 ids, copy = drafts
                 copy.wait()
                 # Convert numpy view to list.
-                draft_token_ids.append(ids.tolist())
+                row = ids.tolist()
+                if self.variable_length and -1 in row:
+                    row = row[: row.index(-1)]
+                draft_token_ids.append(row)
 
         return DraftTokenIds(out_req_ids, draft_token_ids)
 
