@@ -466,11 +466,11 @@ For `BUILD_BASE_IMAGE`, use:
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
 - `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
 
-PyTorch does not publish CUDA 13.5 builder images or cu135 wheels yet, so the
-build stage and the prerelease PyTorch wheels in
-`requirements/rubin-prerelease.txt` stay on CUDA 13.4. Set `CUDA_VERSION` to
-the final image's CUDA version (13.5): the runtime stage installs the matching
-CUDA packages, including the `ptxas` above.
+`requirements/rubin-prerelease.txt` pins PyTorch's cu135 nightly. PyTorch does
+not publish cu135 torchvision or torchaudio yet, so they use the cu134
+nightlies of the same date. Set `CUDA_VERSION` to the final image's CUDA
+version (13.5): the runtime stage installs the matching CUDA packages,
+including the `ptxas` above.
 
 ??? console "ARM64/AArch64 build command"
 

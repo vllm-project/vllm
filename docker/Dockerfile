@@ -923,8 +923,7 @@ RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
 # Only needed for datacenter/professional GPUs with older drivers.
 # See: https://docs.nvidia.com/deploy/cuda-compatibility/
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
-# The final image's compat libraries, which can be newer than torch's CUDA
-# (Rubin: CUDA 13.5 image with cu134 torch).
+# The final image's compat libraries, which can be newer than torch's CUDA.
 ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda/compat
 
 # ============================================================
