@@ -282,9 +282,25 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel, DualActivationKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         if mode is not None and mode != kNvfp4DynamicTensor:
             raise ValueError(f"b12x NVFP4 W4A16 does not support activations {mode}")
-        # The plans cover every row count the scheduler can send; b12x rejects
-        # a larger call instead of preparing a new plan on first use.
-        output = self._mm(layer, x.reshape(-1, x.shape[-1]).contiguous(), mode)
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        # The plans cover every row count the scheduler can send. A larger call
+        # cannot prepare a new plan on first use without evicting kernels
+        # already captured in CUDA graphs.
+        capacity = layer.b12x_nvfp4_plans.capacity
+        if x_2d.shape[0] <= capacity:
+            output = self._mm(layer, x_2d, mode)
+        elif getattr(self, "phase", None) is not None:
+            # Vision-encoder linears can exceed the scheduler's token budget;
+            # a phase may quantize them, so they run in planned chunks.
+            output = torch.cat([self._mm(layer, c, mode) for c in x_2d.split(capacity)])
+        else:
+            raise ValueError(
+                f"b12x NVFP4 W4A16 got {x_2d.shape[0]} rows, above the planned "
+                f"capacity of {capacity} (the scheduler's token budget). Inputs "
+                "outside the language model, such as vision-encoder linears, are "
+                "not supported on this backend: keep them unquantized or use "
+                "another --linear-backend."
+            )
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])

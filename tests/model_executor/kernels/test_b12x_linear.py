@@ -1367,8 +1367,8 @@ def test_b12x_nvfp4_quantized_decode_cutoff_at_capacity(
     monkeypatch, default_vllm_config, max_decode_tokens
 ):
     """Quantized decode with BF16 prefill and a cutoff at or above the planned
-    capacity: every call the scheduler can send, up to the capacity, is a
-    decode call and runs the quantized plan."""
+    capacity keeps an A16 plan for prefill calls, which run in capacity-sized
+    chunks."""
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
     default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
@@ -1410,10 +1410,13 @@ def test_b12x_nvfp4_quantized_decode_cutoff_at_capacity(
         ("quantized", 64),
     ]
     kernel.apply_weights(layer, torch.randn((8, 128), dtype=torch.bfloat16))
-    kernel.apply_weights(layer, torch.randn((64, 128), dtype=torch.bfloat16))
+    kernel.apply_weights(
+        layer, torch.randn((max_decode_tokens + 6, 128), dtype=torch.bfloat16)
+    )
     assert [(rows, handle, mode) for rows, handle, mode, _ in calls] == [
         (8, 1, "quantized"),
-        (64, 1, "quantized"),
+        (64, 0, "a16"),
+        (max_decode_tokens - 58, 0, "a16"),
     ]
 
     # The warmup prepares the A16 prefill plan as well, though every planned
@@ -1628,11 +1631,24 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_warmup(
         )
         actual = kernel.apply_mode(layer, x, mode=mode)
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
-    # A call above the planned capacity fails instead of preparing a new plan.
-    with pytest.raises(ValueError, match="capacity"):
-        kernel.apply_weights(
-            layer, torch.zeros(capacity + 1, k, device="cuda", dtype=torch.bfloat16)
+    above = torch.randn(capacity + 5, k, device="cuda", dtype=torch.bfloat16)
+    if cell is None:
+        # Without a phase, a call above the planned capacity fails instead of
+        # preparing a new plan.
+        with pytest.raises(ValueError, match="capacity"):
+            kernel.apply_weights(layer, above)
+    else:
+        # With a phase, larger inputs (vision-encoder linears) run in chunks.
+        expected = torch.cat(
+            [
+                _nvfp4_activation_reference(chunk, decoded)
+                if quantized(chunk.shape[0])
+                else (chunk.double() @ decoded.double().T).bfloat16()
+                for chunk in above.split(capacity)
+            ]
         )
+        actual = kernel.apply_mode(layer, above, mode=mode)
+        torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
     assert not prepared
 
 
