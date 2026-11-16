@@ -51,8 +51,8 @@ mod tests {
     use super::MistralReasoningParser;
     use crate::reasoning::ReasoningParser;
     use crate::reasoning::tests::{
-        MISTRAL_THINK_END_ID, MISTRAL_THINK_START_ID, content_str, fake_tokenizer, push_str,
-        reasoning_str,
+        MISTRAL_THINK_END_ID, MISTRAL_THINK_START_ID, content_str, decode, fake_tokenizer,
+        push_str, reasoning_str,
     };
 
     #[test]
@@ -202,11 +202,13 @@ mod tests {
         let mut parser = MistralReasoningParser::new(tokenizer).unwrap();
         parser.initialize(&[MISTRAL_THINK_START_ID]).unwrap();
 
-        let first = push_str(&mut parser, "reason[/THI");
+        // Closing delimiter `[/THINK]` arrives in two halves.
+        let [first, second] = decode(["reason[/THI", "NK]answer"]);
+        let first = parser.push(first).unwrap();
         assert_eq!(reasoning_str(&first), Some("reason"));
         assert_eq!(first.content, None);
 
-        let second = push_str(&mut parser, "NK]answer");
+        let second = parser.push(second).unwrap();
         assert_eq!(second.reasoning, None);
         assert_eq!(content_str(&second), Some("answer"));
     }
