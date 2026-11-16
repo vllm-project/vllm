@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -41,7 +41,8 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. Use "auto" or None for automatic selection."""
+    """Attention backend to use. Use "auto" or None for automatic
+    selection. TORCH_SDPA is reserved for multi-modal encoder attention."""
 
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass"
     """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
@@ -234,6 +235,14 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        if AttentionBackendEnum.TORCH_SDPA in (
+            self.backend,
+            *self.backend_per_kind.values(),
+        ):
+            raise ValueError(
+                "TORCH_SDPA is only supported for multi-modal encoder attention "
+                "and cannot be used as a decoder attention backend."
+            )
         # Checked here rather than at indexer selection, which the two CP
         # backends reach separately: bf16 goes to the Triton indexer and fp8
         # to the AITER MSA one, so neither ever sees the other's dtype and
@@ -266,17 +275,14 @@ class AttentionConfig:
             return default
         return self.indexer_logits_dtype
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+        return get_compile_factors(self, set())
 
     @field_validator("backend", mode="before")
     @classmethod

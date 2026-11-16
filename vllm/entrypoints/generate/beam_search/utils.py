@@ -17,7 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchSequence:
     """A sequence for beam search.
     It keeps track of the tokens and the log probability of the sequence.
@@ -101,7 +101,7 @@ class BeamSearchSequence:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchOutput:
     """The output of beam search.
     It contains the list of the best beam search sequences.
@@ -167,10 +167,10 @@ def get_beam_search_eos_token_ids(
     generation_config: dict[str, Any], eos_token_id: int | None
 ) -> set[int]:
     """Return the token ids that end generation: the tokenizer EOS plus the
-    generation config's ``eos_token_id``.
+    generation config's `eos_token_id`.
 
     This uses a separate SamplingParams so the params sent to the engine keep
-    their own ``stop_token_ids`` and are validated as before.
+    their own `stop_token_ids` and are validated as before.
     """
     params = SamplingParams()
     params.update_from_generation_config(generation_config, eos_token_id)

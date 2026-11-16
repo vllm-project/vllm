@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Duration and in-flight metrics for RL weight-transfer operations."""
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Lock
 from time import perf_counter
@@ -31,7 +31,7 @@ class WeightOperationMetrics:
         )
 
     @contextmanager
-    def record(self, operation: Operation) -> Iterator[None]:
+    def record(self, operation: Operation) -> Generator[None]:
         in_flight = self.in_flight.labels(operation)
         in_flight.inc()
         started = perf_counter()
