@@ -146,19 +146,15 @@ with fused preparation on the same padding-aware stack (Pirate2 `dell-b200-02`,
 12.613 ms median, TTFT 524.59 / 576.19 / 588.45 ms, GPU peak 547.90 / 572.80 /
 574.24 GiB). Fusion improved expanded TPOT by about 6%, but non-expanded
 remained faster. Rerun 2026-11-13 on `nm-ohio-b200-01` (8×B200, `fe59004790`,
-`EP_DISABLE_GIN=1 NCCL_IB_DISABLE=1`, port 8128) with the corrected GSM8K
-harness (`--use-chat-completions --chat-template-kwargs '{"enable_thinking":
-false}'`; fixes `\/v1\/completions` truncation that dropped prelim to
-~56–59% on the buggy harness) replicated parity within 0.45 pp: **1265
-(95.91%) baseline, 1268 (96.13%) expanded, 1272 (96.44%) expanded+CPU-sync**
-of 1319, with throughput medians **764.6 / 650.5 / 50.2 tok/s** (TPOT 9.85 /
-11.71 / 159.4 ms, TTFT 464 / 534 / 406 ms) confirming non-expanded remains
-fastest. There is no TTFT or memory improvement demonstrated by this
+`EP_DISABLE_GIN=1 NCCL_IB_DISABLE=1`, port 8128) replicated parity within
+0.45 pp: **1265 (95.91%) baseline, 1268 (96.13%) expanded, 1272 (96.44%)
+expanded+CPU-sync** of 1319, with throughput medians **764.6 / 650.5 / 50.2
+tok/s** (TPOT 9.85 / 11.71 / 159.4 ms, TTFT 464 / 534 / 406 ms) confirming
+non-expanded remains fastest. There is no TTFT or memory improvement demonstrated by this
 experiment. Cases ran sequentially rather than interleaved. The subsequent
 runtime-row-count and 64-bit preparation-offset fix passed GPU correctness and
 profiling checks. Rerun artifacts: `/tmp/e2e_fixed/results/dsv41_fixed_full/`
-and `.tmp/pr177-e2e-20261113_fixed_full/`; diagnosis
-`.tmp/pr177-e2e-20261113/fix_diagnosis/`. Neither expansion nor CPU sync is
+and `.tmp/pr177-e2e-20261113_fixed_full/`. Neither expansion nor CPU sync is
 enabled by default.
 
 Reference implementation:
