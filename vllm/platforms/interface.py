@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, get_args
 
 import torch
 
@@ -1281,11 +1281,11 @@ class Platform:
         Out-of-tree overrides validate their own policy and communicator names.
         """
         eplb_config = parallel_config.eplb_config
-        from vllm.distributed.eplb.policy import EPLB_POLICIES
+        from vllm.config.parallel import EPLBCommunicatorBackend, EPLBPolicyOption
 
         if eplb_config.policy is None:
             eplb_config.policy = "default"
-        if eplb_config.policy not in EPLB_POLICIES:
+        if eplb_config.policy not in get_args(EPLBPolicyOption):
             raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
         if eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
@@ -1307,14 +1307,7 @@ class Platform:
             else:
                 eplb_config.communicator = "torch_gloo"
 
-        if eplb_config.communicator not in (
-            "torch_nccl",
-            "torch_gloo",
-            "torch_xccl",
-            "nixl",
-            "pynccl",
-            "symm_mem",
-        ):
+        if eplb_config.communicator not in get_args(EPLBCommunicatorBackend):
             raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
 
         if eplb_config.use_async and eplb_config.communicator in (
