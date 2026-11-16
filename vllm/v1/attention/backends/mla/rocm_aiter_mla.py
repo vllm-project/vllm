@@ -854,7 +854,7 @@ class AiterMLABackend(MLACommonBackend):
         return AiterMLAMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterMLADCPVerifyMetadata:
     """One paged-KV row per verify token for causal DCP verification.
 

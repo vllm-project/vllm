@@ -89,7 +89,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     layer_config = customize_layer_config(
-        backend, MLAAttention.get_kv_cache_config(layer, config)
+        backend, MLAAttention.get_kv_cache_config(layer, config), "layer.0"
     )
     spec = layer_config.spec
     indexer = SimpleNamespace(
