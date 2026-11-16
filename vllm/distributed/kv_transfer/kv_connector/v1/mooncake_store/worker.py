@@ -66,9 +66,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     KeyMetadata,
     MambaStoreLayout,
     PoolKey,
+    RankLocalStoreLayout,
     StoreLayout,
     StoreShardId,
     TokenMajorStoreLayout,
+    group_compact_kernel_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -95,12 +97,10 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
     group_kernel_blocks,
 )
 
@@ -112,7 +112,7 @@ MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StoreGroupPlan:
     layer_specs: tuple[KVCacheSpec, ...]
     local_block_size: int
@@ -137,11 +137,8 @@ def _store_spec_family(spec: KVCacheSpec) -> Literal["attention", "mamba"] | Non
     return None
 
 
-def _group_layer_specs(group: KVCacheGroupSpec) -> tuple[KVCacheSpec, ...]:
-    group_spec = group.kv_cache_spec
-    if isinstance(group_spec, UniformTypeKVCacheSpecs):
-        return tuple(group_spec.kv_cache_specs[name] for name in group.layer_names)
-    return (group_spec,) * len(group.layer_names)
+def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
+    return tuple(group.kv_cache_specs[name] for name in group.layer_names)
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -171,7 +168,7 @@ def resolve_store_chunk_size(extra_config: dict[str, Any]) -> int | None:
 
 
 def _resolve_attention_store_chunk(
-    group: KVCacheGroupSpec,
+    group: KVCacheGroup,
     tp_size: int,
     replication_factor: int,
     requested_store_tp_size: int,
@@ -751,6 +748,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
         return puts
 
+    def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
+        start = time.perf_counter()
+        try:
+            results = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning(
+                "Mooncake existence check failed for request %s: %s", req_id, e
+            )
+            return None
+
+        failed = [result for result in results if result < 0]
+        status = "ok"
+        if failed:
+            status = "error" if len(failed) == len(keys) else "partial_failure"
+        self._record_operation(
+            "save_exists", start, len(keys), status=status, num_failed_keys=len(failed)
+        )
+        if failed:
+            logger.warning(
+                "Mooncake existence check failed for request %s: "
+                "%d/%d keys failed (codes=%s)",
+                req_id,
+                len(failed),
+                len(keys),
+                set(failed),
+            )
+            return None
+        return results
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
@@ -779,24 +812,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_group_semantics and self.supports_group_ids
             else None
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
+        exists = self._check_keys_exist(req_meta.req_id, keys)
+        if exists is None:
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             return True
@@ -985,23 +1003,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Check which blocks already exist (dedup)
-            save_exists_start = time.perf_counter()
-            try:
-                exists_states = self.store.batch_is_exist(keys)
-            except Exception:
-                self._record_operation(
-                    "save_exists",
-                    save_exists_start,
-                    len(keys),
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                raise
-            self._record_operation(
-                "save_exists",
-                save_exists_start,
-                len(keys),
-            )
+            exists_states = self._check_keys_exist(req_id, keys)
+            if exists_states is None:
+                return
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
@@ -1839,7 +1843,7 @@ class MooncakeStoreWorker:
                     strict=True,
                 )
             ):
-                if not group.kv_cache_spec.prefix_cacheable:
+                if not group.prefix_cacheable:
                     plans.append(None)
                     continue
                 plan = self._make_store_group_plan(
@@ -1892,9 +1896,8 @@ class MooncakeStoreWorker:
         """Construct token databases and their Store layouts."""
         token_dbs: list[ChunkedTokenDatabase] = []
         for group_idx, group in enumerate(self._kv_cache_groups):
-            spec = group.kv_cache_spec
             hash_block_size = (
-                self.hash_block_size if spec.prefix_cacheable else spec.block_size
+                self.hash_block_size if group.prefix_cacheable else group.block_size
             )
             plan = plans[group_idx] if plans is not None else None
             if plan is None:
@@ -1908,7 +1911,7 @@ class MooncakeStoreWorker:
                                 // self._group_tp_replication_factors[group_idx]
                             ),
                         ),
-                        spec.block_size,
+                        group.block_size,
                         hash_block_size=hash_block_size,
                     )
                 )
@@ -1959,7 +1962,7 @@ class MooncakeStoreWorker:
 
     def _make_store_group_plan(
         self,
-        group: KVCacheGroupSpec,
+        group: KVCacheGroup,
         requested_store_tp_size: int,
         attention_layout_cls: type[AttentionStoreLayout],
         replication_factor: int,
@@ -1988,7 +1991,7 @@ class MooncakeStoreWorker:
             )
             return _StoreGroupPlan(
                 layer_specs=layer_specs,
-                local_block_size=group.kv_cache_spec.block_size,
+                local_block_size=group.block_size,
                 logical_tp_size=logical_tp_size,
                 store_shard_count=store_shard_count,
                 tp_rank=self.tp_rank // replication_factor,
@@ -2011,7 +2014,7 @@ class MooncakeStoreWorker:
             return None
         return _StoreGroupPlan(
             layer_specs=layer_specs,
-            local_block_size=group.kv_cache_spec.block_size,
+            local_block_size=group.block_size,
             logical_tp_size=self.tp_size,
             store_shard_count=requested_store_tp_size,
             tp_rank=self.tp_rank,
@@ -2026,20 +2029,16 @@ class MooncakeStoreWorker:
             return None
         return torch.cuda.use_mem_pool(self._mem_pool)
 
-    def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
+    def _group_tp_replication_factor(self, group: KVCacheGroup) -> int:
         if self.dcp_size > 1:
             return 1
-        inner_specs = (
-            tuple(spec.kv_cache_specs.values())
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else (spec,)
-        )
+        inner_specs = group.distinct_specs
         if any(isinstance(inner, MambaSpec) for inner in inner_specs):
             return 1
         factors = [
             (
                 self.tp_size
-                if isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
+                if isinstance(inner, MLAAttentionSpec)
                 else max(1, self.tp_size // self.num_kv_head)
             )
             for inner in inner_specs
@@ -2048,8 +2047,7 @@ class MooncakeStoreWorker:
 
     def _compute_group_tp_replication_factors(self) -> tuple[int, ...]:
         return tuple(
-            self._spec_tp_replication_factor(group.kv_cache_spec)
-            for group in self._kv_cache_groups
+            self._group_tp_replication_factor(group) for group in self._kv_cache_groups
         )
 
     def _init_lookup_key_prefixes(self) -> None:
@@ -2119,11 +2117,10 @@ class MooncakeStoreWorker:
                 for layer_name in group.layer_names
             }
             seen_storage_ptrs: set[int] = set()
+            # Kernel-block views: RankLocalStoreLayout groups them itself,
+            # after checking that each manager block is one gapless byte run.
             cache_by_layer = {
-                layer_name: [
-                    group_kernel_blocks(view, self.num_blocks)
-                    for view in _layer_views(cache)
-                ]
+                layer_name: _layer_views(cache)
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
             }
@@ -2165,9 +2162,13 @@ class MooncakeStoreWorker:
                     group_tensors = [views[0] for views in group_views]
                 else:
                     group_tensors = [cache for views in group_views for cache in views]
-                db.store_layout.register_kv_caches(
-                    group_tensors or cache_tensors, self.num_blocks
-                )
+                group_tensors = group_tensors or cache_tensors
+                if not isinstance(db.store_layout, RankLocalStoreLayout):
+                    group_tensors = [
+                        group_kernel_blocks(cache, self.num_blocks)
+                        for cache in group_tensors
+                    ]
+                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -2200,7 +2201,7 @@ class MooncakeStoreWorker:
                     assert num_blocks is not None
                 else:
                     num_blocks = self._kv_cache_config.num_blocks
-                cache = group_kernel_blocks(cache, num_blocks)
+                cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:
                     base_addr = cache.data_ptr()
@@ -2234,7 +2235,7 @@ class MooncakeStoreWorker:
                     )
 
                 regions: list[tuple[int, int]] = []
-                if not is_non_overlapping_and_dense(cache[0]):
+                if not block_compact:
                     for head_idx in range(cache.shape[1]):
                         head_cache = cache[:, head_idx]
                         assert is_non_overlapping_and_dense(head_cache[0])
@@ -2291,8 +2292,7 @@ class MooncakeStoreWorker:
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
                 group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
+                    group.prefix_cacheable for group in self._kv_cache_groups
                 ],
             )
             self.kv_send_thread.start()
@@ -2312,8 +2312,7 @@ class MooncakeStoreWorker:
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
                 group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
+                    group.prefix_cacheable for group in self._kv_cache_groups
                 ],
                 is_hma_required=self._is_hma_required,
             )
@@ -2369,6 +2368,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        # A request may be re-admitted in the step reporting its preemption.
+        assert self.kv_send_thread is not None
+        for req_id in metadata.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(req_id)
+
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2380,7 +2384,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
@@ -2472,16 +2475,12 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the ledger entries of requests that finished or were preempted.
+        """Retire the ledger entries of finished requests.
 
         An entry may only go once its jobs have drained, because they still read
-        the resume offset it owns; a request that comes back after preemption
-        then saves from the start rather than from where the last attempt got to.
+        the resume offset it owns.
         """
         assert self.kv_send_thread is not None
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         pending_save_req_ids = {
             request.req_id for request in meta.requests if request.can_save
@@ -2528,9 +2527,9 @@ class MooncakeStoreWorker:
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+            if not self._kv_cache_groups[g_idx].prefix_cacheable:
                 continue
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+            spec_block_size = self._kv_cache_groups[g_idx].block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
             lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
             unit_size = self.hash_block_size if fine_grained else db.chunk_size
@@ -2587,7 +2586,7 @@ class MooncakeStoreWorker:
         previous_page = None
         preceding_chunks_present = True
         for g_idx, hash_bytes, end_token in candidate_meta:
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+            spec_block_size = self._kv_cache_groups[g_idx].block_size
             page = (g_idx, (end_token - 1) // spec_block_size)
             if page != previous_page:
                 preceding_chunks_present = True
@@ -2832,7 +2831,7 @@ LOOKUP_BREAKER_COOLDOWN_S = 30.0
 RESET_TIMEOUT_S = 60.0
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]
