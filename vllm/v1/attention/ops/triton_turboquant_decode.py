@@ -744,13 +744,9 @@ def triton_turboquant_decode_attention(
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
-    BLOCK_H = 16
-    BLOCK_KV_GROUPED = 16
-    heads_per_kv_head = triton.cdiv(kv_group_size, BLOCK_H)
-    head_groups = Hk * heads_per_kv_head
-
     if kv_group_size > 1 and key_fp8:
-        grid = (B, head_groups, NUM_KV_SPLITS)
+        BLOCK_H = 16
+        grid = (B, Hk * triton.cdiv(kv_group_size, BLOCK_H), NUM_KV_SPLITS)
         _tq_grouped_decode_stage1[grid](
             q_rot,
             kv_cache,
@@ -776,14 +772,14 @@ def triton_turboquant_decode_attention(
             VAL_DATA_BYTES=cfg["val_data_bytes"],
             ATTN_SCALE=scale,
             BLOCK_D=cfg["BLOCK_D"],
-            BLOCK_KV=BLOCK_KV_GROUPED,
+            BLOCK_KV=16,
             BLOCK_H=BLOCK_H,
             FP8_E4B15=fp8_e4b15,
             num_warps=4,
             num_stages=2,
         )
     else:
-        # MHA (kv_group_size==1): use original scalar kernel
+        # MHA and MSE-key presets: one query head per CTA.
         BLOCK_KV = 4
         grid = (B, Hq, NUM_KV_SPLITS)
         _tq_decode_stage1[grid](
