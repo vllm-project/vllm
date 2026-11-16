@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
+from vllm.model_executor.model_loader import dummy_loader
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -38,6 +39,26 @@ HF_OVERRIDES = {
     "num_experts_per_tok": 2,
     "index_topk": 128,
 }
+
+
+@pytest.fixture(autouse=True)
+def _narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch):
+    """Keep dummy FP8 weights within +-1 so greedy outputs are reproducible.
+
+    These tests compare greedy tokens across paths that are not bitwise
+    equivalent (cold vs. restored prefix, batched vs. single, two engines).
+    Full-range random FP8 codes make the dummy model's near-tied logits flip
+    on kernel-level noise, so even the cold path differs between runs.
+    """
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
 
 
 def _shrink_config(config):
@@ -173,6 +194,7 @@ def test_hisparse_spill_and_prefix_restore(
     ) as runner:
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
+        assert engine_core.vllm_config.num_hash_lookahead_tokens > 0
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner
         full_graph_calls = 0
         full_replay_pending = False

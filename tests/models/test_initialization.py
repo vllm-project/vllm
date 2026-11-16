@@ -125,20 +125,20 @@ def can_initialize(
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layer_configs = self.model_executor.get_kv_cache_layer_configs()
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
-            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+            [lc for layers in layer_configs for lc in layers.values()],
         )
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs,
+            layer_configs,
             [10 * GiB_bytes],
             global_kv_cache_groups,
         )
@@ -147,7 +147,7 @@ def can_initialize(
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                g.block_size for g in kv_cache_groups
             )
 
         vllm_config.validate_block_size()
@@ -230,6 +230,12 @@ def can_initialize(
         kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
+        if model_arch in (
+            "Glm5NextForCausalLM",
+            "Glm5NextForConditionalGeneration",
+            "Glm5NextMTPModel",
+        ):
+            kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
         LLM(
             model_info.default,
