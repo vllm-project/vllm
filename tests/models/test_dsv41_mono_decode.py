@@ -25,6 +25,7 @@ class _Runner:
     def __init__(self):
         self.calls = []
         self.draft = None
+        self.plain_fp8_kv = False
         self.merge = False
 
     def merges(self, rows):

@@ -172,7 +172,7 @@ def _front_key(key: MonoBuild):
 def _symbol_params(key: MonoBuild) -> dict:
     """The kernel symbol's draft-only parameters and the KV format (none for
     a target layer over fp8_ds_mla records)."""
-    out = {}
+    out: dict[str, int | str] = {}
     if key.experts != EXPERTS:
         out["e"] = key.experts
     if key.topk != TOPK:

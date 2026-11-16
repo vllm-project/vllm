@@ -505,7 +505,7 @@ def stage_split(c, unit):
 def store_partial(c, accs, t, ch, dbase, g, r16):
     """A split unit's PV accumulators -> its bf16 partial.
 
-    partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
+    `partial[t][ch][head][dim]` bf16: lane (r16, g) holds C rows 4 g + i ->
     dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
     bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned, whole
     64 B sectors: store j of lane g takes dims 32 j + 8 g .. from lane
