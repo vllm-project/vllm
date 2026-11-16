@@ -2595,12 +2595,5 @@ async def test_knowline_serves_the_decisions_endpoint():
         "billing",
         "shipping",
     }
-    # The trained prompt renders the stock questions too, and usage sums
-    # the reads.
+    # The rendering and usage assertions live with the systemone test.
     assert len(engine.generated) == 2
-    for prompt, _, _ in engine.generated:
-        text = tokenizer.decode(prompt["prompt_token_ids"])
-        assert text.endswith(f"<assistant>{knowline.ANSWER}")
-    assert dump["usage"]["input_tokens"] == sum(
-        len(p["prompt_token_ids"]) for p, _, _ in engine.generated
-    )
