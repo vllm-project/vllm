@@ -1249,7 +1249,9 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Account for replay in encoder-input and prefill checks.
+                    # Computed tokens after the replay rewind applied later by
+                    # _mark_prefix_replay; must match its calculation.
+                    # Used for the encoder-input and prefill-deferral checks.
                     effective_computed_tokens = num_computed_tokens
                     if not window_loaded:
                         effective_computed_tokens = max(
