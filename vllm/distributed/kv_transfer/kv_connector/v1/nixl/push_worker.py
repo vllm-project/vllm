@@ -102,8 +102,6 @@ class _ChunkTask:
     job: NixlPushChunkJob
     event: torch.Event
     state: _ChunkRequestState
-    # The P->D handshake the job waits for; each job tries it once.
-    handshake: Future | None = None
 
 
 @dataclass
@@ -527,6 +525,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             job, state = task.job, task.state
             if state.retired:
                 continue
+            if state.failed:
+                # The request is pushed whole when it finishes.
+                self._finish_chunk_job(task)
+                continue
             # D decodes once the completion notification arrives, so it must
             # follow all of the request's data. It rides on the WRITE of the
             # last block, submitted once every earlier WRITE of the request
@@ -543,18 +545,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if reg_data is None:
                 self._chunk_deferred.append(task)
                 continue
-            handshake = task.handshake or self._ensure_handshake(
-                reg_data["decode_engine_id"],
-                reg_data["decode_host"],
-                reg_data["decode_port"],
-                reg_data["decode_tp_size"],
-            )
-            if handshake is not None and not handshake.done():
-                task.handshake = handshake
-                self._chunk_deferred.append(task)
-                continue
-            if handshake is not None and handshake.exception() is not None:
-                # Not retried, as for a whole-request push.
+            if (
+                self._ensure_handshake(
+                    reg_data["decode_engine_id"],
+                    reg_data["decode_host"],
+                    reg_data["decode_port"],
+                    reg_data["decode_tp_size"],
+                )
+                is not None
+            ):
+                # D is not handshaked yet; the call has started the handshake,
+                # and the request is pushed whole once it finishes.
                 self._finish_chunk_job(task, failed=True)
                 continue
             if not task.event.query():
@@ -566,7 +567,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             handles: list[TransferHandle] = []
             failed = False
-            notify = last and not state.failed
+            notify = last
             try:
                 handles = self._submit_chunk_job(job, reg_data, notify=notify)
             except Exception:

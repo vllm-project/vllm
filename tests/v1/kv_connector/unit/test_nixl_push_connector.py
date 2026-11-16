@@ -617,29 +617,21 @@ def _fail_writes(w: _StubWriterWorker) -> None:
     w.nixl_wrapper.check_xfer_state.return_value = "ERR"
 
 
-@pytest.mark.parametrize(
-    "cause", ["failed_write", "incompatible_peer", "failed_handshake"]
-)
+@pytest.mark.parametrize("cause", ["failed_write", "incompatible_peer", "no_handshake"])
 def test_request_with_an_unwritten_chunk_is_pushed_whole(cause):
     w = _chunk_worker()
     if cause == "failed_write":
         _fail_writes(w)
     elif cause == "incompatible_peer":  # e.g. a decode peer with a different TP
         w._chunk_path_supported = lambda job, reg_data: False
-    else:
-        handshake: Future = Future()
-        w._ensure_handshake = MagicMock(return_value=handshake)
+    else:  # D is not handshaked yet
+        w._ensure_handshake = lambda *a, **k: Future()
     _publish(w, _chunk_job(0, 1), _chunk_job(1, 2))
     w._process_chunk_jobs()
-    if cause == "failed_handshake":
-        handshake.set_exception(RuntimeError("decode is unreachable"))
     w._poll_chunk_transfers()
     w._process_chunk_jobs()
-    if cause == "failed_handshake":
-        # Each job tries the handshake once, as a whole-request push does.
-        assert w._ensure_handshake.call_count == 2
-    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    w._poll_chunk_transfers()
+    # The rest of the request is not written, as it is pushed whole.
+    assert len(w.writes) == (1 if cause == "failed_write" else 0)
     assert not any(notify for _, _, notify in w.writes)
 
     w._set_chunk_finished("req-p", ([1, 2],))
@@ -720,9 +712,9 @@ def test_request_preempted_during_its_handoff(handed_off):
 
 
 def test_evicted_request_drops_its_chunk_jobs():
-    # Its lease expired, e.g. because the handshake to D never completed.
+    # Its lease expired, e.g. because D never registered.
     w = _chunk_worker()
-    w._ensure_handshake = MagicMock(return_value=Future())
+    w._pending_d_registrations.clear()
     w.nixl_wrapper.get_new_notifs.return_value = {}
     _publish(w, _chunk_job(0, 2))
     w._process_chunk_jobs()

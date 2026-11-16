@@ -39,10 +39,10 @@ release them, and a finished request holds them under the KV lease
   data: it rides on the WRITE of the last prompt block, which is submitted only
   after the request's earlier WRITEs have completed successfully.
 * When the request finishes, the existing whole-request path reports it once
-  its last chunk WRITE completed. If a chunk was not written (an incompatible
-  peer or a failed WRITE), the whole request is written instead; if D has not
-  registered yet, the request waits for its registration as a whole-request
-  push does.
+  its last chunk WRITE completed. If a chunk was not written (D not handshaked
+  yet, an incompatible peer or a failed WRITE), the whole request is written
+  instead; if D has not registered yet, the request waits for its registration
+  as a whole-request push does.
 * When the request is preempted or aborted, `handle_preemptions` drops its
   queued chunk jobs and waits for its submitted WRITEs before the blocks can be
   reused. A preempted request is pushed again from the first block once
