@@ -1904,8 +1904,12 @@ async fn health_response(app: &axum::Router, request_id: Option<&str>) -> axum::
         .expect("call app")
 }
 
+/// Sum of all series of `metric` whose labels include every pair in `labels`,
+/// like PromQL `sum(metric{labels})`. Tests share the global registry, so a
+/// partial selector can match series that other tests created, such as other
+/// engine indexes of the same model.
 fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
-    rendered.lines().find_map(|line| {
+    let values = rendered.lines().filter_map(|line| {
         let rest = line.strip_prefix(metric)?;
 
         match labels {
@@ -1923,7 +1927,8 @@ fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f6
             }
             None => rest.strip_prefix(' ').and_then(|value| value.parse::<f64>().ok()),
         }
-    })
+    });
+    values.reduce(|sum, value| sum + value)
 }
 
 fn metric_delta(
