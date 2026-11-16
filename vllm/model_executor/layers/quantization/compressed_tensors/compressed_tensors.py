@@ -1256,11 +1256,14 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        if not is_weights_pre_processed():
-            # Buffers so sleep snapshots them; ATTN_HEAD changes shape.
-            layer.register_buffer("_k_scale", layer.k_scale.detach())
-            layer.register_buffer("_v_scale", layer.v_scale.detach())
-            layer.register_buffer("_q_scale", layer.q_scale.detach())
+        if is_weights_pre_processed():
+            super().process_weights_after_loading(layer)
+            return
+
+        # Buffers (not Parameters) so sleep snapshots them; ATTN_HEAD changes shape.
+        layer.register_buffer("_k_scale", layer.k_scale.detach())
+        layer.register_buffer("_v_scale", layer.v_scale.detach())
+        layer.register_buffer("_q_scale", layer.q_scale.detach())
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
@@ -1269,19 +1272,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 return tensor.max().item()
             return tensor.item()
 
-        layer._k_scale_float = _to_scalar(layer._k_scale)
-        layer._v_scale_float = _to_scalar(layer._v_scale)
-        layer._q_scale_float = _to_scalar(layer._q_scale)
+        layer._k_scale_float = _to_scalar(layer.k_scale)
+        layer._v_scale_float = _to_scalar(layer.v_scale)
+        layer._q_scale_float = _to_scalar(layer.q_scale)
 
         # Sync host (cpu) scale copies read by AITER fused kernels.
-        if is_weights_pre_processed():
-            # The reconstructed layer's host copies may still be meta tensors.
-            layer._k_scale_cpu = torch.tensor(
-                layer._k_scale_float, dtype=torch.float32, device="cpu"
-            )
-            layer._v_scale_cpu = torch.tensor(
-                layer._v_scale_float, dtype=torch.float32, device="cpu"
-            )
-        else:
-            layer._k_scale_cpu.fill_(layer._k_scale_float)
-            layer._v_scale_cpu.fill_(layer._v_scale_float)
+        layer._k_scale_cpu.fill_(layer._k_scale_float)
+        layer._v_scale_cpu.fill_(layer._v_scale_float)

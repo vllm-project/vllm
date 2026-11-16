@@ -24,7 +24,8 @@ Key benefits:
 
 !!! note
     Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert, pipeline and data parallelism are supported, including across nodes.
+    expert and data parallelism are supported, including across nodes;
+    pipeline parallelism is rejected when launching the daemon.
 
 ## Quick start
 
