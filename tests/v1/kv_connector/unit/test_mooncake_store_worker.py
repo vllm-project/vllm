@@ -72,6 +72,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def _reset_conv_state_layout_cache():
@@ -3497,7 +3499,6 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     assert keys[0] != keys[1]
 
 
-@pytest.mark.cpu_test
 def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
     """Workers are laid out as PP x PCP x TP, so with PCP the first rank of
     each PP stage is 0 and tp_size * pcp_size, and the stages' keys differ."""
@@ -4512,7 +4513,6 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
 
 
 @pytest.mark.parametrize("lookahead", [0, 5])
-@pytest.mark.cpu_test
 def test_store_sending_thread_kv_events_recover_suffix_after_put_failure(lookahead):
     store = MagicMock()
     store.batch_is_exist.side_effect = ([0], [0, 0])
@@ -5974,7 +5974,6 @@ def _enable_reuse(worker: mooncake_store_worker.MooncakeStoreWorker) -> None:
     worker._reuse_pd_transfer_engine = True
 
 
-@pytest.mark.cpu_test
 def test_reused_engine_skips_device_kv_registration():
     store_worker = _make_bare_worker(num_gpu_blocks=2)
     store_worker.token_dbs[0].store_layout = MagicMock()
@@ -5984,7 +5983,6 @@ def test_reused_engine_skips_device_kv_registration():
     assert store_worker._device_regions == {}
 
 
-@pytest.mark.cpu_test
 def test_reused_engine_registers_host_kv_only():
     from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -6029,7 +6027,6 @@ def test_reused_engine_registers_host_kv_only():
     assert store_worker._device_regions == {}
 
 
-@pytest.mark.cpu_test
 def test_reused_engine_sleep_cycle_is_noop():
     store_worker = _make_bare_worker(num_gpu_blocks=2)
     store_worker.token_dbs[0].store_layout = MagicMock()
@@ -6042,7 +6039,6 @@ def test_reused_engine_sleep_cycle_is_noop():
     store_worker.store.register_buffer.assert_not_called()
 
 
-@pytest.mark.cpu_test
 @pytest.mark.parametrize("kind", ["dense", "hisparse"])
 def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
     """Asleep, only host regions stay registered; waking registers the same
@@ -6059,7 +6055,6 @@ def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
         assert worker.store.registered == device | host
 
 
-@pytest.mark.cpu_test
 @pytest.mark.parametrize("op", ["unregister", "register"])
 def test_failed_store_call_raises_and_retry_converges(op: str):
     """A failed region keeps its state and is the only one a retry touches."""

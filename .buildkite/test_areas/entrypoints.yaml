@@ -100,7 +100,14 @@ steps:
     --ignore=entrypoints/serve/dev/rpc
     --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
-  - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/scale_out
+    --ignore=entrypoints/scale_out/derender/test_derender.py
+    --ignore=entrypoints/scale_out/derender/test_derender_stream.py
+    --ignore=entrypoints/scale_out/render/test_render.py
+    --ignore=entrypoints/scale_out/render/test_launch_render.py
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) Shard %N"
@@ -183,8 +190,15 @@ steps:
   commands:
   - pytest -v -s tool_use
   - pytest -v -s entrypoints/tool_parsers
-  - pytest -v -s entrypoints/generate
-  - pytest -v -s entrypoints/anthropic
+  - >-
+    pytest -v -s
+    entrypoints/generate
+    --ignore=entrypoints/generate/structured_decisions/test_decisions.py
+    --ignore=entrypoints/generate/structured_decisions/test_strategies.py
+  - >-
+    pytest -v -s
+    entrypoints/anthropic
+    --ignore=entrypoints/anthropic/test_anthropic_messages_conversion.py
   - pytest -v -s entrypoints/cohere
   mirror:
     amd:
@@ -195,6 +209,37 @@ steps:
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
+
+# Entrypoints tests that never put a process on the GPU, moved off the
+# H200 steps above.
+- label: ":computer: (CPU) Entrypoints Render + Structured Decisions"
+  key: cpu-entrypoints-render-structured-decisions
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 35
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/scale_out/derender/test_derender.py
+  - tests/entrypoints/scale_out/derender/test_derender_stream.py
+  - tests/entrypoints/scale_out/render/test_render.py
+  - tests/entrypoints/scale_out/render/test_launch_render.py
+  - tests/entrypoints/generate/structured_decisions/test_decisions.py
+  - tests/entrypoints/generate/structured_decisions/test_strategies.py
+  - tests/entrypoints/anthropic/test_anthropic_messages_conversion.py
+  commands:
+  - >-
+    pytest -v -s
+    entrypoints/scale_out/derender/test_derender.py
+    entrypoints/scale_out/derender/test_derender_stream.py
+    entrypoints/scale_out/render/test_render.py
+    entrypoints/scale_out/render/test_launch_render.py
+  - >-
+    pytest -v -s
+    entrypoints/generate/structured_decisions/test_decisions.py
+    entrypoints/generate/structured_decisions/test_strategies.py
+  - pytest -v -s entrypoints/anthropic/test_anthropic_messages_conversion.py
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)"
   device: h200_35gb
