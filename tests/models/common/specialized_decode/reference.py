@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Slow references for the AMD monokernel I/O tests: plain torch in float64,
+"""Slow references for the specialized decode tests: plain torch in float64,
 written from the model definitions, never from a vLLM, AITER or Triton kernel.
 
 Rounding points a kernel documents are explicit calls here (`bf16_rne`,
 `to_e4m3_rne`, the E8M0 code rules), so a test reproduces them on purpose.
-`tests/kernels/models/amd/test_dsv41_mono_primitives.py` proves each rounding
+`tests/models/deepseek_v41/amd/mono/test_primitives.py` proves each rounding
 and code rule bit-exact against the device helpers the kernels use.
 
-This is the formats and rounding half. The layer math and the error metrics
-arrive with the model tests that call them."""
+This is the formats and rounding half, which is what the primitive tier (T1)
+of #68016 needs. The layer math (RMSNorm, RoPE, MLA, MoE) and the error
+metrics land here next, shared rather than once per model, so that the
+`DecodeNumerics` contract (T2) measures every model the same way."""
 
 import torch
 

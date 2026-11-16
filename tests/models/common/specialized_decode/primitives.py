@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The machinery a monokernel's primitive tests need, with no model in it.
+"""The machinery a specialized decode's primitive tests need, no model in it.
+
+This is the primitive tier (T1) of #68016, and it is a debugging aid rather
+than the numerical contract. It reaches into a model's internals on purpose,
+so it cannot survive a kernel rewrite. The contract is `DecodeNumerics` (T2),
+which compares a decode's output at the public entry point and holds however
+the kernel is written.
 
 A primitive test calls a model's *real* device helper -- the one its kernels
 call -- on every lane of a thin map kernel, and compares what comes back
-against the closed-form float64 definition in `tests/models/mono_reference.py`.
-Nothing here re-implements a rounding: `run` only moves words onto the GPU,
-hands them to the helper under test and brings the result back, and the
-generators below only build the inputs that make a rounding rule observable
-(the ties, the subnormals, the overflow edges).
+against the closed-form float64 definition in `reference.py`. Nothing here
+re-implements a rounding: `run` only moves words onto the GPU, hands them to
+the helper under test and brings the result back, and the generators below
+only build the inputs that make a rounding rule observable (the ties, the
+subnormals, the overflow edges).
 
 The per-model file supplies the helpers and the assertions; see
-`test_dsv41_mono_primitives.py` for the shape of one. This file assumes only
-that the helpers are FlyDSL device functions a test kernel can call. A model
-whose kernels emit their instructions inline, with no callable helper to
-import, cannot be checked at this tier and needs a stage-level check instead.
+`tests/models/deepseek_v41/amd/mono/test_primitives.py` for the shape of one.
+This file assumes only that the helpers are FlyDSL device functions a test
+kernel can call. A model whose kernels emit their instructions inline, with no
+callable helper to import, cannot be checked at this tier at all, and relies
+on T2 plus a stage-level check instead.
 """
 
 import hashlib
@@ -31,7 +38,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import range_constexpr
 from flydsl.expr.typing import Constexpr, Int64, T
 
-from tests.models import mono_reference as R
+from tests.models.common.specialized_decode import reference as R
 
 DEV = "cuda"
 F32, I32 = torch.float32, torch.int32

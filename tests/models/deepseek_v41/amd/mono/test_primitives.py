@@ -1,22 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1's AMD monokernel device helpers against float64 / exact
-references (tests/models/mono_reference.py), one helper at a time, from a
-test kernel that calls the helper itself on every lane.
+references (`tests/models/common/specialized_decode/reference.py`), one helper
+at a time, from a test kernel that calls the helper itself on every lane.
 
 Roundings, packings, scale codes and data movement are bit-exact: there is a
 closed form for each, so a tolerance would only hide a wrong one.
 
+This is the primitive tier (T1) of #68016, a debugging aid that reaches into
+this model's internals on purpose. It is not the numerical contract; that is
+`DecodeNumerics` (T2), at the decoder layer's public entry point.
+
 The model carries two copies of these helpers -- one on the MoE and seam side,
 one on the attention side -- and `_LIBS` checks each, since a bug fixed in one
 is not fixed in the other. The model-agnostic machinery lives in
-`mono_harness.py`; another model's helpers belong in a file of their own
-beside this one, over its own `_LIBS`."""
+`tests/models/common/specialized_decode/primitives.py`; another model's helpers
+belong in a file under its own `tests/models/<model>/` directory, over its own
+`_LIBS`."""
 
 import pytest
 import torch
 
-from tests.models import mono_reference as R
+from tests.models.common.specialized_decode import reference as R
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -26,7 +31,7 @@ pytest.importorskip("aiter")
 
 import flydsl.expr as fx  # noqa: E402
 
-from tests.kernels.models.amd import mono_harness as H  # noqa: E402
+from tests.models.common.specialized_decode import primitives as H  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942  # noqa: E402
 from vllm.platforms.rocm import on_mi3xx  # noqa: E402
 
