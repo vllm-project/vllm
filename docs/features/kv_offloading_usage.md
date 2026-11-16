@@ -555,6 +555,32 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## CPU eviction order for `SimpleCPUOffloadConnector`
+
+By default the CPU tier of `SimpleCPUOffloadConnector` evicts blocks in the
+order they were stored. A CPU lookup stops at the first missing block, so a
+prompt stored over several chunks, or a prefix served from the GPU cache while
+other requests stored theirs, can lose its first block early and with it the
+whole CPU hit. Set `cpu_lru_eviction` to `true` in `kv_connector_extra_config`
+to evict by last use instead:
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use": 137438953472,
+    "cpu_lru_eviction": true
+  }
+}
+```
+
+When a request finishes and its stores have landed, its CPU prefix becomes the
+most recently used, and CPU blocks released after a load or a dropped lookup
+go back tail first, so eviction takes the end of a prefix before its start.
+This costs one CPU prefix lookup per finished request. With `lazy_offload`,
+only the tail-first release applies.
+
 ## Chunked-local attention with `SimpleCPUOffloadConnector`
 
 For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
