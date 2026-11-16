@@ -395,6 +395,12 @@ class BertModel(nn.Module, SupportsQuant):
     ) -> None:
         super().__init__()
 
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with BERT/RoBERTa models "
+                "because they encode token type IDs in input_ids."
+            )
+
         self.config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(self.config)
         self.encoder = BertEncoder(vllm_config=vllm_config, prefix=f"{prefix}.encoder")

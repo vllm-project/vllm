@@ -420,6 +420,7 @@ def selective_state_update_replayssm_flashinfer(
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
+    rand_seed: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
@@ -427,7 +428,11 @@ def selective_state_update_replayssm_flashinfer(
     use_gb10_profile: bool = False,
     stochastic_rounding_rng: str = "philox",
 ) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
+    """Run FlashInfer checkpointing SSU with model-owned tracker metadata.
+
+    With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
+    refreshed by the caller each step; without one, a seed is drawn here.
+    """
     if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
             "FlashInfer ReplaySSM has not been initialized. "
@@ -529,11 +534,12 @@ def selective_state_update_replayssm_flashinfer(
     if stochastic_rounding_rng != "philox":
         launch_kwargs["sr_rng"] = stochastic_rounding_rng
 
-    rand_seed = (
-        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
-        if enable_stochastic_rounding
-        else None
-    )
+    if not enable_stochastic_rounding:
+        rand_seed = None
+    elif rand_seed is None:
+        rand_seed = torch.randint(
+            0, 2**32, (1,), device=state.device, dtype=torch.int64
+        )
     return _flashinfer_replayssm_kernel(
         state,
         x_cache,
@@ -573,10 +579,11 @@ def initialize_mamba_ssu_backend(
 ) -> None:
     """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
     if not any(
-        isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.mamba_type
+        isinstance(spec, MambaSpec)
+        and spec.mamba_type
         in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
         for g in kv_cache_config.kv_cache_groups
+        for spec in g.kv_cache_specs.values()
     ):
         return
 

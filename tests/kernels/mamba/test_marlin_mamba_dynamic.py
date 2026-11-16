@@ -45,7 +45,7 @@ from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionBackend,
     Mamba2AttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -227,7 +227,9 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
                     layer.conv1d.weight.fill_(0.125)
                     layer.D.fill_(1)
             layer.eval()
-            spec = layer.get_kv_cache_spec(config)
+            layer_config = layer.get_kv_cache_config(config)
+            assert layer_config is not None
+            spec = layer_config.spec
             num_blocks = max_num_seqs + 1
             pages = torch.zeros(
                 (num_blocks, 1, 1, spec.page_size_bytes), dtype=torch.int8
@@ -237,7 +239,9 @@ def owned_mamba(tmp_path, dist_init, request, monkeypatch):
             kv = KVCacheConfig(
                 num_blocks=num_blocks,
                 kv_cache_tensors=[],
-                kv_cache_groups=[KVCacheGroupSpec([layer.prefix], spec)],
+                kv_cache_groups=[
+                    KVCacheGroup.from_layers({layer.prefix: layer_config})
+                ],
             )
             initialize_replayssm_ring_trackers(kv, context)
             starts, history = get_replayssm_block_copy_tensors(context)
@@ -918,7 +922,9 @@ def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
     state.num_accepted_tokens_gpu.copy_(
         torch.arange(1, 5, device=device, dtype=torch.int32).clamp_max(tokens)
     )
-    spec = layer.get_kv_cache_spec(config)
+    layer_config = layer.get_kv_cache_config(config)
+    assert layer_config is not None
+    spec = layer_config.spec
     group = AttentionGroup(
         Mamba2AttentionBackend,
         [layer.prefix],
@@ -929,7 +935,7 @@ def test_batched_normal_worker_preparation_replays_live_requests(owned_mamba):
     kv = KVCacheConfig(
         num_blocks=5,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec([layer.prefix], spec)],
+        kv_cache_groups=[KVCacheGroup.from_layers({layer.prefix: layer_config})],
     )
     manager = ModelCudaGraphManager(
         config,

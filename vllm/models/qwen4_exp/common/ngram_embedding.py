@@ -16,7 +16,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import (
+    get_dp_group,
+    get_engram_dp_group,
+    get_etp_group,
+    get_tp_group,
+)
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -49,6 +54,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -850,3 +856,56 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             "Pinned-host PLE embedding requires "
             "start_prefetch() and finalize_prefetch()."
         )
+
+
+class Qwen4ExpPLESharedHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
+    """Pinned-host PLE tables mapped once per node for co-located DP replicas.
+
+    With `EngramConfig.dp_shared_memory`, the node-local Engram DP group maps
+    each table from one /dev/shm file (as DeepSeek V4.1's Engram does), so
+    lookups are the pinned backend's; only the group leader loads it. A table
+    that cannot be shared stays per rank.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        group = get_engram_dp_group()
+        assert group is not None, "dp_shared_memory requires the Engram DP group"
+        self._shared_group = group
+        self._shared_ptrs: set[int] = set()
+        super().__init__(*args, **kwargs)
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        num_bytes = num_embeddings * embedding_dim * dtype.itemsize
+        try:
+            table, _ = DPSharedEngramStorage.share_shm_table(
+                num_bytes, self._shared_group
+            )
+        except RuntimeError as exc:
+            # Raised on every rank of the group, so all of them fall back.
+            logger.warning_once("Keeping one PLE table per DP replica: %s", exc)
+            return super().allocate_embedding_weight(
+                num_embeddings, embedding_dim, dtype
+            )
+        weight = table.view(dtype).view(num_embeddings, embedding_dim)
+        self._shared_ptrs.add(weight.data_ptr())
+        return weight
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        if param.data_ptr() not in self._shared_ptrs:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+            return
+        if self._shared_group.rank_in_group == 0:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+        # Read order may differ across ranks. Equal load counts ensure all shared
+        # tables are ready after the last weight-loader call returns.
+        torch.distributed.barrier(group=self._shared_group.cpu_group)

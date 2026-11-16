@@ -30,12 +30,13 @@ def _pack(out, lse, world_size, h_per_rank, head_dim, seq_lens, query_start_loc)
         out,
         lse,
         send,
-        world_size,
-        h_per_rank,
-        head_dim,
-        lse_pack_dim,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
+        seq_lens,
+        query_start_loc,
+        has_mask=seq_lens is not None,
+        world_size=world_size,
+        h_per_rank=h_per_rank,
+        head_dim=head_dim,
+        lse_pack_dim=lse_pack_dim,
     )
     return send
 
