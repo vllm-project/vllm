@@ -4565,11 +4565,12 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - csrc/topk.cu
-  - csrc/persistent_topk.cuh
-  - csrc/sampled_topk.cuh
-  - csrc/topk_histogram_4096.cuh
-  - csrc/topk_histogram_4096_overflow.cuh
+  - csrc/attention/dsa/topk/topk.cu
+  - csrc/attention/dsa/topk/top_k_per_row.cu
+  - csrc/attention/dsa/topk/persistent_topk.cuh
+  - csrc/attention/dsa/topk/sampled_topk.cuh
+  - csrc/attention/dsa/topk/topk_histogram_4096.cuh
+  - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
   - vllm/model_executor/layers/indexer_topk.py
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/kernels/test_top_k_per_row.py
