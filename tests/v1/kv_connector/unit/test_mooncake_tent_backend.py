@@ -90,10 +90,40 @@ class Engine:
             raise self.failure
         return np.asarray(self.statuses, dtype=np.uint8)
 
+    def allocate_transfer_batch(self, count: int) -> int:
+        self.batch_size = count
+        return 7
 
-def fake_tent_module() -> types.ModuleType:
+    def submit_transfer(self, batch: int, requests) -> None:
+        self.submitted = list(requests)
+
+    def wait_transfer(self, batch: int, timeout_ms: int = 0):
+        return [
+            types.SimpleNamespace(state=Status(int(state)), bytes=0)
+            for state in self.statuses
+        ]
+
+    def free_transfer_batch(self, batch: int) -> None:
+        self.freed = batch
+
+
+class ListOnlyEngine(Engine):
+    transfer_sync_arrays = None
+
+
+class Request:
+    def __init__(self, opcode, source, segment, offset, length) -> None:
+        self.opcode = opcode
+        self.source = source
+        self.segment = segment
+        self.offset = offset
+        self.length = length
+
+
+def fake_tent_module(engine_cls: type[Engine] = Engine) -> types.ModuleType:
     module = types.ModuleType("tent")
-    module.TransferEngine = Engine
+    module.TransferEngine = engine_cls
+    module.Request = Request
     module.OpCode = OpCode
     module.TransferStatusEnum = Status
     return module
@@ -253,3 +283,30 @@ def test_factory_builds_tent_backend(engine) -> None:
     )
     assert isinstance(backend, TentTransferBackend)
     assert backend.rpc_port == 15012
+
+
+def test_missing_wait_transfer_is_rejected(monkeypatch) -> None:
+    class NoWaitEngine(Engine):
+        wait_transfer = None
+
+    monkeypatch.setitem(sys.modules, "tent", fake_tent_module(NoWaitEngine))
+    with pytest.raises(RuntimeError, match="wait_transfer"):
+        make_backend()
+
+
+def test_falls_back_to_list_submission(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "tent", fake_tent_module(ListOnlyEngine))
+    backend = make_backend()
+    backend._engine.statuses = [int(Status.COMPLETED)] * 2
+    result = backend.transfer_sync_arrays(
+        "peer",
+        TransferOp.WRITE,
+        np.asarray([1, 3], dtype=np.uint64),
+        np.asarray([2, 4], dtype=np.uint64),
+        np.asarray([16, 16], dtype=np.uint64),
+    )
+    assert result.state is TransferState.COMPLETED
+    assert result.num_ranges == 2
+    assert backend._engine.batch_size == 2
+    assert len(backend._engine.submitted) == 2
+    assert backend._engine.freed == 7

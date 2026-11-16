@@ -96,10 +96,22 @@ class TentTransferBackend(TransferBackend):
             for member in self._tent.TransferStatusEnum.__members__.values()
         }
         self._completed = int(self._tent.TransferStatusEnum.COMPLETED)
+        self._wait_transfer = getattr(self._engine, "wait_transfer", None)
+        if self._wait_transfer is None:
+            raise RuntimeError(
+                "This Mooncake build does not expose wait_transfer, which the "
+                "TENT backend needs. Use a Mooncake build that includes it "
+                "(main, or a release that ships the binding)."
+            )
+        self._submit_arrays_fn = getattr(self._engine, "transfer_sync_arrays", None)
         self._lock = threading.Lock()
         self._segments: dict[str, Any] = {}
         self._peer_locks: dict[str, threading.Lock] = {}
         self._closed = threading.Event()
+        self._list_mode = (
+            self._submit_arrays_fn is None
+            or os.environ.get("TENT_SUBMIT", "arrays") == "list"
+        )
 
     @property
     def rpc_port(self) -> int:
@@ -145,7 +157,11 @@ class TentTransferBackend(TransferBackend):
         lengths = np.fromiter(
             (item.length for item in ranges), dtype=np.uint64, count=len(ranges)
         )
-        states = self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
+        states = (
+            self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
+            if self._list_mode
+            else self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
+        )
         events: list[TransferEvent] = []
         for index in range(len(ranges)):
             code = int(states[index])
@@ -177,7 +193,11 @@ class TentTransferBackend(TransferBackend):
                 f"per range, got {num_ranges}, {remote_addrs.size} and "
                 f"{lengths.size}."
             )
-        states = self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
+        states = (
+            self._submit_lists(peer, op, local_addrs, remote_addrs, lengths)
+            if self._list_mode
+            else self._submit_arrays(peer, op, local_addrs, remote_addrs, lengths)
+        )
         if int(states.size) != num_ranges:
             return BatchTransferResult(
                 num_ranges=num_ranges,
@@ -233,12 +253,49 @@ class TentTransferBackend(TransferBackend):
         with self._peer_lock(peer):
             segment = self._open_segment(peer)
             try:
-                return self._engine.transfer_sync_arrays(
+                return self._submit_arrays_fn(
                     np.ascontiguousarray(local_addrs, dtype=np.uint64),
                     np.ascontiguousarray(remote_addrs, dtype=np.uint64),
                     np.ascontiguousarray(lengths, dtype=np.uint64),
                     segment,
                     self._opcodes[op],
+                )
+            except Exception:
+                self._close_segment(peer)
+                raise
+
+    def _submit_lists(
+        self,
+        peer: str,
+        op: TransferOp,
+        local_addrs: NDArray[np.uint64],
+        remote_addrs: NDArray[np.uint64],
+        lengths: NDArray[np.uint64],
+    ) -> NDArray[np.uint8]:
+        with self._peer_lock(peer):
+            segment = self._open_segment(peer)
+            try:
+                count = int(local_addrs.size)
+                batch = self._engine.allocate_transfer_batch(count)
+                if batch <= 0:
+                    raise RuntimeError("TENT could not allocate a transfer batch")
+                requests = [
+                    self._tent.Request(
+                        self._opcodes[op],
+                        int(local_addrs[index]),
+                        segment,
+                        int(remote_addrs[index]),
+                        int(lengths[index]),
+                    )
+                    for index in range(count)
+                ]
+                try:
+                    self._engine.submit_transfer(batch, requests)
+                    statuses = self._wait_transfer(batch, 0)
+                finally:
+                    self._engine.free_transfer_batch(batch)
+                return np.asarray(
+                    [int(item.state) for item in statuses], dtype=np.uint8
                 )
             except Exception:
                 self._close_segment(peer)
