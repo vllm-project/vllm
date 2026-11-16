@@ -4829,6 +4829,19 @@ def test_revision_resolved_for_model(mock_resolve):
     mock_resolve.assert_any_call(model, None, config.hf_token)
 
 
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_hf_token_is_excluded_from_serialization(mock_resolve):
+    config = ModelConfig("Qwen/Qwen3-0.6B")
+    config.hf_token = "hf_secret"
+
+    serialized = pydantic.TypeAdapter(ModelConfig).dump_python(
+        config, mode="json", fallback=str
+    )
+
+    assert "hf_token" not in serialized
+    assert "hf_secret" not in repr(config)
+
+
 @pytest.mark.parametrize(
     "enabled,supported,cuda_alike,tp_size,pp_size,error",
     [

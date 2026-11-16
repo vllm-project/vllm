@@ -202,12 +202,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
 
-    /// The token to use as HTTP bearer authorization for remote files. If
-    /// `True`, will use the token generated when running `hf auth login`
-    /// (stored in `~/.cache/huggingface/token`).
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub hf_token: Option<Unsupported>,
-
     /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     /// used with `--generation-config auto`, the override parameters will be
     /// merged with the default config from the model. If used with
