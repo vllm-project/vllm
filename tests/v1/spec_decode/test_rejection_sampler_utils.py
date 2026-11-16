@@ -2036,7 +2036,7 @@ def _top_k_top_p_cutoffs_reference(
     probs = kept.softmax(-1).gather(1, order)
     reach = (probs.cumsum(-1) < p.double()[:, None]).sum(-1, keepdim=True)
     cut = x.gather(1, order).gather(1, reach.clamp(max=vocab_size - 1))
-    cut = torch.maximum(cut, kth)[:, 0]
+    cut = torch.where(p[:, None] < 1.0, torch.maximum(cut, kth), kth)[:, 0]
     keep_all = (temp == 0) | (k >= vocab_size) | (sorted_x[:, 0] == float("-inf"))
     return torch.where(keep_all, float("-inf"), cut)
 
@@ -2086,6 +2086,9 @@ def test_top_k_top_p_cutoffs_match_fp64_reference(vocab_size: int):
 
     expected = _top_k_top_p_cutoffs_reference(logits, temp, k, p)
     torch.testing.assert_close(cutoffs, expected, rtol=0, atol=0)
+    # With max_top_k = 20 the tie group runs past the values topk returns.
+    tied = top_k_top_p_cutoffs(logits, idx, temp, k, p, 20)[tied_rows]
+    torch.testing.assert_close(tied, expected[tied_rows], rtol=0, atol=0)
 
 
 def test_top_k_top_p_cutoffs_keep_what_the_sampler_keeps():

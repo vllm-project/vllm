@@ -1601,33 +1601,68 @@ def rejection_sample(
     return sampled, num_sampled
 
 
-@triton.jit
-def _count_ties_kernel(
+@triton.jit(do_not_specialize=["num_vals"])
+def _top_k_top_p_cutoff_kernel(
+    cutoff_ptr,
     logits_ptr,
     logits_stride,
-    value_ptr,
-    count_ptr,
+    vals_ptr,
+    vals_stride,
+    expanded_idx_mapping_ptr,
+    temp_ptr,
+    top_k_ptr,
+    top_p_ptr,
     vocab_size,
-    BLOCK_SIZE: tl.constexpr,
+    num_vals,
+    BLOCK_K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
-    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(logits_ptr + row * logits_stride + block, mask=mask)
-    value = tl.load(value_ptr + row)
-    tl.atomic_add(count_ptr + row, tl.sum((logits == value) & mask, axis=0))
+    req = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
+    temp = tl.load(temp_ptr + req).to(tl.float32)
+    top_k = tl.load(top_k_ptr + req)
+    top_p = tl.load(top_p_ptr + req).to(tl.float64)
+    vals_row = vals_ptr + row * vals_stride
 
+    k = tl.minimum(tl.maximum(top_k, 1), num_vals)
+    kth_raw = tl.load(vals_row + k - 1)
+    kth = kth_raw.to(tl.float32)
+    top = tl.load(vals_row).to(tl.float32)
+    keep_all = (temp == 0.0) | (top_k >= vocab_size) | (top == float("-inf"))
+    needs_top_p = (top_p < 1.0) & ~keep_all
+    safe_temp = tl.where(temp == 0.0, 1.0, temp)
 
-def _count_ties(logits: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    """Per-row count of logits equal to value[row], without materializing the
-    [num_rows, vocab_size] comparison."""
-    num_rows, vocab_size = logits.shape
-    count = torch.zeros(num_rows, dtype=torch.int32, device=logits.device)
-    BLOCK_SIZE = 8192
-    _count_ties_kernel[(num_rows, triton.cdiv(vocab_size, BLOCK_SIZE))](
-        logits, logits.stride(0), value, count, vocab_size, BLOCK_SIZE=BLOCK_SIZE
-    )
-    return count
+    offs = tl.arange(0, BLOCK_K)
+    in_vals = offs < num_vals
+    v = tl.load(vals_row + offs, mask=in_vals, other=float("-inf")).to(tl.float32)
+    above = (v > kth) & in_vals
+    first_tie = tl.sum(above.to(tl.int32))
+    num_ties = tl.sum(((v == kth) & in_vals).to(tl.int32))
+    # The tie group may continue past the values topk returned: count the row.
+    last = tl.load(vals_row + num_vals - 1)
+    if needs_top_p & (last == kth_raw) & (num_vals < vocab_size):
+        ties = tl.zeros([BLOCK_V], dtype=tl.int32)
+        logits_row = logits_ptr + row * logits_stride
+        for start in range(0, vocab_size, BLOCK_V):
+            cols = start + tl.arange(0, BLOCK_V)
+            x = tl.load(logits_row + cols, mask=cols < vocab_size)
+            ties += ((x == kth_raw) & (cols < vocab_size)).to(tl.int32)
+        num_ties = tl.sum(ties)
+
+    # Tokens above the k-th value each keep their own slot; the tokens tied
+    # with it, top-k ones or not, share the first tied slot as one group.
+    row_max = tl.div_rn(top, safe_temp).to(tl.float64)
+    scaled = tl.div_rn(v, safe_temp).to(tl.float64)
+    weights = tl.where(above, tl.exp(scaled - row_max), 0.0)
+    kth_scaled = tl.div_rn(kth, safe_temp).to(tl.float64)
+    tie_weight = num_ties.to(tl.float64) * tl.exp(kth_scaled - row_max)
+    weights = tl.where(offs == first_tie, tie_weight, weights)
+    cdf = tl.cumsum(weights, 0) / tl.sum(weights, 0)
+    reach = tl.sum(((cdf < top_p) & in_vals).to(tl.int32))
+    reach_val = tl.load(vals_row + tl.minimum(reach, num_vals - 1)).to(tl.float32)
+
+    cutoff = tl.where(needs_top_p & (reach < first_tie), reach_val, kth)
+    tl.store(cutoff_ptr + row, tl.where(keep_all, float("-inf"), cutoff))
 
 
 def top_k_top_p_cutoffs(
@@ -1645,9 +1680,9 @@ def top_k_top_p_cutoffs(
     the first one, in descending order, whose cumulative probability over the
     kept set reaches top_p, ties included, as topp_cutoffs_lse does. The
     probabilities are taken in fp64 over x / T in fp32, which is how the verify
-    kernels scale the logits they load. Only the max_top_k largest logits of a
-    row are sorted, so the caller must route rows whose top_p is active without
-    a top_k elsewhere: such rows get no top-p here.
+    kernels scale the logits they load. Only the max_top_k + 1 largest logits of
+    a row are sorted, so the caller must route rows whose top_p is active
+    without a top_k elsewhere: such rows get no top-p here.
 
     Args:
         logits: [num_rows, vocab_size] raw target logits.
@@ -1662,35 +1697,25 @@ def top_k_top_p_cutoffs(
         without top-k, rows with no finite logit).
 
     """
-    vocab_size = logits.shape[-1]
-    idx = expanded_idx_mapping.long()
-    temp = temperature[idx]
-    k = top_k[idx].long()
-    active = (temp != 0.0) & (k < vocab_size)
-
-    vals = logits.topk(min(max_top_k, vocab_size), dim=-1).values
+    num_rows, vocab_size = logits.shape
+    # One value past max_top_k shows whether a row's k-th value tie group can
+    # extend beyond the returned values; the kernel counts the row only then.
+    vals = logits.topk(min(max_top_k + 1, vocab_size), dim=-1).values
     num_vals = vals.shape[-1]
-    kth = vals.gather(1, (k.clamp(1, num_vals) - 1)[:, None])
-    num_ties = _count_ties(logits, kth.squeeze(1).contiguous())
-    vals = vals.float()
-    kth = kth.float()
-
-    # Tokens above the k-th value each keep their own slot; the tokens tied
-    # with it, top-k ones or not, share the first tied slot as one group.
-    above = vals > kth
-    first_tie = above.sum(-1, keepdim=True)
-    safe_temp = torch.where(temp == 0.0, 1.0, temp)[:, None]
-    scaled = (vals / safe_temp).double()
-    row_max = scaled[:, :1]
-    weights = torch.where(above, torch.exp(scaled - row_max), 0.0)
-    tie_weight = num_ties[:, None].double() * torch.exp(
-        (kth / safe_temp).double() - row_max
+    cutoff = torch.empty(num_rows, dtype=torch.float32, device=logits.device)
+    _top_k_top_p_cutoff_kernel[(num_rows,)](
+        cutoff,
+        logits,
+        logits.stride(0),
+        vals,
+        vals.stride(0),
+        expanded_idx_mapping.contiguous(),
+        temperature.contiguous(),
+        top_k.contiguous(),
+        top_p.contiguous(),
+        vocab_size,
+        num_vals,
+        BLOCK_K=triton.next_power_of_2(num_vals),
+        BLOCK_V=4096,
     )
-    weights.scatter_(1, first_tie.clamp(max=num_vals - 1), tie_weight)
-    cdf = weights.cumsum(-1) / weights.sum(-1, keepdim=True)
-    reach = (cdf < top_p[idx].double()[:, None]).sum(-1, keepdim=True)
-    cutoff = torch.where(
-        reach < first_tie, vals.gather(1, reach.clamp(max=num_vals - 1)), kth
-    )[:, 0]
-    keep_all = ~active | (vals[:, 0] == float("-inf"))
-    return torch.where(keep_all, float("-inf"), cutoff)
+    return cutoff
