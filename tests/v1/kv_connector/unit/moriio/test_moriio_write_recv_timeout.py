@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MoRIIO WRITE-mode consumer receive timeout (``write_recv_timeout``).
+"""MoRIIO WRITE-mode consumer receive timeout (`write_recv_timeout`).
 
-Runs the real ``Scheduler`` and the real ``MoRIIOConnectorWorker``
-``start_load_kv`` / ``get_transfer_results``, with no GPU or RDMA, for each
+Runs the real `Scheduler` and the real `MoRIIOConnectorWorker`
+`start_load_kv` / `get_transfer_results`, with no GPU or RDMA, for each
 decode KV cache layout WRITE mode supports: plain attention, MLA, and either
 with a Mamba/KDA state group (hybrid).
 """
