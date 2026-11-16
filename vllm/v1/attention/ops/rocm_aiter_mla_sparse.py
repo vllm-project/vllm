@@ -824,8 +824,7 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
 
 @functools.lru_cache
 def _aiter_paged_mqa_logits() -> Callable | None:
-    # AITER's shape-dispatched entry point (ROCm/aiter#6140): it picks the
-    # Gluon or FlyDSL kernel and its launch knobs from its tuned table.
+    # Picks the kernel and launch knobs per shape (ROCm/aiter#6140).
     try:
         from aiter.paged_mqa_logits import paged_mqa_logits
     except ImportError:
@@ -914,7 +913,6 @@ def rocm_fp8_paged_mqa_logits(
                     kv_cache_fp8,
                     weights,
                     out_logits,
-                    # AITER versions with this op read the (B, next_n) table.
                     context_lens,
                     block_tables,
                     max_model_len,
