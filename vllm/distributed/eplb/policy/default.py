@@ -271,7 +271,6 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
     def rebalance_experts(
         self,
-        weight: torch.Tensor,
         stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -280,7 +279,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         num_groups = stats.num_groups
         num_nodes = stats.num_nodes
         num_ranks = stats.num_gpus
-        weight_np = weight.float().cpu().numpy()
+        weight_np = stats.global_expert_load_window.float().cpu().numpy()
         old_phy2log_np = (
             old_global_expert_indices.cpu().numpy()
             if old_global_expert_indices is not None

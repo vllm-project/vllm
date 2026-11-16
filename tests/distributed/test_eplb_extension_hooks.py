@@ -27,6 +27,7 @@ from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
 from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
 
 
@@ -255,25 +256,29 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
         metadata: tuple[int, ...] = ()
 
     class Policy(DefaultEplbPolicy):
-        def rebalance_experts(self, weight, stats, old_global_expert_indices=None):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
             assert stats is published_stats
             assert isinstance(stats, Stats)
             assert stats.metadata == (3, 7)
-            assert weight.device.type == "cpu"
-            return super().rebalance_experts(weight, stats, old_global_expert_indices)
+            assert stats.global_expert_load_window.device.type == "cpu"
+            torch.testing.assert_close(stats.global_expert_load_window, loads)
+            return super().rebalance_experts(stats, old_global_expert_indices)
 
     loads = torch.tensor([[13, 3, 4, 3]])
     current = torch.tensor([[0, 1, 2, 3, 0, 1]])
-    published_stats = Stats(loads, 6, 1, 1, 2, metadata=(3, 7))
+    device = "cpu"
+    if use_async and (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        device = current_platform.device_type
+    published_stats = Stats(loads.to(device), 6, 1, 1, 2, metadata=(3, 7))
     state = _State(Policy())
     if use_async:
         model_state.eplb_stats = published_stats
         result = run_rebalance_experts(model_state, state, current, None)
     else:
-        result = state.policy.rebalance_experts(loads, published_stats, current)
+        result = state.policy.rebalance_experts(published_stats, current)
     default_state = EplbState(ParallelConfig(), torch.device("cpu"))
     assert isinstance(default_state.policy, DefaultEplbPolicy)
-    expected = default_state.policy.rebalance_experts(loads, published_stats, current)
+    expected = default_state.policy.rebalance_experts(published_stats, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
