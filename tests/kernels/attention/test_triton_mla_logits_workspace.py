@@ -60,7 +60,9 @@ def _vllm_config(layer_windows: dict[str, int | None]):
         model_config=SimpleNamespace(max_model_len=MAX_MODEL_LEN),
         scheduler_config=SimpleNamespace(max_num_seqs=MAX_NUM_SEQS),
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=NUM_SPECULATIVE_TOKENS, parallel_drafting=False
+            num_speculative_tokens=NUM_SPECULATIVE_TOKENS,
+            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
         compilation_config=SimpleNamespace(

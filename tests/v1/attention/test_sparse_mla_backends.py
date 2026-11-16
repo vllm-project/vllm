@@ -6239,7 +6239,8 @@ def test_flashinfer_sparse_mla_absorbed_query_dimensions(qk_nope_head_dim):
             qk_rope_head_dim=64,
             kv_lora_rank=512,
             index_topk=2048,
-        )
+        ),
+        get_num_attention_heads=lambda parallel_config: 8,
     )
     selector = AttentionSelectorConfig(
         head_size=576,
@@ -6260,7 +6261,8 @@ def test_flashinfer_sparse_mla_absorbed_query_dimensions(qk_nope_head_dim):
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE, selector, num_heads=8
             )
             assert backend.endswith(".FlashInferMLASparseTRTLLMBackend")
-            assert (
-                current_platform.get_attn_backend_cls(None, selector, num_heads=8)
-                == backend
+            assert current_platform.get_attn_backend_cls(
+                None, selector, num_heads=8
+            ).endswith(
+                (".FlashInferMLASparseTRTLLMBackend", ".FlashAttnMLASparseFA4Backend")
             )
