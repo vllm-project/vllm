@@ -151,17 +151,6 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
-## Reusing Worker initialization
-
-Device plugins inheriting `vllm.v1.worker.gpu_worker.Worker` can override
-`_make_elastic_ep_executor` to avoid importing CUDA-only elastic EP dependencies
-during construction. The returned executor must implement `execute` and `shutdown`;
-unsupported execution should raise explicitly.
-
-`_validate_profiler_config` validates `self.profiler_config` during construction.
-Plugins can override it to validate their device's profiler configuration. The
-default implementations retain the GPU executor and profiler validation.
-
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
