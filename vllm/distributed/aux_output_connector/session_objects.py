@@ -259,13 +259,16 @@ class SessionObjectWriter:
     def _take_fields(
         state: _WorkerRequestState, start: int, end: int
     ) -> dict[str, np.ndarray]:
-        """Rows `[start, end)` of the staged fields; later rows stay staged."""
+        """Rows `[start, end)` of the staged fields; later rows stay staged. A
+        remainder of less than half its chunk is copied so that it does not
+        keep the chunk's step buffer alive."""
         fields = SessionObjectWriter.field_rows(state, start, end)
         for name, (position, stop, chunks) in state.fields.items():
             while chunks and position + len(chunks[0]) <= end:
                 position += len(chunks.pop(0))
             if chunks and position < end:
-                chunks[0] = chunks[0][end - position :]
+                rest = chunks[0][end - position :]
+                chunks[0] = rest.copy() if 2 * len(rest) < len(chunks[0]) else rest
             state.fields[name] = end, stop, chunks
         return fields
 

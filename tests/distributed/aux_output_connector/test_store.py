@@ -3161,22 +3161,21 @@ def test_session_fields_follow_rejected_speculative_rows():
 
 
 @pytest.mark.parametrize(
-    "start,end",
-    [(0, 4), (0, 8), (2, 8)],
-    ids=["inside-a-chunk", "across-chunks", "after-skipped-rows"],
+    "start,end,shared",
+    [(0, 4, True), (0, 8, False), (2, 8, False)],
+    ids=["most-rows-left", "few-rows-left", "after-skipped-rows"],
 )
-def test_session_fields_copy_only_the_rows_of_the_object(start, end):
-    chunks = [np.arange(6)[:, None], np.arange(6, 10)[:, None]]
+def test_session_fields_copy_only_small_remainders(start, end, shared):
+    chunks = [np.arange(10)[:, None], np.arange(10, 12)[:, None]]
     state = _WorkerRequestState(session="s")
-    state.fields["hidden_states"] = (0, 10, list(chunks))
+    state.fields["hidden_states"] = (0, 12, list(chunks))
     rows = SessionObjectWriter._take_fields(state, start, end)["hidden_states"]
     assert rows.ravel().tolist() == list(range(start, end))
     first, stop, rest = state.fields["hidden_states"]
-    assert (first, stop) == (end, 10)
-    assert np.concatenate(rest).ravel().tolist() == list(range(end, 10))
-    assert all(
-        any(np.shares_memory(piece, chunk) for chunk in chunks) for piece in rest
-    )
+    assert (first, stop) == (end, 12)
+    assert np.concatenate(rest).ravel().tolist() == list(range(end, 12))
+    assert np.shares_memory(rest[0], chunks[0]) == shared
+    assert rest[1] is chunks[1]
 
 
 def test_session_object_with_incomplete_field_rows_is_rejected():
