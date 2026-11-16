@@ -153,10 +153,13 @@ from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
+    _get_original_loader,
     finalize_layerwise_reload,
+    get_layerwise_info,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
@@ -761,7 +764,7 @@ def test_online_prequantized_compatibility(
 
     if isinstance(checkpoint_config, ModelOptMxFp8Config):
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
-        assert not layer.quant_method.uses_meta_device
+        assert layer.quant_method.uses_meta_device
         assert isinstance(
             layer.quant_method.requantization_source, ModelOptLinearMethod
         )
@@ -899,7 +902,9 @@ def test_online_quantization_configures_prequantized_moe(
     method = layer._quant_method
     assert isinstance(method, Mxfp4OnlineMoEMethod)
     assert isinstance(method.requantization_source, expected_source_cls)
-    assert not method.uses_meta_device
+    # Serialized experts are materialized and requantized one layer at a time.
+    assert method.uses_meta_device
+    assert all(p.is_meta for p in method.requantization_source_parameters.values())
     assert method.activation_quant_key == expected_activation
     if isinstance(moe, dict):
         # The interleaved AITER kernels serve both bf16 and MXFP8 activations.
@@ -937,6 +942,22 @@ def _serialize_nvfp4_experts(
         torch.stack(block_scales),
         torch.stack(reconstructed_weights),
     )
+
+
+def _materialize_requantization_source(layer: torch.nn.Module) -> None:
+    """Materialize the serialized (meta) weights of an online MoE layer and drop its
+    layerwise tracking, as the layerwise loader does once a layer is fully loaded,
+    for tests that load or process the layer by hand."""
+    for name, parameter in list(layer.named_parameters(recurse=False)):
+        if parameter.is_meta:
+            setattr(layer, name, materialize_meta_tensor(parameter))
+            # Parameters created without a loader were wrapped around the default.
+            original_loader = _get_original_loader(parameter)
+            if original_loader is default_weight_loader:
+                del layer._parameters[name].weight_loader
+            else:
+                layer._parameters[name].weight_loader = original_loader
+    get_layerwise_info(layer).reset()
 
 
 def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
@@ -1082,6 +1103,7 @@ def test_weight_loading_requantization(
         layer = RowParallelLinear(output_size=64, **kwargs)
     else:
         layer = ColumnParallelLinear(output_size=64, **kwargs)
+    _materialize_requantization_source(layer)
     target = layer.quant_method
     # Online processing must remain assigned to the requested target.
     assert isinstance(target, Fp8PtpcOnlineLinearMethod)
@@ -1179,6 +1201,7 @@ def test_weight_loading_requantization_moe(
             map_global_to_local=lambda index: index,
         ),
     )
+    _materialize_requantization_source(layer)
     target = layer.quant_method
     # Construction must select the override, not execute the checkpoint method.
     assert isinstance(target, Fp8PerTensorOnlineMoEMethod)
@@ -1450,6 +1473,7 @@ def test_online_requantized_moe_reload(
             params_dtype=torch.bfloat16,
             weight_loader=default_weight_loader,
         )
+        _materialize_requantization_source(layer)
         record_metadata_for_reloading(layer)
         return layer, method
 
@@ -2101,7 +2125,11 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             {"moe": {"weight": "mxfp4", "activation": None}},
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
-            {},
+            # The interleaved AITER_MXFP4_BF16 kernels have no config for this tiny
+            # MoE with bf16 activations.
+            {"moe_backend": "aiter_triton_mxfp4_bf16"}
+            if current_platform.is_rocm()
+            else {},
             id="mxfp4_null_activation_override",
         ),
         pytest.param(
@@ -2244,6 +2272,8 @@ def test_online_quantization(
         original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
+            if getattr(layer, "_already_called_process_weights_after_loading", False):
+                return
             source_parameters = dict(method.requantization_source_parameters)
             assert set(source_parameters) == {"weight", "weight_scale"}
 
@@ -3185,7 +3215,8 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
             intermediate_size_per_partition=intermediate_size,
             params_dtype=torch.bfloat16,
         )
-        assert not online_method.uses_meta_device
+        assert online_method.uses_meta_device
+        _materialize_requantization_source(source_layer)
         assert source_layer.w13_weight.dtype == torch.float8_e4m3fn
 
         w13_fp8 = (
@@ -3424,13 +3455,25 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    "model_name, expected_model_memory_gib",
+    "model_name, expected_model_memory_gib, quantization_kwargs",
     [
         # MoE models covering both linear and MoE paths, one per modeling backend
-        (GRANITE_MODEL_NAME, 1.35),
-        ("allenai/OLMoE-1B-7B-0125-Instruct", 6.7),
+        (GRANITE_MODEL_NAME, 1.35, {"quantization": "fp8_per_tensor"}),
+        (
+            "allenai/OLMoE-1B-7B-0125-Instruct",
+            6.7,
+            {"quantization": "fp8_per_tensor"},
+        ),
+        # Requantization: the serialized weights are materialized one layer at a
+        # time, so the peak stays close to the model memory instead of holding the
+        # whole serialized model next to the requantized one.
+        (
+            "vllm-project/Qwen3-0.6B-MXFP8",
+            0.76,
+            {"quantization_config": {"linear": "fp8_per_channel"}},
+        ),
     ],
-    ids=["moe", "moe_transformers"],
+    ids=["moe", "moe_transformers", "requantization"],
 )
 def test_online_quant_peak_mem(
     vllm_runner,
@@ -3438,9 +3481,10 @@ def test_online_quant_peak_mem(
     monkeypatch,
     model_name,
     expected_model_memory_gib,
+    quantization_kwargs,
 ) -> None:
     _test_online_quant_peak_mem_impl(
-        "fp8_per_tensor",
+        quantization_kwargs,
         model_name,
         expected_model_memory_gib,
         vllm_runner,
