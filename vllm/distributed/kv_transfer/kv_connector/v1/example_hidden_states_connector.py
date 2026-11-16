@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import fcntl
 import os
-from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
@@ -109,9 +108,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     request finishes. With ``hs_store_device=cpu`` they are instead streamed
     to per-request CPU pages on TP rank 0 during decoding, keeping the
     extract_hidden_states layer out of the device KV pool. When the engine
-    prefix cache is enabled, a token-hash index of completed blocks lets
-    requests backfill the rows skipped by prefix-cache hits (text-only
-    requests; multimodal / prompt-embeds requests are excluded and logged).
+    prefix cache is enabled, a CPU block table addressed by the same BlockPool
+    block_ids as the device KV lets requests backfill the rows skipped by
+    prefix-cache hits; reuse of a block_id by a new request overwrites its
+    slot, so the table's capacity and eviction stay aligned with the engine
+    pool.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
 
@@ -204,24 +205,23 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._cpu_pages: dict[str, torch.Tensor] = {}
         self._hs_staging: torch.Tensor | None = None
         self._logged_cpu_pages = False
-        # CPU-pages prefix index (worker-side, TP rank 0 only): block-hash ->
-        # cloned full-block hidden states, LRU-evicted by token budget. Lets a
-        # request whose prefix hit the engine prefix cache copy the cached
-        # rows into its page instead of leaving holes. The on/off flag is
-        # resolved in register_kv_caches, not here: platforms may disable
-        # enable_prefix_caching during model load (e.g. MLA attention
-        # backends without prefix-cache support), and register_kv_caches runs
-        # after model load, so it sees the value the scheduler runs with.
+        # CPU-pages block table (worker-side, TP rank 0 only): when the
+        # engine prefix cache is on, cpu_hs[num_blocks, block_size, layers,
+        # hidden] is addressed by the same BlockPool block_ids as the device
+        # KV. A prefix-hit request gathers its own block ids back into its
+        # page, and a block_id reused by a new request overwrites its slot,
+        # so the table's capacity and eviction stay aligned with the engine
+        # pool. The on/off flag is resolved in register_kv_caches, not here:
+        # platforms may disable enable_prefix_caching during model load
+        # (e.g. MLA attention backends without prefix-cache support), and
+        # register_kv_caches runs after model load, so it sees the value the
+        # scheduler runs with.
         self._hs_prefix_index_on = False
-        self._hs_hash_blocks: OrderedDict = OrderedDict()
-        self._hs_hash_tokens = 0
-        self._hs_prefix_max_tokens = int(
-            self._kv_transfer_config.get_from_extra_config(
-                "hs_prefix_cache_max_tokens", 131072
-            )
-        )
-        # Per-request chain hashes of full blocks (prefix-hash index keys).
-        self._req_block_hashes: dict[str, list] = {}
+        self._cpu_hs_blocks: torch.Tensor | None = None
+        self._cpu_hs_num_blocks = 0
+        # req_id → BlockPool block ids from the latest streamed step; the
+        # fallback for _req_block_ids when request state is unavailable.
+        self._req_block_ids_cache: dict[str, list[int]] = {}
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
         if self._hs_store_cpu:
@@ -357,25 +357,31 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             # hidden states to CPU pages via save_hs_batch.
             self.cache_layers = []
             self._kv_cache = None
-            # Resolve the CPU prefix-index switch here, not in __init__:
+            # Resolve the CPU block-table switch here, not in __init__:
             # model load may flip cache_config.enable_prefix_caching off
             # afterwards (e.g. MLA attention backends without prefix-cache
             # support), and register_kv_caches runs after model load, so this
             # matches the value the scheduler actually runs with.
             self._hs_prefix_index_on = bool(
                 self._vllm_config.cache_config.enable_prefix_caching
-            ) and (self._hs_prefix_max_tokens > 0)
+            )
+            # The table must hold one slot per engine BlockPool block so that
+            # reuse of a block_id overwrites exactly the slot the engine also
+            # considers free (implicit eviction alignment).
+            self._cpu_hs_num_blocks = self._infer_num_gpu_blocks(kv_caches)
+            self._cpu_hs_blocks = None
             if self._hs_prefix_index_on:
                 logger.info(
-                    "Hidden-states CPU prefix index enabled: "
-                    "max_tokens=%s, block_size=%s",
-                    self._hs_prefix_max_tokens,
+                    "Hidden-states CPU block table enabled: "
+                    "num_blocks=%s, block_size=%s (aligned with the engine "
+                    "BlockPool)",
+                    self._cpu_hs_num_blocks,
                     self._block_size,
                 )
             else:
                 logger.info(
-                    "Hidden-states CPU prefix index disabled "
-                    "(engine prefix cache off or max_tokens=0)"
+                    "Hidden-states CPU block table disabled "
+                    "(engine prefix cache off); streaming full pages"
                 )
             logger.info(
                 "Hidden-states CPU pages: skipped device KV group binding (tp0=%s)",
@@ -416,202 +422,271 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             and getattr(self, "_is_tp_rank_zero", False)
         )
 
-    def _req_hash_scope_ok(self, req_state: Any) -> bool:
-        """Whether this request's hidden-state rows are fully determined by
-        its token ids.
-
-        The CPU prefix index is keyed on token-id block hashes. Requests with
-        multimodal features or prompt embeddings compute hidden states that
-        depend on more than the token ids (the engine's own block hashes
-        include mm/embeds extra keys), so for them a token-hash lookup hit
-        cannot prove row provenance. They must never publish into or
-        backfill from the index: a text-hash collision across different
-        images would silently backfill plausible-but-wrong rows.
-        """
-        return not (
-            req_state.mm_features
-            or req_state.prompt_embeds is not None
-            or req_state.prompt_is_token_ids is not None
-        )
-
     def _req_state(self, req_id: str, requests: Any) -> Any | None:
         if requests is None:
             return None
         return requests.get(req_id)
 
-    def _warn_prefix_scope_gap(self, req_id: str, hit_tokens: int, reason: str) -> None:
-        logger.warning(
-            "Hidden-states CPU prefix index: req_id=%s skipped backfill of "
-            "%s prefix-hit tokens (%s). Those rows are never streamed and "
-            "stay unfilled in the saved hidden states; disable prefix "
-            "caching if this request's data must be exact.",
-            req_id,
-            hit_tokens,
-            reason,
-        )
+    def _infer_num_gpu_blocks(
+        self, kv_caches: dict[str, torch.Tensor] | None = None
+    ) -> int:
+        """Number of blocks in the engine BlockPool, for table capacity.
 
-    def _block_extra_keys(self, req_state: Any) -> tuple[Any, ...] | None:
-        # Mirror the engine's LoRA extra key; other engine keys (mm, salt,
-        # embeds) are out of scope -- requests carrying them are excluded by
-        # _req_hash_scope_ok.
-        extra = []
-        lora = getattr(req_state, "lora_request", None)
-        if lora is not None:
-            extra.append(getattr(lora, "lora_name", None) or str(lora))
-        return tuple(extra) if extra else None
-
-    def _ensure_req_hashes(self, req_id: str, requests: Any, n_blocks: int) -> list:
-        """Chain-hash this request's full blocks, cached per request.
-
-        Fail-safe: without request state nothing is hashed, so nothing can
-        be published or backfilled (holes remain, but no wrong data).
+        Resolution order: `KVCacheConfig.num_blocks`,
+        `cache_config.num_gpu_blocks`, `kv_cache_size_tokens // block_size`,
+        then a shape heuristic over the registered KV buffers. Returns 0
+        when nothing resolves, in which case the table stays unallocated and
+        prefix-hit rows are never backfilled (loudly, via NaN audit).
         """
-        hashes = self._req_block_hashes.setdefault(req_id, [])
-        if n_blocks <= 0 or len(hashes) >= n_blocks:
-            return hashes[: max(n_blocks, 0)]
-        st = self._req_state(req_id, requests)
-        if st is None:
-            return hashes
-        from vllm.utils.hashing import get_hash_fn_by_name
-        from vllm.v1.core import kv_cache_utils as _kvu
-        from vllm.v1.core.kv_cache_utils import hash_block_tokens, init_none_hash
+        kvc = getattr(self, "_kv_cache_config", None)
+        n = getattr(kvc, "num_blocks", None)
+        if n:
+            return int(n)
+        cache_config = getattr(self._vllm_config, "cache_config", None)
+        n = getattr(cache_config, "num_gpu_blocks", None)
+        if n:
+            return int(n)
+        tokens = getattr(cache_config, "kv_cache_size_tokens", None)
+        block_size = int(getattr(self, "_block_size", 0) or 0)
+        if tokens and block_size:
+            return int(tokens) // block_size
 
-        ids = list(st.prompt_token_ids or [])
-        ids.extend(st.output_token_ids or [])
-        bs = int(self._block_size)
-        algo = getattr(
-            self._vllm_config.cache_config, "prefix_caching_hash_algo", "sha256"
+        def _shape_of(t: Any) -> tuple[int, ...] | None:
+            if t is None:
+                return None
+            if isinstance(t, (list, tuple)):
+                for x in t:
+                    s = _shape_of(x)
+                    if s:
+                        return s
+                return None
+            if hasattr(t, "shape"):
+                return tuple(int(x) for x in t.shape)
+            return None
+
+        tensors: Any = (
+            kv_caches.values() if isinstance(kv_caches, dict) else kv_caches
         )
-        hash_fn = get_hash_fn_by_name(algo)
-        if getattr(_kvu, "NONE_HASH", None) is None:
-            # hash_block_tokens reads the module-level NONE_HASH sentinel,
-            # which the worker process may never have initialized.
-            init_none_hash(hash_fn)
-        extra = self._block_extra_keys(st)
-        while len(hashes) < n_blocks:
-            i = len(hashes)
-            lo = i * bs
-            hi = lo + bs
-            if hi > len(ids):
-                break  # only full blocks are hashed
-            prev = hashes[-1] if hashes else None
-            hashes.append(hash_block_tokens(hash_fn, prev, ids[lo:hi], extra))
-        return hashes
+        for t in tensors or ():
+            shape = _shape_of(t)
+            if not shape:
+                continue
+            # MLA-style buffers are [num_blocks, 1, block_size, ...] (a lone
+            # head dim); other groups are [num_blocks, ...].
+            if len(shape) >= 2 and shape[0] in (1, 2) and shape[1] > 8:
+                return int(shape[1])
+            return int(shape[0])
+        return 0
 
-    def _evict_hs_hash_blocks(self) -> None:
-        # Called only when the index is on, so a positive token budget is
-        # guaranteed; LRU by insertion order via move_to_end on hits.
-        while self._hs_hash_tokens > self._hs_prefix_max_tokens and (
-            self._hs_hash_blocks
+    @staticmethod
+    def _flatten_block_ids(raw: Any) -> list[int] | None:
+        """Per-request block ids from raw state, tolerating per-group nesting.
+
+        A per-group block table (list of per-group id lists) contributes only
+        group 0: hybrid verifiers address the CPU table by the MLA /
+        full-attention pool's ids, the pool the engine's prefix matcher used.
+        """
+        if raw is None:
+            return None
+        if len(raw) > 0 and isinstance(raw[0], (list, tuple)):
+            raw = raw[0]
+        try:
+            return [int(x) for x in list(raw)]
+        except (TypeError, ValueError):
+            return None
+
+    def _ensure_cpu_hs_table(
+        self, num_layers: int, hidden_size: int, dtype: torch.dtype
+    ) -> None:
+        """Allocate the BlockPool-aligned CPU hidden-state table once.
+
+        `cpu_hs[num_blocks, block_size, num_layers, hidden]`; every slot
+        starts as the NaN sentinel so rows that were never scattered are
+        detectable (gather skips NaN, and the writer thread audits leftover
+        holes in the saved page).
+        """
+        table = self._cpu_hs_blocks
+        if self._cpu_hs_num_blocks <= 0:
+            self._cpu_hs_num_blocks = self._infer_num_gpu_blocks()
+        num_blocks = self._cpu_hs_num_blocks
+        block_size = int(self._block_size)
+        if num_blocks <= 0 or block_size <= 0:
+            logger.warning(
+                "Hidden-states CPU block table: cannot allocate, "
+                "num_blocks=%s block_size=%s",
+                num_blocks,
+                block_size,
+            )
+            return
+        if (
+            table is not None
+            and table.shape[0] == num_blocks
+            and table.shape[1] == block_size
+            and table.shape[2] == num_layers
+            and table.shape[3] == hidden_size
+            and table.dtype == dtype
         ):
-            _, old = self._hs_hash_blocks.popitem(last=False)
-            self._hs_hash_tokens -= int(old.shape[0])
+            return
+        table = torch.empty(
+            (num_blocks, block_size, num_layers, hidden_size),
+            dtype=dtype,
+            device="cpu",
+        )
+        if table.is_floating_point():
+            table.fill_(float("nan"))
+        self._cpu_hs_blocks = table
+        logger.info(
+            "Hidden-states CPU block table: allocated [%s, %s, %s, %s] "
+            "dtype=%s (~%.2f GiB)",
+            num_blocks,
+            block_size,
+            num_layers,
+            hidden_size,
+            dtype,
+            table.numel() * table.element_size() / (1024**3),
+        )
 
-    def _fill_prefix_from_hash(
+    def _req_block_ids(
+        self, req_id: str, requests: dict[str, Any] | None
+    ) -> list[int] | None:
+        """The request's BlockPool block ids, from state or the last stream."""
+        st = self._req_state(req_id, requests)
+        bids = self._flatten_block_ids(getattr(st, "block_ids", None))
+        if bids:
+            return bids
+        return self._req_block_ids_cache.get(req_id)
+
+    def _copy_from_block_table(
+        self, dest: torch.Tensor, bids: list[int], n_tokens: int
+    ) -> int:
+        """Gather the first `n_tokens` rows from `cpu_hs[bid]`; skip NaN slots.
+
+        A NaN slot was never scattered for the block that owns it now (the
+        id predates the table or those rows belong to an evicted allocation),
+        so copying it would splice unprovable rows; leaving the sentinel
+        keeps holes detectable. Returns the number of rows copied.
+        """
+        table = self._cpu_hs_blocks
+        if table is None or not bids or n_tokens <= 0:
+            return 0
+        block_size = int(self._block_size)
+        copied = 0
+        t = 0
+        n_tokens = min(int(n_tokens), int(dest.shape[0]))
+        while t < n_tokens:
+            bidx = t // block_size
+            if bidx >= len(bids):
+                break
+            bid = int(bids[bidx])
+            off = t % block_size
+            n = min(block_size - off, n_tokens - t)
+            if bid < 0 or bid >= table.shape[0]:
+                t += n
+                continue
+            src = table[bid, off : off + n]
+            if (
+                dest.is_floating_point()
+                and src.is_floating_point()
+                and bool(src.isnan().any())
+            ):
+                t += n
+                continue
+            dest[t : t + n].copy_(src)
+            copied += n
+            t += n
+        return copied
+
+    def _fill_prefix_from_block_ids(
         self,
         req_id: str,
         page: torch.Tensor,
         n_prefix: int,
-        requests: Any,
+        requests: dict[str, Any] | None,
     ) -> int:
-        """Copy cached full blocks into a fresh page's prefix-hit region.
+        """Copy prefix-hit rows into a fresh page via the request's block ids.
 
-        ``n_prefix`` is the request's num_computed_tokens on its first
-        streamed step, i.e. the rows the engine skipped via a prefix-cache
-        hit. Returns the number of rows copied.
+        `n_prefix` is the request's num_computed_tokens on its first streamed
+        step, i.e. the rows the engine skipped via a prefix-cache hit. The
+        engine matched those rows to blocks it verified itself, so gathering
+        by the request's own block ids is provenance-safe. Returns the
+        number of rows copied.
         """
         if not self._hs_prefix_enabled() or n_prefix <= 0:
             return 0
-        st = self._req_state(req_id, requests)
-        if st is None:
-            self._warn_prefix_scope_gap(
-                req_id, n_prefix, "request state unavailable on this rank"
-            )
-            return 0
-        if not self._req_hash_scope_ok(st):
-            self._warn_prefix_scope_gap(
-                req_id,
-                n_prefix,
-                "multimodal or prompt-embeds inputs are outside the token-hash scope",
-            )
-            return 0
-        bs = int(self._block_size)
-        n_blocks = n_prefix // bs
-        if n_blocks <= 0:
-            return 0
-        hashes = self._ensure_req_hashes(req_id, requests, n_blocks)
-        copied = 0
-        for i, h in enumerate(hashes[:n_blocks]):
-            blk = self._hs_hash_blocks.get(h)
-            if blk is None:
-                break
-            lo = i * bs
-            hi = lo + bs
-            if page.shape[0] < hi or blk.shape[0] != bs:
-                break
-            page[lo:hi].copy_(blk)
-            self._hs_hash_blocks.move_to_end(h)
-            copied += 1
-        if copied < n_blocks:
+        if self._cpu_hs_blocks is None:
             logger.warning(
-                "Hidden-states CPU prefix index: req_id=%s backfilled %s/%s "
-                "prefix blocks; the rest are missing (evicted or not yet "
-                "published), so rows from token %s on stay unfilled",
+                "Hidden-states CPU block table: no table; cannot backfill "
+                "req_id=%s",
+                req_id,
+            )
+            return 0
+        bids = self._req_block_ids(req_id, requests)
+        if not bids:
+            logger.warning(
+                "Hidden-states CPU block table: no block ids for prefix "
+                "req_id=%s; rows stay NaN-filled",
+                req_id,
+            )
+            return 0
+        copied = self._copy_from_block_table(page, bids, n_prefix)
+        if copied < n_prefix:
+            logger.warning(
+                "Hidden-states CPU block table: req_id=%s gathered %s/%s "
+                "prefix tokens; the rest were never scattered (block reused "
+                "or predating the table) and stay NaN-filled",
                 req_id,
                 copied,
-                n_blocks,
-                copied * bs,
+                n_prefix,
             )
         elif copied:
             logger.info(
-                "Hidden-states CPU prefix index: backfilled %s/%s prefix "
-                "blocks req_id=%s",
+                "Hidden-states CPU block table: gathered %s prefix tokens "
+                "req_id=%s",
                 copied,
-                n_blocks,
                 req_id,
             )
-        return copied * bs
+        return copied
 
-    def _publish_full_blocks(
+    def _scatter_hs_to_blocks(
         self,
         req_id: str,
         page: torch.Tensor,
         start: int,
         need: int,
-        requests: Any,
+        requests: dict[str, Any] | None,
     ) -> None:
-        """Publish this step's newly completed full blocks into the index."""
-        if not self._hs_prefix_enabled() or need <= start:
+        """Mirror this step's page rows into `cpu_hs[block_id]` slots.
+
+        Overwrites whatever the slot held: the engine only reuses a block_id
+        after freeing it, so a live request's scatter always wins and stale
+        rows evict exactly when the engine evicts them (capacity and
+        eviction stay aligned with the BlockPool).
+        """
+        table = self._cpu_hs_blocks
+        if table is None:
             return
-        st = self._req_state(req_id, requests)
-        if st is None or not self._req_hash_scope_ok(st):
-            # Rows not token-determined: keep them out of the index entirely
-            # instead of polluting it for future lookups.
+        bids = self._req_block_ids(req_id, requests)
+        if not bids:
+            logger.warning(
+                "Hidden-states CPU block table: no block ids to scatter "
+                "req_id=%s; prefix hits of later requests cannot be "
+                "backfilled from this request",
+                req_id,
+            )
             return
-        bs = int(self._block_size)
-        first = start // bs
-        last = need // bs
-        if last <= first:
-            return
-        hashes = self._ensure_req_hashes(req_id, requests, last)
-        for i in range(first, min(last, len(hashes))):
-            h = hashes[i]
-            if h in self._hs_hash_blocks:
-                self._hs_hash_blocks.move_to_end(h)
-                continue
-            lo = i * bs
-            hi = lo + bs
-            if page.shape[0] < hi:
+        block_size = int(self._block_size)
+        t = int(start)
+        need = min(int(need), int(page.shape[0]))
+        while t < need:
+            bidx = t // block_size
+            if bidx >= len(bids):
                 break
-            if page.is_floating_point() and bool(page[lo:hi].isnan().any()):
-                # Partially-filled block: prefix-hit rows the index could
-                # not backfill keep the NaN sentinel. Publishing it would
-                # spread those holes to every future request that hits
-                # the same hash.
-                continue
-            self._hs_hash_blocks[h] = page[lo:hi].contiguous().clone()
-            self._hs_hash_tokens += bs
-        self._evict_hs_hash_blocks()
+            bid = int(bids[bidx])
+            off = t % block_size
+            n = min(block_size - off, need - t)
+            if 0 <= bid < table.shape[0]:
+                table[bid, off : off + n].copy_(page[t : t + n])
+            t += n
 
     def save_hs_batch(
         self,
@@ -624,11 +699,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         ``hidden_states`` is [num_tokens, num_layers, hidden]. The logical
         write offset is ``num_computed_tokens`` per request so chunked prefill
-        concatenates. Rows skipped by an engine prefix-cache hit are backfilled
-        from the CPU prefix index when possible (see _fill_prefix_from_hash);
-        rows that cannot be proven (multimodal / prompt-embeds requests) or
-        were evicted stay NaN-filled (a sentinel the writer thread audits, so
-        holes are detectable downstream instead of looking like valid data).
+        concatenates. When the engine prefix cache is on, rows skipped by a
+        prefix-cache hit are backfilled on the first streamed step from the
+        CPU block table (see _fill_prefix_from_block_ids); rows whose block
+        was never scattered stay NaN-filled (a sentinel the writer thread
+        audits, so holes are detectable downstream instead of looking like
+        valid data).
         """
         if not self._hs_store_cpu:
             return
@@ -761,12 +837,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """Splice this step's rows into per-request CPU pages.
 
         ``nct_list[i]`` is request i's num_computed_tokens (its logical
-        write offset), so chunked prefill concatenates. Rows skipped by
-        an engine prefix-cache hit are backfilled from the CPU prefix
-        index when possible (see _fill_prefix_from_hash); rows that cannot
-        be proven (multimodal / prompt-embeds requests) or were evicted
-        stay NaN-filled (a sentinel the writer thread audits, so holes are
-        detectable downstream instead of looking like valid data).
+        write offset), so chunked prefill concatenates. When the engine
+        prefix cache is on, rows skipped by a prefix-cache hit are
+        backfilled on the first streamed step from the CPU block table
+        (see _fill_prefix_from_block_ids), and this step's rows are also
+        mirrored into the table so later prefix hits can gather them;
+        rows whose block was never scattered stay NaN-filled (a sentinel
+        the writer thread audits, so holes are detectable downstream
+        instead of looking like valid data).
         """
         num_reqs = len(req_ids)
 
@@ -879,12 +957,20 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                     new_page[: page.shape[0]].copy_(page)
                 self._cpu_pages[req_id] = new_page
                 page = new_page
+            prefix_on = self._hs_prefix_enabled()
+            if prefix_on:
+                self._ensure_cpu_hs_table(num_layers, hidden_size, dtype)
+            bids = self._req_block_ids(req_id, requests)
+            if bids:
+                self._req_block_ids_cache[req_id] = bids
             if page_is_new and start > 0:
                 # First streamed step with rows the engine skipped via a
-                # prefix-cache hit: copy them from the CPU prefix index.
-                self._fill_prefix_from_hash(req_id, page, start, requests)
+                # prefix-cache hit: gather them from the CPU block table
+                # via this request's own BlockPool block ids.
+                self._fill_prefix_from_block_ids(req_id, page, start, requests)
             page[start:need].copy_(staging[q0:q1])
-            self._publish_full_blocks(req_id, page, start, need, requests)
+            if prefix_on:
+                self._scatter_hs_to_blocks(req_id, page, start, need, requests)
 
     @staticmethod
     def _write_tensors(
@@ -903,8 +989,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         With `audit_nan` (CPU-pages path), count rows still holding the
         NaN sentinel before writing: they were never filled (prefix-cache
-        rows the index could not prove, or a dropped streaming step) and the
-        log makes the hole auditable instead of looking like valid data.
+        rows the block table could not prove, or a dropped streaming step)
+        and the log makes the hole auditable instead of looking like valid
+        data.
         """
         try:
             event.synchronize()
@@ -950,7 +1037,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if not self._is_tp_rank_zero:
             self._cpu_pages.pop(pending.req_id, None)
-            self._req_block_hashes.pop(pending.req_id, None)
+            self._req_block_ids_cache.pop(pending.req_id, None)
             return
 
         if self._hs_store_cpu:
@@ -958,7 +1045,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             # finishing is a plain concat + save_file, no device KV gather.
             if pending.discard:
                 self._cpu_pages.pop(pending.req_id, None)
-                self._req_block_hashes.pop(pending.req_id, None)
+                self._req_block_ids_cache.pop(pending.req_id, None)
                 return
             finalized = self._finalize_cpu_page(pending.req_id, pending.token_ids)
             if finalized is None:
@@ -1074,9 +1161,17 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ``None`` if nothing was ever streamed for the request. Unfilled rows
         keep their NaN sentinel (audited by the writer thread) instead of
         leaking stale memory into the saved file.
+
+        Never re-gather from the block table here: the request's blocks were
+        already freed (CPU-pages mode returns delay=False from
+        request_finished), so a reused block_id may already hold another
+        request's valid-looking rows; splicing them into the dump would be
+        silent corruption. The page is already complete — the first-step
+        gather ran while this request still owned its blocks, and every
+        streamed step wrote `page[start:need]`.
         """
         page = self._cpu_pages.pop(req_id, None)
-        self._req_block_hashes.pop(req_id, None)
+        self._req_block_ids_cache.pop(req_id, None)
         if page is None:
             logger.error("No CPU hidden states for req_id=%s", req_id)
             return None
@@ -1292,8 +1387,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             # scheduled); treat as a no-op instead of indexing out of bounds.
             return False, None
         if self._hs_store_cpu:
-            # No hidden-states KV group / block ids in CPU-pages mode.
-            return self.request_finished(request, [])
+            # CPU-pages mode keeps no hidden-states KV group, but the CPU
+            # block table is addressed by the group-0 (MLA) block ids, so
+            # carry those in the PendingSave instead of dropping them.
+            return self.request_finished(request, block_ids[0])
         return self.request_finished(request, block_ids[self._cache_kv_group_id])
 
     @classmethod

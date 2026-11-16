@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic."""
 
-from collections import OrderedDict
 from types import SimpleNamespace
 
 import numpy as np
@@ -246,16 +245,15 @@ def _cpu_pages_connector(**extra_config) -> ExampleHiddenStatesConnector:
     conn._hs_staging = None
     conn._logged_cpu_pages = False
     conn._hs_prefix_index_on = True
-    conn._hs_hash_blocks = OrderedDict()
-    conn._hs_hash_tokens = 0
-    conn._hs_prefix_max_tokens = 131072
-    conn._req_block_hashes = {}
+    conn._cpu_hs_blocks = None
+    conn._cpu_hs_num_blocks = 0
+    conn._req_block_ids_cache = {}
     cfg = {"hs_gather_chunk_tokens": 8, **extra_config}
     conn._kv_transfer_config = SimpleNamespace(
         get_from_extra_config=lambda key, default=None: cfg.get(key, default)
     )
     conn._vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(prefix_caching_hash_algo="sha256")
+        cache_config=SimpleNamespace(num_gpu_blocks=16)
     )
     return conn
 
@@ -279,12 +277,7 @@ def _hs(rows: int, start: float = 0) -> torch.Tensor:
 def _scope(prompt_tokens: list[int], **overrides) -> SimpleNamespace:
     attrs = dict(
         num_prompt_tokens=len(prompt_tokens),
-        mm_features=None,
-        prompt_embeds=None,
-        prompt_is_token_ids=None,
-        lora_request=None,
-        prompt_token_ids=list(prompt_tokens),
-        output_token_ids=[],
+        block_ids=[],
     )
     attrs.update(overrides)
     return SimpleNamespace(**attrs)
@@ -367,18 +360,19 @@ def test_save_hs_batch_falls_back_to_seq_lens_without_state():
     assert torch.isnan(page[:5]).all()
 
 
-def test_publish_skips_blocks_with_nan_holes():
-    # A prefix-hit start that is not block-aligned leaves unproven rows in
-    # the first candidate block. Publishing it would spread the NaN holes
-    # to every future request hitting the same hash, so it is skipped.
+def test_scatter_without_block_ids_warns_and_skips(caplog):
+    # Fail-loud: a stream step without block ids cannot scatter, so later
+    # prefix hits cannot be backfilled from this request's rows.
     conn = _cpu_pages_connector()
     hs = _hs(3)
     scopes = {"A": _scope(list(range(100, 108)), num_computed_tokens=2)}
-    conn.save_hs_batch(hs, _cam(1, [0, 3], [9], 3), ["A"], scopes)
+    with caplog.at_level("WARNING"):
+        conn.save_hs_batch(hs, _cam(1, [0, 3], [9], 3), ["A"], scopes)
     page = conn._cpu_pages["A"]
     assert torch.equal(page[2:5], hs)  # streamed rows
     assert torch.isnan(page[:2]).all()  # unproven prefix rows
-    assert len(conn._hs_hash_blocks) == 0  # no polluted block published
+    assert torch.isnan(conn._cpu_hs_blocks).all()  # nothing scattered
+    assert any("no block ids to scatter" in rec.message for rec in caplog.records)
 
 
 def test_page_growth_nan_fills_gap_from_dropped_step():
@@ -397,40 +391,7 @@ def test_page_growth_nan_fills_gap_from_dropped_step():
     assert torch.equal(page[4:6], c2)
 
 
-def test_prefix_index_roundtrip_backfills_prefix_hit():
-    conn = _cpu_pages_connector()
-    prompt = list(range(100, 108))
-    a = _hs(8, start=1)
-    conn.save_hs_batch(a, _cam(1, [0, 8], [8], 8), ["A"], {"A": _scope(prompt)})
-    assert len(conn._hs_hash_blocks) == 2  # both full blocks published
-
-    # B shares A's prompt and starts decoding with that prefix cached.
-    b_row = _hs(1, start=50)
-    conn.save_hs_batch(b_row, _cam(1, [0, 1], [9], 1), ["B"], {"B": _scope(prompt)})
-    page_b = conn._cpu_pages["B"]
-    assert torch.equal(page_b[:8], a[:8])  # backfilled from the index
-    assert torch.equal(page_b[8:9], b_row)
-    assert not torch.isnan(page_b[:9]).any()
-
-
-def test_prefix_index_lru_eviction_keeps_newest_block(caplog):
-    conn = _cpu_pages_connector(hs_prefix_cache_max_tokens=4)
-    prompt = list(range(100, 108))
-    a = _hs(8, start=1)
-    conn.save_hs_batch(a, _cam(1, [0, 8], [8], 8), ["A"], {"A": _scope(prompt)})
-    # One block of budget: publishing the second block evicted the first.
-    assert len(conn._hs_hash_blocks) == 1
-
-    b_row = _hs(1, start=50)
-    with caplog.at_level("WARNING"):
-        conn.save_hs_batch(b_row, _cam(1, [0, 1], [9], 1), ["B"], {"B": _scope(prompt)})
-    page_b = conn._cpu_pages["B"]
-    assert torch.isnan(page_b[:4]).all()  # evicted block stays NaN
-    assert torch.equal(page_b[4:8], a[4:8])  # newest block backfilled
-    assert any("backfilled 1/2" in rec.message for rec in caplog.records)
-
-
-def test_mm_request_never_publishes_or_backfills(caplog):
+def test_block_table_roundtrip_backfills_prefix_hit():
     conn = _cpu_pages_connector()
     prompt = list(range(100, 108))
     a = _hs(8, start=1)
@@ -438,34 +399,99 @@ def test_mm_request_never_publishes_or_backfills(caplog):
         a,
         _cam(1, [0, 8], [8], 8),
         ["A"],
-        {"A": _scope(prompt, mm_features=object())},
+        {"A": _scope(prompt, block_ids=[0, 1])},
     )
-    assert len(conn._hs_hash_blocks) == 0  # never published
+    # A's two full blocks were scattered into the table slots it owns.
 
+    # B shares A's prompt: the engine prefix-cached it onto the same blocks.
+    b_row = _hs(1, start=50)
+    conn.save_hs_batch(
+        b_row,
+        _cam(1, [0, 1], [9], 1),
+        ["B"],
+        {"B": _scope(prompt, block_ids=[0, 1])},
+    )
+    page_b = conn._cpu_pages["B"]
+    assert torch.equal(page_b[:8], a[:8])  # backfilled via block ids
+    assert torch.equal(page_b[8:9], b_row)
+    assert not torch.isnan(page_b[:9]).any()
+
+
+def test_block_reuse_overwrites_stale_rows():
+    # The engine reuses block 0 for a new request once A frees it; C's
+    # scatter overwrites A's rows, so a later prefix hit on block 0 gathers
+    # C's rows, not A's (eviction aligned with the engine BlockPool).
+    conn = _cpu_pages_connector()
+    prompt = list(range(100, 108))
+    a = _hs(8, start=1)
+    conn.save_hs_batch(
+        a,
+        _cam(1, [0, 8], [8], 8),
+        ["A"],
+        {"A": _scope(prompt, block_ids=[0, 1])},
+    )
+    c = _hs(4, start=900)
+    conn.save_hs_batch(
+        c,
+        _cam(1, [0, 4], [4], 4),
+        ["C"],
+        {"C": _scope([1, 2, 3, 4], block_ids=[0])},
+    )
+
+    b_row = _hs(1, start=50)
+    conn.save_hs_batch(
+        b_row,
+        _cam(1, [0, 1], [5], 1),
+        ["B"],
+        {"B": _scope(prompt[:4] + [9], block_ids=[0])},
+    )
+    page_b = conn._cpu_pages["B"]
+    assert torch.equal(page_b[:4], c[:4])  # C's rows won: block 0 was reused
+    assert torch.equal(page_b[4:5], b_row)
+
+
+def test_gather_skips_never_scattered_nan_slots(caplog):
+    # A prefix hit whose block was never scattered into the table keeps the
+    # NaN sentinel instead of copying unproven rows; the gather reports the
+    # hole loudly.
+    conn = _cpu_pages_connector()
     b_row = _hs(1, start=50)
     with caplog.at_level("WARNING"):
         conn.save_hs_batch(
             b_row,
             _cam(1, [0, 1], [9], 1),
             ["B"],
-            {"B": _scope(prompt, prompt_embeds=torch.zeros(1))},
+            {"B": _scope(list(range(100, 109)), block_ids=[3, 4])},
         )
     page_b = conn._cpu_pages["B"]
-    assert torch.isnan(page_b[:8]).all()  # never backfilled
+    assert torch.isnan(page_b[:8]).all()
     assert torch.equal(page_b[8:9], b_row)
-    assert any("skipped backfill" in rec.message for rec in caplog.records)
+    assert any("gathered 0/8" in rec.message for rec in caplog.records)
 
 
-def test_prefix_index_off_leaves_prefix_rows_nan():
+def test_prefix_off_allocates_no_table_and_leaves_prefix_rows_nan():
+    # With the engine prefix cache off nothing is gathered or scattered, so
+    # no table is allocated at all; skipped rows stay NaN (and cannot occur:
+    # without prefix caching the first streamed step starts at 0).
     conn = _cpu_pages_connector()
     conn._hs_prefix_index_on = False
     prompt = list(range(100, 108))
     a = _hs(8, start=1)
-    conn.save_hs_batch(a, _cam(1, [0, 8], [8], 8), ["A"], {"A": _scope(prompt)})
-    assert len(conn._hs_hash_blocks) == 0  # index disabled: no publish
+    conn.save_hs_batch(
+        a,
+        _cam(1, [0, 8], [8], 8),
+        ["A"],
+        {"A": _scope(prompt, block_ids=[0, 1])},
+    )
+    assert conn._cpu_hs_blocks is None  # no table without prefix caching
 
     b_row = _hs(1, start=50)
-    conn.save_hs_batch(b_row, _cam(1, [0, 1], [9], 1), ["B"], {"B": _scope(prompt)})
+    conn.save_hs_batch(
+        b_row,
+        _cam(1, [0, 1], [9], 1),
+        ["B"],
+        {"B": _scope(prompt, block_ids=[0, 1])},
+    )
     assert torch.isnan(conn._cpu_pages["B"][:8]).all()  # no backfill attempted
 
 
@@ -482,7 +508,7 @@ def test_abort_discard_drops_cpu_pages_without_write():
     )
     conn._submit_async_write(pending)
     assert "A" not in conn._cpu_pages
-    assert "A" not in conn._req_block_hashes
+    assert "A" not in conn._req_block_ids_cache
 
 
 def test_finalize_cpu_page_keeps_full_page_without_truncation():

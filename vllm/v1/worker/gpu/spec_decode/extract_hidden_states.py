@@ -19,28 +19,24 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
     from vllm.v1.worker.gpu.states import RequestState
 
 
 @dataclass
 class _HsReqScope:
-    """Per-request inputs the hidden-states CPU prefix index needs.
+    """Per-request inputs the hidden-states CPU block table needs.
 
     Mirrors the attributes of ``Request`` that the connector inspects
-    (``_req_hash_scope_ok`` / ``_block_extra_keys`` / token hashing / page
-    capacity) so the V2 runner can feed it without holding scheduler
-    ``Request`` objects.
+    (page capacity and BlockPool block ids) so the V2 runner can feed it
+    without holding scheduler ``Request`` objects.
     """
 
     num_prompt_tokens: int
-    mm_features: Any = None
-    prompt_embeds: Any = None
-    prompt_is_token_ids: Any = None
-    lora_request: Any = None
-    # All tokens of the request so far (prompt + generated); refreshed from
-    # the runner's request state before each streamed step.
-    prompt_token_ids: Any = None
-    output_token_ids: Any = None
+    # BlockPool block ids of the request so far (group 0: the MLA /
+    # full-attention pool); refreshed from the runner's block tables before
+    # each streamed step.
+    block_ids: list[int]
 
 
 class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
@@ -94,9 +90,13 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         # pages instead of a device cache-only KV group.
         self._hs_store_cpu = is_hs_store_cpu(vllm_config)
         self._hs_scope: dict[str, _HsReqScope] = {}
-        # Injected by the model runner (init_speculator); used to read each
-        # request's token ids for the CPU prefix index.
+        # Injected by the model runner (init_speculator); used to look up each
+        # request's block-table row for the CPU block table.
         self.req_states = req_states
+        # Injected by the model runner after KV init (alongside
+        # pcp_manager); the per-request BlockPool block ids are refreshed
+        # from it before each streamed step.
+        self.block_tables: "BlockTables | None" = None
 
     def load_draft_model(
         self,
@@ -125,27 +125,24 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             )
 
     def on_new_request(self, req_id: str, new_req_data: Any) -> None:
-        """Record the CPU prefix-index scope for a newly scheduled request."""
+        """Record the CPU-pages scope for a newly scheduled request."""
         if not self._hs_store_cpu:
             return
         self._hs_scope[req_id] = _HsReqScope(
             num_prompt_tokens=int(getattr(new_req_data, "prompt_len", 0) or 0),
-            mm_features=getattr(new_req_data, "mm_features", None),
-            prompt_embeds=getattr(new_req_data, "prompt_embeds", None),
-            prompt_is_token_ids=getattr(new_req_data, "prompt_is_token_ids", None),
-            lora_request=getattr(new_req_data, "lora_request", None),
-            prompt_token_ids=list(
-                getattr(new_req_data, "prompt_token_ids", None) or []
-            ),
-            output_token_ids=[],
+            block_ids=[],
         )
 
-    def _refresh_hs_scope_tokens(self, input_batch: InputBatch) -> None:
-        """Mirror each batched request's current token ids into its scope.
+    def _refresh_hs_scope(self, input_batch: InputBatch) -> None:
+        """Mirror each batched request's BlockPool block ids into its scope.
 
-        The connector chain-hashes full token blocks, so it needs the exact
-        token sequence (prompt + generated so far) at stream time.
+        The connector's CPU block table is addressed by the same block ids
+        as the device KV, so the ids of every block the request owns so far
+        must be current at stream time (new blocks extend the scatter range).
         """
+        block_tables = self.block_tables
+        if block_tables is None or not block_tables.block_tables:
+            return
         if self.req_states is None:
             return
         for req_id in input_batch.req_ids[: input_batch.num_reqs]:
@@ -155,11 +152,12 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             row = self.req_states.req_id_to_index.get(req_id)
             if row is None:
                 continue
-            total = int(self.req_states.total_len.gpu[row].item())
-            scope.prompt_token_ids = self.req_states.all_token_ids.gpu[
-                row, :total
-            ].tolist()
-            scope.output_token_ids = []
+            # Group 0 is the MLA / full-attention pool whose block ids the
+            # connector's CPU block table is addressed by.
+            num_blocks = int(block_tables.num_blocks.np[0, row])
+            scope.block_ids = (
+                block_tables.block_tables[0].gpu[row, :num_blocks].tolist()
+            )
 
     def on_requests_finished(self, finished_req_ids: set[str]) -> None:
         for req_id in finished_req_ids:
@@ -267,7 +265,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             # group to write into; the drafter adds nothing else). Dummy runs
             # must not touch the connector (it is disabled while profiling).
             if not dummy_run:
-                self._refresh_hs_scope_tokens(input_batch)
+                self._refresh_hs_scope(input_batch)
                 self._stream_hidden_states_to_cpu(input_batch, num_tokens, is_profile)
             return draft_tokens
 

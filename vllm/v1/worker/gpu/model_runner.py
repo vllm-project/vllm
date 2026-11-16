@@ -779,6 +779,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.speculator is not None:
             self.speculator.pcp_manager = self.pcp_manager
+            # The hidden-states CPU block table is addressed by the same
+            # BlockPool block ids as the device KV; the extract_hidden_states
+            # speculator mirrors each request's group-0 ids from here.
+            self.speculator.block_tables = self.block_tables
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
             self.kv_cache_config,
