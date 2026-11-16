@@ -259,6 +259,7 @@ def enable_quantized_routed_input(runner) -> bool:
                 projection.quant_method,
                 (Mxfp4OnlineLinearMethod, Fp8PtpcOnlineLinearMethod),
             )
+            and not getattr(projection, "quantizes_on_load", False)
         )
         or get_current_vllm_config().lora_config is not None
         or runner.routed_experts.activation != MoEActivation.SITU

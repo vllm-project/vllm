@@ -60,7 +60,7 @@ class DefaultModelLoader(BaseModelLoader):
     # default number of thread when enable multithread weight loading
     DEFAULT_NUM_THREADS = 8
 
-    @dataclasses.dataclass
+    @dataclasses.dataclass(slots=True)
     class Source:
         """A source for weights."""
 
@@ -570,7 +570,9 @@ class DefaultModelLoader(BaseModelLoader):
                     )
                 # ignore online quantization scales
                 quant_method = getattr(module, "quant_method", None)
-                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_online_quant = getattr(
+                    quant_method, "uses_meta_device", False
+                ) or getattr(module, "quantizes_on_load", False)
                 has_postprocess_quant = getattr(
                     quant_method, "process_weights_after_loading", None
                 )

@@ -126,7 +126,7 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
             return
 
         weight = self.get_weight_for_quantization(layer)
-        weight_fp4, weight_scale = self.quantized_param(layer, "weight", weight)
+        weight_fp4, weight_scale = mxfp4_quantize(weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp4.data)
@@ -136,14 +136,6 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
-
-    def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        return 1 if name == "weight" else None
-
-    def quantize_param(
-        self, layer: Module, name: str, weight: torch.Tensor
-    ) -> tuple[torch.Tensor, ...]:
-        return mxfp4_quantize(weight.contiguous())
 
     def apply(
         self,
@@ -243,16 +235,6 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         )
 
         layer.weight_block_size = [1, MXFP4_BLOCK_SIZE]
-
-    def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
-            return None  # kept in high precision
-        return self._row_local(layer, name, 1)
-
-    def quantize_param(
-        self, layer: Module, name: str, weight: torch.Tensor
-    ) -> tuple[torch.Tensor, ...]:
-        return _quantize_mxfp4_moe_weight(weight)
 
     def _setup_kernel(
         self,
@@ -356,8 +338,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
             self._zero_padding(layer, w13_weight, w2_weight)
             return (
-                *self.quantized_param(layer, "w13_weight", w13_weight),
-                *self.quantized_param(layer, "w2_weight", w2_weight),
+                *_quantize_mxfp4_moe_weight(w13_weight),
+                *_quantize_mxfp4_moe_weight(w2_weight),
             )
 
         w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)

@@ -54,6 +54,42 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         layer._already_called_process_weights_after_loading = True
 ```
 
+## Direct Reload with Online Quantization
+
+`VLLM_RELOAD_MODE=direct` reloads weights in place, without layerwise buffering:
+cold start records each tensor's checkpoint layout, and a reload writes the new
+checkpoint tensors into the existing storage and reruns post-load processing.
+[Online quantization](../features/quantization/online.md) works in this mode:
+
+```bash
+VLLM_RELOAD_MODE=direct vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block
+```
+
+Each high-precision tensor is quantized as it is loaded, into the layout of the
+matching pre-quantized checkpoint. The trainer keeps sending BF16 weights under
+their checkpoint names, through `reload_weights` or a checkpoint-format
+[weight transfer](weight_transfer/README.md) backend.
+
+| `--quantization` | Linear layers | MoE layers |
+| - | - | - |
+| `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8` | Supported | Supported |
+| `mxfp4` | Refused | Supported |
+| `nvfp4_per_token` | Not quantized | Supported |
+
+With NVFP4, the w1 and w3 (gate and up) weights of an expert share one global
+scale, so both must arrive in the same update: the first is held until the
+second arrives.
+
+Direct reload raises an error for the following; use the default
+`VLLM_RELOAD_MODE=layerwise` for them instead:
+
+- Online quantization that is not in the table: `mxfp4` and `mxfp4_hadamard32`
+  linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
+  lm_head, activation overrides, and re-quantization of checkpoint-quantized
+  layers.
+- `torchao` quantization, Humming kernels, LoRA, weight offloading,
+  `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
+
 ## Example Usages
 
 ### High Level Weight Transfer API

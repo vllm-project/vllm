@@ -1157,21 +1157,6 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            for connector_name in (
-                "NixlConnector",
-                "NixlPullConnector",
-                "NixlPushConnector",
-                "MoRIIOConnector",
-                "MooncakeConnector",
-            ):
-                if kv_transfer_config.has_connector(connector_name):
-                    raise ValueError(
-                        "--enable-return-routed-experts is incompatible with "
-                        f"{connector_name}; PD auxiliary output is not supported."
-                    )
-
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
@@ -2096,7 +2081,10 @@ class VllmConfig:
                 f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
-        if self.parallel_config.use_ubatching:
+        if (
+            self.parallel_config.use_ubatching
+            and self.parallel_config.dbo_schedule != "all-reduce-overlap"
+        ):
             a2a_backend = self.parallel_config.all2all_backend
             if current_platform.is_rocm():
                 supported_backends = [
@@ -3246,7 +3234,7 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
+        elif current_platform.is_rocm() and KVCacheAccess.REGISTERS in kv_cache_access:
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
@@ -3405,6 +3393,7 @@ class VllmConfig:
         model_config = self.model_config
         parallel_config = self.parallel_config
 
+        schedule = parallel_config.dbo_schedule
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
         if parallel_config.pipeline_parallel_size > 1:
@@ -3412,7 +3401,8 @@ class VllmConfig:
         if parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("dual batch overlap with prefill context parallelism")
         if model_config is not None and (
-            model_config.is_multimodal_model or model_config.is_encoder_decoder
+            (model_config.is_multimodal_model and schedule != "all-reduce-overlap")
+            or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:

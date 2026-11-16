@@ -42,7 +42,6 @@ from .geometry import (
     byte_runs,
     merge_writes,
 )
-from .utils import stages_online_quant
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta
@@ -54,7 +53,7 @@ __all__ = ["Box", "LoadPlan", "check_plannable", "load_planned", "plan_loads"]
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entry:
     name: str
     shape: tuple[int, ...]  # from the metadata
@@ -64,7 +63,7 @@ class Entry:
     reason: str | None = None  # why it is a fallback
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoadPlan:
     entries: dict[str, Entry]  # per declared name, in metadata order
     dests: dict[str, Dest]  # live tensors built at plan_loads; not data
@@ -185,11 +184,6 @@ def check_plannable(model: torch.nn.Module) -> None:
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
-        if stages_online_quant(module):
-            # staged by `begin`: its loaders buffer the traced tensors
-            raise RuntimeError(
-                f"load plan: online quantization is not supported ({name})"
-            )
 
 
 def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:

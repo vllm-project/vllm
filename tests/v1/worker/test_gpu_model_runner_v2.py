@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
@@ -229,6 +230,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     runner.max_num_tokens = 8
     runner.encoder_cache = None
     runner.pooling_runner = None
+    runner.ec_connector = NO_OP_EC_CONNECTOR
     monkeypatch.setattr(runner, "_dummy_run", dummy_run)
 
     runner.profile_run()
@@ -239,6 +241,43 @@ def test_profile_run_creates_aux_output_connector_before_forward(
         assert connector is not None and connector._capturer is capturer
     else:
         assert connector is None
+
+
+@pytest.mark.parametrize(
+    "max_num_tokens,max_num_reqs,max_model_len,expected",
+    [
+        # max_num_batched_tokens > max_num_reqs * max_model_len, as after
+        # auto-fit (first case) or when set explicitly (second case).
+        (2048, 1, 32, [32]),
+        (8192, 2, 2048, [2048, 2048]),
+        # No cap applies, so the split is unchanged.
+        (2048, 4, 2048, [512] * 4),
+        (10, 4, 2048, [2, 2, 3, 3]),
+    ],
+)
+def test_dummy_run_requests_fit_in_max_model_len(
+    max_num_tokens, max_num_reqs, max_model_len, expected
+):
+    """Block tables only fit max_model_len tokens per request, so a dummy
+    request must not be longer, or attention reads past the row."""
+    scheduled = []
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_num_tokens = max_num_tokens
+    runner.max_num_reqs = max_num_reqs
+    runner.max_model_len = max_model_len
+    runner.speculator = None
+    runner.lora_config = None
+    runner.is_first_pp_rank = True
+    runner.is_last_pp_rank = False
+    runner.kv_connector = Mock()
+    runner.eplb = Mock()
+    runner.execute_model = lambda scheduler_output, **kwargs: scheduled.append(
+        list(scheduler_output.num_scheduled_tokens.values())
+    )
+
+    runner._dummy_run(max_num_tokens)
+
+    assert scheduled == [expected]
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -618,7 +657,7 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
 def test_standalone_draft_kv_dtype_override(
     monkeypatch, draft_dtype, expected_dtype, data_parallel_index, draft_moe, draft_attn
 ):
-    @dataclass
+    @dataclass(slots=True)
     class Config:
         cache_config: CacheConfig
         parallel_config: ParallelConfig
@@ -642,9 +681,14 @@ def test_standalone_draft_kv_dtype_override(
         kv_cache_dtype=draft_dtype,
         moe_backend=draft_moe,
         attention_backend=draft_attn,
+        draft_enable_eplb=True,
+        resolved_draft_num_redundant_experts=None,
         draft_parallel_config=ParallelConfig(),
     )
     spec.apply_draft_overrides = partial(SpeculativeConfig.apply_draft_overrides, spec)
+    spec.apply_draft_eplb_overrides = partial(
+        SpeculativeConfig.apply_draft_eplb_overrides, spec
+    )
     speculator.speculative_config = spec
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
