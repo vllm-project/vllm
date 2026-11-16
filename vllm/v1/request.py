@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import sys
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -192,19 +192,25 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
-        self.cache_salt_segments = [
-            (start, sys.intern(salt)) for start, salt in cache_salt_segments or ()
-        ]
+        self.cache_salt_segments = list(cache_salt_segments or ())
         starts = [start for start, _ in self.cache_salt_segments]
-        if any(b <= a for a, b in zip([-1, *starts], starts)) or not all(
-            salt for _, salt in self.cache_salt_segments
+        if (
+            not all(type(start) is int for start in starts)
+            or any(b <= a for a, b in zip([-1, *starts], starts))
+            or not all(
+                isinstance(salt, str) and salt for _, salt in self.cache_salt_segments
+            )
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "cache_salt_segments must have non-empty salts starting at "
-                "non-negative, strictly increasing token positions"
+                "non-negative, strictly increasing token positions",
+                parameter="cache_salt_segments",
             )
         if self.cache_salt_segments and resumable:
-            raise ValueError("cache_salt_segments do not support streaming input")
+            raise VLLMValidationError(
+                "cache_salt_segments do not support streaming input",
+                parameter="cache_salt_segments",
+            )
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -317,6 +323,24 @@ class Request:
         """Compute block hashes for any new full blocks and append them."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
+
+    def add_cache_salt_segment(
+        self, start: int, salt: str, hash_block_size: int
+    ) -> None:
+        """Salt the tokens from `start` on with `salt`. Blocks already hashed
+        keep their hashes, so the segment starts at the first unhashed token
+        at the earliest and replaces the segments from there on."""
+        if not isinstance(salt, str) or not salt:
+            raise VLLMValidationError(
+                "cache salt segments need a non-empty salt",
+                parameter="cache_salt_segments",
+            )
+        start = max(start, len(self.block_hashes) * hash_block_size)
+        segments = self.cache_salt_segments
+        while segments and segments[-1][0] >= start:
+            segments.pop()
+        if not segments or segments[-1][1] != salt:
+            segments.append((start, salt))
 
     def truncate_block_hashes(
         self, hash_block_size: int, num_hash_lookahead_tokens: int = 0

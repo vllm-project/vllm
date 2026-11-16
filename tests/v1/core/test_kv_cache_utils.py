@@ -35,6 +35,7 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -1121,15 +1122,15 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     "segments,start,end,expected",
     [
         ([], 0, 4, None),
-        ([(0, "a")], 4, 8, (("cache_salt_segment", 0, "a"),)),
+        ([(0, "a")], 4, 8, (("cache_salt_segment", 0, b"a"),)),
         (
             [(0, "a"), (6, "b")],
             4,
             8,
-            (("cache_salt_segment", 0, "a"), ("cache_salt_segment", 2, "b")),
+            (("cache_salt_segment", 0, b"a"), ("cache_salt_segment", 2, b"b")),
         ),
-        ([(0, "a"), (6, "b")], 8, 12, (("cache_salt_segment", 0, "b"),)),
-        ([(0, "a"), (4, "b")], 0, 4, (("cache_salt_segment", 0, "a"),)),
+        ([(0, "a"), (6, "b")], 8, 12, (("cache_salt_segment", 0, b"b"),)),
+        ([(0, "a"), (4, "b")], 0, 4, (("cache_salt_segment", 0, b"a"),)),
         ([(4, "b")], 0, 4, None),
     ],
     ids=[
@@ -1183,10 +1184,14 @@ def test_lookahead_block_hash_takes_the_segments_of_its_own_tokens(hash_fn):
         cache_salt_segments=[(0, "a"), (4, "b")],
     )
     first_hash = hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2, 3), ((("cache_salt_segment", 0, "a"),), 4))
+        (
+            kv_cache_utils.NONE_HASH,
+            (0, 1, 2, 3),
+            ((("cache_salt_segment", 0, b"a"),), 4),
+        )
     )
     second_hash = hash_fn(
-        (first_hash, (4, 5, 6, 7), ((("cache_salt_segment", 0, "b"),), 8))
+        (first_hash, (4, 5, 6, 7), ((("cache_salt_segment", 0, b"b"),), 8))
     )
     assert request.block_hashes == [first_hash, second_hash]
 
@@ -1197,7 +1202,7 @@ def test_to_event_extra_keys_keeps_cache_salt_segments_tagged():
     )
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 4, 0)
     assert to_event_extra_keys([extra_keys]) == [
-        ("salt", ("cache_salt_segment", 0, "a"), ("cache_salt_segment", 2, "b"))
+        ("salt", ("cache_salt_segment", 0, b"a"), ("cache_salt_segment", 2, b"b"))
     ]
 
 
@@ -1208,12 +1213,20 @@ def test_to_event_extra_keys_keeps_cache_salt_segments_tagged():
         ([(0, "a"), (0, "b")], False),
         ([(-1, "a")], False),
         ([(0, "")], False),
+        ([(0.5, "a")], False),
         ([(0, "a")], True),
     ],
-    ids=["unsorted", "duplicate-start", "negative-start", "empty-salt", "streaming"],
+    ids=[
+        "unsorted",
+        "duplicate-start",
+        "negative-start",
+        "empty-salt",
+        "non-integer-start",
+        "streaming",
+    ],
 )
 def test_cache_salt_segments_rejected(segments, resumable):
-    with pytest.raises(ValueError, match="cache_salt_segments"):
+    with pytest.raises(VLLMValidationError, match="cache_salt_segments"):
         make_request(
             "0", list(range(8)), cache_salt_segments=segments, resumable=resumable
         )
@@ -1228,15 +1241,66 @@ def test_cache_salt_segments_are_copied_per_request():
     assert segments == [(0, "a")]
 
 
-def test_equal_cache_salt_segments_hash_equally():
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_equal_cache_salt_segments_hash_equally(hash_fn):
     salt = "weight-version-long"
-    other = "".join(["weight-version-", "long"])
-    assert salt is not other
-    shared = [(0, salt), (2, salt + "x"), (3, salt)]
-    separate = [(0, salt), (2, salt + "x"), (3, other)]
-    first = make_request("0", list(range(4)), 4, sha256, cache_salt_segments=shared)
-    second = make_request("1", list(range(4)), 4, sha256, cache_salt_segments=separate)
+    copy_of_salt = salt.encode().decode()
+    assert copy_of_salt is not salt
+    first = make_request(
+        "0",
+        list(range(4)),
+        4,
+        hash_fn,
+        cache_salt=salt,
+        cache_salt_segments=[(0, salt)],
+    )
+    second = make_request(
+        "1",
+        list(range(4)),
+        4,
+        hash_fn,
+        cache_salt=copy_of_salt,
+        cache_salt_segments=[(0, salt)],
+    )
     assert first.block_hashes == second.block_hashes
+
+    first.cache_salt_segments += [(5, salt), (6, "other"), (7, copy_of_salt)]
+    first.append_output_token_ids([4, 5, 6, 7])
+    rebuilt = make_request(
+        "2",
+        list(range(8)),
+        4,
+        hash_fn,
+        cache_salt=salt,
+        cache_salt_segments=[(0, salt), (5, salt), (6, "other"), (7, salt)],
+    )
+    assert first.block_hashes == rebuilt.block_hashes
+
+
+@pytest.mark.parametrize(
+    "start,salt,expected",
+    [
+        (3, "b", [(0, "a"), (4, "b")]),
+        (6, "b", [(0, "a"), (6, "b")]),
+        (6, "a", [(0, "a")]),
+        (5, "c", [(0, "a"), (5, "c")]),
+    ],
+    ids=["below-hashed-frontier", "after-frontier", "same-salt", "replaces-later"],
+)
+def test_add_cache_salt_segment(start, salt, expected):
+    request = make_request(
+        "0", list(range(3)), 4, sha256, cache_salt_segments=[(0, "a")]
+    )
+    request.append_output_token_ids([3])
+    first_hash = request.block_hashes[0]
+    if start == 5:
+        request.add_cache_salt_segment(6, "b", 4)
+    request.add_cache_salt_segment(start, salt, 4)
+    assert request.cache_salt_segments == expected
+    request.append_output_token_ids([4, 5, 6, 7])
+    assert request.block_hashes[0] == first_hash
+    rebuilt = make_request("1", list(range(8)), 4, sha256, cache_salt_segments=expected)
+    assert request.block_hashes == rebuilt.block_hashes
 
 
 def test_engine_core_request_cache_salt_segments_key_its_blocks():
@@ -1268,7 +1332,7 @@ def test_engine_core_request_cache_salt_segments_key_its_blocks():
         request, get_request_block_hasher(3, sha256)
     )
     assert engine_request.block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("cache_salt_segment", 0, "a"),))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("cache_salt_segment", 0, b"a"),))
     )
 
 

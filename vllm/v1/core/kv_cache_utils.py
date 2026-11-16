@@ -627,7 +627,7 @@ def _gen_prompt_embeds_extra_hash_keys(
 
 def _gen_cache_salt_segment_keys(
     request: Request, start_token_idx: int, end_token_idx: int
-) -> list[tuple[str, int, str]]:
+) -> list[tuple[str, int, bytes]]:
     """Generate the keys of the cache salt segments that overlap the tokens
     `[start_token_idx, end_token_idx)`, each with its start relative to
     `start_token_idx` (0 if it starts before)."""
@@ -639,7 +639,9 @@ def _gen_cache_salt_segment_keys(
     keys = []
     while index < len(segments) and segments[index][0] < end_token_idx:
         start, salt = segments[index]
-        keys.append(("cache_salt_segment", max(start - start_token_idx, 0), salt))
+        keys.append(
+            ("cache_salt_segment", max(start - start_token_idx, 0), salt.encode())
+        )
         index += 1
     return keys
 
