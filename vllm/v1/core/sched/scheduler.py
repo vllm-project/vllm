@@ -1233,10 +1233,6 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
-                    if self.aux_output_connector is not None:
-                        self.aux_output_connector.salt_from_hit(
-                            request, num_computed_tokens
-                        )
                     # DSV41 SWA bounded replay: a KV load that carries the
                     # window is taken as is; any other hit no longer than the
                     # replayed window would be recomputed in full and save
@@ -1291,6 +1287,10 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
+                if self.aux_output_connector is not None:
+                    self.aux_output_connector.salt_from_hit(
+                        request, num_computed_tokens
+                    )
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 duplicate_encoder_inputs = []

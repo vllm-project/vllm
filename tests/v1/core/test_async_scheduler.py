@@ -1908,6 +1908,24 @@ def test_session_turn_with_prompt_logprobs_names_its_prompt_by_its_version():
     assert engine.segments["second"] == [(0, "v2"), (64, None)]
 
 
+def test_session_request_loading_kv_across_a_weight_update_names_it_by_the_new():
+    engine = _tier_engine(num_chunks=64, hash_block_size=4)
+    _run_turn(engine, 1, "first", 24, hash_block_size=4)
+    assert engine.segments["first"] == [(0, "v1"), (16, None)]
+    assert engine.scheduler.reset_prefix_cache()
+    (request,) = _session_requests(
+        ["second"], 64, 1, segments=engine.segments["first"], hash_block_size=4
+    )
+    engine.scheduler.add_request(request)
+    engine.step(engine.schedule(), {})
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    engine.set_version(2)
+    engine.run()
+    engine.close()
+    assert engine.num_loads == 1
+    assert engine.segments["second"] == [(0, "v1"), (16, "v2"), (64, None)]
+
+
 @pytest.mark.parametrize("with_segments", [True, False], ids=["segments", "none"])
 def test_session_turn_reuses_a_hash_keyed_store_of_another_replica(with_segments):
     store = fake_store()
