@@ -77,7 +77,7 @@ decode = client.chat.completions.create(
 )
 ```
 
-If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
+If `messages` has non-text content, or `echo` or `return_prompt_text` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
 ## Generate API output modes
 

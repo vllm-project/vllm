@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's attention input projection (``DecodeProjection``: warp
+"""The specialized decode's attention input projection (`DecodeProjection`: warp
 split-K, cluster split-K or cuBLAS per row count) against an FP32 matmul of the same
 BF16 operands, at the TP8 K3.1 shapes and every engine's row range, eager and
 replayed from a CUDA graph."""
@@ -61,7 +61,7 @@ def test_decode_projection_rows(shape):
 
 def test_decode_projection_graph_and_pitch():
     """Packed projection buffers with more rows than the step (the providers'
-    ``projected[:b]`` rows) and CUDA-graph replay with new activations, every engine
+    `projected[:b]` rows) and CUDA-graph replay with new activations, every engine
     (warp split-K, cluster split-K, cuBLAS) checked after each replay."""
     n, k, cap = 3808, 7168, 320
     weight = (torch.randn(n, k, device="cuda") / k**0.5).bfloat16()
@@ -93,7 +93,7 @@ def test_decode_projection_graph_and_pitch():
 @pytest.mark.parametrize("m", [1, 8, 9, 16])
 def test_warp_tactic_residency(m):
     """Warp split-K tactics keep every wave's CTAs resident (one SM's shared memory
-    holds ``ceil(ctas / SMs)`` rings) and fit the kernel's limits."""
+    holds `ceil(ctas / SMs)` rings) and fit the kernel's limits."""
     sms = torch.cuda.get_device_properties(0).multi_processor_count
     for n, k in SHAPES:
         t = decode.warp_tactic(m, n, k, sms)

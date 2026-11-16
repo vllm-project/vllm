@@ -29,7 +29,7 @@ def _make_watch_dog(dump_dir, **kwargs) -> ThreadedWatchDog:
 
 
 def _run_check_loop(wd: ThreadedWatchDog, ticks: int) -> int:
-    """Run the check loop for ``ticks`` checks; return the dump count."""
+    """Run the check loop for `ticks` checks; return the dump count."""
     with (
         patch.object(wd.stop_event, "wait", side_effect=[False] * ticks + [True]),
         patch.object(wd, "handle_failure") as handle_failure,

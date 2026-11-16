@@ -5,17 +5,17 @@
 Numerics of the reference implementation's CUDA norm and activation kernels,
 everything in fp32 with one output rounding:
 
-- ``rms_norm``: ``bf16(x * rsqrt(mean(x^2) + eps) * w)``.
-- ``fused_add_rms_norm``: ``s = x + residual`` in fp32,
-  ``residual_out = bf16(s)``, ``out = bf16(s * rsqrt(mean(s^2) + eps) * w)``
-  from the unrounded ``s``.
-- ``silu_and_mul``: ``bf16(g / (1 + exp(-g)) * u)`` (precise ``expf`` and
+- `rms_norm`: `bf16(x * rsqrt(mean(x^2) + eps) * w)`.
+- `fused_add_rms_norm`: `s = x + residual` in fp32,
+  `residual_out = bf16(s)`, `out = bf16(s * rsqrt(mean(s^2) + eps) * w)`
+  from the unrounded `s`.
+- `silu_and_mul`: `bf16(g / (1 + exp(-g)) * u)` (precise `expf` and
   division).
 
-``rsqrt`` is ``rsqrt.approx.ftz.f32`` (``rsqrtf`` under fast math). The fused
-Flint kernels (``qkv_fused``, the decode MoE block's norm and shared expert, and
+`rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math). The fused
+Flint kernels (`qkv_fused`, the decode MoE block's norm and shared expert, and
 the GEMV SiLU epilogue) follow the same rules; the routed experts use the
-approximate ``ex2`` / ``rcp`` SiLU of the TRTLLM MoE (see ``moe``).
+approximate `ex2` / `rcp` SiLU of the TRTLLM MoE (see `moe`).
 """
 
 import torch
@@ -82,8 +82,8 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
 def fused_add_rms_norm(
     x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """In place: ``residual = bf16(x + residual)``, ``x = rms_norm(x +
-    residual)``; returns ``(x, residual)``."""
+    """In place: `residual = bf16(x + residual)`, `x = rms_norm(x +
+    residual)`; returns `(x, residual)`."""
     assert residual.shape == x.shape and residual.is_contiguous()
     assert x.is_contiguous()
     _launch_norm(x, residual, weight, eps, x)
@@ -101,7 +101,7 @@ def _silu_and_mul_kernel(x_ptr, out_ptr, x_stride, D: tl.constexpr, BD: tl.const
 
 
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
-    """``silu(x[:, :D]) * x[:, D:]`` for ``x`` [M, 2D]."""
+    """`silu(x[:, :D]) * x[:, D:]` for `x` [M, 2D]."""
     m, d2 = x.shape
     d = d2 // 2
     assert x.dtype == torch.bfloat16 and x.stride(-1) == 1
@@ -114,8 +114,8 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
 
 
 class RMSNorm(nn.Module):
-    """Holds a norm ``weight``; ``rms_norm(x)``, or with a residual
-    ``fused_add_rms_norm(x, residual)``."""
+    """Holds a norm `weight`; `rms_norm(x)`, or with a residual
+    `fused_add_rms_norm(x, residual)`."""
 
     def __init__(self, hidden_size: int, eps: float) -> None:
         super().__init__()

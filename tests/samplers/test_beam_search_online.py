@@ -58,7 +58,6 @@ class _Renderer:
 
 
 class _VllmConfig:
-    use_v2_model_runner = True
     watermark_config = WatermarkConfig(key=42)
     speculative_config = None
     model_config = SimpleNamespace(is_diffusion=False)
@@ -674,11 +673,10 @@ async def test_explicit_beam_allowlist_uses_exact_scores(offline, exhausted):
 
 
 @pytest.mark.parametrize(
-    "case", ["empty", "grammar", "spec", "diffusion", "v1", "size", "id"]
+    "case", ["empty", "grammar", "spec", "diffusion", "size", "id"]
 )
 def test_beam_allowlist_rejects_unsupported_requests(case):
     config = SimpleNamespace(
-        use_v2_model_runner=case != "v1",
         speculative_config=object() if case == "spec" else None,
         model_config=SimpleNamespace(
             is_diffusion=case == "diffusion",
