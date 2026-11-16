@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
+import typing
 from typing import Any
 
 import numpy as np
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
+from typing_extensions import TypeAliasType
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
@@ -265,3 +269,85 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
+
+
+class _UnaryModel(BaseModel):
+    id: str
+    text: str
+
+
+class _ChunkDelta(BaseModel):
+    type: str = "delta"
+    delta: str
+
+
+class _ChunkDone(BaseModel):
+    type: str = "done"
+    text: str
+
+
+_ChunkUnionType = _ChunkDelta | _ChunkDone
+_ChunkExtAlias = TypeAliasType("_ChunkExtAlias", _ChunkDelta | _ChunkDone)
+
+
+@pytest.mark.parametrize(
+    ("chunk_model", "done_sentinel"),
+    [
+        (_ChunkDelta, "[DONE]"),
+        (_ChunkUnionType, None),
+        (_ChunkExtAlias, None),
+        pytest.param(
+            getattr(typing, "TypeAliasType", TypeAliasType)(
+                "_ChunkStdAlias", _ChunkDelta | _ChunkDone
+            ),
+            None,
+            id="stdlib_type_alias",
+        ),
+    ],
+)
+def test_json_or_sse_responses_schema_generation(chunk_model, done_sentinel):
+    """json_or_sse_responses handles BaseModel, UnionType, and TypeAliasType
+    without leaking union anyOf/title onto application/json, and respects
+    done_sentinel."""
+    app = FastAPI()
+
+    @app.post(
+        "/test",
+        **api_utils.json_or_sse_responses(
+            _UnaryModel,
+            chunk_model,
+            {400: {"model": ErrorResponse}},
+            done_sentinel=done_sentinel,
+        ),
+    )
+    async def endpoint():
+        return _UnaryModel(id="1", text="ok")
+
+    doc = TestClient(app).get("/openapi.json").json()
+    responses = doc["paths"]["/test"]["post"]["responses"]
+    assert "400" in responses
+    content = responses["200"]["content"]
+
+    assert content["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/_UnaryModel"
+    }
+
+    data_any_of = content["text/event-stream"]["schema"]["properties"]["data"]["anyOf"]
+    if done_sentinel is None:
+        assert all("const" not in item for item in data_any_of)
+        chunk_schema = data_any_of[0]["contentSchema"]
+        assert data_any_of[1]["contentSchema"] == {
+            "$ref": "#/components/schemas/ErrorResponse"
+        }
+    else:
+        assert data_any_of[0] == {"const": done_sentinel}
+        chunk_schema = data_any_of[1]["contentSchema"]
+        assert data_any_of[2]["contentSchema"] == {
+            "$ref": "#/components/schemas/ErrorResponse"
+        }
+
+    validator = Draft202012Validator({**chunk_schema, "components": doc["components"]})
+    validator.validate(_ChunkDelta(delta="hi").model_dump(mode="json"))
+    if chunk_model is not _ChunkDelta:
+        validator.validate(_ChunkDone(text="hi").model_dump(mode="json"))
+    assert not validator.is_valid({"unexpected": 123})

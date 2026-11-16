@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import functools
+import typing
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 import orjson
 from fastapi import Request
@@ -13,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask, BackgroundTasks
+from typing_extensions import TypeAliasType
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
@@ -112,29 +115,84 @@ def with_cancellation(handler_func):
 
 
 _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
+_TYPE_ALIAS_TYPES: tuple[type[Any], ...] = (
+    (typing.TypeAliasType, TypeAliasType)
+    if hasattr(typing, "TypeAliasType")
+    else (TypeAliasType,)
+)
+_CHUNK_ALIAS_CACHE: dict[tuple[str, Any], Any] = {}
+_CHUNK_ALIAS_BY_NAME: dict[str, Any] = {}
 
 
-def _sse_event_schema(chunk_ref: dict[str, str]) -> dict[str, Any]:
-    # One SSE event: `data` is a JSON chunk, a JSON error, or "[DONE]". This is
-    # the envelope FastAPI emits for EventSourceResponse routes, but published
-    # under `schema` because OpenAPI 3.1 has no `itemSchema`.
+def _resolve_chunk_model(
+    unary_model: type[BaseModel], chunk_model: Any
+) -> tuple[Any, str]:
+    """Return a FastAPI-registrable chunk model and its schema name.
+
+    FastAPI emits `anyOf` + `title` on `application/json` when an additional
+    response's `model` is a bare union (`UnionType` / `Union`), which
+    `deep_dict_update` cannot remove via `openapi_extra`. Wrapping bare unions
+    in `TypeAliasType` makes FastAPI emit a `$ref` instead, so `openapi_extra`
+    cleanly restores the `unary_model` `$ref`.
+    """
+    if (
+        isinstance(chunk_model, type) and issubclass(chunk_model, BaseModel)
+    ) or isinstance(chunk_model, _TYPE_ALIAS_TYPES):
+        return chunk_model, chunk_model.__name__
+
+    cache_key = (unary_model.__name__, chunk_model)
+    try:
+        cached = _CHUNK_ALIAS_CACHE.get(cache_key)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached, cached.__name__
+
+    base_name = f"{unary_model.__name__}StreamChunk"
+    name = base_name
+    suffix = 2
+    while name in _CHUNK_ALIAS_BY_NAME:
+        name = f"{base_name}{suffix}"
+        suffix += 1
+
+    alias = cast(Any, TypeAliasType)(name, chunk_model)
+    _CHUNK_ALIAS_BY_NAME[name] = chunk_model
+    with contextlib.suppress(TypeError):
+        _CHUNK_ALIAS_CACHE[cache_key] = alias
+    return alias, name
+
+
+def _sse_event_schema(
+    chunk_ref: dict[str, str],
+    *,
+    done_sentinel: str | None = "[DONE]",
+) -> dict[str, Any]:
+    # One SSE event: `data` is a JSON chunk, a JSON error, or (when configured)
+    # a termination sentinel such as "[DONE]". This is the envelope FastAPI
+    # emits for EventSourceResponse routes, but published under `schema`
+    # because OpenAPI 3.1 has no `itemSchema`.
+    data_variants: list[dict[str, Any]] = []
+    if done_sentinel is not None:
+        data_variants.append({"const": done_sentinel})
+    data_variants.extend(
+        [
+            {
+                "contentMediaType": "application/json",
+                "contentSchema": chunk_ref,
+            },
+            {
+                "contentMediaType": "application/json",
+                "contentSchema": _ERROR_REF,
+            },
+        ]
+    )
     return {
         "type": "object",
         "required": ["data"],
         "properties": {
             "data": {
                 "type": "string",
-                "anyOf": [
-                    {"const": "[DONE]"},
-                    {
-                        "contentMediaType": "application/json",
-                        "contentSchema": chunk_ref,
-                    },
-                    {
-                        "contentMediaType": "application/json",
-                        "contentSchema": _ERROR_REF,
-                    },
-                ],
+                "anyOf": data_variants,
             },
             "event": {"type": "string"},
             "id": {"type": "string"},
@@ -145,8 +203,10 @@ def _sse_event_schema(chunk_ref: dict[str, str]) -> dict[str, Any]:
 
 def json_or_sse_responses(
     unary_model: type[BaseModel],
-    chunk_model: type[BaseModel],
+    chunk_model: Any,
     error_responses: dict[int, dict[str, Any]],
+    *,
+    done_sentinel: str | None = "[DONE]",
 ) -> dict[str, Any]:
     """Route kwargs for an endpoint answering with `unary_model` as JSON, or
     with SSE `data` events carrying `chunk_model` when `stream=true`.
@@ -155,18 +215,23 @@ def json_or_sse_responses(
     additional response's `model`. The chunk model rides on the 200 entry,
     which also overwrites the JSON schema, so `openapi_extra` restores it.
     """
+    resolved_chunk_model, chunk_name = _resolve_chunk_model(unary_model, chunk_model)
     unary_ref = {"$ref": f"#/components/schemas/{unary_model.__name__}"}
-    chunk_ref = {"$ref": f"#/components/schemas/{chunk_model.__name__}"}
+    chunk_ref = {"$ref": f"#/components/schemas/{chunk_name}"}
     return {
         "response_model": unary_model,
         "responses": {
             HTTPStatus.OK.value: {
-                "model": chunk_model,
+                "model": resolved_chunk_model,
                 "description": (
                     "JSON body when stream=false; SSE events when stream=true."
                 ),
                 "content": {
-                    "text/event-stream": {"schema": _sse_event_schema(chunk_ref)}
+                    "text/event-stream": {
+                        "schema": _sse_event_schema(
+                            chunk_ref, done_sentinel=done_sentinel
+                        )
+                    }
                 },
             },
             **error_responses,
