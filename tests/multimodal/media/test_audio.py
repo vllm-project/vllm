@@ -104,6 +104,60 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
 
 
+@pytest.mark.parametrize("backend", ["soundfile", "pyav", "torchcodec"])
+@pytest.mark.parametrize(
+    "duration_limit,decode_limit",
+    [(0, 256 * 1024 * 1024), (600, 0), (0, 0)],
+    ids=["duration", "decoded-bytes", "both"],
+)
+def test_load_audio_zero_decode_limits_are_disabled(
+    backend, duration_limit, decode_limit, dummy_audio_bytes, monkeypatch
+):
+    """Zero decode limits are disabled consistently across backends."""
+    if backend == "torchcodec":
+
+        class FakeSamples:
+            sample_rate = 16000
+
+            def __init__(self):
+                self.data = audio_module.torch.zeros(
+                    (1, 1600), dtype=audio_module.torch.float32
+                )
+
+        class FakeMetadata:
+            duration_seconds = 0.1
+            sample_rate = 16000
+            num_channels = 1
+            codec = "pcm_s16le"
+
+        class FakeDecoder:
+            metadata = FakeMetadata()
+
+            def __init__(self, _path, sample_rate=None):
+                assert sample_rate is None
+
+            @staticmethod
+            def get_all_samples():
+                return FakeSamples()
+
+            @staticmethod
+            def get_samples_played_in_range(_start, _end):
+                return FakeSamples()
+
+        monkeypatch.setattr(audio_module, "AudioDecoder", FakeDecoder)
+
+    audio, sample_rate = load_audio(
+        BytesIO(dummy_audio_bytes),
+        sr=None,
+        max_duration_s=duration_limit,
+        max_decode_bytes=decode_limit,
+        backend=backend,
+    )
+
+    assert audio.size > 0
+    assert sample_rate == 16000
+
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
@@ -123,12 +177,21 @@ def _make_flac_bytes(frames: int, channels: int, samplerate: int) -> bytes:
 
 
 @pytest.mark.skip_global_cleanup
-def test_request_budget_rejects_second_decoded_audio_clip(monkeypatch):
+def test_request_budget_remains_enforced_when_audio_decode_limit_disabled(
+    monkeypatch,
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_DURATION_S", 0)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_BYTES", 0)
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 384)
     clip = _make_flac_bytes(frames=64, channels=1, samplerate=16000)
-    audio_io = AudioMediaIO(decoded_budget=MediaDecodedBudget())
+    audio_io = AudioMediaIO(
+        audio_backend="soundfile", decoded_budget=MediaDecodedBudget()
+    )
 
-    audio_io.load_bytes(clip)
+    audio, sample_rate = audio_io.load_bytes(clip)
+    assert sample_rate == 16000
+    assert audio.nbytes == 256
+
     with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
         audio_io.load_bytes(clip)
 
