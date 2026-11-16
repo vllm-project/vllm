@@ -52,6 +52,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -976,6 +977,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
         self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
@@ -1334,6 +1336,13 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # Activation- and weight-scale layouts are independent: derive each from
+        # the quant key that describes it.
+        activation_quant_key = self.activation_quant_key
+        assert activation_quant_key is not None
+        per_act_token_quant = activation_quant_key.scale.group_shape.is_per_token()
+        per_out_ch_quant = self.weight_quant_key.scale.group_shape.is_per_channel()
+
         # Static-activation INT8 has no oracle backend (it uses the legacy
         # fused_experts path); build its config directly.
         if self.int8_backend is None:
@@ -1344,7 +1353,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 a2_scale=layer.w2_input_scale,
                 w1_bias=getattr(layer, "w13_bias", None),
                 w2_bias=getattr(layer, "w2_bias", None),
-                per_act_token_quant=False,
+                per_act_token_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
             )
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
@@ -1354,7 +1364,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            per_act_token_quant=(self.weight_qscheme == "per_channel"),
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
             layer=layer,
         )
 
@@ -1825,9 +1836,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        # Convert weights to kernel format (handles all backend-specific logic)
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        if self.model_type == "gpt_oss":
+            converted_weights = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=layer.w13_weight,
@@ -1839,7 +1849,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w13_input_scale=layer.w13_input_scale,
                 w2_input_scale=layer.w2_input_scale,
             )
-        )
+        else:
+            converted_weights = convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                activation=self.moe.activation,
+            )
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 
         # Handle weight/scale assignment based on backend type
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
