@@ -156,14 +156,21 @@ def minimax_m3_nvfp4_index_score_decode(
 
 
 @functools.cache
-def _get_kernel_cp_push():
+def _get_kernel_cp_push(query_len: int, ch: int):
     from . import kernel_cp_push
 
-    return kernel_cp_push.compile_score_push()
+    return kernel_cp_push.compile_score_push(query_len, ch)
+
+
+# 8-row (DSpark 7) requests: runs of 8 blocks on 512 workgroups. Half the
+# 16-block runs give the burst's short contexts (64-130K) twice the work units;
+# 512 workgroups keep two a CU at the build's 3-waves-a-SIMD occupancy.
+CP8_CH = 8
+CP8_GRID = 512
 
 
 def minimax_m3_nvfp4_index_score_push_cp(
-    iq: torch.Tensor,  # this rank's index head [num_reqs * 4, 128] e4m3
+    iq: torch.Tensor,  # this rank's index head [num_reqs * query_len, 128] e4m3
     index_cache: torch.Tensor,  # [num_blocks, 128, 72] uint8
     dests: list[int],  # head h's scores [rows, row_stride] fp32 on rank h
     row_stride: int,
@@ -178,26 +185,33 @@ def minimax_m3_nvfp4_index_score_push_cp(
     iq_bufs: list[int],  # rank p's index-q receive buffer [4, iq_rows, 128] e4m3
     iq_rows: int,
     grid: int = 0,
+    query_len: int = 4,
 ) -> None:
     """This rank's share of all four heads' decode scores, pushed to the heads'
-    ranks; returns once every rank's scores have arrived."""
+    ranks; returns once every rank's scores have arrived. `query_len` rows a
+    request (4 or 8): an 8-row request scores both 4-row groups per page read."""
     from . import kernel_cp_push
 
     rows = iq.shape[0]
-    assert rows % 4 == 0 and rows <= iq_rows
+    assert query_len in kernel_cp_push.QLS
+    assert rows % query_len == 0 and rows <= iq_rows
     assert iq.dtype == torch.float8_e4m3fn and iq.shape[1] == kernel_cp_push.D
     assert iq.stride(1) == 1 and iq.stride(0) == kernel_cp_push.D
-    num_reqs = rows // 4
+    num_reqs = rows // query_len
     assert num_reqs <= kernel_cp_push.MAX_REQS
+    ch = CP8_CH if query_len == 8 else kernel_cp_push.CP_CH
     if not grid:
-        small = num_reqs <= kernel_cp_push.GRID_SMALL_REQS
-        grid = kernel_cp_push.GRID_SMALL if small else kernel_cp_push.GRID
+        if query_len == 8:
+            grid = CP8_GRID
+        else:
+            small = num_reqs <= kernel_cp_push.GRID_SMALL_REQS
+            grid = kernel_cp_push.GRID_SMALL if small else kernel_cp_push.GRID
     assert 0 < grid <= kernel_cp_push.SC_MAX_WG
     if num_reqs == 0:
         return
     assert dest_bytes < 2**31 * 4, "score offsets must fit in int32 elements"
     run_compiled(
-        _get_kernel_cp_push(),
+        _get_kernel_cp_push(query_len, ch),
         iq.data_ptr(),
         index_cache.data_ptr(),
         nvfp4_e4m3_lut(iq.device).data_ptr(),

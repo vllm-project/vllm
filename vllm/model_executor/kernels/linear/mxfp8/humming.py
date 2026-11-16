@@ -59,6 +59,10 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
         # Always converts for MXFP8 activations, whatever the layer requests.
         return humming_executed_input_quant_key(cls.weight_quant_config, kMxfp8Dynamic)
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.view(torch.float8_e8m0fnu)
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
