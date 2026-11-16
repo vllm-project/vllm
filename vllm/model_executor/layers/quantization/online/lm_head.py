@@ -6,6 +6,7 @@ private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
+from collections.abc import Callable
 from itertools import chain
 from math import lcm
 from typing import ClassVar, Literal
@@ -36,7 +37,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -232,6 +235,19 @@ def lm_head_padding_size(tp_size: int) -> int:
     return lcm(DEFAULT_VOCAB_PADDING_SIZE, 16 * tp_size)
 
 
+def _lm_head_method_factory(quantization: str) -> Callable[[], OnlineLinearBase]:
+    # Platform formats first: a hardware plugin may provide or override one.
+    platform_methods = current_platform.get_draft_lm_head_quantization_methods()
+    if quantization in platform_methods:
+        return resolve_obj_by_qualname(platform_methods[quantization])
+    if quantization in _LM_HEAD_METHODS:
+        return _LM_HEAD_METHODS[quantization]
+    raise ValueError(
+        f"Unsupported draft_lm_head_quantization {quantization!r}; supported "
+        f"formats: {sorted([*_LM_HEAD_METHODS, *platform_methods])}"
+    )
+
+
 def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
     if (
         not isinstance(
@@ -256,7 +272,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_LM_HEAD_METHODS[quantization](),
+            quant_method=_lm_head_method_factory(quantization)(),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
@@ -275,13 +291,15 @@ _SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDiction
 
 
 def quantized_lm_head_copy(
-    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
+    lm_head: ParallelLMHead, quantization: str
 ) -> ParallelLMHead:
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
     FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. `lm_head` is left
+    platform's W4A16 kernel. The current platform may provide further formats
+    (see `Platform.get_draft_lm_head_quantization_methods`), which take
+    precedence over these. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """

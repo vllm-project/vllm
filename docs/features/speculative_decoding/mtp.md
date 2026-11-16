@@ -82,4 +82,6 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   large vocabulary. The copy costs about one byte (FP8) or 0.56 bytes (NVFP4)
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
-  for it.
+  for it. A hardware platform may provide further formats through
+  `Platform.get_draft_lm_head_quantization_methods`; a platform format using
+  a core format's name takes precedence over it.
