@@ -1313,6 +1313,7 @@ def init_nvfp4_linear_kernel(
     Returns:
         The kernel, or a placeholder for requantization sources, which have
         no kernel.
+
     """
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
