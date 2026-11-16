@@ -58,7 +58,8 @@ def _uses_host_page_tables() -> bool:
     cuda = ctypes.CDLL("libcuda.so.1")
     device, value = ctypes.c_int(), ctypes.c_int()
     return (
-        cuda.cuDeviceGet(ctypes.byref(device), torch.cuda.current_device()) == 0
+        cuda.cuDeviceGet(ctypes.byref(device), torch.accelerator.current_device_index())
+        == 0
         and cuda.cuDeviceGetAttribute(
             ctypes.byref(value), _PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES, device
         )
