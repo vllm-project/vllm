@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -17,6 +18,7 @@ use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
 };
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_metrics::CustomHistogramBuckets;
@@ -320,6 +322,10 @@ impl FromStr for LoraModulePath {
     }
 }
 
+/// Default LoRA adapter path or Hugging Face repo id per modality, as
+/// Python's `--default-mm-loras` (e.g. `{"audio": "org/speech-lora"}`).
+pub type DefaultMmLoras = IndexMap<MmModality, String>;
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -384,6 +390,10 @@ pub struct Config {
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,
+    /// LoRA adapters loaded at startup after `lora_modules`, each under its
+    /// modality's name, and applied to chat requests that name no adapter
+    /// but carry that modality.
+    pub default_mm_loras: DefaultMmLoras,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
@@ -425,6 +435,9 @@ pub struct Config {
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
     pub disable_request_id_randomization: bool,
+    /// Keep the API server running after the LLM becomes permanently unhealthy
+    /// (`VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`).
+    pub keep_alive_on_engine_death: bool,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when

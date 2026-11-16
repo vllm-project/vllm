@@ -310,10 +310,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
 
-    /// Dictionary mapping specific modalities to LoRA model paths.
-    #[arg(long)]
-    pub default_mm_loras: Option<Unsupported>,
-
     /// Target URL to which OpenTelemetry traces will be sent.
     #[arg(long)]
     pub otlp_traces_endpoint: Option<Unsupported>,

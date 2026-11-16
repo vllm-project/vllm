@@ -12,6 +12,7 @@ steps:
     - vllm/model_executor/layers/dash_attention.py
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
+    - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention
@@ -30,11 +31,14 @@ steps:
       - vllm/config/attention.py
       - vllm/model_executor/layers/attention
       - vllm/v1/attention
+      - vllm/models/glm5next/amd/ops/kpool_compress.py
       - tests/v1/attention
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
+      - vllm/models/deepseek_v4/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/rocm.py
       commands:
       - >-
         pytest -v -s
@@ -58,6 +62,7 @@ steps:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
+    - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention
@@ -76,11 +81,14 @@ steps:
       - vllm/config/attention.py
       - vllm/model_executor/layers/attention
       - vllm/v1/attention
+      - vllm/models/glm5next/amd/ops/kpool_compress.py
       - tests/v1/attention
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
       - vllm/models/deepseek_v32/amd/rocm.py
+      - vllm/models/deepseek_v4/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/rocm.py
       commands:
       - >-
         pytest -v -s
