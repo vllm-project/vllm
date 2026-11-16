@@ -201,7 +201,7 @@ def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibl
             psutil.wait_procs(children, timeout=10)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model: str
     prompts: list[str]
@@ -322,6 +322,14 @@ QWEN_MTP_CASE = ModelCase(
     ],
 )
 
+# The engine builds the draft as the only pipeline stage on the last PP rank;
+# the warm runs map it only if the draft daemon builds and keys it that way.
+QWEN_MTP_PP2_CASE = replace(
+    QWEN_MTP_CASE,
+    llm_kwargs={**QWEN_MTP_CASE.llm_kwargs, "pipeline_parallel_size": 2},
+    daemon_args=[*QWEN_MTP_CASE.daemon_args, "--pipeline-parallel-size", "2"],
+)
+
 
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -330,7 +338,6 @@ DSV2_EP_CASE = ModelCase(
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.85,
         enforce_eager=True,
         max_model_len=1024,
     ),
@@ -461,6 +468,41 @@ def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
     run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
 
 
+COMPRESSED_BLOCK_FP8_CASE = ModelCase(
+    model="RedHatAI/Qwen3-0.6B-FP8-BLOCK",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        revision="5def00c475640c0527e3a7067b1a26b94decefb5",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "5def00c475640c0527e3a7067b1a26b94decefb5",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="Compressed-tensors block FP8 CUTLASS weight cache requires SM90+",
+)
+def test_ipc_cache_compressed_block_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_BLOCK_FP8_CASE, tmp_path)
+
+
 NVFP4_CASE = ModelCase(
     model="nvidia/Qwen3-30B-A3B-NVFP4",
     prompts=["The capital of France is", "Hello, my name is"],
@@ -543,6 +585,13 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
     # No capfd: a CaptureFixture does not survive the cloudpickle into the
     # child, and this case never reaches the check_flashinfer_cache branch.
     run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_pp2_mtp(vllm_runner, tmp_path):
+    """Same as above at pp=2, with an MTP draft model."""
+    run_cold_start_and_warm_restart(vllm_runner, QWEN_MTP_PP2_CASE, tmp_path)
 
 
 @create_new_process_for_each_test()
@@ -732,6 +781,10 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         extra_args=case.daemon_args,
     ) as d:
         d.wait_until_ready()
+        if "speculative_config" in case.llm_kwargs:
+            # Draft daemons serve only the GPUs of the last pipeline stage.
+            num_draft_sockets = len(list(Path(d.socket_dir).glob("*_draft.sock")))
+            assert num_draft_sockets == case.llm_kwargs.get("tensor_parallel_size", 1)
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file

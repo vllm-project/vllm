@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAMetadataBuilder,
     _compute_num_kv_splits,
 )
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 NUM_HEADS = 16
 KV_LORA_RANK = 512
@@ -230,13 +230,10 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
         model_config=SimpleNamespace(max_model_len=max_model_len),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
     )
-    spec = SlidingWindowMLASpec(
-        block_size=PAGE_SIZE,
-        num_kv_heads=1,
-        head_size=HEAD_SIZE,
-        dtype=torch.bfloat16,
-        sliding_window=window,
+    spec = MLAAttentionSpec(
+        block_size=PAGE_SIZE, num_kv_heads=1, head_size=HEAD_SIZE, dtype=torch.bfloat16
     )
+    layers = {"layer0": SimpleNamespace(sliding_window=window)}
 
     def builder_init(self, *args):
         self.dcp_world_size = 1
@@ -258,9 +255,10 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
         patch(
             f"{triton_mla}.current_platform.num_compute_units", return_value=sm_count
         ),
+        patch(f"{triton_mla}.get_layers_from_vllm_config", return_value=layers),
         patch.object(MLACommonMetadataBuilder, "__init__", builder_init),
     ):
-        TritonMLAMetadataBuilder(spec, ["layer0"], vllm_config, "cpu")
+        TritonMLAMetadataBuilder(spec, list(layers), vllm_config, "cpu")
         impl.reserve_workspace()
 
     expected = _compute_num_kv_splits(window, sm_count)
