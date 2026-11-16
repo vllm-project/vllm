@@ -192,6 +192,13 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_prefix_lm_rows(cls) -> bool:
+        """Whether the impl runs PrefixLM steps as varlen rows on the layers
+        that apply PrefixLM ranges. `Attention` then passes it
+        `prefix_lm_ranges`."""
+        return False
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return False
 
@@ -315,7 +322,10 @@ class AttentionBackend(ABC):
         use_dcp: bool = False,
         use_rswa: bool = False,
         use_hisparse: bool = False,
+        use_bidirectional_spans: bool = False,
     ) -> list[str]:
+        # use_bidirectional_spans only orders a platform's candidates; a backend
+        # serves spans if it applies PrefixLM ranges (use_mm_prefix).
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
             invalid_reasons.append("head_size not supported")

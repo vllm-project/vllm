@@ -396,6 +396,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
                 has_sliding_window=sliding_window is not None,
+                use_bidirectional_spans=bidirectional_spans,
             )
         else:
             self.attn_backend = attn_backend
@@ -477,6 +478,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 extra_impl_args.setdefault("block_m", block_m)
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
+
+        if self.use_mm_prefix and self.attn_backend.supports_prefix_lm_rows():
+            extra_impl_args["prefix_lm_ranges"] = (
+                mm_prefix_ranges or bidirectional_spans
+            )
 
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass

@@ -86,6 +86,10 @@ All of a span's uncomputed tokens run in one step, because each of them attends 
 
 Each span must fit one step: at most `--max-num-batched-tokens` tokens, less the slots a speculative decoding method reserves, and at most `--max-num-scheduled-tokens` and `--long-prefill-token-threshold` when they are set. Longer spans are refused, and so are spans whose multimodal items do not fit the encoder cache (`--encoder-cache-size`) together.
 
+## Attention backends
+
+Layers that apply spans need an attention backend that applies PrefixLM ranges. On H100 and other SM90 GPUs, vLLM prefers `FLASH_ATTN` for them when FlashAttention 4 serves the layer's head size, as for Gemma 4's full-attention layers. A step that prefills whole spans then runs as varlen rows in one FlashAttention 4 call: the tokens of each span attend non-causally to the keys up to the span's end, and every other token, including those of requests without spans in the same step, attends causally. With adaptive verification of speculative decoding, steps with spans keep FlashAttention 4's mask path instead. When `FLASH_ATTN` cannot serve the layer, for example with an FP8 KV cache, the layer takes the next backend that applies PrefixLM ranges, usually the composite `TRITON_FLASH_ATTN`, which runs steps with spans on Triton's PrefixLM kernel. On other GPUs span layers use the platform's PrefixLM backend, as layers with multimodal PrefixLM ranges do; on Blackwell that is the composite `TRITON_FLASHINFER`.
+
 ## Limitations
 
 vLLM refuses to start a checkpoint that declares spans with:
@@ -100,4 +104,4 @@ vLLM refuses to start a checkpoint that declares spans with:
 
 Spans are refused on requests with streaming input or prompt logprobs. Sliding-window layers and hybrid (Mamba) models do not apply spans yet.
 
-Layers that apply spans run on a backend that applies PrefixLM ranges. When that is the composite `TRITON_FLASH_ATTN` backend, as on H100, it does not support full CUDA graphs with speculative decoding, so vLLM falls back to piecewise CUDA graphs (`cudagraph_mode=PIECEWISE`) and logs a warning at startup.
+When any layer runs on a composite backend (`TRITON_FLASH_ATTN` or `TRITON_FLASHINFER`), for example the sliding-window layers of a Gemma 4 checkpoint with `"vision"` attention on H100, the composite does not support full CUDA graphs with speculative decoding, so vLLM falls back to piecewise CUDA graphs (`cudagraph_mode=PIECEWISE`) and logs a warning at startup.

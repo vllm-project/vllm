@@ -722,6 +722,74 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 
 
 @blackwell_only
+@pytest.mark.parametrize(
+    "use_bidirectional_spans,head_size,kv_cache_dtype,flash_attn_version,expected",
+    [
+        (False, 512, None, None, "TRITON_FLASH_ATTN"),
+        (True, 512, None, None, "FLASH_ATTN"),
+        # FlashAttention cannot apply PrefixLM ranges over an FP8 KV cache on
+        # SM90, nor without FA4.
+        (True, 512, "fp8", None, "TRITON_FLASH_ATTN"),
+        (True, 256, None, 3, "TRITON_FLASH_ATTN"),
+    ],
+)
+def test_hopper_bidirectional_spans_prefer_flash_attn(
+    use_bidirectional_spans,
+    head_size,
+    kv_cache_dtype,
+    flash_attn_version,
+    expected,
+    hopper_selection,
+):
+    """On Hopper, layers that apply bidirectional spans prefer FlashAttention,
+    which runs their steps as varlen rows, and fall back to the composite when
+    it cannot serve them. Layers with image ranges only keep the composite."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype=kv_cache_dtype or "auto",
+        attention_config=AttentionConfig(flash_attn_version=flash_attn_version),
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        backend = get_attn_backend(
+            head_size,
+            torch.bfloat16,
+            kv_cache_dtype,
+            use_mm_prefix=True,
+            use_bidirectional_spans=use_bidirectional_spans,
+        )
+    assert backend.get_name() == expected
+
+
+@blackwell_only
+@pytest.mark.parametrize("head_size", [256, 512])
+def test_blackwell_bidirectional_spans_select_as_image_layers(
+    head_size, blackwell_selection
+):
+    """FA4 has no per-row causal flags on Blackwell, so span layers select the
+    backend that layers with image ranges select there."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it", dtype="bfloat16"
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        names = {
+            spans: get_attn_backend(
+                head_size,
+                torch.bfloat16,
+                None,
+                use_mm_prefix=True,
+                use_bidirectional_spans=spans,
+            ).get_name()
+            for spans in (False, True)
+        }
+    assert names[True] == names[False]
+
+
+@blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
 @pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
