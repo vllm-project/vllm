@@ -62,7 +62,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -97,7 +97,6 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
         and getattr(config, "num_experts", 0) > 0
         and not getattr(config, "mlp_only_layers", [])
         and getattr(config, "decoder_sparse_step", 1) == 1
@@ -731,7 +730,8 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -748,6 +748,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
