@@ -353,6 +353,10 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
             [layer.self_attn.k_norm(k) for layer, k in zip(self.layers, all_k)]
         )
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        k_norms = [layer.self_attn.k_norm for layer in self.layers]
+        return [*super().context_kv_modules(), *k_norms]
+
     def _context_kv_writer(self) -> DSparkContextKVWriter | None:
         """The fused context K/V writer, or None where the base path runs."""
         if not hasattr(self, "_ctx_kv_writer"):

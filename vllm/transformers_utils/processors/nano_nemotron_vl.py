@@ -370,7 +370,7 @@ class DynamicResolutionImageTiler:
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
 
-    @dataclass
+    @dataclass(slots=True)
     class DynamicResolutionParams:
         media: Image.Image
         num_tiles: int

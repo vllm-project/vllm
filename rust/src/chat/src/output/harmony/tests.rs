@@ -46,6 +46,7 @@ fn decoded_start() -> DecodedTextEvent {
     DecodedTextEvent::Start {
         prompt_token_ids: Arc::<[u32]>::from([]),
         prompt_logprobs: None,
+        prompt_token_id_logprobs: None,
     }
 }
 
@@ -59,7 +60,6 @@ fn finished() -> Finished {
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
         ec_transfer_params: None,
-        sampling_mask: None,
         spec_decode_metrics: None,
         weight_versions: None,
         routed_experts: None,
@@ -77,6 +77,7 @@ fn decoded_tokens(
         sampled: SampledDelta {
             token_ids,
             logprobs,
+            sampling_mask: None,
         },
         finished: finished.map(Box::new),
     }

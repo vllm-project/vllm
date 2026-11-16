@@ -964,8 +964,8 @@ impl MultimodalModelInfo {
         let video = self.video.as_ref()?;
         let config = &video.config;
         Some((
-            video.spec.raw.video_frame_sampling_with(Some(config)),
-            video.spec.raw.default_video_sample_fps_with(Some(config)),
+            video.spec.raw.video_frame_sampling_with(config),
+            video.spec.raw.default_video_sample_fps_with(config),
         ))
     }
 
@@ -979,12 +979,17 @@ impl MultimodalModelInfo {
     )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
-        if let Some((sampling, default_fps)) = self.video_sampling_policy() {
+        let video_sampling_policy = self.video_sampling_policy();
+        if let Some((sampling, default_fps)) = video_sampling_policy {
             tracker = tracker
                 .with_video_frame_sampling(sampling)
                 .with_default_video_sample_fps(default_fps);
         }
-        for part in media_parts {
+        for mut part in media_parts {
+            apply_video_fps(
+                &mut part,
+                video_sampling_policy.map(|(sampling, _)| sampling),
+            )?;
             tracker.push_part(part)?;
         }
 
@@ -1041,6 +1046,29 @@ impl MultimodalModelInfo {
             audio_uuids,
         })
     }
+}
+
+/// Check a video part's requested sampling rate against the model's frame
+/// sampling, and scope a client uuid by the rate: as in Python, the uuid alone
+/// does not identify frames sampled at a per-request rate.
+fn apply_video_fps(part: &mut MediaContentPart, sampling: Option<FrameSampling>) -> Result<()> {
+    let MediaContentPart::VideoUrl {
+        uuid,
+        fps: Some(fps),
+        ..
+    } = part
+    else {
+        return Ok(());
+    };
+    if let Some(FrameSampling::UpTo { .. }) = sampling {
+        return Err(Error::UnsupportedMultimodalContent(
+            "video fps for a model that samples a fixed number of frames",
+        ));
+    }
+    if let Some(uuid) = uuid {
+        *uuid = format!("{uuid}@fps={fps}");
+    }
+    Ok(())
 }
 
 /// Adapter from the frontend tokenizer trait to `llm-multimodal`.
@@ -1221,10 +1249,62 @@ mod tests {
     }
 
     #[test]
+    fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
+        let part = |fps| MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned(),
+            uuid: Some("clip".to_owned()),
+            fps,
+            max_long_side_pixel: None,
+        };
+        let results = [
+            (part(None), Some(FrameSampling::EvenRounded)),
+            (part(Some(1.0)), Some(FrameSampling::EvenRounded)),
+            (
+                part(Some(1.0)),
+                Some(FrameSampling::UpTo { max_frames: 32 }),
+            ),
+        ]
+        .map(|(mut part, sampling)| {
+            apply_video_fps(&mut part, sampling)
+                .map(|()| part)
+                .map_err(|error| error.to_report_string())
+        });
+        expect_test::expect![[r#"
+            [
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip",
+                        ),
+                        fps: None,
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip@fps=1",
+                        ),
+                        fps: Some(
+                            1.0,
+                        ),
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Err(
+                    "unsupported multimodal content: video fps for a model that samples a fixed number of frames",
+                ),
+            ]
+        "#]].assert_debug_eq(&results);
+    }
+
+    #[test]
     fn video_sampling_policy_comes_from_the_video_spec() {
         // GLM-5.3-Flash: the GLM-5 family's own loader rule walks the clip
-        // at the configured rate (`RateWalk`), and the processor resamples
-        // at the video config's `fps` (default 2.0).
+        // at its fixed rate (`RateWalk`); the processor config's `fps` does
+        // not change the loader's sampling rate.
         let info = glm53_flash_info(glm53_flash_video_config());
         assert_eq!(
             info.video_sampling_policy(),
@@ -1233,7 +1313,7 @@ mod tests {
                     max_frames: 2048,
                     temporal_patch_size: 2
                 },
-                Some(1.0)
+                Some(2.0)
             ))
         );
         let info = glm53_flash_info(PreProcessorConfig::default());
