@@ -22,17 +22,22 @@
 #      ├─ hybrid-test-wheels  mamba-ssm / causal-conv1d wheels for the test image
 #      └─ dev               + all runtime and dev requirements (not used by CI)
 #
-# Runtime (FROM the nvidia/cuda image):
+# Runtime (FROM the nvidia/cuda image), in file order:
 #   vllm-runtime-base    Python, CUDA JIT tools, PyTorch, FlashInfer kernels, runtime requirements, DeepEP
-#   ├─ vllm-base         + vLLM wheel
-#   │  └─ vllm-openai-base  + optional KV connectors, labels
-#   │     ├─ vllm-openai          release image (default `docker build` target
-#   │     │  └─ vllm-openai-nonroot    is this, the last stage)
-#   │     └─ vllm-sagemaker
-#   └─ test-deps         + every test requirement             (changes with requirements/)
-#      ├─ test-wheel     helper: installs the vLLM wheel, sorts its files by how often they change
-#      ├─ test-src       helper: lays out the source tree
-#      └─ test           CI image: test-deps + one layer per tree from the two helpers
+#   ├─ test-deps         + every test requirement             (changes with requirements/)
+#   │  ├─ test-wheel     helper: installs the vLLM wheel, sorts its files by how often they change
+#   │  ├─ test-src       helper: lays out the source tree
+#   │  └─ test           CI image: test-deps + one layer per tree from the two helpers
+#   └─ vllm-base         + vLLM wheel
+#      └─ vllm-openai-base  + optional KV connectors, labels
+#         ├─ vllm-sagemaker
+#         └─ vllm-openai          release image (default `docker build` target
+#            └─ vllm-openai-nonroot    is this, the last stage)
+#
+# To follow one image, read only its stages:
+#   CI test image (`--target test`):         vllm-runtime-base → test-deps → test-wheel, test-src → test
+#   release image (`--target vllm-openai`):  vllm-runtime-base → vllm-base → vllm-openai-base → vllm-openai
+# Both install the wheel that `build` packages from csrc-build and rust-build.
 #
 # Ordering rule: within a stage, steps that change rarely come first. A step
 # reruns when its own inputs change or when any step above it reran, so keep
@@ -780,8 +785,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 #################### DEV IMAGE ####################
-#################### vLLM installation IMAGE ####################
-# image with vLLM installed
+
+#################### RUNTIME BASE IMAGE ####################
+# What the release image and the CI test image share: OS packages, Python, CUDA
+# JIT tools and the runtime Python requirements. No vLLM code yet.
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG INSTALL_RUBIN_PRERELEASE
@@ -1067,42 +1074,11 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-# ============================================================
-# VLLM INSTALLATION (depends on build stage)
-# ============================================================
+#################### CI TEST IMAGE ####################
+# The next four stages build the per-commit CI image (`--target test`). Nothing
+# in the release image comes from them.
+# Read vllm-runtime-base, then test-deps → test-wheel and test-src → test.
 
-FROM vllm-runtime-base AS vllm-base
-
-ARG PIP_INDEX_URL UV_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# We can specify the standard or nightly build of PyTorch
-ARG PYTORCH_NIGHTLY
-
-# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern as the
-# DeepEP wheels above.
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" /tmp/vllm-dist/*.whl
-
-# Expose the Rust frontend bundled in the wheel on the container's PATH.
-RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
-    && vllm-rs --version
-
-RUN --mount=type=cache,target=/opt/uv/cache \
-. /etc/environment && \
-uv pip list
-
-# Copy examples and benchmarks at the end to minimize cache invalidation
-COPY examples examples
-COPY benchmarks benchmarks
-COPY ./vllm/collect_env.py .
-#################### vLLM installation IMAGE ####################
-#################### TEST IMAGE ####################
 # Stable dependencies for the unit testing image
 FROM vllm-runtime-base AS test-deps
 
@@ -1297,9 +1273,42 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens
 ENV VLLM_GPU_SYNC_CHECK=error
-#################### TEST IMAGE ####################
 
-#################### OPENAI API SERVER ####################
+#################### RELEASE IMAGE ####################
+# From here to the end of the file: the image users run (`--target vllm-openai`).
+# Read vllm-runtime-base, then vllm-base → vllm-openai-base → vllm-openai.
+
+FROM vllm-runtime-base AS vllm-base
+
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
+
+# We can specify the standard or nightly build of PyTorch
+ARG PYTORCH_NIGHTLY
+
+# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern as the
+# DeepEP wheels above.
+COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" /tmp/vllm-dist/*.whl
+
+# Expose the Rust frontend bundled in the wheel on the container's PATH.
+RUN ln -s "$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')/vllm/vllm-rs" /usr/local/bin/vllm-rs \
+    && vllm-rs --version
+
+RUN --mount=type=cache,target=/opt/uv/cache \
+. /etc/environment && \
+uv pip list
+
+# Copy examples and benchmarks at the end to minimize cache invalidation
+COPY examples examples
+COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
+
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
@@ -1413,7 +1422,6 @@ FROM vllm-openai-base AS vllm-openai
 # See docs/deployment/docker.md.
 # USER vllm
 ENTRYPOINT ["vllm", "serve"]
-#################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
 # Non-root-ready variant of `vllm-openai`. Built via:
