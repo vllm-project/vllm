@@ -166,6 +166,16 @@ def test_rocm_monokernel_rejects_indexer_replay_before_loading_layers(capture_co
         MonoDecodeLayer.create(None, capture_config)
 
 
+def test_cpu_attention_rejects_indexer_replay_before_building_layers(
+    capture_config,
+):
+    from vllm.models.deepseek_v4.cpu.cpu_sparse import DeepseekV4CPUAttention
+
+    capture_config.aux_output_config.enable_return_indexer_topk = True
+    with pytest.raises(ValueError, match="on CPU does not support"):
+        DeepseekV4CPUAttention(capture_config, "model.layers.0.self_attn")
+
+
 def test_capture_helper_skips_unbound_sink_without_a_buffer():
     capture_indexer_topk(None, None, 2)
 
