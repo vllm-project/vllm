@@ -8,7 +8,10 @@ import pytest
 from safetensors.numpy import save
 
 from tests.distributed.aux_output_connector.utils import fake_store
-from vllm.distributed.aux_output_connector.object_store import read_aux_rows
+from vllm.distributed.aux_output_connector.object_store import (
+    aux_object_names,
+    read_aux_rows,
+)
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
 
 
@@ -65,3 +68,15 @@ class TestReadAuxRows:
         rows = read_aux_rows(store, ["s/0"], "hidden_states", 2)
         np.testing.assert_array_equal(rows, hidden)
         assert read_aux_rows(store, ["s/0"], "routed_experts", 2).shape == (4, 4, 3)
+
+    @pytest.mark.parametrize(
+        "pipeline_parallel_size", [1, 2], ids=["one-stage", "two-stages"]
+    )
+    def test_field_no_stage_holds_is_named(self, pipeline_parallel_size):
+        _, store = fake_store()
+        names = aux_object_names(["s/0", "s/1"], pipeline_parallel_size)
+        store.put_batch(names, [save({"routed_experts": _rows(0, 4)})] * len(names))
+        with pytest.raises(BlockObjectStoreError, match="'s/0' has no field 'hidden"):
+            read_aux_rows(
+                store, ["s/0", "s/1"], "hidden_states", pipeline_parallel_size
+            )

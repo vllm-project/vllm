@@ -107,15 +107,16 @@ def read_aux_rows(
                 )
             time.sleep(0.05)
         stages.append(load(data).get(field))
-    parts = [
-        np.concatenate(
-            [
-                rows
-                for rows in stages[start : start + pipeline_parallel_size]
-                if rows is not None
-            ],
-            axis=1,
-        )
-        for start in range(0, len(stages), pipeline_parallel_size)
-    ]
+    parts = []
+    for key, start in zip(keys, range(0, len(stages), pipeline_parallel_size)):
+        held = [
+            rows
+            for rows in stages[start : start + pipeline_parallel_size]
+            if rows is not None
+        ]
+        if not held:
+            raise BlockObjectStoreError(
+                f"auxiliary-output object {key!r} has no field {field!r}"
+            )
+        parts.append(np.concatenate(held, axis=1))
     return np.concatenate(parts) if parts else np.empty(0)
