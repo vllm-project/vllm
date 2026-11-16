@@ -51,8 +51,14 @@ def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
     host_memory_is_pinned: bool = True,
+    load_path: str = "auto",
 ):
-    """Resolve the swap_blocks function for a handler at init time."""
+    """Resolve the swap_blocks function for a handler at init time.
+
+    With `load_path="triton"`, loads use the Triton kernel at every page size
+    it can copy, which keeps them off the copy engine that the model's own
+    host-to-device copies share. Batches under `MIN_N` copies still take DMA.
+    """
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     # The Triton kernel dereferences CPU pointers on the GPU, which is only
     # valid for pinned host memory.
@@ -65,10 +71,10 @@ def _select_swap_blocks_fn(
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
-    # Triton wins only on small, 8-byte-aligned payloads.
+    # Timed alone, Triton wins only on small, 8-byte-aligned payloads.
     if (
         not page_sizes
-        or max(page_sizes) >= THRESHOLD_BYTES
+        or (load_path != "triton" and max(page_sizes) >= THRESHOLD_BYTES)
         or any(s % 8 for s in page_sizes)
     ):
         return ops.swap_blocks_batch
@@ -308,6 +314,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
+        load_path: str = "auto",
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -321,6 +328,8 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
+            load_path: `"auto"` or `"triton"`, see `_select_swap_blocks_fn`.
+                Canonical loads copy page fragments and keep `"auto"`.
 
         """
         assert len(cpu_tensors) > 0
@@ -334,7 +343,10 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
+            layer_refs_per_group,
+            gpu_to_cpu,
+            host_memory_is_pinned,
+            load_path="auto" if canonical_layout else load_path,
         )
         self.blocks_per_chunk = blocks_per_chunk
 
@@ -785,6 +797,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
+        load_path: str = "auto",
     ):
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
@@ -844,9 +857,20 @@ class CPUOffloadingWorker(OffloadingWorker):
             host_memory_is_pinned=host_memory_is_pinned,
         )
         self._store_handler = make_handler(gpu_to_cpu=True)
-        self._load_handler = make_handler(gpu_to_cpu=False)
+        self._load_handler = make_handler(gpu_to_cpu=False, load_path=load_path)
         # Own stream, so expedited loads do not queue behind regular loads.
+        # The step waits on them, so their own copy time counts: they keep
+        # the default load path.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
+        if (
+            load_path == "triton"
+            and self._load_handler._swap_blocks_batch is ops.swap_blocks_batch
+        ):
+            logger.warning(
+                "KV offload load_path 'triton' needs Triton on CUDA, pinned host "
+                "memory, the direct CPU layout and pages of whole 8-byte words; "
+                "loads use the copy engine"
+            )
 
     def submit_store(
         self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
