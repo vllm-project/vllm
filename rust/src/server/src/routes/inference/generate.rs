@@ -235,7 +235,6 @@ impl ChoiceChunk for GenerateStreamResponse {
     }
 }
 
-
 #[try_stream]
 async fn generate_chunk_stream(
     stream: impl TextOutputStream,
