@@ -16,6 +16,7 @@ from aiter.ops.triton.attention.pa_mqa_logits import (
 )
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.utils.deep_gemm import calc_diff
 from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
@@ -86,4 +87,4 @@ def test_aiter_paged_mqa_logits_matches_gluon_call(
     )
 
     valid = torch.arange(context, device="cuda") < seq_lens.reshape(-1, 1)
-    torch.testing.assert_close(out[valid], ref[valid], rtol=1e-5, atol=1e-4)
+    assert calc_diff(out[valid], ref[valid]) < 1e-6
