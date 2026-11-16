@@ -241,6 +241,8 @@ steps:
   working_dir: /vllm-workspace/tests
   automatic_shard: true
   timeout_in_minutes: 90
+  env:
+    VLLM_CPU_OMP_THREADS_BIND: "0-31"
   commands:
   - pytest -x -v -s kernels/test_onednn.py
   - pytest -x -v -s kernels/test_cpu_fused_sampling.py

@@ -26,8 +26,11 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
-# On Arm, oneDNN's bf16 GEMM lands up to ~2.1% from the bf16 reference at
-# k=4096, past assert_close's bf16 default rtol of 1.6%.
+# On Arm, oneDNN's ACL GEMM with a bf16 output acts as if it rounds partial
+# sums to bf16 every ~256 of k: its error grows with k, ~1.6-2% at k=4096, past
+# assert_close's bf16 default rtol of 1.6%. bf16 x bf16 -> fp32 then one cast
+# (what create_onednn_mm does for N >= 64000) stays under 0.4%. Restore the
+# default once the bf16 output goes through fp32 for every N.
 BF16_GEMM_TOL = (
     {"rtol": 3e-2, "atol": 1e-5}
     if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
