@@ -1371,6 +1371,37 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
 
     use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
+    if not use_1stage and not aiter_ar.should_custom_ar(input_):
+        # Same large-tensor fallback as the sibling _quant_per_group_impl:
+        # CDR has no efficient IPC path for tensors > AITER CA cap (64 MB).
+        # We also need the unquantized bf16 normed output (result[3]) which
+        # fused_rms_fp8_group_quant provides via output_unquantized_inp1=True.
+        from vllm.distributed import tensor_model_parallel_all_reduce
+        from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+        ar_out = tensor_model_parallel_all_reduce(input_)
+        residual_out = ar_out + residual
+        # fused_rms_fp8_group_quant expects a 2D tensor; flatten leading dims.
+        orig_shape = residual_out.shape
+        x2d = residual_out.view(-1, orig_shape[-1])
+        (quant_out, scale_out), normed_bf16, _, _ = fused_rms_fp8_group_quant(
+            x2d,
+            weight,
+            epsilon,
+            None,
+            None,
+            None,
+            group_size=group_size,
+            dtype_quant=FP8_DTYPE,
+            output_unquantized_inp1=True,
+        )
+        return (
+            quant_out.view(orig_shape),
+            residual_out,
+            scale_out,
+            normed_bf16.view(orig_shape),
+        )
+
     result = ca.fused_ar_rms_per_group_quant(
         input_,
         residual,
@@ -1525,11 +1556,11 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    M, N = x.shape
-    scale_shape = (M, (N + group_size - 1) // group_size)
+    *leading, N = x.shape
+    num_groups = (N + group_size - 1) // group_size
     return (
         torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
-        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+        torch.empty((*leading, num_groups), dtype=torch.float32, device=x.device),
     )
 
 
