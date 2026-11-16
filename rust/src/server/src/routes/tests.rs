@@ -1419,6 +1419,26 @@ async fn test_admin_state_with_ready_and_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    test_admin_state_with_backend_and_engine_script(
+        ready,
+        Arc::new(FakeChatBackend::new()),
+        |state| state,
+        script,
+    )
+    .await
+}
+
+/// Like [`test_admin_state_with_ready_and_engine_script`], with the given chat
+/// backend and `configure` applied to the state before it is shared.
+async fn test_admin_state_with_backend_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    backend: Arc<FakeChatBackend>,
+    configure: impl FnOnce(AppState) -> AppState,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
@@ -1441,12 +1461,12 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(AppState::new(
+        Arc::new(configure(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
-        )),
+        ))),
         engine_task,
     )
 }
@@ -1518,6 +1538,88 @@ async fn static_lora_module_loads_and_lists_with_parent() {
     assert_eq!(json["data"][1]["id"], "alice");
     assert_eq!(json["data"][1]["root"], "/adapters/alice");
     assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+/// Like Python, a chat request that names no adapter takes the
+/// `--default-mm-loras` adapter of the modality it carries and reports it as
+/// the response `model`; a text-only request stays on the base model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_with_media_uses_default_mm_lora() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_backend_and_engine_script(
+        ready,
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+        |state| state.with_default_mm_lora_modalities(vec![MmModality::Image]),
+        |dealer, push| {
+            boxed_test_future(async move {
+                add_lora_script(true, |lora| assert_eq!(lora[0], Value::from("image")))(
+                    dealer, push,
+                )
+                .await;
+                for expected_lora in [Some("image"), None] {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request = decode_add_request(&add);
+                    let lora = request.lora_request.as_ref().map(|lora| lora.lora_name.as_str());
+                    assert_eq!(lora, expected_lora);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                }
+            })
+        },
+    )
+    .await;
+    let module = LoraModulePath {
+        name: "image".to_string(),
+        path: "org/image-lora".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&module).await.expect("load default mm lora");
+    let mut app = build_router_with_gates(state, RouteGates::default());
+
+    let image_content = json!([
+        {"type": "text", "text": "describe "},
+        {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}}
+    ]);
+    for (content, expected_model) in [
+        (image_content, "image"),
+        (json!("hello"), "Qwen/Qwen1.5-0.5B-Chat"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": content}],
+                            "max_completion_tokens": 8
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["model"], expected_model);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4751,7 +4853,8 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
             assert_eq!(features[0].modality.as_str(), "image");
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
+            assert_eq!(features[0].mm_hash.as_deref(), Some("uuid:image-1"));
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
 
@@ -4822,11 +4925,11 @@ fn multimodal_render_app() -> axum::Router {
     }))
 }
 
-async fn render_image_chat(mm_payload: Option<&str>) -> axum::body::Bytes {
+async fn render_image_chat(mm_payload: Option<&str>, uuid: Option<&str>) -> axum::body::Bytes {
     render_chat(
         json!([
             {"type": "text", "text": "describe "},
-            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"}
+            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": uuid}
         ]),
         mm_payload,
     )
@@ -4862,11 +4965,11 @@ async fn render_chat(content: serde_json::Value, mm_payload: Option<&str>) -> ax
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged() {
-    let render_body = render_image_chat(None).await;
+    let render_body = render_image_chat(None, Some("image-1")).await;
     let render_json: serde_json::Value =
         serde_json::from_slice(&render_body).expect("decode render response");
     let features = &render_json["features"];
-    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(
         features["kwargs_data"]["image"][0].is_string(),
         "{features}"
@@ -4889,7 +4992,7 @@ async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged(
             );
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
             assert_eq!(features[0].mm_position.offset, offset);
             assert_eq!(features[0].mm_position.length, length);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -5095,12 +5198,35 @@ async fn generate_limits_features_and_content_parts_together() {
 #[tokio::test]
 async fn render_chat_mm_payload_none_returns_layout_only() {
     let render_json: serde_json::Value =
-        serde_json::from_slice(&render_image_chat(Some("none")).await).expect("decode json");
+        serde_json::from_slice(&render_image_chat(Some("none"), Some("image-1")).await)
+            .expect("decode json");
 
     let features = &render_json["features"];
-    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(features["mm_placeholders"]["image"][0]["length"].as_u64().unwrap() > 1);
     assert!(features.get("kwargs_data").is_none(), "{features}");
+}
+
+/// A client `uuid` spelled like another item's content hash gets a different
+/// cache key, so it cannot hit that item's engine cache entries.
+#[tokio::test]
+async fn render_chat_mm_cache_keys_keep_uuids_apart_from_content_hashes() {
+    let image_key = |body: axum::body::Bytes| {
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        json["features"]["mm_hashes"]["image"][0]
+            .as_str()
+            .expect("image key")
+            .to_owned()
+    };
+
+    let content_key = image_key(render_image_chat(Some("none"), None).await);
+    let digest = content_key.strip_prefix("content:").expect("content-tagged key");
+    let uuid_key = image_key(render_image_chat(Some("none"), Some(digest)).await);
+    assert_eq!(uuid_key, format!("uuid:{digest}"));
+
+    // A `uuid` that already carries a tag is tagged again, never trusted.
+    let uuid_key = image_key(render_image_chat(Some("none"), Some(&content_key)).await);
+    assert_eq!(uuid_key, format!("uuid:{content_key}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5171,6 +5297,62 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
     );
 }
 
+/// Media the request got wrong is a 400: a data URL that is not base64 or not
+/// an image, and a `file://` URL, which this frontend never reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
+    // Each request fails while its media is fetched, so the mock engine task
+    // is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-invalid-media",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut rendered = Vec::new();
+    for url in [
+        "data:image/png;base64,not base64!",
+        "data:image/png;base64,aGVsbG8=",
+        "file:///etc/hosts",
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe "},
+                        {"type": "image_url", "image_url": {"url": url}}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        let error = &json["error"];
+        rendered.push(format!(
+            "{} {}: {}",
+            status.as_u16(),
+            error["type"].as_str().unwrap_or_default(),
+            error["message"].as_str().unwrap_or_default()
+        ));
+    }
+    expect_test::expect![[r#"
+        400 BadRequestError: base64 decode error: Invalid symbol 32, offset 3.
+        400 BadRequestError: image decode error: The image format could not be determined
+        400 BadRequestError: invalid media URL: file:///etc/hosts"#]]
+    .assert_eq(&rendered.join("\n"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn selected_logprobs_invalid_requests_return_client_errors() {
@@ -5239,7 +5421,7 @@ async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
             assert_eq!(features[0].modality, MmModality::Image);
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
             assert_eq!(features[0].mm_position.length, 169 + 2);
 
             let is_embed = features[0].mm_position.is_embed.as_ref().expect("is_embed mask");
@@ -7886,6 +8068,41 @@ async fn stream_raw_generate_error_finish_returns_sse_error() {
     assert!(!text.contains("\"finish_reason\":\"error\""), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_raw_generate_error_finish_returns_internal_server_error() {
+    let (mut app, engine_task) =
+        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
+            .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "sampling_params": {"max_tokens": 2}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(error["error"]["type"], "InternalServerError");
+    assert_eq!(error["error"]["message"], "Internal server error");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
