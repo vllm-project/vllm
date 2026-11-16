@@ -378,7 +378,8 @@ To disable the Python code interpreter specifically, omit `code_interpreter` fro
 
 For MCP tools in a Responses API request, `allowed_tools` is also checked before
 executing a model-generated tool call. A call outside the requested list is
-rejected before contacting the tool server or invoking a demo tool. This applies
+rejected before sending the tool call to the MCP server or invoking a demo tool.
+This applies
 to both Harmony and non-Harmony models. An empty list permits no sub-tools;
 omitting the filter or including `"*"` preserves unrestricted sub-tool access.
 

@@ -350,7 +350,7 @@ class ParsableContext(ConversationContext):
             parser_cls(tokenizer, request.tools) if parser_cls is not None else None
         )
         self.parser_cls = parser_cls
-        self.request = request
+        self.request: ResponsesRequest = request
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
