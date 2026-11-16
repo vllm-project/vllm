@@ -109,7 +109,6 @@ def _run_dbo_gsm8k(
         "4096",
         "--max-num-seqs",
         str(MAX_NUM_SEQS),  # Use larger batch to trigger decode DBO
-        "--trust-remote-code",
         # Note: Not using --enforce-eager to test DBO's alternate CUDA graph dispatching
         "--data-parallel-size",
         str(DP_SIZE),

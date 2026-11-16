@@ -86,7 +86,6 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         kv_cache_memory_bytes=QWEN_KV_CACHE_BYTES if model_name == QWEN_MODEL else None,
         enforce_eager=True,
         tensor_parallel_size=1,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
     ) as llm:

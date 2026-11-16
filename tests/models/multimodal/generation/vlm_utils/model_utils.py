@@ -491,9 +491,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = patched_processor
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        hf_model.model_name, trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(hf_model.model_name)
 
     original_generate = hf_model.model.generate
 
@@ -1205,7 +1203,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
 def moondream3_processor(model: str):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-    return Moondream3Processor.from_pretrained(model, trust_remote_code=True)
+    return Moondream3Processor.from_pretrained(model)
 
 
 def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:

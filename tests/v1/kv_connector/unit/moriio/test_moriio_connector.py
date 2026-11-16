@@ -328,12 +328,7 @@ def create_vllm_config(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=False,
     )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="bfloat16", seed=42)
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,

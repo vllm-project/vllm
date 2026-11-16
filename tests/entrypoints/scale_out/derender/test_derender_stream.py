@@ -1877,7 +1877,7 @@ def harmony_encode():
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
     pytest.importorskip("openai_harmony")
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 @pytest.fixture(scope="module")

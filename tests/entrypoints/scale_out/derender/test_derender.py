@@ -1712,7 +1712,6 @@ def _ensure_harmony_vocab():
 def harmony_server():
     _ensure_harmony_vocab()
     args = [
-        "--trust-remote-code",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "openai",
@@ -1733,7 +1732,7 @@ async def harmony_client(harmony_server):
 
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 def _harmony_extract_assistant_ids(
@@ -1852,9 +1851,7 @@ def harmony_default_server():
     otherwise harmony markup leaks unparsed into derender output.
     """
     _ensure_harmony_vocab()
-    with RemoteLaunchRenderServer(
-        HARMONY_MODEL, ["--trust-remote-code"]
-    ) as remote_server:
+    with RemoteLaunchRenderServer(HARMONY_MODEL, []) as remote_server:
         yield remote_server
 
 

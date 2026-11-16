@@ -172,7 +172,6 @@ MODEL_SPECS = [
 def _run_model(vllm_runner, spec: ModelStartupSpec):
     with vllm_runner(
         spec.model,
-        trust_remote_code=True,
         max_model_len=256,
         max_num_batched_tokens=1024,
         block_size=64,

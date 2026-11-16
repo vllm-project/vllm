@@ -70,7 +70,6 @@ def _inline_kwargs(config: InlineConfig, *, with_spec: bool) -> dict[str, Any]:
         "max_model_len": MAX_MODEL_LEN,
         "gpu_memory_utilization": GPU_MEM_UTIL,
         "enforce_eager": True,
-        "trust_remote_code": True,
         "disable_log_stats": False,
         # MLA + batch invariance currently disables prefix caching at runtime
         # (see vllm/v1/attention/backends/mla/common.py); set explicitly so the
@@ -213,7 +212,6 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=GPU_MEM_UTIL,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_prefix_caching=False,
     )
     spec_args = replace(

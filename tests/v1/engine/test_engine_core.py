@@ -593,7 +593,6 @@ def test_encoder_instance_zero_kv_cache(
     model_config = ModelConfig(
         model="llava-hf/llava-1.5-7b-hf",  # Multimodal model
         enforce_eager=True,
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         max_model_len=512,
