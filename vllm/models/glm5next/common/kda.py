@@ -43,7 +43,6 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
-    is_weights_pre_processed,
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
@@ -459,10 +458,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         that kernel is not used).
 
         It is allocated once, so cudagraphs keep its address, and refreshed
-        from `conv1d.weight` after every load and layerwise reload
-        (`process_weights_after_loading`) and after every `conv1d.weight`
-        shard load, which covers refits through `load_weights` outside the
-        reload lifecycle.
+        from `conv1d.weight` by `process_weights_after_loading` (after a
+        load, a layerwise reload or a kernel-format in-place reload) and
+        after every `conv1d.weight` shard load, which covers refits through
+        `load_weights` outside the reload lifecycle.
         """
         decode_conv1d_weight = None
         if self._use_aiter_decode:
@@ -503,9 +502,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
 
     def process_weights_after_loading(self) -> None:
-        # The weight cache IPC loader maps the buffer the daemon already filled.
-        if not is_weights_pre_processed():
-            self._copy_decode_conv1d_weight()
+        self._copy_decode_conv1d_weight()
 
     def _flashkda_prefill(
         self,

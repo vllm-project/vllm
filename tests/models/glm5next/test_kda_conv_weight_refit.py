@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -144,8 +145,9 @@ def _aiter_layout(weights: list[torch.Tensor]) -> torch.Tensor:
 
 def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
     """AITER's decode reads `decode_conv1d_weight`, a `[3, K, C]` copy of
-    `conv1d.weight`. Refits through load_weights and through the layerwise
-    reload must refresh it in place, at the address FULL cudagraphs capture."""
+    `conv1d.weight`. Refits through load_weights, the layerwise reload and the
+    kernel-format in-place reload must refresh it in place, at the address
+    FULL cudagraphs capture."""
     layer = _decode_layer(conv1d)
     layer.conv_size = KERNEL
     layer.o_norm = SimpleNamespace(weight=None, eps=1e-6)
@@ -189,3 +191,21 @@ def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
     weight = decode()
     assert weight.data_ptr() == data_ptr
     assert torch.equal(weight, _aiter_layout(reload))
+
+    # Kernel-format weights are copied into the parameters, bypassing the
+    # loader, and the post-load hooks run under weights_already_processed().
+    kernel_format = _checkpoint_weights(seed=3)
+    reload_weights(
+        SimpleNamespace(
+            model_config=SimpleNamespace(quantization=None),
+            load_config=None,
+            lora_config=None,
+        ),
+        model,
+        [("0.conv1d.weight", torch.cat(kernel_format))],
+        weights_path=None,
+        is_checkpoint_format=False,
+    )
+    weight = decode()
+    assert weight.data_ptr() == data_ptr
+    assert torch.equal(weight, _aiter_layout(kernel_format))
