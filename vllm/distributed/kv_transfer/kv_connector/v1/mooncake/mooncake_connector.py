@@ -137,6 +137,15 @@ if TYPE_CHECKING:
 WorkerKey = tuple[str, int, int, int]
 BlockRuns = dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]]
 
+
+def _concat_transfer_arrays(chunks: list[NDArray[np.uint64]]) -> NDArray[np.uint64]:
+    if not chunks:
+        return np.empty(0, dtype=np.uint64)
+    if len(chunks) == 1:
+        return chunks[0]
+    return np.concatenate(chunks)
+
+
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
 
@@ -2999,7 +3008,7 @@ class MooncakeConnectorWorker:
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
         block_runs: BlockRuns | None = None,
-    ) -> tuple[list[int], list[int], list[int]]:
+    ) -> tuple[NDArray[np.uint64], NDArray[np.uint64], NDArray[np.uint64]]:
         """Build region addresses, reusing block runs within a send batch."""
         if block_runs is None:
             block_runs = {}
@@ -3012,9 +3021,9 @@ class MooncakeConnectorWorker:
             block_runs.update(
                 self._build_block_runs(local_blocks, remote_blocks, missing_regions)
             )
-        src_ptrs = []
-        dst_ptrs = []
-        lengths = []
+        src_chunks: list[NDArray[np.uint64]] = []
+        dst_chunks: list[NDArray[np.uint64]] = []
+        length_chunks: list[NDArray[np.uint64]] = []
         for local_region, remote_region in zip(local_regions, remote_regions):
             assert local_region.group_index == remote_region.group_index, (
                 "Aligned Mooncake transfer regions must belong to the same KV group."
@@ -3062,23 +3071,27 @@ class MooncakeConnectorWorker:
             if can_coalesce:
                 local_ids = local_ids[run_starts]
                 remote_ids = remote_ids[run_starts]
-                lengths.extend((run_lens * transfer_len).tolist())
+                length_chunks.append(
+                    run_lens.astype(np.uint64) * np.uint64(transfer_len)
+                )
             else:
-                lengths.extend([transfer_len] * len(local_ids))
-            src_ptrs.extend(
-                (
-                    local_ids * local_region.block_len
-                    + (local_region.base_addr + src_region_offset)
-                ).tolist()
+                length_chunks.append(
+                    np.full(len(local_ids), transfer_len, dtype=np.uint64)
+                )
+            src_chunks.append(
+                local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
+                + np.uint64(local_region.base_addr + src_region_offset)
             )
-            dst_ptrs.extend(
-                (
-                    remote_ids * remote_region.block_len
-                    + (remote_region.base_addr + dst_region_offset)
-                ).tolist()
+            dst_chunks.append(
+                remote_ids.astype(np.uint64) * np.uint64(remote_region.block_len)
+                + np.uint64(remote_region.base_addr + dst_region_offset)
             )
 
-        return src_ptrs, dst_ptrs, lengths
+        return (
+            _concat_transfer_arrays(src_chunks),
+            _concat_transfer_arrays(dst_chunks),
+            _concat_transfer_arrays(length_chunks),
+        )
 
     def _bind_sender_thread_device(self) -> None:
         """ThreadPoolExecutor initializer — binds each pool thread to the
@@ -4646,7 +4659,7 @@ class MooncakeConnectorWorker:
 
     def _build_layer_transfer_params(
         self, task: SendTask, block_runs: BlockRuns | None = None
-    ) -> tuple[list[int], list[int], list[int]]:
+    ) -> tuple[NDArray[np.uint64], NDArray[np.uint64], NDArray[np.uint64]]:
         local, remote = task.destination.layout.regions_by_layer[task.kv_cache_name]
         return self._build_block_descriptors(
             [list(group) for group in task.block_ids],
@@ -4674,13 +4687,13 @@ class MooncakeConnectorWorker:
             )
             planned_transfers.append((layer_transfer_task, src, dst, sizes))
         event.synchronize()
-        batch_src: list[int] = []
-        batch_dst: list[int] = []
-        batch_sizes: list[int] = []
+        src_chunks: list[NDArray[np.uint64]] = []
+        dst_chunks: list[NDArray[np.uint64]] = []
+        length_chunks: list[NDArray[np.uint64]] = []
         for layer_transfer_task, src, dst, sizes in planned_transfers:
-            batch_src.extend(src)
-            batch_dst.extend(dst)
-            batch_sizes.extend(sizes)
+            src_chunks.append(src)
+            dst_chunks.append(dst)
+            length_chunks.append(sizes)
             result.progress.append(
                 (
                     layer_transfer_task.transfer_id,
@@ -4689,10 +4702,16 @@ class MooncakeConnectorWorker:
                     layer_transfer_task.end_tokens,
                 )
             )
-        if batch_src:
-            ret = self._send_blocks(session, batch_src, batch_dst, batch_sizes)
-            if ret != 0:
-                raise RuntimeError(f"Mooncake WRITE returned {ret}")
+        batch_src = _concat_transfer_arrays(src_chunks)
+        if len(batch_src):
+            error = self._send_blocks(
+                session,
+                batch_src,
+                _concat_transfer_arrays(dst_chunks),
+                _concat_transfer_arrays(length_chunks),
+            )
+            if error is not None:
+                raise RuntimeError(error)
         return result
 
     def _finish_pending_send(self, *, wait: bool = False) -> None:
