@@ -448,6 +448,38 @@ _TD_SHAPES = [
 ]
 
 
+@pytest.mark.parametrize(
+    ("is_xpu", "is_cuda", "capability", "expected"),
+    [
+        (True, False, 0, True),
+        (False, True, 100, True),
+        (False, True, 90, False),
+        (False, False, 0, False),
+    ],
+)
+def test_tensor_descriptor_default_selection(
+    monkeypatch, is_xpu, is_cuda, capability, expected
+):
+    from vllm import envs
+    from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+
+    monkeypatch.setattr(envs, "VLLM_TRITON_USE_TD", None)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        current_platform, "has_device_capability", lambda _: capability >= 100
+    )
+
+    assert use_tensor_descriptor() is expected
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_tensor_descriptor_explicit_override(monkeypatch, override):
+    from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+
+    assert use_tensor_descriptor(override) is override
+
+
 def _td_supported() -> bool:
     return current_platform.is_xpu() or (
         current_platform.is_cuda() and current_platform.has_device_capability(90)
