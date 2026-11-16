@@ -108,6 +108,17 @@ def _normalize_decode_limits(
     return max_duration_s, max_decode_bytes
 
 
+class NoAudioStreamError(ValueError):
+    """The input is a valid media container but carries no audio stream.
+
+    Raised by the audio loaders when the source decodes fine as a container
+    (e.g. an MP4 video) but has no audio track, or an audio track that decodes
+    to zero frames. Decode failures (corrupt data, over duration/size limits)
+    keep raising plain `ValueError`, so callers can tell "nothing to extract"
+    apart from "unprocessable audio".
+    """
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -153,7 +164,7 @@ def load_audio_pyav(
 
     with container:
         if not container.streams.audio:
-            raise ValueError("No audio stream found.")
+            raise NoAudioStreamError("No audio stream found.")
         stream = container.streams.audio[0]
         stream.thread_type = "AUTO"
         native_sr = stream.rate
@@ -234,7 +245,7 @@ def load_audio_pyav(
             ) from e
 
     if not chunks:
-        raise ValueError("No audio found in the input.")
+        raise NoAudioStreamError("No audio found in the input.")
 
     audio = np.concatenate(chunks, axis=-1).astype(np.float32)
     if mono and audio.ndim > 1:
@@ -256,7 +267,16 @@ def load_audio_soundfile(
         max_duration_s, max_decode_bytes
     )
 
-    with soundfile.SoundFile(path) as f:
+    try:
+        f = soundfile.SoundFile(path)
+    except soundfile.LibsndfileError as exc:
+        # libsndfile cannot read video containers, so an unrecognized-format
+        # error on an otherwise decodable media file (e.g. a silent MP4) means
+        # there is no audio stream for this backend to extract.
+        if exc.code == 1:
+            raise NoAudioStreamError("No audio stream found.") from exc
+        raise
+    with f:
         native_sr = f.samplerate
         if max_duration_s is not None:
             file_duration_s = f.frames / native_sr
@@ -346,6 +366,12 @@ def load_audio_torchcodec(
         if "Could not load libtorchcodec" in str(e):
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
+    except ValueError as e:
+        # torchcodec reports "no audio stream in the container" (e.g. a silent
+        # video) as a ValueError about the audio stream being unknown.
+        if "best audio stream is unknown" in str(e):
+            raise NoAudioStreamError("No audio stream found.") from e
+        raise
 
     # Pre-check the memory budget from container metadata so an obviously
     # oversized stream is rejected before allocating the PCM buffer. Metadata
@@ -438,7 +464,7 @@ def load_audio_torchcodec(
     out_sr = samples.sample_rate
     audio = samples.data.numpy()  # (num_channels, num_samples), float32
     if audio.size == 0:
-        raise ValueError("No audio found in the input.")
+        raise NoAudioStreamError("No audio found in the input.")
 
     if mono and audio.ndim > 1:
         # Same reduction as load_audio_pyav, so both backends agree at the

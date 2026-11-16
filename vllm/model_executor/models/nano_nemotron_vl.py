@@ -740,11 +740,32 @@ class NanoNemotronVLMultiModalProcessor(
                     f"num_videos={len(videos)}"
                 )
             audio_items = audios.get_all()
-            has_audio = [True] * len(videos)
-            logger.info(
-                "Using %d pre-populated audio item(s) from upstream.",
-                len(audio_items),
-            )
+            if any(audio is None for audio in audio_items):
+                # The renderer degrades a video without an audio track to a
+                # None audio entry. A None cannot be passed to the HF
+                # processor as real audio, so fall back to per-video
+                # extraction: it re-reads each video's bytes and records
+                # `has_audio=False` for the silent ones.
+                items_dict = dict(mm_items)
+                items_dict.pop("audio")
+                inputs.mm_data_items = MultiModalDataItems(items_dict)
+                mm_items, audio_items, has_audio = self._extract_audio_from_videos(
+                    inputs.mm_data_items
+                )
+                inputs.mm_data_items = mm_items
+                logger.info(
+                    "Silent video detected among pre-populated items; "
+                    "re-extracted audio from video bytes: %d audio(s), "
+                    "has_audio=%s.",
+                    len(audio_items),
+                    has_audio,
+                )
+            else:
+                has_audio = [True] * len(videos)
+                logger.info(
+                    "Using %d pre-populated audio item(s) from upstream.",
+                    len(audio_items),
+                )
         else:
             # Extract audio from video bytes (library usage path).
             mm_items, audio_items, has_audio = self._extract_audio_from_videos(mm_items)

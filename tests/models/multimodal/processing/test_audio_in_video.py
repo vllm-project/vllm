@@ -19,6 +19,10 @@ sequence on every subsequent request for the same video.
 """
 
 import asyncio
+import subprocess
+import tempfile
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -418,3 +422,113 @@ def test_encoder_profiler_pairs_dummy_audio_with_video(model_id: str) -> None:
     dummy_inputs = processor.get_dummy_mm_inputs({"video": 1})
     assert len(dummy_inputs["mm_kwargs"]["video"]) == 1
     assert len(dummy_inputs["mm_kwargs"]["audio"]) == 1
+
+
+def test_nemotron_silent_video_degrades_per_video():
+    """A silent video must not inject an audio context in Nemotron-Omni.
+
+    The renderer degrades a video without an audio track to a None audio
+    item (see `parse_chat_messages_silent_video_degrades_to_video_only`).
+    NanoNemotronVLMultiModalProcessor.apply must not treat that None as a
+    real audio clip: it re-extracts audio from each video's original bytes
+    so only videos that actually carry audio get an AUDIO_CONTEXT injected.
+
+    Runs the real registry processor on CPU with ffmpeg-generated videos.
+    """
+    import av
+
+    from vllm.transformers_utils.processors.nano_nemotron_vl import AUDIO_CONTEXT
+
+    model_id = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 2, "video": 2},
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
+
+    with tempfile.TemporaryDirectory() as tmpd:
+        tmp = Path(tmpd)
+        videos_bytes: list[tuple[str, bytes]] = []
+        for name, with_audio in (
+            ("silent.mp4", False),
+            ("with_audio.mp4", True),
+        ):
+            path = tmp / name
+            src = ["-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=4"]
+            if with_audio:
+                cmd = [
+                    *src,
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=2",
+                    "-c:v",
+                    "mpeg4",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    str(path),
+                ]
+            else:
+                cmd = [*src, "-c:v", "mpeg4", "-an", str(path)]
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *cmd],
+                check=True,
+            )
+            videos_bytes.append((name, path.read_bytes()))
+
+    def decode_frames(video_bytes: bytes) -> np.ndarray:
+        container = av.open(BytesIO(video_bytes))
+        frames = [
+            np.asarray(f.to_image().resize((64, 64))) for f in container.decode(video=0)
+        ]
+        container.close()
+        return np.stack(frames)
+
+    def video_item(video_bytes: bytes) -> tuple:
+        frames = decode_frames(video_bytes)
+        metadata = {
+            "original_video_bytes": video_bytes,
+            "fps": 2,
+            "duration": 2.0,
+            "total_num_frames": len(frames),
+            "frames_indices": list(range(len(frames))),
+            "video_backend": "nemotron_vl",
+            "do_sample_frames": False,
+        }
+        return frames, metadata
+
+    silent_item = video_item(videos_bytes[0][1])
+    audible_item = video_item(videos_bytes[1][1])
+
+    # Renderer parity: a silent video's audio is None, an audible one's is a
+    # real (waveform, sample_rate) pair.
+    from vllm.multimodal.media.audio import load_audio_pyav
+
+    audible_audio = load_audio_pyav(BytesIO(videos_bytes[1][1]), max_duration_s=None)
+
+    def run(mm_data, num_videos):
+        mm_items = processor.info.parse_mm_data(mm_data)
+        out = processor(
+            tokenizer.encode("<video>" * num_videos, add_special_tokens=False),
+            mm_items=mm_items,
+            mm_uuid_items={
+                "video": [f"v{i}" for i in range(num_videos)],
+                "audio": [f"a{i}" for i in range(num_videos)],
+            },
+        )
+        return tokenizer.decode(out["prompt_token_ids"], skip_special_tokens=False)
+
+    # A silent video degrades to video-only: no audio context is injected.
+    assert AUDIO_CONTEXT not in run({"video": [silent_item], "audio": [None]}, 1)
+
+    # Mixed request: only the audible video contributes its audio context,
+    # the silent video must not add a second one.
+    audible_text = run({"video": [audible_item], "audio": [audible_audio]}, 1)
+    mixed_text = run(
+        {"video": [silent_item, audible_item], "audio": [None, audible_audio]}, 2
+    )
+    assert audible_text.count(AUDIO_CONTEXT) > 0
+    assert mixed_text.count(AUDIO_CONTEXT) == audible_text.count(AUDIO_CONTEXT)
