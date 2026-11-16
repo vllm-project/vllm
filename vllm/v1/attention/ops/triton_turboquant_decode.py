@@ -352,20 +352,13 @@ def _tq_grouped_decode_stage1(
 
     Each CTA processes up to BLOCK_H Q heads that share one KV head,
     loading K/V once and computing scores via `tl.dot`.
-
-    Scoped to FP8 keys + 4-bit values: the MSE-quantized key presets
-    (`turboquant_{4bit,k3v4,3bit}_nc`) retain the original scalar
-    kernel because their per-token dequant regresses with BLOCK_KV=16.
     """
     bid = tl.program_id(0)
     head_group_id = tl.program_id(1)
     sid = tl.program_id(2)
 
-    # Map head_group_id → KV head + Q head range.
-    # CTAs are partitioned per KV head: each KV head owns
-    # `heads_per_kv_head = ceil(KV_GROUP_SIZE / BLOCK_H)` consecutive CTAs.
-    # This keeps every CTA confined to a single KV head even when
-    # KV_GROUP_SIZE > BLOCK_H and not a multiple of it.
+    # Each KV head owns `heads_per_kv_head` consecutive CTAs, so a CTA never
+    # spans two KV heads even when KV_GROUP_SIZE is not a multiple of BLOCK_H.
     heads_per_kv_head: tl.constexpr = tl.cdiv(KV_GROUP_SIZE, BLOCK_H)
     kv_head = head_group_id // heads_per_kv_head
     group_idx = head_group_id % heads_per_kv_head
@@ -378,7 +371,6 @@ def _tq_grouped_decode_stage1(
     split_end = tl.minimum(split_start + split_len, seq_len)
 
     if split_start >= split_end:
-        # Still must write valid -inf LSE for masked heads
         out_base = bid * stride_mid_b + cur_head * stride_mid_h + sid * stride_mid_s
         tl.store(Mid_o_ptr + out_base + HEAD_DIM, float("-inf"), mask=mask_h)
         return
@@ -387,7 +379,6 @@ def _tq_grouped_decode_stage1(
     d_mask = d_offs < HEAD_DIM
     kv_range = tl.arange(0, BLOCK_KV)
 
-    # Load Q: [BLOCK_H, BLOCK_D]
     q_base = bid * stride_qb + cur_head[:, None] * stride_qh + d_offs[None, :]
     q_rot = tl.load(
         Q_rot_ptr + q_base,
@@ -395,7 +386,6 @@ def _tq_grouped_decode_stage1(
         other=0.0,
     ).to(tl.float32)
 
-    # Online softmax accumulators: [BLOCK_H]
     m_prev = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
     l_prev = tl.zeros([BLOCK_H], dtype=tl.float32)
     acc = tl.zeros([BLOCK_H, BLOCK_D], dtype=tl.float32)
@@ -418,10 +408,7 @@ def _tq_grouped_decode_stage1(
             + tl.cast(kv_head, tl.int64) * stride_cache_head
         )
 
-        # ============================================================
-        # K DEQUANT → k_float [BLOCK_KV, BLOCK_D] (FP8 only; MSE keys use
-        # the original scalar kernel).
-        # ============================================================
+        # K dequant: [BLOCK_KV, BLOCK_D]
         k_addrs = slot_bases[:, None] + d_offs[None, :]
         k_raw = tl.load(
             KV_cache_ptr + k_addrs,
@@ -433,22 +420,16 @@ def _tq_grouped_decode_stage1(
         else:
             k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
 
-        # scores = q_rot @ k_float^T : [BLOCK_H, BLOCK_KV]
+        # [BLOCK_H, BLOCK_KV]
         scores = tl.dot(q_rot.to(tl.float16), tl.trans(k_float.to(tl.float16)))
         scores = (scores * ATTN_SCALE).to(tl.float32)
         scores = tl.where(mask_h[:, None] & kv_mask[None, :], scores, -float("inf"))
 
-        # ============================================================
-        # ONLINE SOFTMAX: [BLOCK_H]
-        # ============================================================
         n_e_max = tl.maximum(tl.max(scores, 1), m_prev)
         re_scale = tl.exp(m_prev - n_e_max)
         p = tl.exp(scores - n_e_max[:, None])
 
-        # ============================================================
-        # V DEQUANT → values [BLOCK_KV, BLOCK_D] (4-bit uniform; VQB==3
-        # is an MSE-only path handled by the original scalar kernel).
-        # ============================================================
+        # V dequant: [BLOCK_KV, BLOCK_D]
         tl.static_assert(VQB == 4, "grouped kernel only supports 4-bit values")
         val_bases = slot_bases + KPS
 
@@ -477,16 +458,12 @@ def _tq_grouped_decode_stage1(
         v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
         values = v_idx * v_scales[:, None] + v_zeros[:, None]
 
-        # ============================================================
-        # ACCUMULATE: acc += p @ values via tl.dot
-        # ============================================================
         acc = acc * re_scale[:, None] + tl.dot(
             p.to(tl.float16), values.to(tl.float16)
         ).to(tl.float32)
         l_prev = l_prev * re_scale + tl.sum(p, 1)
         m_prev = n_e_max
 
-    # Store partial results per Q head
     safe_l = tl.where(l_prev > 0.0, l_prev, 1.0)
     out_base = (
         bid * stride_mid_b + cur_head[:, None] * stride_mid_h + sid * stride_mid_s
