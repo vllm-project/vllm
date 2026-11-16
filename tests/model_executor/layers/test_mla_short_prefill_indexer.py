@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -243,6 +244,155 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     # K cache is always updated before the scoring decision.
     torch.testing.assert_close(observed["k"], k[: slot_mapping.numel()])
     assert observed["slots"] is slot_mapping
+
+
+@pytest.mark.parametrize(
+    "batch_kind",
+    [
+        "short",
+        "mixed",
+        "masked_mha",
+        "force_mqa",
+        "capture",
+        "full",
+        "disabled",
+        "dummy",
+    ],
+)
+def test_rocm_short_prefill_skips_indexer_q_and_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+    batch_kind: str,
+) -> None:
+    from vllm.models.deepseek_v32.amd import rocm
+
+    num_tokens, num_heads, nope_dim, rope_dim = 3, 2, 4, 2
+    should_skip = batch_kind == "short"
+    mla_metadata = make_mla_metadata(
+        use_dense_mha=batch_kind != "masked_mha",
+        num_decode_tokens=int(batch_kind == "mixed"),
+    )
+    mla_metadata.num_actual_tokens = num_tokens
+    runtime_mode = CUDAGraphMode.FULL if batch_kind == "full" else CUDAGraphMode.NONE
+    monkeypatch.setattr(
+        rocm,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={MLA_LAYER: None if batch_kind == "dummy" else mla_metadata},
+            slot_mapping={MLA_LAYER: torch.zeros(num_tokens, dtype=torch.long)},
+            cudagraph_runtime_mode=runtime_mode,
+        ),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "is_current_stream_capturing",
+        lambda: batch_kind == "capture",
+    )
+
+    observed: dict[str, dict] = {}
+
+    def record(name, fn, result):
+        signature = inspect.signature(fn)
+
+        def wrapper(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            observed[name] = bound.arguments
+            return result(bound.arguments)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        rocm,
+        "fused_norm_rope",
+        record("norm_rope", rocm.fused_norm_rope, lambda a: a["q_c"]),
+    )
+    monkeypatch.setattr(
+        rocm,
+        "fused_q",
+        record(
+            "fused_q", rocm.fused_q, lambda a: (None, None, torch.zeros_like(a["q_pe"]))
+        ),
+    )
+
+    calls: list[str] = []
+
+    def call(name, result=None):
+        def fn(*args):
+            calls.append(name)
+            return result
+
+        return fn
+
+    k_cache = torch.empty(1)
+    layer = SimpleNamespace(
+        layer_name=MLA_LAYER,
+        indexer=SimpleNamespace(
+            k_norm=SimpleNamespace(weight=None, bias=None, eps=1e-6),
+            k_cache=SimpleNamespace(kv_cache=k_cache, uses_shuffled_layout=False),
+            softmax_scale=1.0,
+            n_head=2,
+            head_dim=4,
+            wq_b=call("wq_b", (torch.zeros(num_tokens, 8),)),
+        ),
+        skip_topk=False,
+        use_pcp=False,
+        _dense_mha_metadata_layer_name="" if batch_kind == "disabled" else MLA_LAYER,
+        _use_sparse_mha=lambda _: batch_kind != "force_mqa",
+        indexer_rope_emb=SimpleNamespace(cos_sin_cache=None),
+        rotary_emb=SimpleNamespace(cos_sin_cache=None),
+        q_a_layernorm=SimpleNamespace(weight=None, variance_epsilon=1e-6),
+        kv_a_layernorm=SimpleNamespace(weight=None, variance_epsilon=1e-6),
+        topk_indices_buffer=None,
+        kv_cache=torch.empty(1),
+        kv_cache_dtype="fp8",
+        _k_scale=None,
+        _k_scale_float=1.0,
+        _q_scale=None,
+        _fp8_kv=True,
+        _fp8_kv_needs_view=False,
+        _index_rope_interleave=False,
+        num_local_heads=num_heads,
+        qk_head_dim=nope_dim + rope_dim,
+        qk_nope_head_dim=nope_dim,
+        qk_rope_head_dim=rope_dim,
+        q_b_proj=call(
+            "q_b_proj", (torch.zeros(num_tokens, num_heads * (nope_dim + rope_dim)),)
+        ),
+        _compute_ql_nope=call(
+            "ql_nope",
+            (
+                torch.zeros(num_tokens, num_heads, nope_dim),
+                torch.zeros(num_tokens, num_heads, rope_dim),
+            ),
+        ),
+        _run_indexer=call("run_indexer"),
+        forward_impl=call("dense_mha"),
+        _build_q_for_attn=call("build_q"),
+        impl=SimpleNamespace(forward_mqa=call("sparse_mqa", (None, None))),
+        _compute_uv_out=call("uv_out"),
+    )
+
+    index_k = torch.zeros(num_tokens, 4)
+    rocm.DeepseekV32MLAAttention._fused_attention(
+        layer,
+        torch.arange(num_tokens),
+        torch.zeros(num_tokens, 8),
+        torch.zeros(num_tokens, 4),
+        torch.zeros(num_tokens, rope_dim),
+        index_k,
+        torch.zeros(num_tokens, 2),
+        torch.zeros(num_tokens, num_heads * nope_dim),
+    )
+
+    # The indexer K cache is written whether or not this batch is scored.
+    norm_rope = observed["norm_rope"]
+    assert norm_rope["has_indexer"]
+    assert norm_rope["index_k"] is index_k
+    assert norm_rope["indexer_k_cache"] is (None if batch_kind == "dummy" else k_cache)
+
+    assert observed["fused_q"]["has_indexer"] is not should_skip
+    assert (observed["fused_q"]["index_q"] is None) is should_skip
+    assert calls.count("wq_b") == calls.count("run_indexer") == int(not should_skip)
 
 
 def test_skipped_k_cache_insert_accepts_no_k(
@@ -523,7 +673,7 @@ def _candidate_token_mask(
 ):
     """[rows, total] bool mask of the candidate-covered token positions.
 
-    ``ks`` converts request-local candidate blocks to absolute positions
+    `ks` converts request-local candidate blocks to absolute positions
     (prefill's packed workspace); pass None when already request-local.
     """
     rows = candidates.shape[0]
@@ -543,7 +693,7 @@ def _candidate_token_mask(
 
 
 def _reference_topk(masked: torch.Tensor, topk: int) -> torch.Tensor:
-    """Plain ``torch.topk`` over -inf-masked logits; slots past a row's valid
+    """Plain `torch.topk` over -inf-masked logits; slots past a row's valid
     count are -1 (the indexer's "no token" sentinel)."""
     values, indices = masked.topk(topk, dim=1)
     return torch.where(values > float("-inf"), indices.int(), -1)
@@ -582,8 +732,8 @@ def _expand_candidates_reference(
     candidates: torch.Tensor, ks: torch.Tensor, ke: torch.Tensor, cbk: int, sbk: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """PyTorch reference for `candidate_blocks_to_sparse_indices`: expand
-    each candidate block into ``cbk // sbk`` sparse blocks, keep those inside
-    ``[0, ke - ks)``, sort ascending, anchor at ``ks // sbk``, pad by
+    each candidate block into `cbk // sbk` sparse blocks, keep those inside
+    `[0, ke - ks)`, sort ascending, anchor at `ks // sbk`, pad by
     repeating the last valid block, and count the valid sparse columns."""
     ratio = cbk // sbk
     rows, num_candidates = candidates.shape
@@ -610,7 +760,7 @@ def _expand_candidates_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
 def test_candidate_blocks_to_sparse_indices_math():
     """Candidate->sparse-block expansion: ks anchoring, range filtering,
-    repeat-last padding, and the per-row valid column count (``end``)."""
+    repeat-last padding, and the per-row valid column count (`end`)."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         candidate_blocks_to_sparse_indices,
     )
@@ -787,7 +937,7 @@ def _quant_k(x: torch.Tensor, kv_dtype: str):
 def _quant_q(x: torch.Tensor, kv_dtype: str):
     """Quantize [N, D] Q rows as the indexer passes them: MXFP4 like K, or
     FP8 e4m3 with unit UE8M0 scales (FP8 Q folds its scale into the weights,
-    see ``mqa_logits_mx_inputs``)."""
+    see `mqa_logits_mx_inputs`)."""
     if kv_dtype == "mxfp4":
         return _quant_k(x, kv_dtype)
     values = x.to(torch.float8_e4m3fn)
@@ -799,7 +949,7 @@ def _quant_q(x: torch.Tensor, kv_dtype: str):
 @pytest.mark.parametrize("capture", [False, True])
 def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool, kv_dtype: str):
     """The sparse-MQA candidate path selects exactly the same logit values as
-    ``torch.topk`` over dense bf16 logits masked to the candidates (the two
+    `torch.topk` over dense bf16 logits masked to the candidates (the two
     DeepGEMM kernels agree bitwise on candidate columns), incl. under CUDA
     graph capture, and a later layer reusing the step's expansion/schedule
     selects the same values."""
@@ -894,7 +1044,7 @@ def _build_paged_cache(
     page_pad: int = 0,
 ):
     """MXFP4 or FP8 paged cache in DeepGEMM's fused layout: per page, all
-    tokens' values first, then their packed UE8M0 scales; ``page_pad`` bytes
+    tokens' values first, then their packed UE8M0 scales; `page_pad` bytes
     pad each page like the other layers' pages in a packed block."""
     device = req_lens.device
     pages_per = (req_lens + page_kv - 1) // page_kv
@@ -941,7 +1091,7 @@ def _build_paged_cache(
 def test_sparse_mqa_logits_paged_matches_dense_masked(
     next_n: int, capture: bool, page_pad: int, kv_dtype: str
 ):
-    """Paged sparse-MQA decode selects exactly the values ``torch.topk`` picks
+    """Paged sparse-MQA decode selects exactly the values `torch.topk` picks
     from the dense bf16 masked logits, incl. MTP rows (next_n > 1 flattened to
     one query row each), CUDA graph capture/replay and schedule reuse by a
     later layer."""
