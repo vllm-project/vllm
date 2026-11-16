@@ -23,6 +23,15 @@ from . import silly_attention  # noqa: F401
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.fixture(autouse=True, scope="module")
+def reset_default_device():
+    """Tests here set the default device and leave it set, as they always
+    have, so later tests in this file run on it. Reset it when the file ends,
+    so other files run in the same pytest start from the default device."""
+    yield
+    torch.set_default_device(None)
+
+
 def test_getitem_moved_to_producer_subgraph():
     """Test that getitem operations are moved to the same subgraph as their input,
     preventing tuple inputs to submodules.

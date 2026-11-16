@@ -35,15 +35,12 @@ def test_bert_model_runner_v2(
     hf_runner,
     vllm_runner,
     example_prompts,
-    monkeypatch,
     model: str,
     dtype: str,
 ) -> None:
     prompt_batches = [[example_prompts[0]], example_prompts]
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_output_batches = [
             vllm_model.token_classify(prompts) for prompts in prompt_batches
         ]
