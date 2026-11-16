@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
@@ -229,6 +230,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     runner.max_num_tokens = 8
     runner.encoder_cache = None
     runner.pooling_runner = None
+    runner.ec_connector = NO_OP_EC_CONNECTOR
     monkeypatch.setattr(runner, "_dummy_run", dummy_run)
 
     runner.profile_run()
