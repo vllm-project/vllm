@@ -6,12 +6,14 @@ mod cli;
 use std::env;
 use std::ffi::OsStr;
 use std::process::{ExitCode, ExitStatus};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
 
@@ -89,9 +91,12 @@ fn main() -> ExitCode {
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    vllm_tracing::init_tracing(process_label);
-
-    let cli = Cli::parse();
+    // Parsing warns about no-op arguments before `--log-level` is known.
+    let cli = {
+        let _guard = vllm_tracing::set_default_tracing(process_label, LogLevel::from_env());
+        Cli::parse()
+    };
+    vllm_tracing::init_tracing(process_label, cli.log_level(), cli.log_formatter());
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
@@ -203,15 +208,22 @@ async fn async_main(cli: Cli) -> Result<()> {
             // Regardless of the shutdown reason, broadcast shutdown signal here to ensure
             // that all serving tasks are notified.
             shutdown.cancel();
+            let shutdown_deadline = Instant::now() + shutdown_timeout;
 
-            // Shutdown begins. Terminate the managed engine first.
-            engine.shutdown(shutdown_timeout).await?;
+            // Wait for the API server to drain in-flight requests while the engine
+            // keeps serving them, then stop the engine with the remaining budget, as
+            // `vllm serve` does. Data parallel engines that drain on their own exit
+            // one by one, and the first exit would fail the requests still running
+            // on the others.
+            let serve_result = if matches!(shutdown_reason, ShutdownReason::Server(_)) {
+                Ok(())
+            } else {
+                serve_task.await.context("serve task join failed").and_then(|result| result)
+            };
+            let remaining = shutdown_deadline.saturating_duration_since(Instant::now());
+            engine.shutdown(remaining).await?;
             info!("managed engine shut down gracefully");
-            // Wait for the API server to shut down gracefully by draining in-flight
-            // requests.
-            if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
-                serve_task.await.context("serve task join failed")??;
-            }
+            serve_result?;
 
             match shutdown_reason {
                 ShutdownReason::Signal => Ok(()),

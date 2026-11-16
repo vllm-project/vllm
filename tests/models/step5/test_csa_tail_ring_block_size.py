@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm.config import CacheConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.models.step5.common.csa_tail_ring import Step5CSATailRing
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import AttentionBackend, MultipleOf
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _HEAD_SIZE = 192
 _FP8 = torch.uint8
@@ -47,13 +48,15 @@ class _MainLayer(AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return _MultipleOf16
 
-    def get_kv_cache_spec(self, vllm_config):
-        return FullAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=_HEAD_SIZE,
-            dtype=self.dtype,
-            page_size_padded=self.page_size_padded,
+    def get_kv_cache_config(self, vllm_config):
+        return FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=_HEAD_SIZE,
+                dtype=self.dtype,
+                page_size_padded=self.page_size_padded,
+            )
         )
 
 
@@ -69,8 +72,9 @@ class _MainLayer(AttentionLayerBase):
     ],
 )
 def test_block_size_fits_tail_ring(
-    num_kv_heads, dtype, speculative_tokens, page_size_padded, expected
+    num_kv_heads, dtype, speculative_tokens, page_size_padded, expected, monkeypatch
 ):
+    monkeypatch.setattr(CacheConfig, "DEFAULT_BLOCK_SIZE", _DEFAULT_BLOCK_SIZE)
     context: dict = {}
     ring = Step5CSATailRing(
         prefix="layers.0.csa_tail_ring",
@@ -90,6 +94,6 @@ def test_block_size_fits_tail_ring(
     )
     with set_current_vllm_config(config):
         Platform.update_block_size_for_backend(config)
-    ring.get_kv_cache_spec(config)
+    ring.get_kv_cache_config(config)
     assert ring.capacity >= ring.required_rows
     assert config.cache_config.block_size == expected

@@ -27,7 +27,10 @@ else:
     gl = TritonLanguagePlaceholder()
     aggregate = TritonLanguagePlaceholder()
 
-from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+from vllm.triton_utils.tensor_descriptor import (
+    tensor_descriptor_compatible,
+    use_tensor_descriptor,
+)
 
 # Replace Autotuner.run so it always picks the first valid configuration, to
 # eliminate autotune variability. Installed here rather than in
@@ -45,9 +48,9 @@ LOGE2 = 0.6931471805599453
 
 
 def fp32_dot_precision(dtype: torch.dtype) -> str | None:
-    """``tl.dot`` ``input_precision`` for ``dtype`` operands. Float32 dots get
-    float32 accuracy unless TF32 is allowed by ``torch.set_float32_matmul_precision``
-    (``VLLM_FLOAT32_MATMUL_PRECISION``): 3xTF32 on CUDA, which matches IEEE
+    """`tl.dot` `input_precision` for `dtype` operands. Float32 dots get
+    float32 accuracy unless TF32 is allowed by `torch.set_float32_matmul_precision`
+    (`VLLM_FLOAT32_MATMUL_PRECISION`): 3xTF32 on CUDA, which matches IEEE
     accuracy on tensor cores, and IEEE elsewhere. Other dtypes keep Triton's
     default."""
     if dtype != torch.float32 or torch.get_float32_matmul_precision() != "highest":
@@ -66,5 +69,6 @@ __all__ = [
     "gl",
     "aggregate",
     "fp32_dot_precision",
+    "tensor_descriptor_compatible",
     "use_tensor_descriptor",
 ]
