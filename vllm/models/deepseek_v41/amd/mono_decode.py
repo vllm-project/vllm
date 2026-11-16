@@ -279,6 +279,16 @@ def _copy_942_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
         _copy_linear_at_load(linear)
 
 
+def _keep_row_major_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
+    """gfx950: the kernels read these linears' weights row-major, so their kernel
+    keeps them and preshuffles a copy for AITER's GEMMs."""
+    sh = layer.ffn.shared_experts
+    assert sh is not None
+    attn = [] if ffn_only else [getattr(layer.attn, n) for n in ATTN_LINEARS_942]
+    for linear in [sh.gate_up_proj, sh.down_proj, *attn]:
+        linear.keep_row_major_weight = True
+
+
 def _compute_units() -> int:
     return current_platform.num_compute_units(torch.accelerator.current_device_index())
 
@@ -369,14 +379,6 @@ class MonoDecodeLayer:
         self._weights: MonoLayerWeights | None = None
         self.next_layer: DeepseekV4DecoderLayer | None = None
 
-    @property
-    def unfolded_entry(self) -> bool:
-        """gfx942: when this whole first layer runs vLLM's path, its entry seam
-        projects the expanded residual with the unfolded hc_attn_fn, as K1
-        does, and not the embedding with the folded copy (model.py). The
-        folded form has no AITER kernel on gfx942."""
-        return not self.ffn_only and _on_gfx942()
-
     @staticmethod
     def create(
         layer: "DeepseekV4DecoderLayer", vllm_config
@@ -389,6 +391,8 @@ class MonoDecodeLayer:
         mono = MonoDecodeLayer._create(layer, vllm_config)
         if mono is not None and _on_gfx942():
             _copy_942_at_load(layer, mono.ffn_only)
+        elif mono is not None:
+            _keep_row_major_at_load(layer, mono.ffn_only)
         return mono
 
     @staticmethod
