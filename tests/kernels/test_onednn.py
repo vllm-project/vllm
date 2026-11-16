@@ -214,9 +214,10 @@ def test_onednn_gemm(
     if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and (
         n,
         k,
+        m_list,
         use_bias,
         use_stride,
-    ) == (16384, 4096, True, False):
+    ) == (16384, 4096, M_FACTORS[0], True, False):
         request.applymarker(
             pytest.mark.xfail(
                 strict=True,
