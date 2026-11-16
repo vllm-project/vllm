@@ -41,7 +41,7 @@ import numpy as np
 from vllm.utils.math_utils import cdiv
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WriteTarget:
     """What one producer rank writes into one consumer rank."""
 
@@ -64,7 +64,7 @@ class WriteTarget:
     num_writers: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MoRIIOWriteTPMapping:
     """Write targets of one producer rank for one consumer engine."""
 

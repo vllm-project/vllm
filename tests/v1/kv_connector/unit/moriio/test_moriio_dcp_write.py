@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -165,7 +165,12 @@ def _worker(
     worker.use_mla = True
     worker._has_mamba = False
     worker.model_config = SimpleNamespace(
-        get_total_num_kv_heads=lambda: 1, get_head_size=lambda: 576
+        get_total_num_kv_heads=lambda: 1,
+        get_head_size=lambda: 576,
+        model_arch_config=SimpleNamespace(per_layer_overrides=None),
+    )
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={})
     )
     worker.kv_caches = caches
     worker.layer_to_spec = dict(specs)
@@ -203,7 +208,7 @@ def test_only_known_token_layouts_are_written_in_runs(specs, whole_block_layer):
 KDA = MambaSpec(
     block_size=BLOCK_SIZE, shapes=((4, 3), (2, 8, 8)), dtypes=(torch.uint8,) * 2
 )
-GQA = FullAttentionSpec(
+GQA = AttentionSpec(
     block_size=BLOCK_SIZE, num_kv_heads=8, head_size=64, dtype=torch.uint8
 )
 
@@ -223,7 +228,7 @@ GQA = FullAttentionSpec(
         ),
         (SPECS, {"kda": KDA}, {}),
         (
-            {**SPECS, "draft": _spec(576, non_causal_multi_token_decode=True)},
+            {**SPECS, "draft": _spec(576)},
             {"kda": KDA},
             {},
         ),
