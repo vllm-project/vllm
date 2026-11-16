@@ -189,6 +189,7 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
         ]
     )
     handler._transfer_events = {1: failed_event, 2: skipped_event}
+    handler._pending = gpu_worker.deque()
     handler._stream_pool = [MagicMock()]
     handler._event_pool = [MagicMock()]
     handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
@@ -214,6 +215,8 @@ def _bare_handler(gpu_to_cpu: bool = True):
     handler.gpu_to_cpu = gpu_to_cpu
     handler._transfers = gpu_worker.deque()
     handler._transfer_events = {}
+    handler.max_descriptors_per_submit = 0
+    handler._pending = gpu_worker.deque()
     handler._stream_pool = []
     handler._event_pool = []
     handler._buffer_pool = []
@@ -359,9 +362,11 @@ def test_get_finished_reports_failure_when_event_query_raises() -> None:
     results = handler.get_finished()
 
     assert [(r.job_id, r.success) for r in results] == [(3, False), (4, True)]
+    assert results[1].transfer_time == 2.0 * 1e-3
     assert not handler._transfers
     assert not handler._transfer_events
     assert handler._stream_pool == [ready.stream]
+    assert handler._event_pool == [ready.end_event, ready.start_event]
     assert handler._buffer_pool == [
         (ready.batch_src, ready.batch_dst, ready.batch_sizes)
     ]
@@ -641,6 +646,131 @@ def test_transfer(
     del src_view, dst_view, orig_dst_view, expected
 
     worker.shutdown()
+
+
+def _load_worker(
+    device: str, num_tensors: int, num_blocks: int, page_size: int
+) -> tuple[CPUOffloadingWorker, CanonicalKVCaches]:
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros(
+                    (num_blocks, page_size), dtype=torch.int8, device=device
+                ),
+                page_size_bytes=page_size,
+            )
+            for _ in range(num_tensors)
+        ],
+        group_data_refs=[
+            [
+                CanonicalKVCacheRef(tensor_idx=i, page_size_bytes=page_size)
+                for i in range(num_tensors)
+            ]
+        ],
+    )
+    worker = CPUOffloadingWorker(
+        kv_caches=kv_caches, blocks_per_chunk=1, num_cpu_chunks=num_blocks
+    )
+    return worker, kv_caches
+
+
+def _submit_load(
+    worker: CPUOffloadingWorker,
+    kv_caches: CanonicalKVCaches,
+    job_id: int,
+    cpu_blocks: list[int],
+    gpu_blocks: list[int],
+) -> bool:
+    gpu_spec = GPULoadStoreSpec(gpu_blocks, (len(gpu_blocks),), (0,))
+    device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
+    return worker.submit_load(job_id, CPULoadStoreSpec(cpu_blocks), device_ptrs)
+
+
+def _poll_finished(worker: CPUOffloadingWorker, num_jobs: int) -> list[TransferResult]:
+    results: list[TransferResult] = []
+    deadline = time.time() + 10
+    while len(results) < num_jobs and time.time() < deadline:
+        results += worker.get_finished()
+        time.sleep(0.01)
+    return results
+
+
+@pytest.mark.parametrize("flush_with_wait", [False, True])
+@torch.inference_mode()
+def test_load_submitted_over_several_steps(
+    default_vllm_config, monkeypatch: pytest.MonkeyPatch, flush_with_wait: bool
+) -> None:
+    """A load larger than the per-step descriptor cap is submitted in slices
+    over several get_finished() calls (one per engine step), and is reported
+    only once its last slice has landed, with every block copied. A later load
+    still completes after it, and wait() (the flush fence) submits the rest at
+    once."""
+    num_tensors, num_blocks, page_size = 4, 16, 512
+    monkeypatch.setenv("VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS", "5")
+    worker, kv_caches = _load_worker(DEVICES[0], num_tensors, num_blocks, page_size)
+    cpu_tensors = list(worker._load_handler.cpu_tensors)
+    gpu_tensors = [t.tensor for t in kv_caches.tensors]
+    for tensor in cpu_tensors:
+        tensor.random_()
+
+    big_cpu, big_gpu = list(range(0, 9)), list(range(4, 13))
+    small_cpu, small_gpu = [12], [0]
+
+    def landed(cpu_blocks: list[int], gpu_blocks: list[int]) -> list[bool]:
+        return [
+            torch.equal(gpu[gpu_block].cpu(), cpu[cpu_block])
+            for cpu, gpu in zip(cpu_tensors, gpu_tensors)
+            for cpu_block, gpu_block in zip(cpu_blocks, gpu_blocks)
+        ]
+
+    assert _submit_load(worker, kv_caches, 1, big_cpu, big_gpu)
+    assert _submit_load(worker, kv_caches, 2, small_cpu, small_gpu)
+    # 36 descriptors with a cap of 5: the two calls submit 10 of them only
+    torch.accelerator.synchronize()
+    assert not all(landed(big_cpu, big_gpu))
+
+    if flush_with_wait:
+        worker.wait({1})
+        assert all(landed(big_cpu, big_gpu))
+    results = _poll_finished(worker, num_jobs=2)
+
+    assert [(r.job_id, r.success) for r in results] == [(1, True), (2, True)]
+    assert results[0].transfer_size == 9 * num_tensors * page_size
+    assert results[0].transfer_time is not None and results[0].transfer_time > 0
+    assert all(landed(big_cpu + small_cpu, big_gpu + small_gpu))
+    worker.shutdown()
+
+
+@torch.inference_mode()
+def test_shutdown_drains_partly_submitted_load(
+    default_vllm_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """shutdown() returns only after every copy of a partly submitted load has
+    landed, so the caller may release the memory the load reads and writes."""
+    num_tensors, num_blocks, page_size = 4, 16, 512
+    monkeypatch.setenv("VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS", "5")
+    worker, kv_caches = _load_worker(DEVICES[0], num_tensors, num_blocks, page_size)
+    cpu_tensors = list(worker._load_handler.cpu_tensors)
+    gpu_tensors = [t.tensor for t in kv_caches.tensors]
+    for tensor in cpu_tensors:
+        tensor.random_()
+    blocks = list(range(9))
+
+    def landed() -> list[bool]:
+        return [
+            torch.equal(gpu[block].cpu(), cpu[block])
+            for cpu, gpu in zip(cpu_tensors, gpu_tensors)
+            for block in blocks
+        ]
+
+    assert _submit_load(worker, kv_caches, 1, blocks, blocks)
+    # 36 descriptors with a cap of 5: only the first slice is submitted
+    torch.accelerator.synchronize()
+    assert not all(landed())
+
+    worker.shutdown()
+
+    assert all(landed())
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
