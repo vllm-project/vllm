@@ -942,7 +942,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
@@ -1017,7 +1017,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {

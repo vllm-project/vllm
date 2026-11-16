@@ -73,7 +73,9 @@ pub async fn chat_completions(
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
-    let lora_resolution = state.resolve_model_with_loras(requested_model).await;
+    let lora_resolution = state
+        .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())
+        .await;
 
     let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
