@@ -182,9 +182,7 @@ def test_pushed_base_uses_its_digest_not_a_later_tag_lookup(
         BUILDKITE_BRANCH="main",
     )
     assert result.returncode == 0, result.stderr
-    assert (
-        "buildx build --platform linux/amd64 --file docker/Dockerfile.xpu_base" in calls
-    )
+    assert "buildx build --file docker/Dockerfile.xpu_base" in calls
     assert "--tag registry.example/ci:xpu-base-" in calls
     assert "--push --metadata-file" in calls
     assert f"@{DIGEST}" in calls

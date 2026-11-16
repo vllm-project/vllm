@@ -39,62 +39,64 @@ if [[ ${BUILDKITE_PULL_REQUEST:-} == false && ${BUILDKITE_BRANCH:-} == "${BUILDK
   publish_base=true
 fi
 
-image_exists=false
-if image_digest "$IMAGE" > /dev/null; then
-  echo "Image found"
-  image_exists=true
-else
-  status=$?
-  (( status == 1 )) || exit "$status"
-  echo "Image not found, proceeding with build..."
-fi
+build_xpu_image() {
+  local image_exists=false base_key base_image base_digest="" metadata_file status
+  local -a base_args=()
 
-if [[ $image_exists == false || $publish_base == true ]]; then
-  # Key the base by its recipe and platform.
+  if image_digest "$IMAGE" > /dev/null; then
+    echo "Image found"
+    image_exists=true
+  else
+    status=$?
+    (( status == 1 )) || return "$status"
+    echo "Image not found, proceeding with build..."
+  fi
+
+  # Main still needs to publish the base if the final image already exists.
+  if [[ $image_exists == true && $publish_base == false ]]; then
+    return
+  fi
+
+  # The shared base is for CI builders with an amd64 default platform.
   base_key=$(
     { sha256sum docker/Dockerfile.xpu_base && printf 'linux/amd64\n'; } |
       sha256sum | cut -c1-32
   )
   base_image="$REGISTRY/$REPO:xpu-base-$base_key"
   if base_digest=$(image_digest "$base_image"); then
-    if [[ $image_exists == false ]]; then
-      echo "Reusing $base_image@$base_digest"
-    else
-      echo "XPU base image found: $base_image@$base_digest"
-    fi
+    echo "XPU base image found: $base_image@$base_digest"
   else
     status=$?
-    (( status == 1 )) || exit "$status"
+    (( status == 1 )) || return "$status"
     if [[ $publish_base == true ]]; then
       # Only main publishes a shared base; PRs build it locally on a miss.
       echo "Building and publishing $base_image"
       metadata_file=$(mktemp)
-      if docker buildx build --platform linux/amd64 --file docker/Dockerfile.xpu_base \
-        --tag "$base_image" --push --metadata-file "$metadata_file" --progress plain .; then
-        base_digest=$(awk -F'"' '$2 == "containerimage.digest" {print $4; exit}' "$metadata_file")
-        rm -f "$metadata_file"
-      else
+      docker buildx build --file docker/Dockerfile.xpu_base \
+        --tag "$base_image" --push --metadata-file "$metadata_file" --progress plain . || {
         status=$?
         rm -f "$metadata_file"
-        exit "$status"
-      fi
+        return "$status"
+      }
+      base_digest=$(awk -F'"' '$2 == "containerimage.digest" {print $4; exit}' "$metadata_file")
+      rm -f "$metadata_file"
       if [[ ! $base_digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
         echo "Cannot resolve the pushed XPU base image digest" >&2
-        exit 1
+        return 1
       fi
       echo "Published $base_image@$base_digest"
     else
       echo "XPU base image not found; building from the Dockerfile"
     fi
   fi
-fi
 
-if [[ $image_exists == false ]]; then
-  base_args=()
-  if [[ -n ${base_digest:-} ]]; then
+  if [[ $image_exists == true ]]; then
+    return
+  fi
+
+  if [[ -n $base_digest ]]; then
     # Pin the base so later tag updates cannot change this build.
-    base_args=(--set vllm-openai.platform=linux/amd64 \
-      --set "vllm-openai.contexts.vllm-base=docker-image://$base_image@$base_digest")
+    base_args=(--set "vllm-openai.contexts.vllm-base=docker-image://$base_image@$base_digest")
   fi
   docker buildx bake \
     --file docker/docker-bake-xpu.hcl --load \
@@ -104,6 +106,7 @@ if [[ $image_exists == false ]]; then
     "${base_args[@]}" \
     --progress plain vllm-openai
   docker push "$IMAGE"
-fi
+}
 
+build_xpu_image
 .buildkite/scripts/annotate-image-build.sh "$IMAGE"
