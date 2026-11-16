@@ -112,7 +112,7 @@ torch::stable::Tensor moe_sort_routing(
   auto topk_ids_for_sort = maybe_allocate_tensor(
       maybe_topk_ids_for_sort, topk_ids.sizes(),
       torch::headeronly::ScalarType::Int, device, "topk_ids_for_sort");
-  if (expanded_rows <= 128) {
+  if (expanded_rows <= 128 && topk_ids.is_contiguous()) {
     smallSortAndScanExperts(
         get_ptr<const int>(topk_ids), get_ptr<const int>(token_expert_indices),
         expert_map_ptr, get_ptr<int>(topk_ids_for_sort),
