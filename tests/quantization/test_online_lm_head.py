@@ -61,6 +61,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_processing,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 
 # Not a multiple of the vocab padding, so the head has zero-filled rows.
 VOCAB, HIDDEN = 4000, 2048
@@ -364,9 +365,28 @@ def _reference_logits(scheme, x, weight):
     return x.float() @ _dequantize(*scheme.quantize(weight)).t()
 
 
+def _require_vllm_parameters(head, monkeypatch):
+    # Kernels such as Marlin and Conch assert vLLM parameter types; the RDNA
+    # kernels do not, so check what the kernel is handed on every platform.
+    assert isinstance(head.quant_method, OnlineLMHeadMethodBase)
+    kernel_cls = head.quant_method.kernel_cls
+    process = kernel_cls.process_weights_after_loading
+
+    def checked(kernel, layer):
+        for name in (kernel.w_q_name, kernel.w_s_name, kernel.w_zp_name):
+            if name is not None:
+                param = getattr(layer, name)
+                assert isinstance(param, BasevLLMParameter), (name, type(param))
+        process(kernel, layer)
+
+    monkeypatch.setattr(kernel_cls, "process_weights_after_loading", checked)
+
+
 @parametrize_kernel_schemes
 @pytest.mark.parametrize("num_tokens", [1, 7, 64])
-def test_untied_head_matches_reference(online_head_config, scheme, num_tokens):
+def test_untied_head_matches_reference(
+    online_head_config, scheme, num_tokens, monkeypatch
+):
     torch.manual_seed(0)
     head = ParallelLMHead(
         VOCAB,
@@ -378,6 +398,7 @@ def test_untied_head_matches_reference(online_head_config, scheme, num_tokens):
     )
     assert isinstance(head.quant_method, scheme.method)
     assert head.weight.is_meta  # materialized while loading
+    _require_vllm_parameters(head, monkeypatch)
     loaded = (torch.randn(VOCAB, HIDDEN, device="cuda") * 0.02).to(torch.bfloat16)
     head.weight.weight_loader(head.weight, loaded)
     # The padded vocab rows are never loaded: processing waits for finalize.
@@ -395,7 +416,7 @@ def test_untied_head_matches_reference(online_head_config, scheme, num_tokens):
 
 
 @parametrize_kernel_schemes
-def test_tied_head_keeps_the_embedding(online_head_config, scheme):
+def test_tied_head_keeps_the_embedding(online_head_config, scheme, monkeypatch):
     torch.manual_seed(0)
     embed = VocabParallelEmbedding(
         VOCAB, HIDDEN, params_dtype=torch.bfloat16, disable_tp=True
@@ -411,6 +432,7 @@ def test_tied_head_keeps_the_embedding(online_head_config, scheme):
         prefix="lm_head",
         disable_tp=True,
     )
+    _require_vllm_parameters(head, monkeypatch)
     head.tie_weights(embed)
     # The model loader's process_weights_after_loading pass.
     head.quant_method.process_weights_after_loading(head)
