@@ -5,7 +5,6 @@ job_dirs:
   - ".buildkite/hardware_tests"
 run_all_patterns:
   - "docker/Dockerfile"
-  - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
   - "requirements/kv_connectors.txt"
@@ -14,9 +13,11 @@ run_all_patterns:
   - "setup.py"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
-# Run every AMD step (ci-selector does not pick AMD steps). csrc/ is also built for ROCm.
+# Run every AMD step (ci-selector does not pick AMD steps). csrc/ and
+# CMakeLists.txt are also built for ROCm.
 amd_run_all_patterns:
   - "csrc/"
+  - "CMakeLists.txt"
   - "cmake/hipify.py"
   - "docker/Dockerfile.rocm$"
   - "docker/docker-bake-rocm.hcl"

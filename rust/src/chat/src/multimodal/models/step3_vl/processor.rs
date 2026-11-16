@@ -294,7 +294,7 @@ impl VisionPreProcessor for Step3VLProcessor {
 
     fn preprocess(
         &self,
-        images: &[DynamicImage],
+        images: &[&DynamicImage],
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
@@ -530,7 +530,7 @@ mod tests {
     fn preprocess_emits_engine_contract() {
         let processor = Step3VLProcessor::new();
         let images = [solid(1008, 1008), solid(400, 300)];
-        let out = processor.preprocess(&images).unwrap();
+        let out = processor.preprocess(&images.iter().collect::<Vec<_>>()).unwrap();
 
         // Global views stack to [B, 3, 728, 728].
         assert_eq!(out.encoder_input.shape(), &[2, 3, 728, 728]);
@@ -575,7 +575,7 @@ mod tests {
     fn preprocess_without_patches_emits_empty_patch_tensor() {
         let processor = Step3VLProcessor::new();
         let images = [solid(400, 300)];
-        let out = processor.preprocess(&images).unwrap();
+        let out = processor.preprocess(&images.iter().collect::<Vec<_>>()).unwrap();
 
         assert_eq!(out.encoder_input.shape(), &[1, 3, 728, 728]);
         let ModelSpecificValue::Tensor { data, shape } = &out.model_specific["patch_pixel_values"]
@@ -595,7 +595,7 @@ mod tests {
     fn tiny_extreme_aspect_image_is_square_padded_first() {
         let processor = Step3VLProcessor::new();
         // 20x100 pads to 100x100, then ratio 1 -> window size 0.
-        let out = processor.preprocess(std::slice::from_ref(&solid(20, 100))).unwrap();
+        let out = processor.preprocess(&[&solid(20, 100)]).unwrap();
         assert_eq!(out.encoder_input.shape(), &[1, 3, 728, 728]);
         assert_eq!(out.feature_token_counts, vec![169]);
         assert_eq!(out.item_sizes, vec![(20, 100)]);
@@ -618,7 +618,7 @@ mod tests {
         let processor = Step3VLProcessor::from_preprocessor_config(&config);
 
         assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 146);
-        let out = processor.preprocess(std::slice::from_ref(&solid(1008, 1008))).unwrap();
+        let out = processor.preprocess(&[&solid(1008, 1008)]).unwrap();
         assert_eq!(out.encoder_input.shape(), &[1, 3, 336, 336]);
         assert_eq!(out.feature_token_counts, vec![144]);
     }
