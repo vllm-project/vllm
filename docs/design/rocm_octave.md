@@ -24,6 +24,10 @@ The packaged HIP sources require ROCm `hipcc` on `PATH` for the first build.
 Workers compile before graph capture and reuse libraries under
 `VLLM_CACHE_ROOT/octave_rdna4`. No graph-mode or vision flags are required.
 
+The `specialized_d256_r64` native source provides optimized dense kernels for
+head size 256 and rotary dimension 64. The `geometry` source supports general
+dimensions and QSA. Dense attention selects between them by workload shape.
+
 The dense path supports FP16/BF16, integer GQA ratios and equal Q/K/V head
 sizes from 1 to 1024, provided the separately padded RoPE and non-RoPE
 dimensions fit in 1024. It uses the existing Octave wire formats and

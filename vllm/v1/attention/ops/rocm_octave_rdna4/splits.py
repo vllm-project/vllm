@@ -30,7 +30,7 @@ def recommend_splits(
     cache_dtype,
     prefill=False,
     head_dim,
-    legacy_fast,
+    specialized_fast,
 ):
     """Return a power of two in 1..256 without reading device tensor values.
 
@@ -46,7 +46,7 @@ def recommend_splits(
     maximum = min(
         256, _floor2(DEFAULT_WORKSPACE_BYTES // (tokens * heads * (head_dim + 2) * 4))
     )
-    if not legacy_fast:
+    if not specialized_fast:
         rows = 16
         head_tile = min(group, rows)
         head_tiles = math.ceil(group / head_tile)

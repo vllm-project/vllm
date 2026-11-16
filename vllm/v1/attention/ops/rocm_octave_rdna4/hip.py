@@ -30,7 +30,11 @@ def build_library(
     """Build the packaged HIP source before graph capture."""
     if arch not in _ARCHES:
         raise ValueError(f"Unsupported RDNA4 target {arch}")
-    source = _NATIVE / ("legacy" if specialized else "geometry") / "octave_rdna4.hip"
+    source = (
+        _NATIVE
+        / ("specialized_d256_r64" if specialized else "geometry")
+        / "octave_rdna4.hip"
+    )
     build_dir = Path(envs.VLLM_CACHE_ROOT) / "octave_rdna4"
     hipcc = shutil.which("hipcc") or str(Path(sys.executable).with_name("hipcc"))
     flags = [f"--offload-arch={arch}", "-std=c++17", "-O3", "-fPIC", "-shared"]

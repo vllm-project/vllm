@@ -89,7 +89,7 @@ class TunedHipOctave(HipOctave):
             cache_dtype=cache_dtype,
             prefill=prefill,
             head_dim=self.head_dim,
-            legacy_fast=not self._use_geometry(query, cache, block_table, prefill),
+            specialized_fast=not self._use_geometry(query, cache, block_table, prefill),
         )
 
     def _attention(
