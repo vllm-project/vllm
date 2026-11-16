@@ -24,7 +24,7 @@ from ..utils import create_new_process_for_each_test
 pytestmark = pytest.mark.skip(reason="Kernel warmup coverage is still incomplete")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JitModel:
     model: str
     draft: str | None = None
