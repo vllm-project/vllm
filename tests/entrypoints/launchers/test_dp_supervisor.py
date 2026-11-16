@@ -21,6 +21,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -563,7 +564,7 @@ def launch_mock_vllm(child_args: argparse.Namespace):
 def launch_mock_vllm_with_drain(
     child_args: argparse.Namespace,
 ):
-    logger.info("Launching mock vLLM with 15s drain on port %s", child_args.port)
+    logger.info("Launching mock vLLM with 10s drain on port %s", child_args.port)
     mock_vllm = MockVLLMServer(
         port=child_args.port,
         drain_seconds=10.0,
@@ -571,6 +572,13 @@ def launch_mock_vllm_with_drain(
         ssl_certfile=child_args.ssl_certfile,
     )
     asyncio.run(mock_vllm.start())
+    # The drain above is the only shutdown work this mock simulates. Skip the
+    # spawned child's interpreter teardown (it imported torch and vLLM), which
+    # takes seconds on a loaded host and would eat the supervisor's
+    # CHILD_EXIT_GRACE_S window that test_shutdown_timeout relies on.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +913,11 @@ async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
         os.kill(os.getpid(), signal.SIGTERM)
 
         print(f"DRAINING FOR {_DRAIN_SECONDS}")
-        await asyncio.wait_for(_task, timeout=_DRAIN_SECONDS + CHILD_EXIT_GRACE_S + 5.0)
+        # The supervisor enforces its own deadline; this outer bound only
+        # guards against a hang, so leave generous room for a loaded host.
+        await asyncio.wait_for(
+            _task, timeout=_DRAIN_SECONDS + CHILD_EXIT_GRACE_S + 30.0
+        )
         elapsed = time.perf_counter() - start_t
 
         assert elapsed >= _DRAIN_SECONDS, (
