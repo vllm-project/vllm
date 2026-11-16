@@ -32,21 +32,24 @@ class DPLoRASlots:
         if previous and adapter_identity(previous.request) != adapter_identity(request):
             raise ValueError("A LoRA ID must identify the same adapter on every rank")
 
+    def _register(self, request: LoRARequest) -> LoRASlot:
+        self.validate(request)
+        adapter_id = request.lora_int_id
+        if adapter_id not in self.adapters:
+            self.generation += 1
+            self.adapters[adapter_id] = LoRASlot(
+                msgspec.structs.replace(request, load_inplace=False), self.generation
+            )
+        return self.adapters[adapter_id]
+
     def acquire(self, requests: list[LoRARequest], protected: set[int]) -> None:
         protected = protected | self.pinned | {r.lora_int_id for r in requests}
         if len(protected) > len(self.slots):
             raise ValueError("The global LoRA working set exceeds max_loras")
         self.clock += 1
         for request in requests:
-            self.validate(request)
             adapter_id = request.lora_int_id
-            if adapter_id not in self.adapters:
-                self.generation += 1
-                self.adapters[adapter_id] = LoRASlot(
-                    msgspec.structs.replace(request, load_inplace=False),
-                    self.generation,
-                )
-            slot = self.adapters[adapter_id]
+            slot = self._register(request)
             index = next(
                 (
                     i
@@ -93,7 +96,10 @@ class DPLoRASlots:
                     msgspec.structs.replace(request, load_inplace=False),
                     self.generation,
                 )
-            self.acquire([request], running)
+            if len(running | self.pinned | {adapter_id}) > len(self.slots):
+                self._register(request)
+            else:
+                self.acquire([request], running)
             return True
         adapter_id = msgspec.msgpack.decode(payload, type=int)
         if kind == "remove":

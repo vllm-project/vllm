@@ -870,7 +870,7 @@ async def _olmoe_online_checks(
             "/v1/load_lora_adapter",
             json={"lora_name": "missing", "lora_path": "/missing/adapter"},
         )
-        assert response.status_code >= 400
+        assert response.status_code == 404, response.text
         assert await layout() == before
         await load("c", paths[2])
         mixed = [

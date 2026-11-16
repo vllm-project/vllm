@@ -62,10 +62,16 @@ class DPLoRACoordinator:
 
     def _commit(self, candidate: DPLoRASlots) -> None:
         payload = candidate.payload()
-        if payload == self.state.payload():
+        extra_requests = [
+            slot.request
+            for adapter_id, slot in candidate.adapters.items()
+            if slot not in candidate.slots
+            and slot != self.state.adapters.get(adapter_id)
+        ]
+        if payload == self.state.payload() and not extra_requests:
             self.state = candidate
             return
-        errors = self._worker_errors("prepare_dp_loras", payload)
+        errors = self._worker_errors("prepare_dp_loras", payload, extra_requests)
         if errors:
             self.engine.model_executor.collective_rpc("abort_dp_loras")
             raise ValueError(f"DP LoRA preparation failed: {errors}")
@@ -79,10 +85,8 @@ class DPLoRACoordinator:
         self.engine.model_executor.collective_rpc("finalize_dp_loras")
         self.state = candidate
 
-    def _reject(self, usage: list[LoRAUsage], ids: set[int], message: str) -> None:
+    def _reject(self, usage: list[LoRAUsage], message: str) -> None:
         for item in usage:
-            if item.request.lora_int_id not in ids:
-                continue
             self.engine.scheduler.finish_requests(
                 [item.request_id], RequestStatus.FINISHED_ERROR
             )
@@ -141,18 +145,19 @@ class DPLoRACoordinator:
                 if previous and adapter_identity(previous) != adapter_identity(request):
                     raise ValueError("Conflicting adapter identity")
             except ValueError:
-                invalid.add(adapter_id)
+                invalid.add(item.request_id)
+                continue
             requests.setdefault(adapter_id, request)
             if item.ready and (
                 adapter_id in allowed or len(allowed) < len(self.state.slots)
             ):
                 allowed.add(adapter_id)
         if invalid:
-            self._reject(local, invalid, "Conflicting or unsupported LoRA request")
-            allowed -= invalid
-        selected = [
-            requests[i] for i in sorted(allowed) if i in requests and i not in invalid
-        ]
+            self._reject(
+                [item for item in local if item.request_id in invalid],
+                "Conflicting or unsupported LoRA request",
+            )
+        selected = [requests[i] for i in sorted(allowed) if i in requests]
         resident = {
             slot.request.lora_int_id for slot in self.state.slots if slot is not None
         }
@@ -165,7 +170,10 @@ class DPLoRACoordinator:
                 candidate.acquire([request], allowed)
                 self._commit(candidate)
             except ValueError as exc:
-                self._reject(local, {adapter_id}, str(exc))
+                self._reject(
+                    [item for item in local if item.request.lora_int_id == adapter_id],
+                    str(exc),
+                )
                 allowed.discard(adapter_id)
         self.state.acquire([r for r in selected if r.lora_int_id in allowed], allowed)
         self.engine.scheduler.set_allowed_loras(allowed)

@@ -145,6 +145,10 @@ class LoRAConfig:
         if not self.is_dp_ep(vllm_config.model_config, vllm_config.parallel_config):
             return
         parallel = vllm_config.parallel_config
+        if parallel.distributed_executor_backend == "external_launcher":
+            raise ValueError("DP LoRA sync does not support external_launcher")
+        if envs.VLLM_USE_RUST_FRONTEND:
+            raise ValueError("DP LoRA sync does not support the rust frontend")
         if (
             parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_external_lb

@@ -131,13 +131,18 @@ class WorkerLoRAManager:
     def get_slot_ids(self) -> list[int | None]:
         return list(self._adapter_manager.lora_index_to_id)
 
-    def prepare_dp_loras(self, payload: bytes) -> None:
+    def prepare_dp_loras(
+        self, payload: bytes, extra_requests: list[LoRARequest] | None = None
+    ) -> None:
         if not self.is_dp_ep_lora:
             raise ValueError("DP LoRA synchronization is not enabled")
         slots = msgspec.msgpack.decode(payload, type=list[LoRASlot | None])
         if len(slots) != len(self._dp_slots):
             raise ValueError("Invalid synchronized LoRA layout")
         self._dp_prepared = None
+        for request in extra_requests or ():
+            with gpu_sync_allowed():
+                self._load_adapter(request)
         loaded = {}
         for old, new in zip(self._dp_slots, slots):
             if new is not None and (
