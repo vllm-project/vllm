@@ -555,9 +555,15 @@ def test_pp_tied_word_embeddings(
 
 
 @multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize("tp_size", [1, 2])
 @create_new_process_for_each_test()
-def test_pp_mimo_v2_dflash(vllm_runner, tmp_path):
+def test_pp_mimo_v2_dflash(vllm_runner, tmp_path, num_gpus_available, tp_size):
     """Verify a draft that needs target states from both pipeline stages."""
+    if num_gpus_available < 2 * tp_size:
+        pytest.skip(f"Need at least {2 * tp_size} GPUs")
+
+    import random
+
     import torch
     from transformers import MiMoV2FlashConfig, MiMoV2FlashForCausalLM, Qwen3Config
 
@@ -569,7 +575,7 @@ def test_pp_mimo_v2_dflash(vllm_runner, tmp_path):
         num_attention_heads=4,
         num_key_value_heads=2,
         head_dim=64,
-        vocab_size=128,
+        vocab_size=32,
     )
     target = MiMoV2FlashConfig(
         **dims,
@@ -588,9 +594,16 @@ def test_pp_mimo_v2_dflash(vllm_runner, tmp_path):
         num_hidden_layers=1,
         num_target_layers=4,
         block_size=3,
-        dflash_config={"target_layer_ids": [0, 1, 3], "mask_token_id": 127},
+        dflash_config={
+            "target_layer_ids": [0, 1, 3],
+            "mask_token_id": dims["vocab_size"] - 1,
+        },
     ).save_pretrained(tmp_path / "draft")
 
+    rng = random.Random(0)
+    prompts = [
+        rng.choices(range(3, dims["vocab_size"] - 1), k=3 + i % 10) for i in range(16)
+    ]
     outputs = {}
     for pp_size in (1, 2):
         with vllm_runner(
@@ -601,6 +614,7 @@ def test_pp_mimo_v2_dflash(vllm_runner, tmp_path):
             max_num_seqs=4,
             kv_cache_memory_bytes=64 << 20,
             distributed_executor_backend="mp",
+            tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
             disable_log_stats=False,
             speculative_config={
@@ -611,14 +625,24 @@ def test_pp_mimo_v2_dflash(vllm_runner, tmp_path):
             },
         ) as runner:
             outputs[pp_size] = runner.generate_greedy_logprobs(
-                [[5, 7, 11], [3, 9, 8, 6]], max_tokens=8, num_logprobs=5
+                prompts, max_tokens=16, num_logprobs=5
+            )
+            metrics = runner.llm.get_metrics()
+            assert (
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_draft_tokens"
+                )
+                > 0
             )
             assert (
                 get_spec_decode_metric_value(
-                    runner.llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
                 )
                 > 0
             )
     check_logprobs_close(
-        outputs_0_lst=outputs[1], outputs_1_lst=outputs[2], name_0="pp1", name_1="pp2"
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0=f"tp{tp_size}_pp1",
+        name_1=f"tp{tp_size}_pp2",
     )
