@@ -10,6 +10,8 @@ wiring.
 """
 
 import importlib
+import mmap
+import socket
 import threading
 from collections import defaultdict
 from dataclasses import asdict
@@ -47,6 +49,9 @@ ssm_conv_transfer_utils = importlib.import_module(
 )
 MambaConvSplitInfo = ssm_conv_transfer_utils.MambaConvSplitInfo
 MoRIIOMode = moriio_connector.MoRIIOMode
+moriio_engine = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
+)
 moriio_common = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
 )
@@ -1350,6 +1355,68 @@ def test_register_kv_caches_allows_hybrid_divergent_block_len():
 
     assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
     assert worker.block_len == 9216
+
+
+@pytest.mark.cpu_test
+def test_register_kv_caches_fails_when_notify_port_is_taken():
+    """An occupied notify port must fail startup, not leave an instance that
+    reports healthy and hangs its WRITE requests."""
+    Geom = moriio_layout.LayerTransferGeometry
+    # The shared MR needs a page-aligned backing, as GPU KV caches are; mmap
+    # gives one on CPU.
+    backing = torch.frombuffer(mmap.mmap(-1, 4096), dtype=torch.uint8)
+    cache = backing[:2048].view(torch.float16).view(2, 4, 16, 1, 8)
+    caches = {"layer0": cache}
+    geoms = {"layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False)}
+    worker = _make_register_worker(caches, geoms)
+    wrapper = moriio_engine.MoRIIOWrapper(moriio_engine=object())
+    wrapper.register_local_tensor = lambda _t: b"m"
+    wrapper.get_agent_metadata = lambda: b"a"
+    worker.moriio_wrapper = wrapper
+
+    with socket.socket() as occupied:
+        occupied.bind(("", 0))
+        occupied.listen()
+        wrapper.notify_port = occupied.getsockname()[1]
+        with pytest.raises(moriio_common.HandshakeError, match="notification listener"):
+            worker.register_kv_caches(caches)
+
+    assert wrapper.notify_thread is None
+
+
+@pytest.mark.cpu_test
+def test_register_kv_caches_fails_when_handshake_port_is_taken():
+    """The handshake listener dies before setting its ready event when its
+    port is taken; startup must fail instead of waiting forever."""
+    Geom = moriio_layout.LayerTransferGeometry
+    backing = torch.frombuffer(mmap.mmap(-1, 4096), dtype=torch.uint8)
+    caches = {"layer0": backing[:2048].view(torch.float16).view(2, 4, 16, 1, 8)}
+    geoms = {"layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False)}
+    worker = _make_register_worker(caches, geoms)
+    worker._moriio_handshake_listener = (
+        moriio_connector.MoRIIOConnectorWorker._moriio_handshake_listener
+    )
+    raised: list[BaseException] = []
+
+    def _register():
+        try:
+            worker.register_kv_caches(caches)
+        except BaseException as e:
+            raised.append(e)
+
+    with socket.socket() as occupied:
+        occupied.bind(("", 0))
+        occupied.listen()
+        worker.side_channel_port = occupied.getsockname()[1]
+        t = threading.Thread(target=_register, daemon=True)
+        t.start()
+        t.join(10)
+
+    assert not t.is_alive(), "register_kv_caches hung on a taken handshake port"
+    assert len(raised) == 1
+    assert isinstance(raised[0], moriio_common.HandshakeError)
+    assert "handshake listener" in str(raised[0])
+    assert worker._moriio_handshake_listener_t is None
 
 
 def test_register_kv_caches_advertises_where_each_layer_starts():
