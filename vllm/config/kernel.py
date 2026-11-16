@@ -176,7 +176,6 @@ SparseIndexerTopkBackend = Literal[
     "persistent",
     "per_row",
     "flashinfer",
-    "flashinfer_gvr2",
     "torch",
     "aiter",
 ]
@@ -228,6 +227,26 @@ def bind_passthrough_all2all_backend(
             f"all2all_backend={a2a!r} is only valid with a moe_backend that "
             f"dispatches and combines itself ({sorted(FLASHINFER_MOE_EP_BACKENDS)}),"
             f" got moe_backend={moe_backend!r}."
+        )
+
+
+def validate_deepep_v2_cpu_sync(
+    *,
+    do_cpu_sync: bool,
+    use_all2all: bool,
+    all2all_backend: str,
+    enforce_eager: bool,
+) -> None:
+    if (
+        do_cpu_sync
+        and use_all2all
+        and all2all_backend == "deepep_v2"
+        and not enforce_eager
+    ):
+        raise ValueError(
+            "KernelConfig.deepep_v2_do_cpu_sync requires eager execution because "
+            "DeepEP v2 CPU count synchronization cannot be CUDA graph captured. "
+            "Pass --enforce-eager."
         )
 
 
@@ -290,12 +309,6 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
-    enable_flashinfer_mm_encoder_autotune: bool = False
-    """Include multimodal encoders and projectors in FlashInfer autotuning.
-    Disabled by default because profiling can increase startup time. Requires
-    enable_flashinfer_autotune and Model Runner V2. Skipped when
-    skip_mm_profiling is set."""
-
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -314,6 +327,15 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
+    deepep_v2_do_expand: bool = False
+    """Expand DeepEP v2 dispatch into one row per token/expert pair."""
+
+    deepep_v2_do_cpu_sync: bool = False
+    """Wait for DeepEP v2 receive counts to reduce unused capacity.
+
+    Requires eager execution; CPU count polling cannot be CUDA graph captured.
+    """
+
     monokernel: bool = False
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
@@ -321,11 +343,7 @@ class KernelConfig:
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
     requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
-    deployment that cannot run it is refused at startup.
-
-    Same switch as `--additional-config '{"decode_backend":
-    "latency_specialized"}'`, the specialized decode of RFC #60904: setting
-    either one enables the model's specialized decode, whichever it reads."""
+    deployment that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -341,10 +359,8 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
-      mega-kernel with NVFP4 weights on Blackwell (SM100/SM103, where MXFP4
-      checkpoints are requantized at load, or SM107 for NVFP4 checkpoints
-      only), or with block-FP8 (128x128) weights on Hopper; requires expert
-      parallelism and NVSHMEM
+      mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
+      load); requires Blackwell, expert parallelism, and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -358,7 +374,7 @@ class KernelConfig:
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
       kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
-      DeepSeek-V4 and V4.1 only)
+      DeepSeek-V4 only)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
@@ -368,13 +384,6 @@ class KernelConfig:
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
-    """
-
-    step5_attention_backend: Literal["native", "prims_ts"] = "native"
-    """Step5 attention backend. PrimTS supports SM100, SM103 and SM107 and
-    handles all FP8 attention and BF16 prefill.
-    BF16 decode uses PrimTS for MTP=3/Q=4 batches with at least 32 requests,
-    using the padded batch size for full CUDA graphs.
     """
 
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
@@ -387,11 +396,6 @@ class KernelConfig:
     - "persistent": Use vLLM's persistent_topk kernel (CUDA and ROCm)
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
-    - "flashinfer_gvr2": Use FlashInfer's self-sampling GVR V2 top-k
-      (`top_k_varlen(backend="gvr_2")`). SM100 family, fp32 logits, topk in
-      {512, 1024, 2048}. Also routes prefill chunks of >= 1024 row-relative
-      rows to gvr_2. Its latency depends on the logit distribution (rows with
-      strong position skew or many ties at the k-th value are slower)
     - "torch": Use a plain torch.topk implementation (debug reference)
     - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
       requires VLLM_ROCM_USE_AITER)
@@ -466,12 +470,6 @@ class KernelConfig:
       the budget
     """
 
-    b12x_moe_uncompressed_scales: bool = False
-    """Decode `csf`-compressed NVFP4 MoE block scales at load. By default the
-    B12X MoE backend keeps them compressed on the GPU and expands the routed
-    experts' scales on each call, which saves memory (2.57 GiB on
-    Qwen3.8-Flash-Next-FP4-Local) at some latency at higher batch sizes."""
-
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -509,7 +507,6 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
-            "enable_flashinfer_mm_encoder_autotune",
             "enable_rocm_segmented_attn_autotune",
             "enable_rocm_aiter_gemm_warmup",
         }
@@ -537,6 +534,12 @@ class KernelConfig:
         if vllm_config.model_config is not None:
             validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
+            )
+            validate_deepep_v2_cpu_sync(
+                do_cpu_sync=self.deepep_v2_do_cpu_sync,
+                use_all2all=vllm_config.parallel_config.use_all2all,
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                enforce_eager=vllm_config.model_config.enforce_eager,
             )
         bind_passthrough_all2all_backend(self.moe_backend, vllm_config.parallel_config)
 

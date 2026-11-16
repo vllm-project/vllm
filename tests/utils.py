@@ -18,7 +18,6 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, MutableMapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
@@ -1454,14 +1453,16 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
-    world_size = data_parallel_size * tp_size * pp_size
-    # One CPU per rank: Ray prestarts a worker process per CPU, and hundreds of
-    # them starve the next test's ray.init past its 30 s GCS startup timeout.
-    ray.init(num_cpus=world_size, runtime_env={"env_vars": env_vars})
+    ray.init(
+        runtime_env={
+            "env_vars": env_vars,
+        }
+    )
 
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
     data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
+    world_size = data_parallel_size * tp_size * pp_size
     try:
         refs = []
         for rank in range(world_size):
@@ -1599,21 +1600,6 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    if current_platform.is_rocm() and not torch.cuda.is_initialized():
-        # HIP memory queries initialize HIP, which forces vLLM to spawn instead
-        # of fork its engine processes; poll from a forked child instead.
-        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
-            pool.submit(
-                _wait_for_gpu_memory_to_clear_with_hip,
-                devices=devices,
-                threshold_bytes=threshold_bytes,
-                threshold_ratio=threshold_ratio,
-                timeout_s=timeout_s,
-                stable_duration_s=stable_duration_s,
-                stable_tolerance_bytes=stable_tolerance_bytes,
-                poll_interval_s=poll_interval_s,
-            ).result()
-        return
     # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
         devices = get_physical_device_indices(devices)
@@ -1732,11 +1718,6 @@ def wait_for_gpu_memory_to_clear(
             )
 
         time.sleep(poll_interval_s)
-
-
-def _wait_for_gpu_memory_to_clear_with_hip(**kwargs) -> None:
-    torch.cuda.init()
-    wait_for_gpu_memory_to_clear(**kwargs)
 
 
 def wait_for_memory_to_settle(
@@ -2079,12 +2060,12 @@ def multi_gpu_marks(*, num_gpus: int):
     return [test_selector, test_skipif]
 
 
-def multi_gpu_test(*, num_gpus: int):
+def multi_gpu_test(*, num_gpus: int, method: Literal["spawn", "fork"] | None = None):
     """Decorate a test to be run only when multiple GPUs are available."""
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = create_new_process_for_each_test()(f)
+        func = create_new_process_for_each_test(method)(f)
         for mark in reversed(marks):
             func = mark(func)
 

@@ -3,6 +3,7 @@
 """DeepEP test utilities."""
 
 import dataclasses
+import os
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -37,7 +38,7 @@ class GINNotAvailableError(RuntimeError):
     pass
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass
 class ProcessGroupInfo:
     world_size: int
     world_local_size: int
@@ -123,12 +124,12 @@ def parallel_launch(
 ## DeepEP specific utils
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass
 class DeepEPHTArgs:
     num_local_experts: int
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass
 class DeepEPLLArgs:
     max_tokens_per_rank: int
     hidden_size: int
@@ -215,7 +216,7 @@ def make_deepep_a2a(
     return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass
 class DeepEPV2Args:
     num_local_experts: int
     num_experts: int
@@ -223,6 +224,9 @@ class DeepEPV2Args:
     hidden_size: int
     max_tokens_per_rank: int
     use_fp8_dispatch: bool
+    do_expand: bool = False
+    do_cpu_sync: bool = False
+    expert_alignment: int = 1
 
 
 def make_deepep_v2_a2a(
@@ -239,11 +243,13 @@ def make_deepep_v2_a2a(
     # lazy communicator and reject unsupported systems before entering DeepEP.
     probe = torch.zeros(1, device=pgi.device)
     torch.distributed.all_reduce(probe, group=pg)
-    gin_type = query_nccl_gin_type(pg)
-    if gin_type is None:
-        raise RuntimeError("Failed to determine NCCL GIN support")
-    if gin_type == 0:
-        raise GINNotAvailableError("NCCL GIN not available")
+    gin_disabled = os.environ.get("EP_DISABLE_GIN", "0") != "0"
+    if not gin_disabled:
+        gin_type = query_nccl_gin_type(pg)
+        if gin_type is None:
+            raise RuntimeError("Failed to determine NCCL GIN support")
+        if gin_type == 0:
+            raise GINNotAvailableError("NCCL GIN not available")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,
@@ -254,6 +260,9 @@ def make_deepep_v2_a2a(
         allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
+    if gin_disabled and tuple(buffer.get_physical_domain_size()) != (1, pgi.world_size):
+        buffer.destroy()
+        raise RuntimeError("GIN-disabled tests require a single NVLink domain")
     return DeepEPV2PrepareAndFinalize(
         buffer=buffer,
         num_dispatchers=pgi.world_size,
@@ -262,4 +271,7 @@ def make_deepep_v2_a2a(
         num_experts=v2_args.num_experts,
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        do_expand=v2_args.do_expand,
+        do_cpu_sync=v2_args.do_cpu_sync,
+        expert_alignment=v2_args.expert_alignment,
     )

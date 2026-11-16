@@ -142,6 +142,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
     output_scale_ptr,
+    expert_ids_ptr,
     expert_ends_ptr,
     M,
     input_stride_m,
@@ -159,6 +160,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    HAS_EXPERT_IDS: tl.constexpr,
     EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
@@ -188,12 +190,17 @@ def _silu_mul_quant_fp8_packed_kernel(
     while row_start < M:
         rows = row_start + row_offsets
         row_mask = rows < M
+        input_mask = row_mask
+        if HAS_EXPERT_IDS:
+            input_mask = input_mask & (
+                tl.load(expert_ids_ptr + rows, mask=row_mask, other=-1) >= 0
+            )
         input_row_start = rows[:, None] * input_stride_m
         output_row_start = rows[:, None] * output_q_stride_m
 
         gate_flat = tl.load(
             input_ptr + input_row_start + col_start + col_offsets[None, :],
-            mask=row_mask[:, None] & col_mask[None, :],
+            mask=input_mask[:, None] & col_mask[None, :],
             other=0.0,
         )
         up_flat = tl.load(
@@ -202,7 +209,7 @@ def _silu_mul_quant_fp8_packed_kernel(
             + hidden_size
             + col_start
             + col_offsets[None, :],
-            mask=row_mask[:, None] & col_mask[None, :],
+            mask=input_mask[:, None] & col_mask[None, :],
             other=0.0,
         )
 
@@ -266,6 +273,7 @@ def silu_mul_quant_fp8_packed_triton(
     *,
     expert_ends: torch.Tensor | None = None,
     expert_alignment: int = 0,
+    expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse activation and FP8 quantization, optionally skipping expert padding.
 
@@ -273,6 +281,7 @@ def silu_mul_quant_fp8_packed_triton(
     exclusive end of an expert's live rows, including earlier alignment gaps.
     An expert starts at the preceding end rounded up to `expert_alignment`.
     Padding outputs are left unwritten and must not be consumed as live rows.
+    `expert_ids` instead marks live rows directly for already grouped input.
     Without `expert_ends`, the original dense launch configuration is used
     and the metadata loads are compiled out.
     """
@@ -280,6 +289,8 @@ def silu_mul_quant_fp8_packed_triton(
     assert input.is_contiguous()
 
     M, N = input.shape
+    if expert_ids is not None:
+        assert expert_ids.shape == (M,) and expert_ids.is_contiguous()
     hidden_size = N // 2
 
     assert hidden_size % group_size == 0
@@ -336,6 +347,7 @@ def silu_mul_quant_fp8_packed_triton(
         input,
         output_q,
         output_scale_packed,
+        expert_ids,
         expert_ends,
         M,
         input.stride(0),
@@ -353,6 +365,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        HAS_EXPERT_IDS=expert_ids is not None,
         EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
