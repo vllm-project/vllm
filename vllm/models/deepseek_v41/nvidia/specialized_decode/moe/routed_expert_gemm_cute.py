@@ -82,13 +82,11 @@ GEMM1 reads and writes no global memory (its CTAs read the record's tile
 count before triggering, and a release fence precedes the trigger); so a
 kernel that waits for GEMM2 also sees GEMM1's work done.
 
-GEMM1's A load warp triggers right after issuing the CTA's
-`GEMM1_TRIGGER_K_TILE`-th k tile, counted over its items, and a CTA with fewer
-k tiles exits without triggering. GEMM2's grid becomes ready to launch only
-once every GEMM1 CTA has got that far or exited, so kernels of other streams
-that become ready before that (the shared expert's down_proj) take the SMs
-GEMM1 leaves ahead of GEMM2's CTAs. GEMM2 launches only once every GEMM1 CTA is
-resident, and GEMM1 waits on nothing GEMM2 does, so GEMM1 always completes.
+GEMM1's A load warp triggers after the CTA's `GEMM1_TRIGGER_K_TILE`-th k
+tile, counted over its items; a CTA with fewer exits without triggering. GEMM2
+can launch only once every GEMM1 CTA has triggered or exited, so other streams'
+kernels that are ready earlier (the shared expert's down_proj) take the SMs
+GEMM1 leaves first. GEMM1 waits on nothing GEMM2 does, so it always completes.
 
 The weights are those vLLM prepares for the TRT-LLM-gen backend, whose rows are
 shuffled for 128-row epilogue tiles: in each block of 32, shuffled row

@@ -24,19 +24,16 @@ low-batch kernels where they apply:
   expansion on a side stream right after its indexer, and index sources first
   join the side-stream sparse-index builds, which read the top-k indices they
   overwrite. The indexers the plan does not take (the stock dense indexer and
-  the candidate consumers) reset their top-k rows there too, instead of after
-  the index query and key.
+  the candidate consumers) reset their top-k rows there, before the index query
+  and key are ready.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
   KV counters (`sparse_mla`).
-- With `kv_stream` (the target's layers), the query's RoPE and FP8
-  quantization move into the CuTe sparse-MLA kernel, and the fused Q/KV norm
-  writes the KV cache bytes of `_fused_qnorm_rope_kv_insert` itself (where
-  the norm is not fused, that insert runs on `kv_stream` beside `wq_b`):
-  `wq_b` is then the attention's only producer of the layer and launches it
-  early, on the same FP8 bytes.
+- With `kv_stream` (the target's layers), the CuTe sparse-MLA kernel ropes
+  and quantizes the query and the fused Q/KV norm writes the KV cache (an
+  unfused norm leaves the KV insert to `kv_stream`, beside `wq_b`), so
+  `wq_b` alone precedes the attention and launches it early.
 - With `prefetch`, a layer whose sparse-index table an earlier layer built
-  first prefetches the table's KV rows into L2 on a side stream
-  (`sparse_mla.SparseMlaPrefetch`).
+  prefetches the table's KV rows into L2 (`sparse_mla.SparseMlaPrefetch`).
 
 `wo_b`'s output is TP-partial: the next boundary reduces it. The DSpark
 draft's stock layers reduce `wo_b` themselves, so for them the step projects
@@ -157,10 +154,11 @@ class AttentionStep:
             else None
         )
         self._kv_done = torch.cuda.Event()
-        # This step's KV was inserted by the norm.
-        self._kv_in_norm = False
-        # This step's top-k rows were reset in _prepare.
-        self._topk_filled = False
+
+    @property
+    def _norm_fused(self) -> bool:
+        attn = self.attn
+        return attn.q_lora_rank % 32 == 0 and attn._can_fuse_query_quant
 
     def run(
         self,
@@ -201,7 +199,7 @@ class AttentionStep:
         if q_rope is None:
             self.mla.run(attn, q, out)
         else:
-            if not self._kv_in_norm:
+            if not self._norm_fused:
                 # The attention reads the KV inserted beside wq_b.
                 torch.cuda.current_stream().wait_event(self._kv_done)
             if not self.mla.run(attn, q, out, q_rope):
@@ -308,11 +306,9 @@ class AttentionStep:
         wait, overlapping them with the norm. The fused norm also does
         `insert`."""
         attn = self.attn
-        self._kv_in_norm = False
-        if attn.q_lora_rank % 32 or not attn._can_fuse_query_quant:
+        if not self._norm_fused:
             return attn._split_qkv_and_norm(qr_kv)
         qr, kv = qr_kv.split([attn.q_lora_rank, attn.head_dim], dim=-1)
-        self._kv_in_norm = insert is not None
         qr_quant, kv = fused_q_kv_rmsnorm_quant(
             qr,
             kv,
@@ -353,8 +349,7 @@ class AttentionStep:
         indexer's plan (`plan_decode_rows`), then the compressed-cache
         insertion once the latent is ready. Returns the query, the indexer
         query, its scale and weights, the dense indexer's plan, and with
-        `insert` (on `kv_stream`, or done by the norm) the RoPE the
-        attention applies to the (then BF16) query.
+        `insert` the `QRope` the attention applies to the BF16 query.
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
@@ -410,7 +405,6 @@ class AttentionStep:
             # The side-stream table builds read the top-k rows it resets.
             self.tables.join()
             plan = plan_decode_rows(indexer.indexer_op, num_tokens)
-        self._topk_filled = False
         if (
             indexer is not None
             and plan is None
@@ -420,7 +414,6 @@ class AttentionStep:
             # ready (sparse_attn_indexer's, SparseMQAIndexer.forward's).
             self.tables.join()
             indexer.indexer_op.topk_indices_buffer[:num_tokens] = -1
-            self._topk_filled = True
         if compressor is not None:
             latent_ready.wait()
             compressor.insert_cache(latent, positions, attn.rotary_emb)
@@ -461,14 +454,14 @@ class AttentionStep:
     def _insert_kv_aside(
         self, kv: torch.Tensor, insert: KVCacheInsert | None
     ) -> QRope | None:
-        """With `insert`, unless the norm did it, the KV half of
-        `_fused_qnorm_rope_kv_insert` (its kernel without query heads, bit
-        for bit) on `kv_stream` from the start event on; and the `QRope`
-        with which the CuTe sparse-MLA kernel does the query half."""
+        """The `QRope` for the CuTe sparse-MLA kernel's query half of
+        `_fused_qnorm_rope_kv_insert`, after running the KV half
+        (`fused_deepseek_v4_kv_rope_insert`) on `kv_stream` unless the norm
+        did it. None without `insert`."""
         if insert is None:
             return None
         attn = self.attn
-        if not self._kv_in_norm:
+        if not self._norm_fused:
             assert self.kv_stream is not None
             self.kv_stream.wait_event(self._events[0])
             with torch.cuda.stream(self.kv_stream):
@@ -538,7 +531,7 @@ class AttentionStep:
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         op = indexer.indexer_op
         # The reset _prepare ran replaces the indexer's own.
-        filled, self._topk_filled = self._topk_filled, False
+        filled = plan is None and isinstance(op, SparseAttnIndexer | SparseMQAIndexer)
         if filled:
             assert isinstance(op, SparseAttnIndexer | SparseMQAIndexer)
             op.skip_topk_buffer_clear = True
@@ -561,7 +554,7 @@ class AttentionStep:
                     self.consumer.join()
                 if not (
                     isinstance(op, SparseMQAIndexer)
-                    and consume_decode_rows(op, x, q_quant, index_weights)
+                    and consume_decode_rows(op, q_quant, index_weights)
                 ):
                     op(x, q_quant, None, index_weights)
         finally:

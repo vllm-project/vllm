@@ -22,15 +22,12 @@ DSpark on a GB300) run the CuTe DSL kernel of `sparse_mla_cute` instead of
 TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
 3.
 
-Where that kernel runs, the layer that would build its run's table on the
-current stream (a compressed run's first layer: an index source right after its
-indexer, or a layer whose KV source changes within an index run) attends on the
-table's inputs instead (`sparse_mla_cute.LocalIndices`), and every table its
-run's later layers look up is built on the side stream. The later layers of its
-own SWA group then wait for that build's event, as the other groups' layers
-already do. A layer whose table an earlier layer of the step built prefetches
-the table's KV rows into L2 on a side stream at its start
-(`SparseMlaPrefetch`).
+Where that kernel runs, a compressed run's first layer, which would build the
+run's table on the current stream, attends on the table's inputs
+(`sparse_mla_cute.LocalIndices`); every table the run's later layers look up
+is built on the side stream, and those layers wait for the build's event. A
+layer whose table an earlier layer built prefetches the table's KV rows into L2
+on a side stream at its start (`SparseMlaPrefetch`).
 """
 
 import inspect
@@ -266,14 +263,6 @@ class SparseIndexTables:
         assert compressed_kv_cache is not None
         return compressed_kv_cache, swa_metadata.seq_lens[:num_reqs], *table
 
-    def misses(
-        self,
-        attn: DeepseekV4FlashInferMLAAttention,
-        swa_metadata: "DeepseekSparseSWAMetadata",
-    ) -> bool:
-        """Whether `lookup` would build `attn`'s table on the current stream."""
-        return (id(swa_metadata), self.keys[attn]) not in self._tables
-
     def fork_all(
         self,
         attn: DeepseekV4FlashInferMLAAttention,
@@ -388,17 +377,13 @@ class SparseIndexTables:
 
 
 class SparseMlaPrefetch:
-    """At the start of a layer whose sparse-index table an earlier layer of
-    the step built, prefetch into L2 on a side stream what the layer's CuTe
-    sparse-MLA kernel reads first (`sparse_mla_prefetch`): the table, its KV
-    rows, the sinks and the query scale. They were last read a layer or more
-    ago, with at least one MoE layer's expert weights streamed through L2
-    since, so otherwise the attention's index loads and then its KV gather can
-    both miss L2 on the critical path.
+    """Prefetches into L2, on a side stream at a layer's start, what the
+    layer's CuTe sparse-MLA kernel reads first (`sparse_mla_prefetch`), for
+    layers whose sparse-index table an earlier layer of the step built. An MoE
+    layer's expert weights have streamed through L2 since those rows were last
+    read, so the attention's index loads and KV gather would otherwise miss.
 
-    The kernel writes nothing and reads the table after every earlier kernel
-    of the current stream (and a pending side-stream build) finished; the
-    stream joins the current one only in `join`, at the end of the step.
+    The kernel writes nothing; `join` joins the stream at the end of the step.
     """
 
     def __init__(self, tables: SparseIndexTables) -> None:
@@ -614,7 +599,7 @@ class SparseMlaDecode:
         SWA slot ids) without it, and fork the builds of the run's later
         layers. False, having issued nothing, where the CuTe kernel does not
         take the step."""
-        if not self.tables.misses(attn, swa_metadata):
+        if self.tables.peek(attn, swa_metadata) is not None:
             return False
         num_tokens = swa_metadata.num_decode_tokens
         topk = attn.topk_indices_buffer

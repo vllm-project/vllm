@@ -1251,7 +1251,7 @@ def cluster_for(rows: int, width: int, device_index: int) -> int:
 
 
 def precompile(
-    device_index: int, width: int, k: int, block_mode: bool, pdl: bool = True
+    device_index: int, width: int, k: int, block_mode: bool, pdl: bool
 ) -> None:
     """Compile the `DecodeTopK` variants `decode_topk` launches on rows of
     `width` logits for `k`, `block_mode` and `pdl`, at any row count,

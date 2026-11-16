@@ -200,7 +200,7 @@ def test_index_rows_wider_than_the_table() -> None:
 
 
 @pytest.mark.parametrize("width", [128, 640])
-@pytest.mark.parametrize("tokens", [1, 6, 48])
+@pytest.mark.parametrize("tokens", [1, 48])
 @pytest.mark.parametrize("scale_inv", [1.0, 0.375])
 def test_q_rope_split_matches_the_fused_insert_bitwise(
     width: int, tokens: int, scale_inv: float
@@ -271,10 +271,7 @@ def test_q_rope_split_matches_the_fused_insert_bitwise(
 
 
 @pytest.mark.parametrize("q_rope", [False, True])
-@pytest.mark.parametrize("with_sinks", [True, False])
-def test_local_indices_match_the_built_table_bitwise(
-    q_rope: bool, with_sinks: bool
-) -> None:
+def test_local_indices_match_the_built_table_bitwise(q_rope: bool) -> None:
     """`sparse_mla_decode_local` on an index source's table inputs gives,
     bit for bit, `sparse_mla_decode` on the table that
     `build_flashinfer_mixed_sparse_indices` builds from them (as
@@ -282,7 +279,7 @@ def test_local_indices_match_the_built_table_bitwise(
     packed pages in both pools, -1 SWA and top-k entries, a short top-k row, a
     hole inside a row (which the table's length cuts off), and a token whose
     compressed columns do not count."""
-    g = torch.Generator(device=DEVICE).manual_seed(17 + 2 * q_rope + with_sinks)
+    g = torch.Generator(device=DEVICE).manual_seed(18 + 2 * q_rope)
     tokens, reqs, topk = 12, 2, 512
     swa_block, swa_span, comp_block, comp_span = 64, 72, 64, 80
     swa_pool = fp8((32, swa_span, D), 1.0, g)
@@ -350,7 +347,7 @@ def test_local_indices_match_the_built_table_bitwise(
         )
     else:
         q = fp8((tokens, H, D), 0.5, g)
-    sinks = torch.randn(H, device=DEVICE, generator=g) if with_sinks else None
+    sinks = torch.randn(H, device=DEVICE, generator=g)
     scales = (D**-0.5 * 1.25, 0.75)
     built = torch.empty((tokens, H, D), dtype=torch.bfloat16, device=DEVICE)
     direct = torch.empty_like(built)

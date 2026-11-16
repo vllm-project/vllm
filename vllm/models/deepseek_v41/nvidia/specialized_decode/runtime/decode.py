@@ -248,10 +248,8 @@ class SpecializedDecode:
         )
         gemms = build_routed_expert_gemms([layer.ffn.experts for layer in layers])
         quantize = self.all_reduce.quantize_layer_input
-        # Where the attention ropes its own query, the KV insert runs on this stream
-        # beside wq_b unless the fused norm does it.
+        # The attention steps' side stream for the KV insert.
         kv_stream = torch.cuda.Stream()
-        # The L2 prefetch of a layer's attention rows, from the layer's start.
         self.prefetch = SparseMlaPrefetch(self.tables)
         self.plans = [
             LayerPlan(

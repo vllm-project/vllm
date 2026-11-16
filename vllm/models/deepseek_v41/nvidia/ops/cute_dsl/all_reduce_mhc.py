@@ -366,9 +366,8 @@ class _QuadFinalizePublishDeviceKernel:
         self.prefetch_group = prefetch_group
         self.prefetch_groups = (top_k + prefetch_group - 1) // prefetch_group
         self.fp32_weights = fp32_weights
-        # The consumer launches right after this kernel's wait, not at its
-        # end: its prologue overlaps this kernel, and its own wait still waits
-        # for this whole grid, so what it reads is unchanged.
+        # Trigger the consumer right after the wait so its prologue overlaps this
+        # kernel; its own wait still covers this whole grid.
         self.trigger_after_wait = enable_pdl and trigger_after_wait
 
     def smem_size_in_bytes(self) -> int:
@@ -757,7 +756,7 @@ class _LamportMHCDeviceKernel:
         quantize: bool = False,
         residual_only: bool = False,
         reduced_input: bool = False,
-        trigger_at: str = "end",
+        trigger_at: str,
     ) -> None:
         if trigger_at not in ("end", "poll", "start"):
             raise ValueError("trigger_at must be 'end', 'poll' or 'start'")
@@ -1402,9 +1401,7 @@ class AllReduceMHC:
                 )
 
             # Consumers by (BT, variant): "plain", "quant" (also the MXFP8
-            # layer input) and "residual" (residual streams only). The LL
-            # plain and quant consumers trigger their dependents at
-            # ``plain_trigger`` and ``quant_trigger``.
+            # layer input) and "residual" (residual streams only).
             self._consumers: dict[tuple[bool, str], Any] = {}
             for bt in (False, True) if bt_enabled else (False,):
                 self._consumers[bt, "plain"] = compile_collective(

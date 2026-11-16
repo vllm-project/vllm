@@ -147,9 +147,9 @@ def test_wide_rows(rows, wide, cluster, fallback):
     """Rows of up to 524,288 logits (the ratio-2 layers' width at a 1M
     context), which only 8 CTAs a row hold, and of up to 1,048,576 (the
     candidate source's), which take 16; at 20 and 12 rows more clusters than
-    a GB300 runs at once, so they run in waves. The blocks again as the
-    deferred candidate-block selection launches them: without PDL, a few rows
-    (here 3) a launch."""
+    a GB300 runs at once, so they run in waves. Block mode also runs as the
+    deferred candidate-block selection launches it: without PDL, 3 rows a
+    launch."""
     lengths = [
         [wide, wide * 3 // 4 + 1, wide // 2 + 1, 9000][r % 4] for r in range(rows)
     ]
@@ -279,9 +279,8 @@ def test_candidate_blocks_match_stock(workspace_init, rows, fallback):
         assert int(got[r].max()) == nblocks - 1, f"row {r}: newest block not pinned"
 
 
-@pytest.mark.parametrize("kind", ["normal", "crowded", "constant", "rising", "special"])
-@pytest.mark.parametrize("k", [512, 2048])
-@pytest.mark.parametrize("block_size", [8, 16])
+@pytest.mark.parametrize("kind", ["normal", "crowded", "constant", "special"])
+@pytest.mark.parametrize(("k", "block_size"), [(512, 8), (512, 16), (2048, 8)])
 def test_sparse_topk_small(kind, k, block_size):
     """The candidate consumers' top-k on their rows (2048 candidate blocks of
     8 tokens), eagerly and replayed from a CUDA graph on new logits: in

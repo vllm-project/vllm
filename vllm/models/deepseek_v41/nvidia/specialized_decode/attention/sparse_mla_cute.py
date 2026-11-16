@@ -55,22 +55,16 @@ position) before its grid dependency wait and everything else after it, the
 index loads first. It lets its dependents launch once its S MMAs are issued
 (programmatic dependent launch). Masked columns gather zeros and score -inf.
 
-Query RoPE (`QRope`). The kernel can instead take `wq_b`'s BF16 output and
-apply the query's GPT-J RoPE (on dims 448-511), its FP8 scale and E4M3 rounding
-as it loads it, in the rounding of the CUDA kernel it replaces
-(`fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert` without the Q
-norm): the same E4M3 bytes land in the query tile. The KV insert then runs
-elsewhere, and the attention follows `wq_b` directly (its PDL prologue
-overlapping `wq_b`'s tail).
+Query RoPE (`QRope`). With `q_rope` the kernel takes `wq_b`'s BF16 output and
+applies the query's GPT-J RoPE (dims 448-511), FP8 scale and E4M3 rounding as
+it loads it, giving the FP8 query bytes of
+`fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert` (without the Q
+norm). The attention then follows `wq_b` directly in the PDL chain.
 
-Local indices (`LocalIndices`). The kernel can instead take the sparse set
-before `build_flashinfer_mixed_sparse_indices` turns it into storage offsets:
-the token's SWA slot ids and its indexer's request-local top-k positions, which
-it translates as it loads them (the SWA ids through the pool's block span, the
-top-k positions through the request's compressed block table and span) and
-masks as that build's lengths do. The KV rows it gathers are the table's, so an
-index source's attention follows its top-k directly, without the table build in
-between.
+Local indices (`LocalIndices`). With `local` the kernel takes the inputs of
+`build_flashinfer_mixed_sparse_indices` (SWA slot ids, request-local top-k
+positions), translates them as it loads them and masks as that build's lengths
+do, so it gathers the table's KV rows without the table.
 
 L2 prefetch (`SparseMlaPrefetchCute`). It reads a built sparse-index table
 and prefetches each active column's KV row (and the sinks and the query scale)
@@ -127,6 +121,12 @@ LOCAL_TOPK = 4 * THREADS
 # The E4M3 range the CUDA kernel clamps to before its saturating conversion
 # (+-448 as PTX hexadecimal floats).
 _CLAMP = "max.f32 {r}, {r}, 0fC3E00000;\n\tmin.f32 {r}, {r}, 0f43E00000;\n\t"
+# qa..qd clamped and packed into one word of four E4M3 bytes.
+_CLAMP_PACK = (
+    "".join(_CLAMP.format(r=r) for r in ("qa", "qb", "qc", "qd"))
+    + "cvt.rn.satfinite.e4m3x2.f32 lo, qb, qa;\n\t"
+    "cvt.rn.satfinite.e4m3x2.f32 hi, qd, qc;\n\tmov.b32 $0, {lo, hi};\n\t}"
+)
 
 
 class QRope(NamedTuple):
@@ -403,10 +403,7 @@ def query_e4m3x4(
             "shl.b32 qa, $1, 16;\n\tand.b32 qb, $1, 0xFFFF0000;\n\t"
             "shl.b32 qc, $2, 16;\n\tand.b32 qd, $2, 0xFFFF0000;\n\t"
             "mul.rn.f32 qa, qa, $3;\n\tmul.rn.f32 qb, qb, $3;\n\t"
-            "mul.rn.f32 qc, qc, $3;\n\tmul.rn.f32 qd, qd, $3;\n\t"
-            + "".join(_CLAMP.format(r=r) for r in ("qa", "qb", "qc", "qd"))
-            + "cvt.rn.satfinite.e4m3x2.f32 lo, qb, qa;\n\t"
-            "cvt.rn.satfinite.e4m3x2.f32 hi, qd, qc;\n\tmov.b32 $0, {lo, hi};\n\t}",
+            "mul.rn.f32 qc, qc, $3;\n\tmul.rn.f32 qd, qd, $3;\n\t" + _CLAMP_PACK,
             "=r,r,r,f",
             False,
             loc,
@@ -447,9 +444,7 @@ def roped_query_e4m3x4(
             "{\n\t.reg .f32 qe, qo, qt, qa, qb, qc, qd;\n\t.reg .b16 lo, hi;\n\t"
             + pair.format(w=1, c=3, s=4, e="qa", o="qb")
             + pair.format(w=2, c=5, s=6, e="qc", o="qd")
-            + "".join(_CLAMP.format(r=r) for r in ("qa", "qb", "qc", "qd"))
-            + "cvt.rn.satfinite.e4m3x2.f32 lo, qb, qa;\n\t"
-            "cvt.rn.satfinite.e4m3x2.f32 hi, qd, qc;\n\tmov.b32 $0, {lo, hi};\n\t}",
+            + _CLAMP_PACK,
             "=r,r,r,f,f,f,f,f",
             False,
             loc,
@@ -601,8 +596,8 @@ class SparseMlaDecodeCute:
         self,
         chunks: int,
         has_sinks: bool,
-        q_rope: bool = False,
-        local: bool = False,
+        q_rope: bool,
+        local: bool,
     ) -> None:
         assert 1 <= chunks <= MAX_CHUNKS
         assert not local or chunks == MAX_CHUNKS
@@ -1237,12 +1232,9 @@ class SparseMlaDecodeCute:
 
 
 class SparseMlaPrefetchCute:
-    """Prefetch into L2 what `SparseMlaDecodeCute` of `chunks` chunks reads
-    first from an already built sparse-index table: the table's rows (by
-    loading them, as the attention does), each active column's KV row, the
-    sinks and the query scale. One CTA of 128 threads a token and chunk, one
-    column a thread, as in the attention, whose masking it copies: it addresses
-    exactly the rows the attention then gathers. It writes nothing."""
+    """The L2 prefetch (module docstring) for a table of `chunks` chunks: one
+    CTA of 128 threads a token and chunk, one column a thread, masked as
+    `SparseMlaDecodeCute` masks. It writes nothing."""
 
     def __init__(self, chunks: int) -> None:
         assert 1 <= chunks <= MAX_CHUNKS
@@ -1561,7 +1553,7 @@ def supports_local_indices(
     """Whether `sparse_mla_decode_local` takes these arguments: those of
     `supports_sparse_mla_cute` at 640 columns, with `LocalIndices` of 512
     16-byte aligned int32 top-k columns, 128 int32 SWA columns, int32 requests,
-    bool token flags, an int32 block table and positive block sizes."""
+    bool token flags and an int32 block table."""
     tokens = query.shape[0]
     topk, swa = local.topk, local.swa
     if (
@@ -1591,16 +1583,6 @@ def supports_local_indices(
             return False
     table = local.block_table
     if table.dtype != torch.int32 or table.dim() != 2 or table.stride(1) != 1:
-        return False
-    if (
-        min(
-            local.swa_block_size,
-            local.swa_block_span,
-            local.block_size,
-            local.block_span,
-        )
-        <= 0
-    ):
         return False
     return _takes_launch(
         query,

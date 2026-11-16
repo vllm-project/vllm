@@ -98,8 +98,8 @@ if TYPE_CHECKING:
 # single request's slices save less than the all-gathers cost.
 ROW_SHARD_MIN_ROWS = 12
 
-# Rows a launch of the deferred candidate-block selection: without PDL it starts
-# beside the attention the token top-k launched early, and holds an SM a CTA.
+# Rows per launch of the deferred candidate-block selection. Small, because each
+# CTA holds an SM beside the attention that the token top-k launched early.
 DEFERRED_BLOCKS_MAX_ROWS = 2
 
 
@@ -473,27 +473,31 @@ def decode_schedule(
     )
 
 
-def consume_decode_rows(
+def _indexer_metadata(
     op: SparseMQAIndexer,
-    hidden_states: torch.Tensor,
-    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    weights: torch.Tensor,
-) -> bool:
-    """`op(hidden_states, q_quant, None, weights)` for a pure-decode step,
-    the decode branch of `SparseMQAIndexer.forward` with `sparse_topk_small`
-    in place of DeepSelect and the remap; False, having issued nothing, for any
-    other step."""
+) -> DeepseekV41SparseIndexerMetadata | None:
     attn_metadata = get_forward_context().attn_metadata
     metadata = (
         attn_metadata.get(op.k_cache.prefix)
         if isinstance(attn_metadata, dict)
         else None
     )
-    if (
-        not isinstance(metadata, DeepseekV41SparseIndexerMetadata)
-        or metadata.num_prefills > 0
-        or metadata.sparse_decode is None
-    ):
+    if isinstance(metadata, DeepseekV41SparseIndexerMetadata):
+        return metadata
+    return None
+
+
+def consume_decode_rows(
+    op: SparseMQAIndexer,
+    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+) -> bool:
+    """The decode branch of `SparseMQAIndexer.forward` for a pure-decode
+    step whose top-k rows the caller has reset, with `sparse_topk_small` in
+    place of DeepSelect and the remap; False, having issued nothing, for any
+    other step."""
+    metadata = _indexer_metadata(op)
+    if metadata is None or metadata.num_prefills > 0 or metadata.sparse_decode is None:
         return False
     rows = metadata.sparse_decode
     num_rows = rows.row_ke.shape[0]
@@ -504,8 +508,6 @@ def consume_decode_rows(
     ):
         return False
     assert isinstance(q_quant, tuple)
-    if not op.skip_topk_buffer_clear:
-        op.topk_indices_buffer[: hidden_states.shape[0]] = -1
     if rows.kernel_metadata is None:
         rows.kernel_metadata = decode_schedule(op, rows, sparse_block_kv)
     q_values, q_scale = q_quant
@@ -564,13 +566,8 @@ class CandidateOverlap:
         self._forked = False
 
     def _decode_rows(self) -> tuple[SparseMQARowsMetadata, int] | None:
-        attn_metadata = get_forward_context().attn_metadata
-        metadata = (
-            attn_metadata.get(self.consumer.k_cache.prefix)
-            if isinstance(attn_metadata, dict)
-            else None
-        )
-        if not isinstance(metadata, DeepseekV41SparseIndexerMetadata):
+        metadata = _indexer_metadata(self.consumer)
+        if metadata is None:
             return None
         rows = metadata.sparse_decode
         if rows is None or not rows.row_ke.numel():
@@ -599,10 +596,9 @@ class CandidateOverlap:
         select: Callable[[], None] | None = None,
         reads: tuple[torch.Tensor, ...] = (),
     ) -> None:
-        """Start the expansion; the candidate source calls this right after
-        its indexer has written the candidates, or, once `can_fork` holds,
-        with `select`, the selection that writes them (reading `reads`),
-        which then runs first on `stream`."""
+        """Start the expansion on `stream`, after the candidate source's
+        indexer. With `select` (only once `can_fork` holds), run it first on
+        `stream`: it writes the candidates and reads `reads`."""
         found = self._decode_rows()
         if found is None or found[0].kernel_metadata is not None:
             assert select is None

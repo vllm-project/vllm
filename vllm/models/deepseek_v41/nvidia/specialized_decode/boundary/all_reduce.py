@@ -32,7 +32,7 @@ class BoundaryAllReduce(AllReduceMHC):
             quantize_layer_input=quantize_layer_input,
             residual_only=True,
             # The plain and quant consumers' dependents read only weights before their
-            # own wait; the finalize-publish triggers its consumer after its own wait.
+            # own wait.
             plain_trigger="poll",
             quant_trigger="start",
             finalize_trigger_max_rows=LOW_BATCH_MAX_ROWS,

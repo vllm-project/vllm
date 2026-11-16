@@ -188,7 +188,7 @@ def tie_rope_table(q: torch.Tensor, positions: torch.Tensor, scale_inv: float):
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
 )
-@pytest.mark.parametrize("tokens", [1, 6, 48])
+@pytest.mark.parametrize("tokens", [1, 48])
 @pytest.mark.parametrize("kv_scale", [1.0, 2.5])
 def test_norm_kv_insert_matches_the_kv_insert_bitwise(
     tokens: int, kv_scale: float

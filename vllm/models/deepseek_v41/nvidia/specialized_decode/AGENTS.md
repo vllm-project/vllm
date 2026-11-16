@@ -126,11 +126,13 @@ graph.
 | Otherwise the candidate blocks selected with `cooperative_topk` on the upcast logits | up to 64 rows per rank |
 | The candidate source's block selection on the expansion's side stream, after the token top-k, in launches of `DEFERRED_BLOCKS_MAX_ROWS` rows without PDL | replicated steps whose expansion forks |
 | Candidate consumers' top-k selected and remapped to KV positions in one kernel (`attention/sparse_topk_small.py`) | pure-decode steps it takes (`supports_sparse_topk_small`) |
-| Indexers outside the plan reset their top-k rows before their inputs are ready | all executor steps |
+| The stock dense indexer and the candidate consumers reset their top-k rows before their index query and key are ready | all executor steps |
 | Compressed layers sharing an index source reuse one sparse-index table; the first of them builds the other KV-cache groups' tables on a side stream | all executor steps |
 | Sparse-MLA decode on a CuTe DSL kernel, a thread block cluster per token with one CTA per 128 columns (`attention/sparse_mla_cute.py`) | the target's causal decode while every token's cluster is resident at once (at width 640, up to 8 requests with DSpark on a GB300) |
 | Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
-| The CuTe DSL sparse-MLA decode ropes and quantizes the BF16 query itself, the Q/KV norm writes the KV cache (else a side stream beside `wq_b`), so the attention follows `wq_b` in the PDL chain; the layer that would build its run's sparse-index table attends on the indexer's request-local top-k instead (`LocalIndices`) and builds the run's tables on the sparse-index tables' side stream, and a layer whose table an earlier layer built prefetches its KV rows into L2 on a side stream at its start (`SparseMlaPrefetch`) | the target's steps the kernel takes |
+| Query RoPE and FP8 quantization inside the CuTe DSL sparse-MLA decode; the Q/KV norm writes the KV cache (else a side stream beside `wq_b`), so the attention follows `wq_b` in the PDL chain | the target's steps the kernel takes |
+| A compressed run's first layer attends on the indexer's request-local top-k (`LocalIndices`); the run's sparse-index tables build on the side stream | the same |
+| A layer whose table an earlier layer built prefetches its KV rows into L2 on a side stream (`SparseMlaPrefetch`) | the same |
 | Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
