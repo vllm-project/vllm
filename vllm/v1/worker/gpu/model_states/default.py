@@ -18,7 +18,10 @@ from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
 )
-from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.mm_pruning import (
+    maybe_create_mm_pruner,
+    uses_multimodal_pruning,
+)
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -60,6 +63,11 @@ class DefaultModelState(ModelState):
         # Pruner is used for multimodal embedding pruning (EVS).
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
+        )
+        # EVS recomputes M-RoPE positions from the pruned encoder outputs.
+        self.positions_depend_on_encoder = (
+            self.rope_state is not None
+            and uses_multimodal_pruning(self.model_config, model)
         )
 
         # Per-request bidirectional MM ranges. Not kept in the encoder cache:
@@ -110,11 +118,21 @@ class DefaultModelState(ModelState):
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.apply_staged_writes()
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         if self.supports_mm_inputs:
-            return self.encoder_runner.inputs_embeds[:num_tokens]
-        return self.inputs_embeds[:num_tokens]
+            inputs_embeds = self.encoder_runner.inputs_embeds
+        else:
+            inputs_embeds = self.inputs_embeds
+        if input_ids is not None:
+            inputs_embeds[: input_ids.shape[0]] = self.model.embed_input_ids(input_ids)
+        return inputs_embeds[:num_tokens]
 
     def prepare_inputs_embeds(
         self,
@@ -169,10 +187,10 @@ class DefaultModelState(ModelState):
             return {}  # Common case (1D positions).
 
         self.rope_state.prepare_positions(
-            input_batch.idx_mapping,
+            input_batch.idx_mapping[: input_batch.num_reqs],
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
-            req_states.num_computed_tokens.gpu,
+            input_batch.positions,
         )
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
