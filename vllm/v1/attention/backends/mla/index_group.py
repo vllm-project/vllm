@@ -325,7 +325,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             state_indices = cache.runtime.request_state_indices
             assert cache.block_table is not None and state_indices is not None
             block_table = cache.block_table.index_select(
-                0, state_indices[attn_metadata.num_decodes :][requests]
+                0, state_indices[attn_metadata.num_decodes :][requests].clamp(min=0)
             )
         else:
             plan = self._prefill_gather_plan(layer_index, attn_metadata)

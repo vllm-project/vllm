@@ -5752,6 +5752,8 @@ def test_hisparse_fp8_prefill_gather_reads_resident_pages_like_the_plan():
     torch.testing.assert_close(
         gather(True), gather(False), rtol=0, atol=0, equal_nan=True
     )
+    state_indices.fill_(-1)
+    gather(True)
 
 
 def test_sparse_impl_observes_repointed_indexer_buffer():
