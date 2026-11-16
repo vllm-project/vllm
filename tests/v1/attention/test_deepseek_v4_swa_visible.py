@@ -3,12 +3,12 @@
 """Tests for DeepSeek-V4 in-image bidirectional SWA visibility (vision variant).
 
 The reference semantics are a torch port of the official
-``get_image_visible`` / ``get_window_topk_idxs_visible``: inside an image span
-[span_start, span_end] (inclusive), a token at ``pos`` sees
-``min(pos - span_start, max_image_tokens - 1)`` extra tokens to the left and
-``min(span_end - pos, max_image_tokens)`` to the right; the window then starts
-at ``max(pos - (window - 1) - max(left - (window - 1), 0), 0)`` and ends at
-``pos + right`` (inclusive).
+`get_image_visible` / `get_window_topk_idxs_visible`: inside an image span
+[span_start, span_end] (inclusive), a token at `pos` sees
+`min(pos - span_start, max_image_tokens - 1)` extra tokens to the left and
+`min(span_end - pos, max_image_tokens)` to the right; the window then starts
+at `max(pos - (window - 1) - max(left - (window - 1), 0), 0)` and ends at
+`pos + right` (inclusive).
 """
 
 import inspect
@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
 )
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 WINDOW = 8
 MAX_IMG = 6
@@ -64,7 +64,7 @@ def ref_swa_bounds(
     pos: int, window: int, left: int, right: int, replay_start: int = 0
 ) -> tuple[int, int]:
     """Reference [start, end) window bounds for one query token. Under SWA
-    bounded replay no window KV exists below ``replay_start``."""
+    bounded replay no window KV exists below `replay_start`."""
     left_add = max(left - (window - 1), 0)
     start = max(pos - (window - 1) - left_add, 0, replay_start)
     return start, pos + right + 1
@@ -307,7 +307,7 @@ def combine_case(
 ):
     """Run combine_topk_swa_indices and return (indices, lens, expected).
 
-    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    `in_range_topk` draws top-k indices below N, for combiners that drop
     out-of-range ones.
     """
     device = torch.device("cuda")
@@ -534,7 +534,6 @@ def make_builder(
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
     deepseek_v4_config: bool = True,
-    bounded_replay: bool = False,
 ) -> DeepseekSparseSWAMetadataBuilder:
     vision_fields = dict(vision_n_layers=2, vision_max_n_token=max_image_tokens)
     vllm_config = create_vllm_config(
@@ -553,15 +552,13 @@ def make_builder(
             sliding_window=window,
             **vision_fields,
         )
-    spec = SlidingWindowMLASpec(
+    spec = MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
-        bounded_replay=bounded_replay,
     )
     return builder_cls(
         kv_cache_spec=spec,
@@ -770,7 +767,7 @@ def test_builder_replay_start_bounds_prefill_window_and_gather():
 def test_builder_replaying_group_builds_without_replay_start():
     """Graph captures build without model-specific kwargs: a replaying group's
     metadata then bounds nothing."""
-    builder = make_builder(vision=False, bounded_replay=True)
+    builder = make_builder(vision=False)
     md = build_metadata(builder, [40, 12], [24, 12], None)
     assert not md.replay_start.any()
     assert md.prefill_swa_lens[0].item() == WINDOW
@@ -927,19 +924,22 @@ def _prefix_replay_attention_cls():
     [
         (False, 0, True, True),
         (True, 4, True, True),
-        (True, 3, True, False),
+        (True, 3, True, True),
+        (True, 2, True, False),
         (True, 4, False, False),
     ],
 )
 def test_prefix_cache_replays_the_swa_window(
     monkeypatch, is_rocm, cdna, flag, replays_window
 ):
-    """Prefix caching stays on, and the window is replayed only on CDNA4.
+    """Prefix caching stays on, and the window is replayed on a compatible
+    CDNA version.
 
     tests/v1/core/test_prefix_replay.py already checks that a
     bounded-replay SWA spec makes a prefix hit recompute the window.
     This is the spec the attention layer actually publishes. Forcing
-    the window back into the prefix cache, on CDNA4 or off it, fails here.
+    the window back into the prefix cache, on a compatible CDNA version
+    or off it, fails here.
     The replay_start clamp used by the gather kernels is covered by
     test_builder_replay_start_bounds_prefill_window_and_gather.
     """
@@ -947,9 +947,9 @@ def test_prefix_cache_replays_the_swa_window(
     from vllm.models.deepseek_v41 import attention as attn
     from vllm.platforms import current_platform
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setattr(attn, "MergedColumnParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "ColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "DeepseekV4GroupedWoA", _StubLinear)
     monkeypatch.setattr(attn, "RowParallelLinear", _StubLinear)
     monkeypatch.setattr(attn, "RMSNorm", _StubLinear)
     monkeypatch.setattr(attn, "build_deepseek_v4_rope", lambda *a, **k: None)
@@ -982,7 +982,9 @@ def test_prefix_cache_replays_the_swa_window(
     layer_cls = _prefix_replay_attention_cls()
     with set_current_vllm_config(vllm_config):
         layer = layer_cls(vllm_config, prefix="model.layers.0.self_attn")
-    spec = layer.swa_cache_layer.get_kv_cache_spec(vllm_config)
-    assert spec.bounded_replay is replays_window
-    assert spec.prefix_cacheable is not replays_window
-    assert spec.prefix_replay_tokens == (window if replays_window else 0)
+    config = layer.swa_cache_layer.get_kv_cache_config(vllm_config).manager_config
+    assert config.params.bounded_replay is replays_window
+    assert config.manager_cls.prefix_cacheable(config) is not replays_window
+    assert config.manager_cls.prefix_replay_tokens(config) == (
+        window if replays_window else 0
+    )

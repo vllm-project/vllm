@@ -5,7 +5,6 @@ mod convert;
 mod types;
 mod validate;
 
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -13,19 +12,17 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
-use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -43,21 +40,26 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::npy_base64;
+use crate::utils::{
+    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
+    unix_timestamp,
+};
 
 pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    tokenizer: &dyn Tokenizer,
+    processor: &TextRequestProcessor,
 ) -> Result<TextRequest, ApiError> {
-    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+    prepare_completion_request(request, lora_resolution, ctx, processor)
         .map(|prepared| prepared.text_request)
 }
 
@@ -73,22 +75,40 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
-        tokenizer.as_ref(),
+        state.chat.text().request_processor(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
+    }
+    // Without a tokenizer, string-form logprobs would key every candidate by
+    // the same empty token string. The token-ID form needs no tokenizer.
+    if !state.chat.text().has_tokenizer()
+        && prepared.options.requested_logprobs.is_some()
+        && !prepared
+            .options
+            .return_tokens_as_token_ids
+            .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
+    {
+        return text_submit_error(
+            "invalid completion request",
+            vllm_text::Error::TokenizerUnavailable,
+        )
+        .into_response();
     }
     let request_span = tracing::info_span!(
         "completions",
@@ -98,48 +118,97 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
+    let text_streams = match state
         .chat
         .text()
-        .generate(prepared.text_request)
+        .generate_n(prepared.text_request, prepared.n)
         .instrument(request_span.clone())
         .await
     {
-        Ok(stream) => stream,
+        Ok(streams) => streams,
         Err(error) => {
             return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
-        let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                completion_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    state.system_fingerprint.clone(),
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream =
+            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = future::try_join_all(text_streams.into_iter().map(|text_stream| {
+            collect_completion(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                state.system_fingerprint.clone(),
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for CompletionSseChunk {
+    fn set_choice_index(&mut self, index: u32) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        for choice in &mut chunk.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        match self {
+            Self::Chunk(_) => None,
+            Self::Usage(chunk) => chunk.usage.as_mut(),
+        }
+    }
+
+    fn clear_metrics(&mut self) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        chunk.metrics = None;
     }
 }
 
@@ -148,6 +217,7 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -261,13 +331,13 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
-            routed_experts: None,
+            routed_experts: collected.routed_experts.as_ref().map(npy_base64).transpose()?,
             weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
@@ -280,12 +350,14 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -304,6 +376,8 @@ async fn completion_chunk_stream(
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
@@ -344,6 +418,7 @@ async fn completion_chunk_stream(
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             }) => {
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
@@ -388,6 +463,7 @@ async fn completion_chunk_stream(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        ..
                     },
                 finished,
             }) => {
@@ -411,12 +487,15 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(
+                        let mut final_chunk = final_chunk(
                             &envelope,
                             finished.finish_reason,
                             finished.kv_transfer_params.map(|value| *value),
                             finished.weight_versions.filter(|_| return_weight_versions),
                         )?;
+                        if !include_usage {
+                            final_chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         if let Some(output_log) = output_log.take() {
                             log_outputs.log(
                                 LoggedOutput::StreamComplete,
@@ -442,6 +521,7 @@ async fn completion_chunk_stream(
                                     None,
                                 ),
                                 metrics,
+                                system_fingerprint.clone(),
                             )))
                             .await;
                         }
@@ -502,12 +582,17 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(
+                    let mut final_chunk = final_chunk(
                         &envelope,
                         finished.finish_reason,
                         finished.kv_transfer_params.map(|value| *value),
                         finished.weight_versions.filter(|_| return_weight_versions),
                     )?;
+                    // Like Python, the last chunk carries the fingerprint:
+                    // this one, or the usage chunk that follows.
+                    if !include_usage {
+                        final_chunk.system_fingerprint = system_fingerprint.clone();
+                    }
                     if let Some(output_log) = output_log.take() {
                         log_outputs.log(
                             LoggedOutput::StreamComplete,
@@ -533,6 +618,7 @@ async fn completion_chunk_stream(
                                 None,
                             ),
                             metrics,
+                            system_fingerprint.clone(),
                         )))
                         .await;
                     }
@@ -636,60 +722,13 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
-}
-
-/// Convert one chunk stream into OpenAI-style SSE events.
-///
-/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
-/// events followed by `data: [DONE]`, so the transport stream itself stays
-/// infallible even when generation fails after the HTTP response has started.
-#[try_stream]
-async fn completion_sse_stream(
-    stream: impl Stream<Item = Result<CompletionSseChunk, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-/// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
-    trace!(?chunk, "completion emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("completion chunk must serialize to JSON")
-}
-
-/// Serialize one OpenAI error payload into one SSE `data:` event.
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "completion emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-/// Build the terminal OpenAI SSE sentinel event.
-fn done_sse_event() -> Event {
-    trace!("completion emitting done");
-    Event::default().data("[DONE]")
 }
 
 #[cfg(test)]
@@ -720,6 +759,7 @@ mod tests {
             sampled: SampledDelta {
                 token_ids,
                 logprobs,
+                sampling_mask: None,
             },
             finished: finished.map(Box::new),
         }
@@ -774,6 +814,7 @@ mod tests {
                 Ok(DecodedTextEvent::Start {
                     prompt_token_ids: vec![1].into(),
                     prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
                 }),
                 Ok(decoded_delta(
                     "hi",
@@ -788,7 +829,6 @@ mod tests {
                         finish_reason: FinishReason::stop_eos(),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        sampling_mask: None,
                         spec_decode_metrics,
                         timestamps: vllm_llm::RequestTimestamps {
                             queued_ts: 10.0,
@@ -797,6 +837,7 @@ mod tests {
                             last_token_ts: 10.5,
                         },
                         weight_versions: None,
+                        routed_experts: None,
                     }),
                 )),
             ])
@@ -808,6 +849,7 @@ mod tests {
                 "cmpl-1".into(),
                 "model".into(),
                 1,
+                None,
                 ApiServerOptions {
                     enable_per_request_metrics: enabled,
                     ..Default::default()
@@ -838,6 +880,7 @@ mod tests {
             "cmpl-1".into(),
             "model".into(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions::default(),
         )
@@ -860,6 +903,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 "h",
@@ -919,7 +963,6 @@ mod tests {
                     ))),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: Some(RequestSpecDecodeMetrics {
                         num_spec_tokens: 3,
                         histogram: vec![0, 1, 1, 0],
@@ -933,6 +976,7 @@ mod tests {
                         last_token_ts: 11.0,
                     },
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             )),
         ]);
@@ -942,6 +986,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1074,6 +1119,7 @@ mod tests {
             let events = std::iter::once(Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }))
             .chain(deltas.iter().enumerate().map(|(i, (token, text))| {
                 Ok(decoded_delta(
@@ -1085,9 +1131,9 @@ mod tests {
                         finish_reason: FinishReason::Stop(None),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        sampling_mask: None,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        routed_experts: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1099,6 +1145,7 @@ mod tests {
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 ResponseOptions {
                     requested_logprobs: Some(0),
@@ -1124,6 +1171,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta("a", vec![7], None, None)),
             Ok(decoded_delta(
@@ -1141,9 +1189,9 @@ mod tests {
                         serde_json::json!({"remote_block_ids": [1, 2]}),
                     )),
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1154,6 +1202,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1190,6 +1239,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 "ok",
@@ -1204,9 +1254,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1217,6 +1267,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1257,6 +1308,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1271,9 +1323,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1284,6 +1336,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1313,6 +1366,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1327,9 +1381,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1340,6 +1394,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1372,6 +1427,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1388,9 +1444,9 @@ mod tests {
                         serde_json::json!({"remote_block_ids": [1, 2]}),
                     )),
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1401,6 +1457,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1454,6 +1511,7 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1468,9 +1526,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1481,6 +1539,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1532,6 +1591,7 @@ mod tests {
                         }],
                     }],
                 }),
+                prompt_token_id_logprobs: None,
             }),
             Ok(decoded_delta(
                 " leaked",
@@ -1546,9 +1606,9 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1559,6 +1619,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,

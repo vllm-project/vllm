@@ -248,7 +248,7 @@ class GumbelWatermarkDetector(WatermarkDetector):
 class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
     """Detect a dual-key watermark with weighted early fusion.
 
-    ``alpha`` is the weight assigned to key B; key A receives ``1 - alpha``.
+    `alpha` is the weight assigned to key B; key A receives `1 - alpha`.
     """
 
     def __init__(

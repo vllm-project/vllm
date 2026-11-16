@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Model, tokenizer, and config source options mirroring Python's `model`,
-//! `--revision`, `--tokenizer`, `--tokenizer-revision`, and `--hf-config-path`,
-//! shared by the OpenAI frontend and the render server.
+//! `--revision`, `--tokenizer`, `--tokenizer-revision`, `--hf-config-path`, and
+//! `--skip-tokenizer-init`, shared by the OpenAI frontend and the render server.
 
 use clap::Args;
 use serde::Deserialize;
@@ -42,6 +42,13 @@ pub struct ModelArgs {
     #[arg(long)]
     #[serde(default)]
     pub hf_config_path: Option<String>,
+
+    /// Skip initialization of tokenizer and detokenizer. Expects valid
+    /// `prompt_token_ids` and `None` for prompt from the input. The generated
+    /// output will contain token ids.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub skip_tokenizer_init: bool,
 }
 
 impl ModelArgs {
@@ -66,11 +73,14 @@ impl ModelArgs {
             },
             tokenizer,
             hf_config,
+            skip_tokenizer_init: self.skip_tokenizer_init,
         }
     }
 
     /// Forward the revision and source options to the managed Python engine,
-    /// which loads the same model, tokenizer, and config.
+    /// which loads the same model, tokenizer, and config. With
+    /// `--skip-tokenizer-init` the engine skips its tokenizer too, which it
+    /// would otherwise load for structured outputs.
     pub fn python_args(&self) -> Vec<String> {
         [
             ("--revision", &self.revision),
@@ -81,6 +91,7 @@ impl ModelArgs {
         .into_iter()
         .filter_map(|(flag, value)| Some([flag.to_string(), value.clone()?]))
         .flatten()
+        .chain(self.skip_tokenizer_init.then(|| "--skip-tokenizer-init".to_string()))
         .collect()
     }
 }

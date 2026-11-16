@@ -31,21 +31,19 @@ class _VllmConfig:
 
 
 @pytest.mark.parametrize(
-    ("use_v2_model_runner", "spec_config", "expected"),
+    ("spec_config", "expected"),
     [
-        (True, _SpecConfig(True), 2),
-        (False, _SpecConfig(True), 1),
-        (True, _SpecConfig(False), 1),
-        (True, None, 1),
+        (_SpecConfig(True), 2),
+        (_SpecConfig(False), 1),
+        (None, 1),
     ],
 )
 def test_workspace_lane_count_is_dspark_only(
-    use_v2_model_runner: bool,
     spec_config: _SpecConfig | None,
     expected: int,
 ) -> None:
     config = cast(VllmConfig, _VllmConfig(spec_config))
-    assert _num_workspace_lanes(config, use_v2_model_runner) == expected
+    assert _num_workspace_lanes(config) == expected
 
 
 def test_workspace_lanes_do_not_alias_and_restore_context(monkeypatch) -> None:

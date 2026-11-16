@@ -12,7 +12,7 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
     rope_quant_insert,
@@ -28,7 +28,8 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, KVCacheSpec
 
 
 class CompressorBackend(AttentionBackend):
@@ -112,7 +113,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, CircularBufferSpec)
+        assert isinstance(self.kv_cache_spec, AttentionSpec)
         self.capacity = self.kv_cache_spec.block_size
         self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         max_num_batched_tokens = (
@@ -255,15 +256,17 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         del vllm_config
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.state_dim,
             head_size_v=0,
             dtype=self.dtype,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def forward(self): ...
 
@@ -274,7 +277,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
-    Pools ``compress_ratio`` consecutive tokens into one KV latent with a
+    Pools `compress_ratio` consecutive tokens into one KV latent with a
     learned softmax gate (ratio 1 has no gate and no pooling). Owns the
     linear, norm and state cache. State saving, compression and RMSNorm share
     one Triton kernel. The emitted latent feeds independent main-cache and
@@ -321,7 +324,7 @@ class DeepseekCompressor(nn.Module):
         wkv_wgate_sizes = (
             [self.head_dim, self.head_dim] if self.has_gate else [self.head_dim]
         )
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        self.fused_wkv_wgate = DeepseekV4CompressorKVScoreLinear(
             self.hidden_size,
             wkv_wgate_sizes,
             bias=False,

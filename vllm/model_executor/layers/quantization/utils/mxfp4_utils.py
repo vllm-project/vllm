@@ -542,7 +542,7 @@ def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     - the native XPU custom op on XPU,
     - aiter on ROCm when `aiter` is installed,
-    - and the portable Triton kernel (``downcast_to_mxfp``) otherwise.
+    - and the portable Triton kernel (`downcast_to_mxfp`) otherwise.
 
     Returns packed FP4 values (uint8, two values per byte) and per-block
     (group-32) e8m0 scales (uint8).
