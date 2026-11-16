@@ -128,13 +128,13 @@ def resolve_mm_processor_kwarg(
     """Read a processor kwarg that may be set flat or inside an HF scope.
 
     HuggingFace processors accept some kwargs both in the shared flat
-    namespace and inside a modality scope such as ``videos_kwargs``. A scoped
+    namespace and inside a modality scope such as `videos_kwargs`. A scoped
     value takes precedence over the flat one here. (Note: HF's own
-    ``_merge_kwargs`` instead *rejects* a key passed both flat and scoped, so
+    `_merge_kwargs` instead *rejects* a key passed both flat and scoped, so
     configuring both is not portable — set it in exactly one place.) For
-    example, ``use_audio_in_video`` may be configured as
-    ``--mm-processor-kwargs '{"use_audio_in_video": true}'`` or as
-    ``--mm-processor-kwargs '{"videos_kwargs": {"use_audio_in_video": true}}'``.
+    example, `use_audio_in_video` may be configured as
+    `--mm-processor-kwargs '{"use_audio_in_video": true}'` or as
+    `--mm-processor-kwargs '{"videos_kwargs": {"use_audio_in_video": true}}'`.
 
     Only a single scope level is resolved; deeper nesting is not supported.
     """

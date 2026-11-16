@@ -14,7 +14,6 @@ from typing_extensions import override
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.renderers.embed_utils import (
@@ -26,8 +25,6 @@ from .types import InputAudio, ModalityStr, MultiModalEmbedsPayload
 
 if TYPE_CHECKING:
     from .item_tracker import AsyncMultiModalItemTracker, MultiModalItemTracker
-
-logger = init_logger(__name__)
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
@@ -304,18 +301,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if video_url and _loads_audio_from_video(
             self._tracker.model_config, self._mm_processor_kwargs
         ):
-            try:
-                audio = self._connector.fetch_audio(video_url)
-            except ValueError as e:
-                # A video without an audio track is served video-only, matching
-                # how the model processors degrade (e.g. Nemotron skips audio
-                # extraction for silent videos).
-                logger.debug(
-                    "Video %s: no audio track found, skipping audio extraction.",
-                    video_url,
-                    exc_info=e,
-                )
-                return
+            audio = self._connector.fetch_audio(video_url)
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 
@@ -502,31 +488,6 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         return audio, uuid
 
-    async def _video_audio_with_uuid_async(
-        self, video_url: str | None, uuid: str | None
-    ):
-        # A video without an audio track is served video-only, matching how
-        # the model processors degrade (e.g. Nemotron skips audio extraction
-        # for silent videos).
-        try:
-            audio = (
-                await self._connector.fetch_audio_async(video_url)
-                if video_url
-                else None
-            )
-        except ValueError as e:
-            logger.debug(
-                "Video %s: no audio track found, skipping audio extraction.",
-                video_url,
-                exc_info=e,
-            )
-            # No audio stream: return None data without the video's UUID so
-            # `_resolve_items` drops the entry. Inheriting the video UUID
-            # would keep the unresolved `(None, uuid)` pair, letting
-            # `mm_data["audio"] = [None]` reach the processor.
-            return None, None
-        return audio, uuid
-
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
         placeholder = self._tracker.add(
             "audio", partial(self._audio_with_uuid_async, audio_url, uuid)
@@ -572,7 +533,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             self._tracker.model_config, self._mm_processor_kwargs
         ):
             audio_placeholder = self._tracker.add(
-                "audio", partial(self._video_audio_with_uuid_async, video_url, uuid)
+                "audio", partial(self._audio_with_uuid_async, video_url, uuid)
             )
             self._add_placeholder("audio", audio_placeholder)
 
