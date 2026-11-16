@@ -250,16 +250,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_elastic_ep: Option<Unsupported>,
 
-    /// This feature is work in progress and no prefill optimization takes place
-    /// with this flag enabled currently.
-    #[arg(
-        long,
-        visible_alias = "no-kv-sharing-fast-prefill",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub kv_sharing_fast_prefill: Option<Unsupported>,
-
     /// If `True`, LoRA support for the tower (vision encoder) and connector
     /// of multimodal models will be enabled. This is an experimental feature
     /// and currently only supports some MM models such as the Qwen VL series.

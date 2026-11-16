@@ -128,6 +128,8 @@ pub struct EngineCoreLlm {
     /// Facts from the engine-core startup handshake.
     info: LlmInfo,
     randomize_request_id: bool,
+    /// Whether the engine runs with `--kv-sharing-fast-prefill`.
+    kv_sharing_fast_prefill: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
@@ -164,6 +166,7 @@ impl EngineCoreLlm {
             client,
             info,
             randomize_request_id: true,
+            kv_sharing_fast_prefill: false,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
@@ -188,6 +191,14 @@ impl EngineCoreLlm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Reject prompt logprobs, for an engine started with
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers and
+    /// so computes incorrect logprobs for them.
+    pub fn with_kv_sharing_fast_prefill(mut self, enabled: bool) -> Self {
+        self.kv_sharing_fast_prefill = enabled;
         self
     }
 
@@ -228,6 +239,22 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
+        if self.kv_sharing_fast_prefill {
+            let params = &req.sampling_params;
+            // Python tests `prompt_logprobs` for truthiness, which lets `0`
+            // through although those logprobs are just as incorrect.
+            if params.prompt_logprobs.is_some() {
+                return Err(Error::PromptLogprobsWithKvSharingFastPrefill {
+                    parameter: "prompt_logprobs",
+                });
+            }
+            if params.prompt_logprob_token_ids.is_some() {
+                return Err(Error::PromptLogprobsWithKvSharingFastPrefill {
+                    parameter: "prompt_logprob_token_ids",
+                });
+            }
+        }
+
         // Clamp the request's stream interval to the frontend-level one, like
         // Python. Engine-core ignores it; the client batches deliveries by it.
         let stream_interval = (req.sampling_params.stream_interval)

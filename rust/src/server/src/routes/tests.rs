@@ -5384,6 +5384,60 @@ async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
     );
 }
 
+/// Under `--kv-sharing-fast-prefill`, a request asking for prompt logprobs,
+/// directly or through completions `echo` with `logprobs`, is a 400 naming the
+/// parameter; other requests still run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_sharing_fast_prefill_rejects_prompt_logprobs() {
+    let (mut app, engine_task) = test_app_with_chat_and_engine_request_check(
+        |llm| {
+            ChatLlm::from_shared_backend(
+                llm.with_kv_sharing_fast_prefill(true),
+                Arc::new(FakeChatBackend::new()),
+            )
+        },
+        |request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            assert_eq!(params.prompt_logprobs, None);
+        },
+    )
+    .await;
+
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let chat = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 2,
+    });
+    let mut chat_with_prompt_logprobs = chat.clone();
+    chat_with_prompt_logprobs["prompt_logprobs"] = json!(1);
+    let completions_echo = json!({
+        "model": model,
+        "prompt": "hi",
+        "max_tokens": 2,
+        "echo": true,
+        "logprobs": 1,
+    });
+    for (uri, body) in [
+        ("/v1/chat/completions", chat_with_prompt_logprobs),
+        ("/v1/completions", completions_echo),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+        assert_eq!(json["error"]["param"], "prompt_logprobs", "{uri} {json}");
+        let message = json["error"]["message"].as_str().expect("error message");
+        assert!(
+            message.contains("--kv-sharing-fast-prefill"),
+            "{uri} {json}"
+        );
+    }
+
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", chat).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {

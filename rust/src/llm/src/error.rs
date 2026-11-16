@@ -22,6 +22,13 @@ pub enum Error {
     },
     #[error("invalid auxiliary output rows")]
     AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
+    /// The request asks for prompt logprobs, which an engine started with
+    /// `--kv-sharing-fast-prefill` computes incorrectly.
+    #[error(
+        "`{parameter}` is not supported with --kv-sharing-fast-prefill, which produces \
+         incorrect logprobs for prompt tokens; disable it when requests need prompt logprobs."
+    )]
+    PromptLogprobsWithKvSharingFastPrefill { parameter: &'static str },
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]
     Unsupported { field: &'static str },

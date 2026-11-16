@@ -106,6 +106,7 @@ impl Error {
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
             | Self::Llm(LlmError::Unsupported { .. })
+            | Self::Llm(LlmError::PromptLogprobsWithKvSharingFastPrefill { .. })
             | Self::Llm(LlmError::RemoteInvalidRequest { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
@@ -126,6 +127,9 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::Llm(LlmError::PromptLogprobsWithKvSharingFastPrefill { parameter }) => {
+                Some(parameter)
+            }
             _ => None,
         }
     }
