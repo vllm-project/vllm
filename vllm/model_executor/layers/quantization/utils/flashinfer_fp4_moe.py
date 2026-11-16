@@ -390,26 +390,24 @@ def prepare_static_weights_for_trtllm_fp4_moe(
         num_elts_per_sf=16,
     )
 
-    def interleave(scales: torch.Tensor) -> torch.Tensor:
-        # The interleave tiles 128 rows; experts with a multiple of 128 rows
-        # concatenate to the same bytes as one call over all their rows.
-        e, n, k = scales.shape
-        if n % 128 == 0:
-            return nvfp4_block_scale_interleave(scales.reshape(e * n, k)).reshape(
-                e, n, k
-            )
-        return torch.stack([nvfp4_block_scale_interleave(s) for s in scales]).reshape(
-            e, n, k
-        )
-
+    # One gather and one interleave over every expert: the interleave takes
+    # [E, N, K] and lays experts out one after another.
     gemm1_weights_fp4_shuffled = gather_rows(gemm1_weights_fp4, gemm1_weight_indices)
     gemm2_weights_fp4_shuffled = gather_rows(gemm2_weights_fp4, gemm2_weight_indices)
-    gemm1_scales_fp4_shuffled = interleave(
-        gather_rows(gemm1_scales_linear_fp4, gemm1_scale_indices)
-    ).view(torch.float8_e4m3fn)
-    gemm2_scales_fp4_shuffled = interleave(
-        gather_rows(gemm2_scales_linear_fp4, gemm2_scale_indices)
-    ).view(torch.float8_e4m3fn)
+    gemm1_scales_fp4_shuffled = (
+        nvfp4_block_scale_interleave(
+            gather_rows(gemm1_scales_linear_fp4, gemm1_scale_indices)
+        )
+        .reshape(gemm1_scales_linear_fp4.shape)
+        .view(torch.float8_e4m3fn)
+    )
+    gemm2_scales_fp4_shuffled = (
+        nvfp4_block_scale_interleave(
+            gather_rows(gemm2_scales_linear_fp4, gemm2_scale_indices)
+        )
+        .reshape(gemm2_scales_linear_fp4.shape)
+        .view(torch.float8_e4m3fn)
+    )
 
     return (
         gemm1_weights_fp4_shuffled,

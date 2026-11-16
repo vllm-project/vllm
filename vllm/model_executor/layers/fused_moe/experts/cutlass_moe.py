@@ -1009,7 +1009,8 @@ def swizzle_mxfp4_scales(
     N: int,
     K: int,
 ) -> torch.Tensor:
-    """Swizzle flat [N, K//32] E8M0 scales to CUTLASS tiled layout.
+    """Swizzle flat [..., N, K//32] E8M0 scales to CUTLASS tiled layout, one
+    flat layout per leading index (a 2D input returns a 1D tensor).
 
     CUTLASS expects MX scale factors in a tiled layout:
         [numMTiles, numKTiles, 32, 4, 4]
@@ -1033,19 +1034,21 @@ def swizzle_mxfp4_scales(
     padded_scale_cols = num_k_tiles * 4
 
     # Start with flat scales, pad if needed
+    lead = scales.shape[:-2]
     padded = torch.zeros(
-        padded_N, padded_scale_cols, dtype=torch.uint8, device=scales.device
+        *lead, padded_N, padded_scale_cols, dtype=torch.uint8, device=scales.device
     )
-    padded[:N, :num_scale_cols] = scales
+    padded[..., :N, :num_scale_cols] = scales
 
     # Reshape to tile structure:
-    # [numMTiles, 4, 32, numKTiles, 4]
+    # [..., numMTiles, 4, 32, numKTiles, 4]
     #  mTileIdx, innerMIdx, outerMIdx, kTileIdx, innerKIdx
-    tiled = padded.reshape(num_m_tiles, 4, 32, num_k_tiles, 4)
-    # Permute to [numMTiles, numKTiles, 32, 4, 4]
+    tiled = padded.reshape(*lead, num_m_tiles, 4, 32, num_k_tiles, 4)
+    # Permute to [..., numMTiles, numKTiles, 32, 4, 4]
     #            (outerMIdx, innerMIdx, innerKIdx)
-    tiled = tiled.permute(0, 3, 2, 1, 4).contiguous()
-    return tiled.reshape(-1)
+    d = len(lead)
+    tiled = tiled.permute(*range(d), d, d + 3, d + 2, d + 1, d + 4).contiguous()
+    return tiled.reshape(*lead, -1)
 
 
 class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):

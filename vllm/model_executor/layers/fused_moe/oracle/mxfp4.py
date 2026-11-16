@@ -137,10 +137,8 @@ def _swizzle_cutlass_mxfp4_scales(scale: torch.Tensor) -> torch.Tensor:
         swizzle_mxfp4_scales,
     )
 
-    n, scale_k = scale.shape[1:]
-    return torch.stack(
-        [swizzle_mxfp4_scales(s, n, scale_k * 32).reshape(n, scale_k) for s in scale]
-    )
+    e, n, scale_k = scale.shape
+    return swizzle_mxfp4_scales(scale, n, scale_k * 32).reshape(e, n, scale_k)
 
 
 class Mxfp4MoeBackend(Enum):
@@ -1084,12 +1082,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         w13_s = gather_rows(w13_weight_scale, w13_sf_perm)
         w2_s = gather_rows(w2_weight_scale, w2_sf_perm)
         w13_weight_scale = (
-            torch.stack([nvfp4_block_scale_interleave(s) for s in w13_s])
+            nvfp4_block_scale_interleave(w13_s)
             .reshape(num_experts, 2 * intermediate_size, hidden_size // sf_block_size)
             .view(torch.float8_e4m3fn)
         )
         w2_weight_scale = (
-            torch.stack([nvfp4_block_scale_interleave(s) for s in w2_s])
+            nvfp4_block_scale_interleave(w2_s)
             .reshape(num_experts, hidden_size, intermediate_size // sf_block_size)
             .view(torch.float8_e4m3fn)
         )
