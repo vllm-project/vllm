@@ -70,7 +70,7 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
         return MiniMaxM3IndexerMSAMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class MiniMaxM3IndexerMSAPrefillMetadata:
     """fmha score plan + Triton top-k inputs for the prefill side (eager)."""
 

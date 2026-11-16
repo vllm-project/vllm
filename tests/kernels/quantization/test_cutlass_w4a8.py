@@ -65,7 +65,7 @@ SCHEDULES = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
@@ -75,7 +75,7 @@ class TypeConfig:
     token_scale_type: torch.dtype | None
 
 
-@dataclass
+@dataclass(slots=True)
 class Tensors:
     w_ref: torch.Tensor
     a_ref: torch.Tensor
