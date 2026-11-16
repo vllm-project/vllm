@@ -3,8 +3,10 @@
 """Safe deserialization helpers for client-supplied embedding tensors.
 
 `check_sparse_tensor_invariants_threadsafe()` is a thread-safe wrapper for
-sparse tensor invariant validation. `safe_to_dense()` bounds the memory a
-deserialized tensor may allocate when densified.
+sparse tensor invariant validation. `check_torch_archive_size()` bounds the
+memory `torch.load` allocates for the tensor storages of a payload.
+`safe_to_dense()` bounds the memory a deserialized tensor may allocate when
+densified.
 
 PyTorch's `torch.sparse.check_sparse_tensor_invariants()` context manager
 manipulates a **process-global** flag (save/enable/restore). When multiple
@@ -18,6 +20,8 @@ which serializes access behind a lock.
 
 import contextlib
 import threading
+import zipfile
+from io import BytesIO
 
 import torch
 
@@ -32,6 +36,44 @@ _SPARSE_LOAD_LOCK = threading.Lock()
 def check_sparse_tensor_invariants_threadsafe():
     with _SPARSE_LOAD_LOCK, torch.sparse.check_sparse_tensor_invariants():
         yield
+
+
+_ZIP_LOCAL_FILE_HEADER = b"PK\x03\x04"
+
+
+def check_torch_archive_size(payload: bytes, *, parameter: str) -> None:
+    """Bound the bytes `torch.load` inflates from a client-supplied payload.
+
+    `torch.save` writes a zip archive, and `torch.load` reads each tensor
+    storage entry into memory at the uncompressed size recorded in the
+    archive. Entries may be deflate-compressed, so a few MiB of zeros can
+    declare a storage of many GiB. That allocation happens inside
+    `torch.load`, before `safe_to_dense()` sees the tensor, and a small view
+    of a large storage keeps the whole storage alive. Reject archives whose
+    entries add up to more than `VLLM_MAX_EMBED_DECODE_BYTES` before loading.
+    """
+    max_bytes = envs.VLLM_MAX_EMBED_DECODE_BYTES
+    if max_bytes <= 0 or payload[:4] != _ZIP_LOCAL_FILE_HEADER:
+        return
+
+    try:
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            inflated_bytes = sum(info.file_size for info in archive.infolist())
+    except (zipfile.BadZipFile, ValueError) as exc:
+        raise VLLMValidationError(
+            f"`{parameter}` payload is not a readable torch.save archive.",
+            parameter=parameter,
+        ) from exc
+
+    if inflated_bytes > max_bytes:
+        raise VLLMValidationError(
+            f"`{parameter}` payload inflates to {inflated_bytes} bytes "
+            f"({inflated_bytes / MiB_bytes:.0f} MiB) when loaded, exceeding "
+            f"the {max_bytes} byte limit. Set VLLM_MAX_EMBED_DECODE_BYTES to "
+            f"increase this limit.",
+            parameter=parameter,
+            value=inflated_bytes,
+        )
 
 
 def safe_to_dense(tensor: object, *, parameter: str) -> torch.Tensor:

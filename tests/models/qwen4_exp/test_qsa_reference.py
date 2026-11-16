@@ -1108,7 +1108,10 @@ def test_qsa_sparse_paged_attention_correctness(
     else:
         k_scale, v_scale = 1.0, 1.0
 
-    actual = qsa_ops.qsa_sparse_paged_attention(
+    actual = torch.full_like(q, torch.nan)
+    # Poisoned out buffer: the assert below fails if any actual row is left
+    # unwritten, which is what lets the caller skip zero-filling it.
+    qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
         v_cache,
@@ -1116,6 +1119,7 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         use_prefill_config=use_prefill_config,
+        out=actual,
         k_scale=k_scale,
         v_scale=v_scale,
         output_gate=output_gate,
