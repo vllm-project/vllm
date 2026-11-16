@@ -53,7 +53,6 @@ class _FlydslMxfp4Gemm(VllmJitKernel["_FlydslMxfp4Gemm.CompileKey"]):
             normal_only=normal_only,
             dtype=out_dtype,
             device_id=device_id,
-            cache_policy="rotating",
             num_processors=num_processors,
             cache_size_bytes=cache_size_bytes,
             lds_size_bytes=lds_size_bytes,
@@ -94,8 +93,7 @@ class _FlydslMxfp4Gemm(VllmJitKernel["_FlydslMxfp4Gemm.CompileKey"]):
             normal_only=normal_only,
             nibble_layout="split",
         )
-        # Full-model execution visits different layers between uses of a weight.
-        return gemm(x, prepared, x_scale, dtype=out_dtype, cache_policy="rotating")
+        return gemm(x, prepared, x_scale, dtype=out_dtype)
 
 
 _FLYDSL_MXFP4_GEMM = _FlydslMxfp4Gemm()
