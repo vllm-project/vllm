@@ -363,13 +363,18 @@ class AuxOutputSchedulerConnector:
             return
         segments = request.cache_salt_segments
         ends = [start for start, _ in segments[1:]]
-        if any(
-            salt != self._weight_version and end > num_hit
-            for (_, salt), end in zip(segments, [*ends, request.num_tokens])
-        ):
+        start = next(
+            (
+                max(begin, num_hit)
+                for (begin, salt), end in zip(segments, [*ends, request.num_tokens])
+                if salt != self._weight_version and end > num_hit
+            ),
+            None,
+        )
+        if start is not None:
             hash_size = self._hash_block_size
-            del request.block_hashes[num_hit // hash_size :]
-            request.add_cache_salt_segment(num_hit, self._weight_version, hash_size)
+            del request.block_hashes[start // hash_size :]
+            request.add_cache_salt_segment(start, self._weight_version, hash_size)
             request.update_block_hashes()
 
     def cap_external_hit(

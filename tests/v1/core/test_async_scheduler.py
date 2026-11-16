@@ -1737,9 +1737,26 @@ def test_session_request_preempted_by_a_reset_takes_the_next_version():
 def test_preempted_session_request_keeps_its_hashes_at_the_same_version():
     engine = _tier_engine(connector=None, hash_block_size=4, retention=16)
     request, hashes = _preempt_at_an_object_boundary(engine, (1,) * 16)
-    assert all(a is b for a, b in zip(hashes, request.block_hashes, strict=True))
     engine.run()
     engine.close()
+    resumed = request.block_hashes[: len(hashes)]
+    assert all(a is b for a, b in zip(hashes, resumed, strict=True))
+
+
+def test_session_request_is_rehashed_from_its_first_salt_of_another_version():
+    engine = _tier_engine(connector=None)
+    engine.set_version(2)
+    (request,) = _session_requests(
+        ["r"], 72, 1, segments=[(0, "v2"), (32, "v1"), (64, None)]
+    )
+    engine.scheduler.add_request(request)
+    hashes = list(request.block_hashes)
+    engine.run()
+    engine.close()
+    kept = request.block_hashes[:2]
+    assert all(a is b for a, b in zip(hashes[:2], kept, strict=True))
+    assert hashes[2] != request.block_hashes[2]
+    assert engine.segments["r"] == [(0, "v2"), (64, None)]
 
 
 def test_preempted_session_request_offloads_under_its_new_hashes():
