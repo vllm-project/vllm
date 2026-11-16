@@ -18,11 +18,13 @@ import torch
 import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
+    transfer_engine_registry,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _SHARED_REGION_GROUP_ID,
@@ -55,9 +57,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     RegisterWorkerPayload,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
 )
@@ -70,6 +71,12 @@ from .utils import (
     create_vllm_config,
     maybe_update_block_size,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_transfer_engine():
+    yield
+    transfer_engine_registry._SHARED = None
 
 
 @pytest.mark.parametrize(
@@ -165,14 +172,14 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 [
                     "model.layers.0.self_attn",
                     "model.layers.1.self_attn",
                     "model.layers.0.mla_attn",
                     "model.layers.1.eagle_attn",
                 ],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=64,
@@ -202,7 +209,7 @@ def _make_compressed_kv_cache_config() -> KVCacheConfig:
         dtype=torch.uint8,
         tokens_per_state=8,
     )
-    return KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    return KVCacheConfig(2, [], [make_kv_cache_group(["summary"], spec)])
 
 
 def _make_packed_mla_kv_cache_config(
@@ -216,15 +223,15 @@ def _make_packed_mla_kv_cache_config(
     )
     if num_groups == 1:
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.0.mla_attn", "model.layers.1.indexer"],
                 spec,
             )
         ]
     else:
         groups = [
-            KVCacheGroupSpec(["model.layers.0.mla_attn"], spec),
-            KVCacheGroupSpec(["model.layers.1.indexer"], spec),
+            make_kv_cache_group(["model.layers.0.mla_attn"], spec),
+            make_kv_cache_group(["model.layers.1.indexer"], spec),
         ]
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -237,13 +244,16 @@ class FakeMooncakeWrapper:
     """Mock Mooncake TransferEngine for unit testing environments."""
 
     def __init__(self, *args, **kwargs):
-        pass
+        self._inner = object()
 
     def initialize(self, local_hostname, metadata_server, protocol, device_name) -> int:
         return 0
 
     def get_rpc_port(self) -> int:
         return 12345
+
+    def get_engine(self):
+        return self._inner
 
     def batch_transfer_sync_write(
         self, target_hostname, buffers, peer_buffer_addresses, lengths
@@ -337,6 +347,23 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
         p_regions, early_d, allow_partial_layers=False
     )
     assert mismatch_err is not None
+
+
+def test_del_keeps_quiet_when_the_constructor_did_not_finish():
+    """A constructor that raised leaves no state for the hook to tear down."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+    worker.__del__()
+
+
+def test_del_shuts_down_a_worker_that_started():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown = MagicMock()
+
+    worker.__del__()
+
+    worker.shutdown.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -525,7 +552,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         identity = b"consumer-layer-align"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
@@ -923,15 +950,14 @@ class _FlakyAsyncClient:
     async def post(self, url, json=None):
         self.calls.append(1)
         if len(self.calls) <= self.failures:
-            raise httpx.ReadTimeout("simulated slow bootstrap server")
+            raise mooncake_connector.httpx.ReadTimeout(
+                "simulated slow bootstrap server"
+            )
         response = MagicMock()
         response.raise_for_status = MagicMock()
         return response
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
@@ -940,7 +966,7 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(2, calls),
     )
@@ -951,9 +977,6 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
     assert len(calls) == 3
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Patches the wrong httpx module; fixed by #63122"
-)
 @pytest.mark.asyncio
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
@@ -962,7 +985,7 @@ async def test_register_worker_raises_after_max_attempts(monkeypatch):
 
     calls: list[int] = []
     monkeypatch.setattr(
-        httpx,
+        mooncake_connector.httpx,
         "AsyncClient",
         lambda **kwargs: _FlakyAsyncClient(99, calls),
     )
@@ -1263,7 +1286,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
+            FakeMooncakeWrapper, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
 
@@ -1404,7 +1427,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
             sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
             with (
                 patch.object(worker, "sender_loop", asyncio.get_running_loop()),
-                patch.object(worker, "_send_blocks", return_value=0) as send,
+                patch.object(worker, "_send_blocks", return_value=None) as send,
             ):
                 for pp_rank in range(2):
                     metadata = _xfer_meta(
@@ -1499,7 +1522,7 @@ async def test_kv_producer(monkeypatch):
         identity = b"consumer-id"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
 
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
@@ -1589,7 +1612,9 @@ async def test_kv_producer(monkeypatch):
 
         # Transfer error
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=123
+            prefill_worker,
+            "_send_blocks",
+            return_value="Mooncake transfer engine returned 123",
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
             prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -2191,7 +2216,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             req_blocks,
         )
         sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
-        with patch.object(producer, "_send_blocks", return_value=0):
+        with patch.object(producer, "_send_blocks", return_value=None):
             await producer.send_kv_to_decode(b"consumer", sock, metadata)
 
         # No placeholder that would wait for a prefill that already ran.
@@ -2215,6 +2240,45 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
         producer.shutdown()
 
 
+def test_worker_publishes_and_clears_shared_engine():
+    """A late shutdown must not drop an engine published after this worker."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+        clear_shared_transfer_engine,
+        get_shared_transfer_engine,
+        register_shared_transfer_engine,
+    )
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.torch.accelerator.current_device_index",
+            return_value=0,
+        ),
+        mooncake_register_worker(_make_test_kv_cache_config()) as worker_reg,
+    ):
+        worker, _reg = worker_reg
+        shared = get_shared_transfer_engine()
+        assert shared is not None
+        assert shared.engine is worker.transfer_backend.engine
+        assert shared.hostname == "127.0.0.1"
+        assert shared.rpc_port == 12345
+        assert shared.protocol == "rdma"
+
+        replacement = object()
+        register_shared_transfer_engine(
+            engine=replacement,
+            hostname="10.0.0.2",
+            rpc_port=9,
+            protocol="rdma",
+        )
+        worker.shutdown()
+        replaced = get_shared_transfer_engine()
+        assert replaced is not None
+        assert replaced.engine is replacement
+        clear_shared_transfer_engine(replacement)
+        assert get_shared_transfer_engine() is None
+
+
 @pytest.mark.parametrize(
     ("layout", "separate_kv_head_groups"),
     [
@@ -2229,7 +2293,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
 )
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -2310,7 +2374,7 @@ def test_register_noncontiguous_packed_allows_matching_pp():
     A remote PP mismatch is rejected at send time, once the peer PP size is
     known. Rejecting every local PP>1 layout at startup is too strict.
     """
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -2825,7 +2889,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     worker.is_kv_consumer = True
     # The first register built a producer. Its thread patch is already gone,
     # so stay on the consumer path and return before the sender thread starts.
-    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+    with patch.object(FakeMooncakeWrapper, "batch_register_memory", return_value=0):
         worker.register_kv_caches(kv_caches)
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
@@ -3101,7 +3165,7 @@ def _register_sliced_packed_mla(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([_layer_name(i) for i in layer_idxs], spec),
+            make_kv_cache_group([_layer_name(i) for i in layer_idxs], spec),
         ],
     )
     backing = torch.zeros((num_blocks, page * len(layer_idxs)), dtype=torch.uint8)
@@ -3135,7 +3199,7 @@ def test_sliced_packed_mla_registers_each_layer_view():
             num_blocks=4,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     [_layer_name(i) for i in layer_idxs],
                     MLAAttentionSpec(
                         block_size=maybe_update_block_size(16),
@@ -3338,7 +3402,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         }
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=None
         ) as mock_send_blocks:
             for d_rank in target_d_ranks:
                 remote_block_ids = d_rank_remote_blocks[d_rank]
@@ -3421,7 +3485,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
 
 def test_sleep_unregisters_and_restores_kv_caches():
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -3436,7 +3500,7 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.register_kv_caches(dict(zip(layer_names, views)))
         reg.reset_mock()
         with patch.object(
-            worker.engine, "batch_unregister_memory", return_value=0
+            FakeMooncakeWrapper, "batch_unregister_memory", return_value=0
         ) as unreg:
             worker.unregister_kv_caches()
             worker.unregister_kv_caches()

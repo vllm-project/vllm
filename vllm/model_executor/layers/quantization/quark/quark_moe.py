@@ -10,6 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -50,6 +51,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _backend_activation_key,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -147,16 +149,6 @@ __all__ = [
     "QuarkW8A8Mxfp8MoEMethod",
     "QuarkNvfp4MoEMethod",
 ]
-
-
-def _use_k3_situ_aiter_a8w4(
-    moe: FusedMoEConfig, ocp_mx_scheme: OCP_MX_Scheme | str
-) -> bool:
-    """Whether Quark K3 should use AITER's SiTUv2 activation path."""
-    return (
-        ocp_mx_scheme == "w_mxfp4_a_mxfp4"
-        and rocm_aiter_ops.is_fused_moe_situv2_enabled()
-    )
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -987,6 +979,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
         self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
@@ -1345,6 +1338,13 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # Activation- and weight-scale layouts are independent: derive each from
+        # the quant key that describes it.
+        activation_quant_key = self.activation_quant_key
+        assert activation_quant_key is not None
+        per_act_token_quant = activation_quant_key.scale.group_shape.is_per_token()
+        per_out_ch_quant = self.weight_quant_key.scale.group_shape.is_per_channel()
+
         # Static-activation INT8 has no oracle backend (it uses the legacy
         # fused_experts path); build its config directly.
         if self.int8_backend is None:
@@ -1355,7 +1355,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 a2_scale=layer.w2_input_scale,
                 w1_bias=getattr(layer, "w13_bias", None),
                 w2_bias=getattr(layer, "w2_bias", None),
-                per_act_token_quant=False,
+                per_act_token_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
             )
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
@@ -1365,7 +1366,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            per_act_token_quant=(self.weight_qscheme == "per_channel"),
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
             layer=layer,
         )
 
@@ -1576,6 +1578,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     # implements the packed MXFP4 / MXFP6 elements.
     supported_activation_quant_keys = [
         kMxfp4Dynamic,
+        kMxfp8Dynamic,
         kMxfp6E3M2Dynamic,
         kMxfp6E2M3Dynamic,
         kFp8DynamicTensorSym,
@@ -1594,6 +1597,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
     ):
+        activation_override, explicit_override = user_activation_override(
+            "moe", get_current_vllm_config()
+        )
+        if explicit_override and weight_quant_key == kMxfp4Static:
+            if (
+                activation_override == kFp8StaticTensorSym
+                and activation_quant_key != kFp8StaticTensorSym
+            ):
+                raise ValueError("An FP8 static override requires checkpoint scales")
+            activation_quant_key = activation_override
         super().__init__(moe, weight_quant_key, activation_quant_key)
         self.weight_dtype = next(
             dtype
@@ -1634,16 +1647,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = activation_quant_key == kFp8StaticTensorSym
 
-        self.is_k3_situ_aiter_a8w4 = _use_k3_situ_aiter_a8w4(moe, self.ocp_mx_scheme)
-
         # Select backend based on OCP MX scheme
-        if self.is_k3_situ_aiter_a8w4:
-            # The checkpoint declares dynamic MXFP4 activations. This explicit
-            # opt-in keeps its packed weights/scales and passes BF16 inputs to
-            # AITER, which applies the selected SiTUv2 activation quantization.
-            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-        elif self.ocp_mx_scheme == "w_mxfp4":
+        if self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
@@ -1656,6 +1661,30 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kMxfp4Dynamic
             )
+        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp8":
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=kMxfp8Dynamic
+            )
+
+        if (
+            explicit_override
+            and weight_quant_key == kMxfp4Static
+            and self.mxfp4_backend != Mxfp4MoeBackend.NONE
+        ):
+            backend_key = _backend_activation_key(self.mxfp4_backend)
+            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+                if activation_quant_key == kMxfp8Dynamic:
+                    raise NotImplementedError(
+                        "Quark MXFP4 emulation does not support MXFP8 activations"
+                    )
+            elif (
+                self.mxfp4_backend != Mxfp4MoeBackend.HUMMING
+                and backend_key != activation_quant_key
+            ):
+                raise NotImplementedError(
+                    f"Quark MXFP4 backend {self.mxfp4_backend.value} cannot honour "
+                    f"activation={activation_quant_key}; it computes {backend_key}"
+                )
 
         # Validation for unsupported schemes
         if any(
@@ -1690,13 +1719,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
-        if self.is_k3_situ_aiter_a8w4:
-            logger.warning_once(
-                "Kimi-K3 Quark checkpoint declares dynamic MXFP4 activations; "
-                "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly overrides "
-                "routed-MoE activations to MXFP8 and uses native AITER SiTUv2 "
-                "A8W4 with MXFP4 weights."
-            )
 
     def maybe_roundup_sizes(
         self,
@@ -1854,36 +1876,33 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        # Convert weights to kernel format (handles all backend-specific logic)
-        if self.is_k3_situ_aiter_a8w4:
-            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-                convert_weight_to_mxfp4_moe_kernel_format(
-                    mxfp4_backend=self.mxfp4_backend,
-                    layer=layer,
-                    w13_weight=layer.w13_weight,
-                    w2_weight=layer.w2_weight,
-                    w13_weight_scale=layer.w13_weight_scale,
-                    w2_weight_scale=layer.w2_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_bias=w2_bias,
-                    activation=self.moe.activation,
-                )
+        if self.model_type == "gpt_oss":
+            converted_weights = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                w13_input_scale=layer.w13_input_scale,
+                w2_input_scale=layer.w2_input_scale,
             )
         else:
-            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-                convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-                    mxfp4_backend=self.mxfp4_backend,
-                    layer=layer,
-                    w13_weight=layer.w13_weight,
-                    w2_weight=layer.w2_weight,
-                    w13_weight_scale=layer.w13_weight_scale,
-                    w2_weight_scale=layer.w2_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_bias=w2_bias,
-                    w13_input_scale=layer.w13_input_scale,
-                    w2_input_scale=layer.w2_input_scale,
-                )
+            converted_weights = convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                activation=self.moe.activation,
+                activation_key=self.activation_quant_key,
             )
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 
         # Handle weight/scale assignment based on backend type
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
