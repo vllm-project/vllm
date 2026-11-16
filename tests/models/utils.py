@@ -431,7 +431,7 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelInfo:
     name: str
     revision: str | None = None
@@ -448,7 +448,7 @@ class ModelInfo:
     enable_test: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class EmbedModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_EMBED_TOL.
@@ -457,7 +457,7 @@ class EmbedModelInfo(ModelInfo):
     matryoshka_dimensions: list[int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_RERANK_TOL.
@@ -465,7 +465,7 @@ class RerankModelInfo(ModelInfo):
     chat_template_name: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None

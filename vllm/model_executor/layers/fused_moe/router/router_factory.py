@@ -103,7 +103,8 @@ def create_fused_moe_router(
             experts (must be 1.0 for the AITER shared-expert router)
         has_shared_expert_gate: Whether the last num_fused_shared_experts
             columns of router_logits are shared-expert gate logits
-        skip_padding: Whether to invalidate routes for padding rows
+        skip_padding: With ROCm AITER fused MoE, let grouped routing mask
+            padding rows; otherwise it follows VLLM_MOE_SKIP_PADDING
 
     Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights
