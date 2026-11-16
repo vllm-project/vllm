@@ -2085,16 +2085,10 @@ class MoRIIOConnectorWorker:
         # Remote engines already covered by the eager pre-forward handshake.
         self._eager_handshaked_engines: set[EngineId] = set()
 
-        # Parked requests waiting for a background handshake to complete
-        # (Gap 6). Instead of busy-waiting with sleep(0.001), requests are
-        # deferred here and drained on the next save_kv_layer / start_load_kv
-        # call once the handshake callback has fired.
-        # Each entry: (req_id, meta, layer_name, kv_layer, park_time)
+        # Write requests parked while a background handshake completes.
         self._parked_write_reqs: list[
             tuple[ReqId, ReqMeta, str, torch.Tensor, float]
         ] = []
-        # Each entry: (req_id, meta, park_time)
-        self._parked_read_reqs: list[tuple[ReqId, ReqMeta, float]] = []
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -3215,8 +3209,11 @@ class MoRIIOConnectorWorker:
         invalid, self._invalid_block_ids = self._invalid_block_ids, set()
         return invalid
 
-    def _drain_parked_writes(self, layer_name: str, kv_layer: torch.Tensor):
-        """Process parked write requests whose handshakes have completed."""
+    def _drain_parked_writes(self):
+        """Process parked write requests whose handshakes have completed.
+
+        # TODO: reconcile with #63879's layer-0-only-blocking approach.
+        """
         remaining: list[
             tuple[ReqId, ReqMeta, str, torch.Tensor, float]
         ] = []
@@ -3224,9 +3221,9 @@ class MoRIIOConnectorWorker:
             self._parked_write_reqs
         ):
             eid = meta.remote_engine_id
-            if eid in self.write_ready_flags and not self._ready_requests.empty():
+            if eid in self.write_ready_flags:
                 self._write_blocks_for_req(
-                    *self._ready_requests.get_nowait(), layer_name, kv_layer
+                    req_id, meta, parked_layer, parked_kv
                 )
             elif (
                 time.monotonic() - park_time
@@ -3258,7 +3255,7 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.READ:
             return
 
-        self._drain_parked_writes(layer_name, kv_layer)
+        self._drain_parked_writes()
 
         for req_id, meta in metadata.reqs_to_save.items():
             remote_engine_id = (
@@ -3283,14 +3280,20 @@ class MoRIIOConnectorWorker:
             )
             if not handshake_ready:
                 with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
+                    # Check with dp0 key (matches _remote_agents keying) and
+                    # skip if a handshake round is already in flight.
+                    futures = getattr(self, "_handshake_futures", {})
+                    if (
+                        dp0_remote_engine_id not in self._remote_agents
+                        and remote_engine_id not in futures
+                    ):
                         self._background_moriio_handshake(
                             req_id, remote_engine_id, meta
                         )
-                        self._parked_write_reqs.append(
-                            (req_id, meta, layer_name, kv_layer, time.monotonic())
-                        )
-                        continue
+                    self._parked_write_reqs.append(
+                        (req_id, meta, layer_name, kv_layer, time.monotonic())
+                    )
+                    continue
             self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
 
     def get_engine_name_with_dp(self, engine_name, dp_rank):
@@ -3440,30 +3443,6 @@ class MoRIIOConnectorWorker:
 
             self._eager_handshaked_engines.add(remote_engine_id)
 
-    def _drain_parked_reads(self):
-        """Process parked read requests whose handshakes have completed."""
-        remaining: list[tuple[ReqId, ReqMeta, float]] = []
-        for req_id, meta, park_time in self._parked_read_reqs:
-            eid = meta.remote_engine_id
-            if eid in self.load_ready_flag and not self._ready_requests.empty():
-                self._read_blocks_for_req(
-                    *self._ready_requests.get_nowait()
-                )
-            elif (
-                time.monotonic() - park_time
-                > self.moriio_config.transfer_timeout
-            ):
-                logger.warning(
-                    "Timed out waiting for read handshake with %s "
-                    "(parked %.1fs); dropping request %s",
-                    eid,
-                    time.monotonic() - park_time,
-                    req_id,
-                )
-            else:
-                remaining.append((req_id, meta, park_time))
-        self._parked_read_reqs = remaining
-
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
@@ -3485,33 +3464,15 @@ class MoRIIOConnectorWorker:
             return
 
         # Handshake every referenced remote prefill rank up front, before any
-        # read enters the forward pass. A lazy per-rank handshake on the read
-        # path lets TP workers diverge into a forward collective while a peer is
-        # still blocked handshaking -> NCCL hang (see below).
+        # read enters the forward pass. _eager_handshake_all_dp_ranks handles
+        # all engines so no per-request parking is needed on the read path.
         self._eager_handshake_all_dp_ranks(metadata)
-
-        self._drain_parked_reads()
 
         for req_id, meta in metadata.reqs_to_recv.items():
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
             meta.remote_engine_id = remote_engine_id
-            dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            if (
-                remote_engine_id not in self._eager_handshaked_engines
-                and dp0_remote_engine_id not in self._remote_agents
-            ):
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_moriio_handshake(
-                            req_id, remote_engine_id, meta
-                        )
-                        self._parked_read_reqs.append(
-                            (req_id, meta, time.monotonic())
-                        )
-                        continue
-
             self._read_blocks_for_req(req_id, meta)
 
         self._await_reads_issued_this_step()

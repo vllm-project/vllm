@@ -480,6 +480,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker._write_blocks_for_req = (  # type: ignore[method-assign]
         lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
     )
+    worker._parked_write_reqs = []
     return worker
 
 
