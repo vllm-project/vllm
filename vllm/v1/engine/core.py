@@ -2102,10 +2102,17 @@ class EngineCoreProc(EngineCore):
         except Exception:
             return None
 
+    @staticmethod
+    def _get_mm_device_do_normalize(vllm_config: VllmConfig) -> bool:
+        multimodal_config = vllm_config.model_config.multimodal_config
+        return (
+            multimodal_config is not None
+            and multimodal_config.mm_device_do_normalize is True
+        )
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
-        multimodal_config = self.vllm_config.model_config.multimodal_config
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -2164,9 +2171,9 @@ class EngineCoreProc(EngineCore):
             cache_config_info=self.vllm_config.cache_config.metrics_info(),
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
-            mm_device_do_normalize=(
-                multimodal_config is not None
-                and multimodal_config.mm_device_do_normalize is True
+            mm_device_do_normalize=self._get_mm_device_do_normalize(self.vllm_config),
+            supports_prompt_logprobs=(
+                not self.vllm_config.cache_config.kv_sharing_fast_prefill
             ),
         )
 

@@ -588,9 +588,17 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
             .ready_response
     }
+
     /// Return whether engines normalize multimodal encoder inputs on device.
     pub fn mm_device_do_normalize(&self) -> bool {
         self.ready_response().mm_device_do_normalize
+    }
+
+    /// Whether every engine computes prompt logprobs. A request may go to any
+    /// engine, so one engine without them (e.g. under
+    /// `--kv-sharing-fast-prefill`) disables them for all.
+    pub fn supports_prompt_logprobs(&self) -> bool {
+        (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
     }
 
     /// Return the engine-reported effective model dtype.

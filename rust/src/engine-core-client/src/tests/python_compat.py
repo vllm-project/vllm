@@ -552,6 +552,7 @@ class EngineCoreReadyResponse:
     config_hash: str | None = None
     enable_expert_parallel: bool = False
     mm_device_do_normalize: bool = False
+    supports_prompt_logprobs: bool = True
 
 
 ready_response = EngineCoreReadyResponse(
@@ -602,6 +603,7 @@ ready_response = EngineCoreReadyResponse(
     config_hash="0123456789",
     enable_expert_parallel=True,
     mm_device_do_normalize=True,
+    supports_prompt_logprobs=False,
 )
 
 nixl_stats = {

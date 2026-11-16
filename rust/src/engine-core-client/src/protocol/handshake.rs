@@ -149,6 +149,14 @@ pub struct EngineCoreReadyResponse {
     /// Older engines omit this field and require frontend normalization.
     #[serde(default)]
     pub mm_device_do_normalize: bool,
+    /// Whether the engine computes prompt logprobs. `false` under
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
+    #[serde(default = "supports_prompt_logprobs_default")]
+    pub supports_prompt_logprobs: bool,
+}
+
+fn supports_prompt_logprobs_default() -> bool {
+    true
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
