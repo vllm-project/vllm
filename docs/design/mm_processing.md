@@ -93,6 +93,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `kimi-k3`                  | `KimiK3ForConditionalGeneration`           | `moonshotai/Kimi-K3`                                  |
 | `llama-nemotron-vl-embed`  | `LlamaNemotronVLForEmbedding`              | `nvidia/llama-nemotron-embed-vl-1b-v2`                |
 | `llama-nemotron-vl-rerank` | `LlamaNemotronVLForSequenceClassification` | `nvidia/llama-nemotron-rerank-vl-1b-v2`               |
+| `llava-onevision`          | `LlavaOnevisionForConditionalGeneration`   | `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.     |
 | `mistral3`                 | `Mistral3ForConditionalGeneration`         | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
 | `nano-nemotron-vl`         | `NemotronH_Nano_VL_V2`                     | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`          |
 | `nano-nemotron-omni`       | `NemotronH_Nano_Omni_Reasoning_V3`         | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` |
