@@ -1956,8 +1956,10 @@ class MoRIIOConnectorScheduler:
             self._write_recv_timed_out -= reported
             held = reported & set(connector_output.failed_recving or ())
             self._write_recv_held |= held
-            released = set(connector_output.finished_sending or ()) & (
-                self._write_recv_held - held
+            # A release in the step of the hold is final too: the worker saw the
+            # write end (e.g. a write_failed with the timeout).
+            released = (
+                set(connector_output.finished_sending or ()) & self._write_recv_held
             )
             self._write_recv_held -= released
             # Settled: a request already finished gives up the mapping it kept.

@@ -378,3 +378,18 @@ def test_request_aborted_before_its_deadline_stops_its_timer(engine):
 def test_peer_listening_treats_a_malformed_host_as_not_listening():
     # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
     assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
+
+
+def test_write_failed_with_the_timeout_frees_the_blocks(engine):
+    """A producer write_failed that reaches the workers in the step the timeout
+    does: the write is over, so the blocks must be freed, not held forever."""
+    free_before = engine.pool.get_num_free_blocks()
+    request = engine.add_waiting_request()
+    transfer_id = request.kv_transfer_params["transfer_id"]
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step(write_failed=frozenset({transfer_id}))
+    assert request.status == RequestStatus.FINISHED_ERROR
+    engine.step()
+    assert request.request_id not in engine.scheduler.requests
+    assert engine.pool.get_num_free_blocks() == free_before
