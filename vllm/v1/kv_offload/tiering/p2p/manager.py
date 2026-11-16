@@ -200,7 +200,7 @@ def _annotate_req_context(req_context: ReqContext) -> None:
         req_context.set_state(dest)
 
 
-@dataclass
+@dataclass(slots=True)
 class _UnboundStoreBatch:
     """A submit_store batch parked at the manager before any peer has fetched.
 
