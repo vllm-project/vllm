@@ -17,6 +17,7 @@ FlashMLA and indexer builders they keep (`DeepseekV41MetadataGraphModelState`).
 """
 
 from collections.abc import Callable, Sequence
+from functools import cache
 from typing import Any
 
 import torch
@@ -28,45 +29,53 @@ from vllm.config.compilation import (
     decode_cudagraph_capture_shapes,
 )
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
-from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
-    DeepseekSparseSWAFlashInferMetadataBuilder,
-    DeepseekV4FlashInferSparseMLAMetadataBuilder,
-)
-from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadataBuilder,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
-from ..ampere.attention import AmpereSWAMetadataBuilder
-from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
-from ..hopper.attention import HopperSWAMetadataBuilder
-from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
-
 logger = init_logger(__name__)
 
-# Builders whose build() of a uniform decode batch launches only capture-safe
-# work (no device-to-host reads, no pageable host-to-device copies) into
-# persistent buffers, with host arguments set by the batch shape.
-_RECORDABLE_BUILDERS = frozenset(
-    {
-        AmpereIndexerMetadataBuilder,
-        AmpereSWAMetadataBuilder,
-        CompressorMetadataBuilder,
+
+@cache
+def _get_recordable_builders() -> frozenset[type[AttentionMetadataBuilder]]:
+    # Shape enumeration needs no CUDA kernels; load builders only for recording.
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
+    from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
         DeepseekSparseSWAFlashInferMetadataBuilder,
-        DeepseekV32IndexerMetadataBuilder,
-        DeepseekV41SparseIndexerMetadataBuilder,
         DeepseekV4FlashInferSparseMLAMetadataBuilder,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import (
         DeepseekV4FlashMLAMetadataBuilder,
-        HopperIndexerMetadataBuilder,
-        HopperSWAMetadataBuilder,
-    }
-)
+    )
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+
+    from ..ampere.attention import AmpereSWAMetadataBuilder
+    from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
+    from ..hopper.attention import HopperSWAMetadataBuilder
+    from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
+
+    # Only capture-safe device work into persistent buffers, with host arguments
+    # fixed by the batch shape.
+    return frozenset(
+        {
+            AmpereIndexerMetadataBuilder,
+            AmpereSWAMetadataBuilder,
+            CompressorMetadataBuilder,
+            DeepseekSparseSWAFlashInferMetadataBuilder,
+            DeepseekV32IndexerMetadataBuilder,
+            DeepseekV41SparseIndexerMetadataBuilder,
+            DeepseekV4FlashInferSparseMLAMetadataBuilder,
+            DeepseekV4FlashMLAMetadataBuilder,
+            HopperIndexerMetadataBuilder,
+            HopperSWAMetadataBuilder,
+        }
+    )
+
 
 # Recordable builders that only read their block table: on a table that other
 # builders clamp in place, they build on branches of their own once those have.
@@ -156,8 +165,9 @@ class AttnMetadataCudaGraphs:
     def can_record(self, attn_groups: list[list[AttentionGroup]]) -> bool:
         """Whether every metadata builder of `attn_groups` is recordable."""
         if self._recordable is None:
+            recordable_builders = _get_recordable_builders()
             self._recordable = all(
-                type(group.get_metadata_builder()) in _RECORDABLE_BUILDERS
+                type(group.get_metadata_builder()) in recordable_builders
                 for groups in attn_groups
                 for group in groups
             )
