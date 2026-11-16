@@ -30,8 +30,17 @@ MAX_SPLIT_ROWS = 1024
 
 
 @functools.cache
-def _get_kernel(splits: int, topk: int, xcds: int, fp8_out: bool = False):
-    return _kernel.compile_nvfp4_sparse_decode(splits, topk, xcds, fp8_out)
+def _get_kernel(
+    splits: int,
+    topk: int,
+    xcds: int,
+    fp8_out: bool = False,
+    place: int = _kernel.PLACE_REQ,
+    waves_per_eu: int = 0,
+):
+    # waves_per_eu is not a kernel argument: it keys the cache because each
+    # (kernel, hint) pair is compiled once (run_compiled) on its own launcher.
+    return _kernel.compile_nvfp4_sparse_decode(splits, topk, xcds, fp8_out, place)
 
 
 def _query_xcd_count(device_index: int) -> int:
@@ -99,27 +108,73 @@ def decode_splits(num_rows: int, num_blocks: int, cus: int) -> int:
     return best
 
 
-def _xcd_splits(
-    num_reqs: int, xcds: int, topk: int, decode_query_len: int, num_kv_heads: int
-) -> int | None:
-    """Splits for the XCD-aware grid with up to three requests per XCD, or None.
+# Splits of the XCD-aware plan; more than 4 never paid off (one round of
+# 2-block workgroups costs about what 4-block ones do, plus the wider combine).
+MAX_XCD_SPLITS = 4
+# Requests past one round on the busiest XCD that run 2 balanced splits on the
+# two-workgroups-a-CU build (measured up to here).
+MAX_OCC2_REQS = 48
 
-    A request's rows and splits all run on one XCD (32 CUs), so the cost model
-    of `decode_splits`, which spreads the grid over every CU, mispredicts: at
-    5 requests it picks 6 splits for 15.7 us where 4 splits take 11.9 us.
-    Measured on MI355X (top-k 16, 8 rows a request, 30K-400K contexts, 1-24
-    requests; the kernel time does not depend on the context): 4 splits is
-    best up to 8 requests (11.4-12.4 us, one request per XCD) and for 17-24
-    requests (21 us), 2 splits for 9-16 requests (15.3-16 us). Wider grids use
-    the cost model. A request's KV heads also share its XCD, so with 2 or 4 KV
-    heads per rank (TP2, TP1) the table over-splits and the cost model is kept.
+
+def _xcd_plan(
+    num_reqs: int,
+    xcds: int,
+    topk: int,
+    decode_query_len: int,
+    num_kv_heads: int,
+    cus: int,
+) -> tuple[int, int, int] | None:
+    """(splits, row placement, waves_per_eu) of the XCD-aware grid, or None.
+
+    The kernel takes 259 VGPRs, so a CU runs one workgroup at a time, and a
+    second round of workgroups on an XCD costs a whole workgroup latency chain
+    (block-table, page and partial round trips: about 7 us cold) for a few
+    blocks saved. So the plan is the most splits (at most `MAX_XCD_SPLITS`)
+    for which the busiest XCD runs all its workgroups in one round:
+    `PLACE_REQ` (request r on XCD r % xcds) puts ql x ceil(reqs / xcds) rows
+    on the busiest XCD, `PLACE_BAL` ceil(rows / xcds) on every XCD;
+    `PLACE_REQ` on ties (a request's rows share an L2). With more rows than
+    an XCD has CUs, up to `MAX_OCC2_REQS` requests: 2 balanced splits built
+    for two workgroups a CU (waves_per_eu 2: 256 VGPRs, 2 spilled outside the
+    loop), whose overlapping latency chains beat a second round; past that,
+    None (the cost model on the plain grid).
+
+    Measured on MI355X (top-k 16, DSpark 7 = 8 rows a request, one KV head, 64K /
+    128K / 256K contexts, cold, graph replay): 1-8 requests 4 splits PLACE_REQ
+    (unchanged); 9-10 requests 3 splits PLACE_BAL (14.5-15.7 us vs 16.2-17.1
+    with 2); 11-16 2 splits PLACE_REQ (unchanged); 17-32 no split, PLACE_REQ
+    (22-24 us; 17-24 took 29-31 us with the former 4 splits, 25-32 already
+    ran unsplit); 33-48 2 splits PLACE_BAL occupancy 2 (34.5-36.7 us vs 44-50
+    with the cost model's 4 splits). A request's KV heads also share its XCD,
+    so with 2 or 4 KV heads per rank (TP2, TP1) the plan does not apply and
+    the cost model is kept.
     """
     if xcds <= 0 or topk != 16 or decode_query_len != 8 or num_kv_heads != 1:
         return None  # tuned for DSpark 7, one KV head per rank
-    per_xcd = -(-num_reqs // xcds)
-    if per_xcd == 2:
-        return 2
-    return 4 if per_xcd <= 3 else None
+    cus_per_xcd = cus // xcds
+    rows = num_reqs * decode_query_len
+    req_rows = decode_query_len * -(-num_reqs // xcds)
+    bal_rows = -(-rows // xcds)
+    s_req = min(MAX_XCD_SPLITS, cus_per_xcd // req_rows)
+    s_bal = min(MAX_XCD_SPLITS, cus_per_xcd // bal_rows)
+    if s_req >= s_bal and s_req:
+        return s_req, _kernel.PLACE_REQ, 0
+    if s_bal:
+        return s_bal, _kernel.PLACE_BAL, 0
+    if num_reqs <= MAX_OCC2_REQS:
+        return 2, _kernel.PLACE_BAL, 2
+    return None
+
+
+def _grid_x(rows: int, ql: int, xcds: int, place: int) -> int:
+    """grid.x of the kernel's row placement (see `kernel.py`)."""
+    if not xcds:
+        return rows
+    if place == _kernel.PLACE_REQ:
+        group = xcds * ql
+        return -(-rows // group) * group
+    sf = (rows // ql // xcds) * ql
+    return (sf + -(-(rows - sf * xcds) // xcds)) * xcds
 
 
 def minimax_m3_nvfp4_sparse_decode_fly(
@@ -137,6 +192,8 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     xcd_count: int | None = None,
     out_q: torch.Tensor | None = None,  # [rows, H * 128] float8_e4m3fn
     out_scale: torch.Tensor | None = None,  # [rows, H * 4] uint8 (E8M0)
+    place: int | None = None,
+    waves_per_eu: int | None = None,
 ) -> None:
     """Sparse decode attention over the NVFP4 K/V pages.
 
@@ -146,6 +203,11 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     With `out_q` and `out_scale` the output is written as MXFP8 (E4M3 values
     and row-major E8M0 scales per 32 dims, equal to `mxfp8_e4m3_quantize` of
     the bf16 output) instead of bf16 into `output`, which is then unused.
+
+    `splits` / `place` / `waves_per_eu` default to the XCD plan (`_xcd_plan`),
+    else the cost model; an explicit `splits` keeps `PLACE_REQ`. For a given
+    split count the output does not depend on the placement or the occupancy
+    hint (the splits combine in split order).
     """
     rows, num_heads, head_dim = q.shape
     if rows == 0:
@@ -187,29 +249,36 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     if xcd_count is None:
         xcd_count = _xcd_count(q.device.index)
     xcds = xcd_count if xcd_count and xcd_count > 1 else 0
-    if xcds:
-        group = xcds * decode_query_len
-        grid_x = -(-rows // group) * group
-    else:
-        grid_x = rows
-    if splits is None:
-        wg_rows = grid_x * num_kv_heads
-        if wg_rows > MAX_SPLIT_ROWS:
-            splits = 1
-        else:
-            splits = _xcd_splits(
-                rows // decode_query_len, xcds, topk, decode_query_len, num_kv_heads
-            )
-            if splits is None:
-                splits = decode_splits(rows * num_kv_heads, topk, cu_count(q.device))
+    if splits is None and place is None:
+        plan = _xcd_plan(
+            rows // decode_query_len,
+            xcds,
+            topk,
+            decode_query_len,
+            num_kv_heads,
+            cu_count(q.device),
+        )
+        if plan is not None:
+            splits, place, plan_wpe = plan
+            if waves_per_eu is None:
+                waves_per_eu = plan_wpe or None
+    if place is None:
+        place = _kernel.PLACE_REQ
+    assert place == _kernel.PLACE_REQ or xcds
+    grid_x = _grid_x(rows, decode_query_len, xcds, place)
+    if grid_x * num_kv_heads > MAX_SPLIT_ROWS:
+        splits = 1
+    elif splits is None:
+        splits = decode_splits(rows * num_kv_heads, topk, cu_count(q.device))
     assert splits == 1 or grid_x * num_kv_heads <= MAX_SPLIT_ROWS
     part, cnt = _split_buffers(q.device)
     unit = unit_scale(q.device)
     ks = unit if k_scale is None else k_scale
     vs = unit if v_scale is None else v_scale
     c = float(np.float32(sm_scale) * np.float32(LOG2E))
+    wpe = waves_per_eu or 0
     run_compiled(
-        _get_kernel(splits, topk, xcds, fp8_out),
+        _get_kernel(splits, topk, xcds, fp8_out, place, wpe),
         q.data_ptr(),
         kv_cache.data_ptr(),
         topk_idx.data_ptr(),
@@ -234,4 +303,5 @@ def minimax_m3_nvfp4_sparse_decode_fly(
         c,
         grid_x,
         torch.cuda.current_stream(q.device),
+        waves_per_eu=wpe or None,
     )
