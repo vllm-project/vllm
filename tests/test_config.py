@@ -573,12 +573,6 @@ def test_pd_dcp_interleave_size_respects_explicit_settings(
         kv_transfer_config=nixl_kv_transfer_config,
     )
 
-    if explicit_interleave in (3, 32):
-        with pytest.raises(AssertionError, match="divisible by"):
-            config.validate_block_size()
-        return
-
-    config.validate_block_size()
     kv_cache_groups = [
         KVCacheGroup(
             kv_cache_specs={
@@ -603,6 +597,13 @@ def test_pd_dcp_interleave_size_respects_explicit_settings(
         assert "automatically adjusted from 1 to block_size 16" in caplog.text
     else:
         assert "automatically adjusted" not in caplog.text
+
+    # Same order as the engine core: validate after the interleave is resolved.
+    if explicit_interleave in (3, 32):
+        with pytest.raises(AssertionError, match="divisible by"):
+            config.validate_block_size()
+    else:
+        config.validate_block_size()
 
 
 def test_kv_offloading_does_not_adjust_dcp_interleave_size():
