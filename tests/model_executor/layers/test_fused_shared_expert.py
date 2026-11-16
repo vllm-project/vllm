@@ -1424,6 +1424,7 @@ def _load_minimax_m3_weights(
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
+@pytest.mark.skip_global_cleanup
 @override_parallel_groups(_SingleRankGroup())
 def test_models_fse_init(
     model_type: str,
@@ -2064,6 +2065,7 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
         {"weight": "mxfp4", "activation": None},
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_online_mxfp4_shared_expert_fse_compares_resolved_keys(
     routed_weight_only: bool, target: str | dict
 ) -> None:

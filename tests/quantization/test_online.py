@@ -282,6 +282,7 @@ def test_online_activation_override(
     ("layer_kind", "method_cls"),
     [("linear", Mxfp4OnlineLinearMethod), ("moe", Mxfp4OnlineMoEMethod)],
 )
+@pytest.mark.skip_global_cleanup
 def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     default_vllm_config,
     layer_kind: str,
