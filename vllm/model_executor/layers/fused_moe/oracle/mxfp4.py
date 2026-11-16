@@ -474,6 +474,12 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         return [Mxfp4MoeBackend.CPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        # b12x plans its own tiles and its support predicate
+        # (`B12xExperts._supports_parallel_config`) only accepts non-EP
+        # deployments, so expert-parallel configs keep falling through to
+        # DeepGEMM below while tensor-parallel ones get a faster option.
+        Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+        Mxfp4MoeBackend.B12X_MXFP4_BF16,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
