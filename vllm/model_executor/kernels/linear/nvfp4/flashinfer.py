@@ -53,6 +53,12 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
         return True, None
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
@@ -233,6 +239,12 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        # FlashInfer's TRT-LLM FP4 GEMM only supports the SM100 family.
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            return False, "FlashInfer TRT-LLM NVFP4 GEMM requires CUDA sm_10x"
         if has_flashinfer():
             return True, None
         return False, "FlashInfer required"
@@ -305,6 +317,10 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        if not (
+            current_platform.is_cuda() and current_platform.has_device_capability(100)
+        ):
+            return False, "NVFP4 activation quantization requires CUDA sm_100+"
         if has_flashinfer():
             return True, None
         return False, "FlashInfer required"
@@ -350,7 +366,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
 
 class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
-    """NVFP4 GEMM via FlashInfer's b12x CuTe DSL warp-level MMA kernel (SM120+)."""
+    """NVFP4 GEMM via FlashInfer's b12x CuTe DSL warp-level MMA kernel (SM12x)."""
 
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
@@ -359,12 +375,16 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if current_platform.has_device_capability(120) and has_flashinfer_b12x_gemm():
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+            and has_flashinfer_b12x_gemm()
+        ):
             return True, None
         return (
             False,
             (
-                "FlashInfer b12x requires SM120+ and FlashInfer "
+                "FlashInfer b12x requires CUDA sm_12x and FlashInfer "
                 "with Sm120BlockScaledDenseGemmKernel"
             ),
         )
