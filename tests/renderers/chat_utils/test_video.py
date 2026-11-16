@@ -716,3 +716,82 @@ async def test_parse_chat_messages_sync_async_parity_for_silent_video(tmp_path):
             f"{name}: prompt has {prompt_s.count(audio_token)} audio "
             f"placeholders but {len(audio_items_s)} audio items"
         )
+
+
+async def _parse_sync_and_async(messages: list[dict[str, Any]], config: ModelConfig):
+    """Parse with `use_audio_in_video` on; return `(mm_data, mm_uuids)` per mode."""
+    kwargs = {"use_audio_in_video": True}
+    _, data_sync, uuids_sync = parse_chat_messages(
+        messages, config, content_format="string", mm_processor_kwargs=kwargs
+    )
+    _, data_async, uuids_async = await parse_chat_messages_async(
+        messages, config, content_format="string", mm_processor_kwargs=kwargs
+    )
+    return {"sync": (data_sync, uuids_sync), "async": (data_async, uuids_async)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_audio", [True, False])
+async def test_parse_chat_messages_video_audio_uuid_differs_from_video(
+    qwen25omni_model_config_audio_video, tmp_path, with_audio
+):
+    """The audio track taken from a video gets its own UUID.
+
+    Reusing the video's UUID would give both items the same `uuid:` cache key
+    whenever no other hash factor applies, for audible and silent videos alike.
+    The derived UUID is namespaced so it cannot match a plain client UUID.
+    """
+    url = _make_video_data_url(with_audio=with_audio, tmp_path=tmp_path)
+    messages = _video_messages(url)
+    messages[0]["content"][1]["uuid"] = "vid"
+
+    parsed = await _parse_sync_and_async(messages, qwen25omni_model_config_audio_video)
+    for mode, (_, mm_uuids) in parsed.items():
+        assert mm_uuids == {
+            "video": ["vid"],
+            "audio": ["vllm-audio-in-video:vid"],
+        }, mode
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_audio_without_uuid_stays_content_hashed(
+    qwen25omni_model_config_audio_video, tmp_path
+):
+    """A decoded audio track gets no UUID unless the client gave the video one.
+
+    A random UUID would replace the content hash and so defeat the processor,
+    encoder and prefix caches for every request.
+    """
+    url = _make_video_data_url(with_audio=True, tmp_path=tmp_path)
+
+    parsed = await _parse_sync_and_async(
+        _video_messages(url), qwen25omni_model_config_audio_video
+    )
+    for mode, (mm_data, mm_uuids) in parsed.items():
+        assert mm_data["audio"][0] is not None, mode
+        assert mm_uuids["audio"] == [None], mode
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_silent_video_warning_omits_url(
+    qwen25omni_model_config_audio_video, tmp_path, caplog_vllm
+):
+    """The silent-video warning must not log the `data:` URL.
+
+    The URL embeds the whole user-provided video, which can be several MB.
+    """
+    url = _make_video_data_url(with_audio=False, tmp_path=tmp_path)
+    payload = url.partition(",")[2]
+
+    await _parse_sync_and_async(
+        _video_messages(url), qwen25omni_model_config_audio_video
+    )
+    warnings = [
+        record.getMessage()
+        for record in caplog_vllm.records
+        if "no audio stream" in record.getMessage()
+    ]
+    assert len(warnings) == 2, warnings
+    for message in warnings:
+        assert payload[:32] not in message
+        assert "url scheme=data" in message
