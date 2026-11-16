@@ -50,12 +50,15 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
+    DeepseekV4MoE,
     _linear_scale_param_name,
     _use_mega_gate,
     _use_sequence_parallel,
@@ -299,7 +302,7 @@ def _insert_context_kv(
     )
 
 
-class DSparkDeepseekV4ForCausalLM(nn.Module):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
     # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
@@ -364,6 +367,17 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.markov_cache_dtype = vllm_config.model_config.head_dtype
             self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self.num_speculative_steps = spec_config.num_speculative_tokens
+
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+        )
 
     def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
         """Build this model's decode executor on `target`, the target
@@ -507,6 +521,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
                 num_experts=n_draft_experts,
+                num_redundant_experts=first_layer.ffn.n_redundant_experts,
             )
         expert_scale_suffix = (
             ".weight_scale"
@@ -566,6 +581,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
+                # A checkpoint expert can map to multiple local physical replicas.
+                # Load every local slot or the remaining replicas stay uninitialized.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
@@ -581,7 +598,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     )
                     if success:
                         loaded_params.add(name_mapped)
-                        break
                 continue
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params
