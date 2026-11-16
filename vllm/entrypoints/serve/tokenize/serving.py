@@ -171,7 +171,7 @@ class ServingTokenization(BaseServing):
         return TokenizerInfoResponse(**info)
 
 
-@dataclass
+@dataclass(slots=True)
 class TokenizerInfo:
     tokenizer: TokenizerLike
     chat_template: str | None
