@@ -4,22 +4,24 @@
 
 import pytest
 from tokenizers import AddedToken, Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.renderers import prefix_token_cache as ptc
 
 SPECIALS = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
 
 
-def _tokenizer(rstrip: bool = False) -> PreTrainedTokenizerFast:
+def _tokenizer(rstrip: bool = False) -> TokenizersBackend:
     vocab = {chr(c): i for i, c in enumerate(range(32, 127))}
     merges = [("t", "h"), ("th", "e"), ("a", "n"), ("an", "d")]
     for a, b in merges:
         vocab.setdefault(a + b, len(vocab))
     bpe = Tokenizer(models.BPE(vocab=vocab, merges=merges, unk_token=" "))
     bpe.pre_tokenizer = pre_tokenizers.Whitespace()
-    bpe.add_special_tokens([AddedToken(s, rstrip=rstrip, normalized=False) for s in SPECIALS])
-    return PreTrainedTokenizerFast(tokenizer_object=bpe)
+    bpe.add_special_tokens(
+        [AddedToken(s, rstrip=rstrip, normalized=False) for s in SPECIALS]
+    )
+    return TokenizersBackend(tokenizer_object=bpe)
 
 
 def _turns(n: int) -> list[str]:
@@ -65,6 +67,7 @@ def test_eviction_keeps_ids_exact(monkeypatch):
     monkeypatch.setattr(ptc, "MAX_TOKENS", 2000)
     tok = _tokenizer()
     cache = ptc.PrefixTokenCache.maybe_create(tok)
+    assert cache is not None
     for text in _turns(8) + _turns(3):
         assert cache.encode(text) == tok.encode(text, add_special_tokens=False)
     assert cache._tokens <= 2000 or len(cache._entries) == 1

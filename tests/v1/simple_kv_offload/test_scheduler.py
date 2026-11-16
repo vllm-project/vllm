@@ -1627,7 +1627,7 @@ def _cpu_hit_tokens(sched: SimpleCPUOffloadScheduler, request: Request) -> int:
 
 
 def _store(fix: SchedulerFixture, request: Request, num_blocks: int) -> KVCacheBlocks:
-    """Store a request's first ``num_blocks`` blocks in one step."""
+    """Store a request's first `num_blocks` blocks in one step."""
     sched = fix.scheduler
     kv_blocks = _alloc_and_register(fix, request, num_blocks)
     sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)

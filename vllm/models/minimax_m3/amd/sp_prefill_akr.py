@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels ``sp_prefill`` route (TP4): the sequence-parallel prefill from
+"""The amd_kernels `sp_prefill` route (TP4): the sequence-parallel prefill from
 4096 tokens. Each rank keeps a shard of the residual stream; per layer the two
 all-reduces become the hand-offs of
-``amd_kernels.collectives.seq_parallel_handoffs_h6144_q2048_ranks4`` (pull
+`amd_kernels.collectives.seq_parallel_handoffs_h6144_q2048_ranks4` (pull
 collectives for a single batch, SDMA pushes per DBO microbatch) around the layer's
-own ``attend`` and the FFN of every token, with the whole o_proj on every rank."""
+own `attend` and the FFN of every token, with the whole o_proj on every rank."""
 
 import functools
 
@@ -69,8 +69,28 @@ def make_o_proj_full(layer, quant_config, prefix: str):
     return full
 
 
+def full_o_proj_layers(model) -> frozenset[int]:
+    """The decoder layers of `model` (a `MiniMaxM3Model`) with an o_proj_full."""
+    return frozenset(
+        i
+        for i in range(model.start_layer, model.end_layer)
+        if getattr(model.layers[i].self_attn, "o_proj_full", None) is not None
+    )
+
+
+def load_o_proj_full(weights, layers: frozenset[int]):
+    """A `WeightsMapper` weights transform: each checkpoint o_proj tensor of a layer
+    in `layers` once more, for its o_proj_full."""
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    for name, weight in weights:
+        yield name, weight
+        if ".self_attn.o_proj." in name and extract_layer_index(name) in layers:
+            yield name.replace(".self_attn.o_proj.", ".self_attn.o_proj_full."), weight
+
+
 def _unsupported(layer) -> str | None:
-    """None when ``layer`` can run the amd_kernels SP layer, else why not."""
+    """None when `layer` can run the amd_kernels SP layer, else why not."""
     lib = _lib()
     attn = layer.self_attn
     if not hasattr(attn, "indexer"):
@@ -192,7 +212,7 @@ def _gemm(layer, codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
 
 
 def _dense_mlp(mlp, codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """The dense MLP of every token -> its TP partial ``[padded, H]`` (no reduce)."""
+    """The dense MLP of every token -> its TP partial `[padded, H]` (no reduce)."""
     from .ops import swiglu_oai_split
 
     x = swiglu_oai_split(
@@ -211,7 +231,7 @@ def forward(
     hidden_states: torch.Tensor,
     aux_hidden_states: list[torch.Tensor],
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-    """The SP forward of ``model`` from the embeddings to the final norm."""
+    """The SP forward of `model` from the embeddings to the final norm."""
     from amd_kernels.moe.mxfp4_h6144_i768_e128_top4 import mxfp4_moe
 
     if dbo_enabled():
