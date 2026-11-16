@@ -5,7 +5,7 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 !!! tip
     To get started with quantization, see [LLM Compressor](llm_compressor/README.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
 
-    For precision schemes (W8A8 vs W4A16, per-token vs per-block, MXFP4 vs NVFP4), see [Formats and Vocabulary](formats.md).
+    For the names vLLM accepts for methods and schemes, see [Methods and Schemes](formats.md). For which kernel runs a quantized layer, see [Kernel Selection](kernels.md).
 
 The following are the supported quantization formats for vLLM:
 
