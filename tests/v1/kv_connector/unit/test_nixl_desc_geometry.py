@@ -1146,7 +1146,8 @@ def _run_hetero_case(
     unit = math.gcd(kernel, remote_kernel)
     remote_ppl = remote_block // remote_kernel
     matched = num_tokens - 1  # mamba N-1 rule
-    n_local = -(-num_tokens // local_block)
+    # D allocates for the pulled tokens (matched), not the prompt length.
+    n_local = -(-matched // local_block)
     n_remote = -(-matched // remote_block)
 
     worker = _make_mla_hybrid_worker(
@@ -1909,7 +1910,7 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
         transfer_groups=[make_kv_cache_group(["draft"], spec)]
     )
 
-    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+    backends, specs, _ = kv_utils.get_current_attn_backends_and_specs(
         vllm_config, kv_cache_config, [_DraftBackend]
     )
 

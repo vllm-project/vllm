@@ -2423,6 +2423,8 @@ class NixlBaseConnectorWorker:
                 else [0] * num_regions
             ),
         )
+        if not hasattr(self, "_remote_stages"):
+            self._remote_stages = {}
         stages = self._remote_stages.setdefault(engine_id, {})
         # Another TP rank of the stage may have registered it already.
         if stages.setdefault(pp_rank, stage).pairs != pairs:
@@ -3733,7 +3735,7 @@ class NixlBaseConnectorWorker:
         # Notif-only engines (push-mode D side) have no descriptor state.
         # Stage handles and dst_xfer_side_handles alias the same prep lists;
         # release once via stages when present, else via the flat map.
-        stages = self._remote_stages.pop(engine_id, {})
+        stages = getattr(self, "_remote_stages", {}).pop(engine_id, {})
         if stages:
             for stage in stages.values():
                 for handle in stage.xfer_side_handles.values():

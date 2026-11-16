@@ -187,9 +187,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_tp_size, remote_info.remote_dcp_size
         )
         # One stage per PP rank of the remote; a PP=1 remote is a single stage.
-        # Unit fixtures that only fill the flat dst_* maps still work as PP=1.
+        # Fixtures that only fill the flat dst_* maps synthesize a PP=1 stage;
+        # partial mocks with no dst handles leave stages empty (no reads).
         stages = getattr(self, "_remote_stages", {}).get(engine_id)
-        if not stages:
+        if not stages and engine_id in getattr(self, "dst_xfer_side_handles", {}):
             pairs = self._dst_pairs[engine_id]
             stages = {
                 0: _RemoteStage(
@@ -199,15 +200,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     region_num_blocks=self.dst_region_num_blocks[engine_id],
                     region_group_ids=self.dst_region_group_ids[engine_id],
                     xfer_side_handles=dict(self.dst_xfer_side_handles[engine_id]),
-                    byte_ranges=self._byte_ranges.get(engine_id, []),
-                    desc_starts=dict(self._desc_starts.get(engine_id, {})),
-                    local_descs=self._local_descs.get(engine_id),
+                    byte_ranges=getattr(self, "_byte_ranges", {}).get(engine_id, []),
+                    desc_starts=dict(
+                        getattr(self, "_desc_starts", {}).get(engine_id, {})
+                    ),
+                    local_descs=getattr(self, "_local_descs", {}).get(engine_id),
                 )
             }
+        elif not stages:
+            stages = {}
 
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
-        different_block_sizes = (
-            self.block_size != remote_info.remote_block_size
+        # Require real ints: MagicMock remotes make `!=` true and would
+        # wrongly take the unequal-block path.
+        remote_block_size = getattr(remote_info, "remote_block_size", None)
+        different_block_sizes = isinstance(remote_block_size, int) and (
+            self.block_size != remote_block_size
             or remote_info.remote_physical_blocks_per_logical
             != self._physical_blocks_per_logical_kv_block
         )
