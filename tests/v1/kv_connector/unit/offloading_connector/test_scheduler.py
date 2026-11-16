@@ -162,6 +162,45 @@ def test_update_offload_keys_without_scanning_hash_prefix():
                 assert context.get_offload_key_position(key) == chunk_idx * stride * 16
 
 
+def test_rehashed_request_keeps_the_offload_keys_of_its_unchanged_chunks():
+    config = MagicMock()
+    config.kv_group_configs = [
+        SimpleNamespace(
+            group_idx=group_idx, hashes_per_chunk=stride, tokens_per_chunk=16 * stride
+        )
+        for group_idx, stride in enumerate((1, 2, 4))
+    ]
+    request = MagicMock(
+        kv_transfer_params=None,
+        block_hashes=[BlockHash(bytes([i])) for i in range(16)],
+    )
+    context = ReqContext("test")
+    state = RequestOffloadState(config, request, context, RequestOffloadingContext())
+    state.update_offload_keys()
+    old_keys = [list(group.offload_keys) for group in state.group_states]
+    request.block_hashes[10:] = [BlockHash(bytes([100 + i])) for i in range(6)]
+    with patch.object(
+        ReqContext,
+        "set_offload_key_position",
+        autospec=True,
+        side_effect=ReqContext.set_offload_key_position,
+    ) as set_position:
+        state.update_offload_keys()
+    assert [entry.args[2] for entry in set_position.call_args_list] == [
+        *range(176, 257, 16),
+        *range(192, 257, 32),
+        *range(192, 257, 64),
+    ]
+    for group_idx, stride in enumerate((1, 2, 4)):
+        keys = state.group_states[group_idx].offload_keys
+        assert keys == [
+            make_offload_key(block_hash, group_idx)
+            for block_hash in request.block_hashes[stride - 1 :: stride]
+        ]
+        for key in set(old_keys[group_idx]) - set(keys):
+            assert context.get_offload_key_position(key) is None
+
+
 def test_streaming_resume_refreshes_recomputed_offload_keys():
     scheduler = _make_partial_tail_scheduler()
     scheduler.use_lookahead_block_hashes = True

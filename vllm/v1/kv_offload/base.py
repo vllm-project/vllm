@@ -151,6 +151,9 @@ class ReqContext:
     def get_offload_key_position(self, key: OffloadKey) -> int | None:
         return self._offload_key_positions.get(key)
 
+    def discard_offload_key_position(self, key: OffloadKey) -> None:
+        self._offload_key_positions.pop(key, None)
+
 
 class LookupResult(Enum):
     """Result of OffloadingManager.lookup()."""
