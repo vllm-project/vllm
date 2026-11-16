@@ -19,6 +19,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+from vllm.utils.platform_utils import cuda_get_device_properties
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +200,14 @@ class Backend(Enum):
 @functools.cache
 def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
     try:
-        device_shared_mem_list = get_all_max_shared_mem()
-        max_shared_memory = device_shared_mem_list[tensor_idx]
+        if is_amd:
+            # Triton's device query initializes HIP outside torch, so vLLM would
+            # fork workers from an initialized parent and they could not use HIP.
+            (max_shared_memory,) = cuda_get_device_properties(
+                tensor_idx, ("shared_memory_per_block",)
+            )
+        else:
+            max_shared_memory = get_all_max_shared_mem()[tensor_idx]
         return max_shared_memory >= Backend.get_shared_memory(arch)
     except Exception:
         return False

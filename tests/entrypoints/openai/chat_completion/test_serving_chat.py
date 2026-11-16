@@ -531,7 +531,7 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
@@ -574,12 +574,12 @@ class MockModelConfig:
         return 50257
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -1459,7 +1459,7 @@ async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
     assert streamed_tokens == expected_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
@@ -3267,6 +3267,29 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
         messages=[{"role": "user", "content": "hi"}],
         kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
         echo=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_return_prompt_text(ids):
+    """`return_prompt_text` needs the rendered conversation, so the ids are
+    not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        return_prompt_text=True,
     )
     result = await serving_chat.render_chat_request(request)
     assert not isinstance(result, ErrorResponse)

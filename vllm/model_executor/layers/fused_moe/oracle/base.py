@@ -38,6 +38,14 @@ BackendT = TypeVar("BackendT", bound=Enum)
 Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 
 
+class RequantizationSourceExperts(mk.FusedMoEExperts):
+    """Experts class selected for online requantization sources.
+
+    Such a source only dequantizes its weights, so no kernel is ever built from
+    it: it is returned as a class and never instantiated.
+    """
+
+
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
@@ -60,6 +68,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     backend_mapping: Mapping[MoEBackend, BackendT] | None = None
     experts_mapping: Mapping[BackendT, tuple[str, ...]] | None = None
 
+    # Backend returned (with `RequantizationSourceExperts`) when selection is
+    # skipped for an online requantization source, which only dequantizes weights.
+    # Oracles supporting requantization sources set it to their enum's `NONE`.
+    # NB: `NONE` may carry other meanings in some enums (e.g. no backend on an
+    # out-of-tree platform for fp8, kernel-less online mxfp4): see each enum.
+    placeholder_backend: BackendT
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -75,6 +90,19 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         """Return the concrete `Enum` class enumerating this oracle's
         backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
         raise NotImplementedError
+
+    @classmethod
+    def maybe_skip_for_requantization_source(
+        cls,
+    ) -> tuple[BackendT, type[mk.FusedMoEExperts]] | None:
+        """Skip backend selection for online requantization sources."""
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            is_requantization_source,
+        )
+
+        if not is_requantization_source():
+            return None
+        return cls.placeholder_backend, RequantizationSourceExperts
 
     def get_priority_backends(self) -> list[BackendT]:
         """Return backends in priority order.
