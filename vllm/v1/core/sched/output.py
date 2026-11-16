@@ -238,6 +238,40 @@ class KVConnectorBlockState:
 
 
 @dataclass
+class RepairWork:
+    """Worker-facing descriptor of one scheduler-admitted repair-only step.
+
+    The scheduler's RecoveryPlan carries the accounting (spans, the
+    equivalent-token charge); this is the execution geometry the model
+    runner needs: which request, which physical span, how deep the layer
+    range runs, and the extent to restore at commit.
+    """
+
+    request_id: str
+    # [rollback_boundary, corrupt_end): the physical token span.
+    repair_span: tuple[int, int]
+    # Exclusive layer limit: the repair executes layers [0, layer_end).
+    layer_end: int
+    # The pre-failure external computed count C: num_computed_tokens is
+    # restored to this at the repair commit.
+    restored_extent: int
+    # The plan identity: echoed on the RepairResultReport for the stale /
+    # duplicate rejection at _consume_repair_result.
+    plan_id: int = -1
+    # The execution epoch (the scheduler step that admitted this work).
+    epoch: int = -1
+    # The OWNERSHIP AUTHORIZATION: the scheduler-authoritative physical KV
+    # block ids covering repair_span, snapshotted from KVCacheManager at
+    # the admission that built this work. The worker reconstructs the
+    # expected physical slots from THESE ids (independent of the worker's
+    # own block table and slot mapping) and refuses the repair unless the
+    # worker geometry agrees exactly: two consistently-corrupted worker
+    # structures cannot authorize a foreign KV write. Single KV cache
+    # group only (the derivation asserts it).
+    expected_write_block_ids: tuple[int, ...] = ()
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -299,6 +333,11 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # req_id -> the repair-only execution descriptor. None on ordinary
+    # steps; a non-None dict means every scheduled request this step is a
+    # scheduler-admitted hole repair (v1: repair steps are exclusive).
+    repair_works: dict[str, RepairWork] | None = None
 
     # Whether any scheduled request consumes KV that the connector loads
     # synchronously during this step (load_async=False).

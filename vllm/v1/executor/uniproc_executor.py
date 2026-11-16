@@ -51,7 +51,7 @@ class AsyncOutputFuture(Future):
 
 class _SourceRankStampedFuture(Future):
     """A Future whose resolved ModelRunnerOutput carries the authoritative
-    TP=1 source-rank stamp on its transfer evidence .
+    TP=1 source-rank stamp on its transfer evidence.
 
     UniProcExecutor runs no output aggregator (TP=1: the single worker's
     output IS the gathered output), so the executor itself is the
@@ -127,6 +127,8 @@ def _stamp_tp1_source_rank(output: Any) -> Any:
         if kv_output is not None:
             for report in kv_output.load_failure_reports or []:
                 report.source_rank = 0
+            for attestation in kv_output.load_attestations or []:
+                attestation.source_rank = 0
     return output
 
 
@@ -234,12 +236,14 @@ class UniProcExecutor(Executor):
             single_value=True,
         )
         if isinstance(output, Future):
-            # The sample path can carry the same connector evidence as
-            # execute_model (the worker attaches it post-forward), and on
-            # the batch-queue / None-fallback paths the engine core
-            # consumes THIS future as the step's output -- it must be
-            # stamped identically or the evidence's rank attribution is
-            # silently lost on this path.
+            # the sample path carries the
+            # same transfer evidence as execute_model (the worker attaches
+            # it post-forward), and on the batch-queue / None-fallback
+            # paths the engine core consumes THIS future as the step's
+            # output -- it must be stamped identically or every
+            # unstamped attestation fails the completeness gate and the
+            # repair policy silently degrades to permanent recompute on
+            # this path.
             stamped = _SourceRankStampedFuture(output)
             if stamped.done() and stamped.exception() is not None:
                 stamped.result()

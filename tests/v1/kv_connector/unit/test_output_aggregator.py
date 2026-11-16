@@ -20,8 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector impor
 )
 from vllm.v1.outputs import (
     KVConnectorOutput,
+    KVLoadAttestation,
     KVLoadFailureReport,
     ModelRunnerOutput,
+    RepairResultReport,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -76,6 +78,8 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         failed_recving: set[str] | None = None,
         expected_finished_count: int = 0,
         load_failure_reports: list[KVLoadFailureReport] | None = None,
+        load_attestations: list[KVLoadAttestation] | None = None,
+        repair_results: list[RepairResultReport] | None = None,
         kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
         kv_cache_events: KVConnectorKVEvents | None = None,
     ):
@@ -86,6 +90,8 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             failed_recving=failed_recving or set(),
             expected_finished_count=expected_finished_count,
             load_failure_reports=load_failure_reports,
+            load_attestations=load_attestations,
+            repair_results=repair_results,
             kv_connector_worker_meta=kv_connector_worker_meta,
             kv_cache_events=kv_cache_events,
         )
@@ -442,3 +448,88 @@ def test_aggregate_invalid_block_ids_union_across_ranks_unchanged():
     aggregated = aggregator.aggregate([output1, output2])
 
     assert aggregated.kv_connector_output.invalid_block_ids == {1, 2, 3}
+
+
+def make_repair_result(request_id: str, plan_id: int = 1) -> RepairResultReport:
+    """A minimal legal per-rank repair verdict."""
+    return RepairResultReport(
+        request_id=request_id,
+        plan_id=plan_id,
+        epoch=7,
+        structural_check=True,
+        executed_layers=4,
+        span=(96, 112),
+    )
+
+
+def test_aggregate_repair_verdicts_across_ranks():
+    """The repair verdicts survive aggregation: the per-rank
+    repair_results lists are concatenated across ranks."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    result_rank0 = make_repair_result("req-1", plan_id=1)
+    result_rank1a = make_repair_result("req-2", plan_id=2)
+    result_rank1b = make_repair_result("req-3", plan_id=3)
+    output1 = DummyModelRunnerOutput(repair_results=[result_rank0])
+    output2 = DummyModelRunnerOutput(repair_results=[result_rank1a, result_rank1b])
+
+    aggregated = aggregator.aggregate([output1, output2])
+
+    assert aggregated is output1
+    assert aggregated.kv_connector_output.repair_results == [
+        result_rank0,
+        result_rank1a,
+        result_rank1b,
+    ]
+
+
+def test_aggregate_attestations_from_all_ranks():
+    """Every rank's positive transfer attestations survive aggregation
+    (the completeness gate counts distinct stamped ranks against the TP
+    size, so the per-rank lists must be concatenated, not merged)."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    a0 = make_load_failure_report.__globals__["KVLoadAttestation"](
+        request_id="req-1",
+        expected_objects=4,
+        loaded_objects=4,
+        failed_objects=0,
+        certification="sha256",
+        certified_objects=4,
+        certification_failures=0,
+        terminal=True,
+    )
+    a1 = make_load_failure_report.__globals__["KVLoadAttestation"](
+        request_id="req-1",
+        expected_objects=4,
+        loaded_objects=4,
+        failed_objects=0,
+        certification="content",
+        certified_objects=4,
+        certification_failures=0,
+        terminal=True,
+    )
+    output1 = DummyModelRunnerOutput(load_attestations=[a0])
+    output2 = DummyModelRunnerOutput(load_attestations=[a1])
+
+    aggregated = aggregator.aggregate([output1, output2])
+
+    assert aggregated.kv_connector_output.load_attestations == [a0, a1]
+
+
+def test_single_rank_passes_verdicts_through():
+    aggregator = KVOutputAggregator(expected_finished_count=1)
+    verdict = make_repair_result("req-1")
+    output1 = DummyModelRunnerOutput(repair_results=[verdict])
+
+    aggregated = aggregator.aggregate([output1])
+
+    assert aggregated.kv_connector_output.repair_results == [verdict]
+
+    # The multi-verdict shape: the list passes through unchanged.
+    mixed_verdicts = [
+        make_repair_result("req-1", plan_id=2),
+        make_repair_result("req-2", plan_id=3),
+    ]
+    output1 = DummyModelRunnerOutput(repair_results=mixed_verdicts)
+    aggregator = KVOutputAggregator(expected_finished_count=1)
+    aggregated = aggregator.aggregate([output1])
+    assert aggregated.kv_connector_output.repair_results == mixed_verdicts

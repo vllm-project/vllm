@@ -47,7 +47,7 @@ def make_scheduler(**kwargs) -> Scheduler:
         # Same geometry as the original fixture model (16 hidden
         # layers, long context) so the validation battery's bounds and
         # the prompt-length fixtures are unchanged.
-        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 4096},
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
         max_num_batched_tokens=kwargs.pop("max_num_batched_tokens", 4096),
         kv_load_failure_policy=kwargs.pop("kv_load_failure_policy", "recompute"),
     )

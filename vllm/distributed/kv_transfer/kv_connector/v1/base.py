@@ -53,7 +53,11 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput, KVLoadFailureReport
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVLoadAttestation,
+    KVLoadFailureReport,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -505,6 +509,32 @@ class KVConnectorBase_V1(ABC):
         """
         return []
 
+    def get_load_attestations(self) -> list[KVLoadAttestation]:
+        """Get positive per-rank attestations of completed load attempts.
+
+        Attestations are the completeness half of the hole-repair
+        policy's evidence contract: failure reports are negative
+        evidence (a rank that loaded everything successfully reports
+        nothing), so a silent rank is indistinguishable from a healthy
+        one without this positive statement. A conforming
+        repair-policy connector produces one TERMINAL
+        KVLoadAttestation per rank per load attempt -- including
+        attempts that loaded everything successfully -- carrying the
+        attempt's transfer generation, the rank's complete expected
+        object set, its completion accounting, and the integrity
+        certification it actually applied. The timing contract is
+        identical to get_load_failure_reports(): sync loads attest in
+        the forward pass of the transfer, async loads attest no later
+        than the pass in which the request is returned by
+        get_transfer_results().
+
+        Returns:
+            List of attestations. Empty for connectors that do not
+            implement the attestation contract.
+
+        """
+        return []
+
     def shutdown(self):
         """Shutdown the connector. This is called when the worker process
         is shutting down to ensure that all the async operations are
@@ -652,6 +682,37 @@ class KVConnectorBase_V1(ABC):
 
         """
         pass
+
+    def note_transfer_attempt(
+        self, request: "Request", transfer_generation: int
+    ) -> None:
+        """Notify the connector that a new external-KV load attempt was
+        scheduled for the request, together with its transfer identity.
+
+        Called at the moment the scheduler admits the request with
+        external computed tokens -- the moment the load attempt is
+        initiated (sync loads run in this step; async loads start now
+        and finish later). Connectors participating in the hole-repair
+        policy must capture the generation, carry it through their
+        broadcast transfer metadata, and echo it in every
+        KVLoadFailureReport and KVLoadAttestation the attempt produces:
+        the scheduler rejects evidence whose identity does not match
+        the request's latest scheduled attempt, which is what
+        distinguishes a late duplicate of a consumed attempt from a
+        genuine new failure.
+
+        The default implementation ignores the notification: connectors
+        that do not implement the repair policy are unaffected.
+
+        Args:
+            request (Request): the request whose external-KV load is
+                being initiated.
+            transfer_generation (int): the globally unique identity of
+                this load attempt (monotonic for the scheduler's
+                lifetime; never reused, across request-ID reuse too).
+
+        """
+        return
 
     @abstractmethod
     def build_connector_meta(

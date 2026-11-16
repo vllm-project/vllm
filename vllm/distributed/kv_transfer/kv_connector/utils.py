@@ -24,8 +24,10 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
     KVConnectorOutput,
+    KVLoadAttestation,
     KVLoadFailureReport,
     ModelRunnerOutput,
+    RepairResultReport,
 )
 
 if TYPE_CHECKING:
@@ -163,11 +165,21 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
-        # Carry-through: the per-rank connector outputs carry one more
-        # field the aggregate must not drop -- the structured load-failure
-        # reports. Every TP rank reports the same fault, so concatenating
-        # the per-rank lists is the correct merge.
+        # Carry-through: the per-rank connector outputs carry three more
+        # fields the aggregate must not drop -- the structured load-failure
+        # reports, the positive transfer attestations, and the repair
+        # verdicts. Every TP rank reports the same fault and executes the
+        # same repair; the scheduler consumes the per-rank reports and
+        # keeps the first verdict disposition, so concatenating the
+        # per-rank lists is the correct merge.
         load_failure_reports: list[KVLoadFailureReport] = []
+        repair_results: list[RepairResultReport] = []
+        # Positive transfer attestations (the completeness half of the
+        # transfer-evidence contract): unlike reports, one per rank per
+        # attempt even on success. Concatenation is the merge here as
+        # well: the scheduler's evidence gate groups by request and
+        # requires one terminal attestation per TP rank.
+        load_attestations: list[KVLoadAttestation] = []
         mrope_position_deltas: dict[str, int] = {}
 
         salvaged, self._salvaged_outputs = self._salvaged_outputs, []
@@ -261,14 +273,29 @@ class KVOutputAggregator:
                 # diagnostics.
                 report.source_rank = rank
             load_failure_reports.extend(kv_output.load_failure_reports or [])
+            repair_results.extend(kv_output.repair_results or [])
+            for attestation in kv_output.load_attestations or []:
+                # Rank attribution, AUTHORITATIVE for the same reason as
+                # the reports' stamp: the
+                # aggregator is the only component that knows which
+                # output came from which rank, so a connector-supplied
+                # source_rank is always overwritten -- an attesting
+                # connector must not be able to impersonate another
+                # rank in the completeness gate or the divergence
+                # diagnostics.
+                attestation.source_rank = rank
+            load_attestations.extend(kv_output.load_attestations or [])
+
             # Every rank computes the same deltas for the requests it adds.
             if kv_output.mrope_position_deltas:
                 mrope_position_deltas.update(kv_output.mrope_position_deltas)
+
         # Salvaged outputs from failed workers join this round so their
-        # transfer progress isn't lost. Their reported evidence carries no
-        # authoritative rank (the originating worker of a salvaged output
-        # is not tracked across the replay), so it is stamped None rather
-        # than trusted as any particular rank's statement.
+        # transfer progress isn't lost. Their transfer evidence carries no
+        # authoritative rank (the originating worker of a salvaged output is
+        # not tracked across the replay), so it is stamped None: the
+        # scheduler's evidence gates treat a rank-less attestation as absent
+        # and fail closed rather than trust an unattributable statement.
         for salvaged_output in salvaged:
             if salvaged_output:
                 absorb_kv_output(salvaged_output, None)
@@ -294,6 +321,8 @@ class KVOutputAggregator:
             mrope_position_deltas=mrope_position_deltas or None,
             expected_finished_count=self._expected_finished_count,
             load_failure_reports=load_failure_reports or None,
+            load_attestations=load_attestations or None,
+            repair_results=repair_results or None,
         )
 
         return output
