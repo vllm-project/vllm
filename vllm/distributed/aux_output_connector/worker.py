@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -117,6 +117,7 @@ class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
     _return_hidden_states = False
+    _topk_logprobs = 0
 
     def __init__(
         self,
@@ -144,6 +145,9 @@ class AuxOutputWorkerConnector:
         self._return_hidden_states = (
             vllm_config.aux_output_config.enable_return_hidden_states
         )
+        self._topk_logprobs = vllm_config.aux_output_config.return_topk_logprobs
+        self._session_request_ids: set[str] = set()
+        self._session_generation = 0
         self._r3_shape: tuple[int, ...] = ()
         self._r3_dtype: np.dtype[Any] = np.dtype("uint8")
         self._r3_nbytes = 0
@@ -261,19 +265,40 @@ class AuxOutputWorkerConnector:
         return {name: rows for name, rows in fields.items() if rows is not None}
 
     def prepare_output(
-        self, input_batch: InputBatch, hidden_states: torch.Tensor | None = None
+        self,
+        input_batch: InputBatch,
+        hidden_states: torch.Tensor | None = None,
+        logits_fn: Callable[[torch.Tensor], torch.Tensor | None] | None = None,
     ) -> PendingAuxOutput | None:
         """Snapshot one step's auxiliary tensors for asynchronous CPU transfer.
 
         `hidden_states` are what the model's forward pass returned, one row per
-        query token, on the last pipeline stage.
+        query token, on the last pipeline stage, and `logits_fn` computes logits
+        from them. Call on every rank: the top-k logprobs need the logits
+        collective.
         """
-        if self._buffer is None or self._step_metadata is None:
+        if self._step_metadata is None or (
+            self._buffer is None and not self._topk_logprobs
+        ):
             return None
-
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        topk = None
+        if self._topk_logprobs and hidden_states is not None and logits_fn is not None:
+            topk_rows = session_rows(
+                request_ids, query_start_loc, self._session_request_ids
+            )
+            if len(topk_rows):
+                index = async_tensor_h2d(topk_rows, hidden_states.device)
+                topk = compute_topk_logprobs(
+                    hidden_states.index_select(0, index),
+                    logits_fn,
+                    self._topk_logprobs,
+                )
+        if self._buffer is None:
+            return None
+
         snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
         fields: dict[str, torch.Tensor] = {}
         sessions = {
@@ -288,6 +313,8 @@ class AuxOutputWorkerConnector:
             if hidden.dtype == torch.bfloat16:
                 hidden = hidden.view(torch.int16)
             fields["hidden_states"] = hidden
+        if topk is not None:
+            fields["topk_token_ids"], fields["topk_logprobs"] = topk
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
@@ -606,6 +633,12 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
+        if self._topk_logprobs and metadata is not None:
+            if metadata.generation != self._session_generation:
+                self._session_request_ids.clear()
+                self._session_generation = metadata.generation
+            self._session_request_ids.update(metadata.sessions)
+            self._session_request_ids.difference_update(metadata.finished_requests)
         if self._object_writer is not None:
             self._object_writer.check()
         if self._buffer is None or metadata is None:
@@ -724,6 +757,27 @@ def session_rows(
         if request_id in session_request_ids
     ]
     return np.concatenate(ranges) if ranges else np.empty(0, dtype=np.int64)
+
+
+def compute_topk_logprobs(
+    hidden_states: torch.Tensor,
+    logits_fn: Callable[[torch.Tensor], torch.Tensor | None],
+    k: int,
+    chunk_size: int = 1024,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Top-k next-token ids (int32) and log-probabilities (float32) of every
+    row, or None on ranks that do not receive the logits."""
+    token_ids, logprobs = [], []
+    for start in range(0, len(hidden_states), chunk_size):
+        logits = logits_fn(hidden_states[start : start + chunk_size])
+        if logits is None:
+            continue
+        values, indices = torch.log_softmax(logits.float(), dim=-1).topk(k, dim=-1)
+        token_ids.append(indices.to(torch.int32))
+        logprobs.append(values)
+    if not token_ids:
+        return None
+    return torch.cat(token_ids), torch.cat(logprobs)
 
 
 def get_aux_output_connector(

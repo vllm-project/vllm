@@ -48,6 +48,7 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     _WorkerRequestState,
+    compute_topk_logprobs,
 )
 from vllm.model_executor.layers.fused_moe import (
     routed_experts_capturer as capturer_module,
@@ -262,6 +263,8 @@ def _make_worker(
     worker._max_concurrent_batches = max_concurrent_batches
     worker._object_writer = None
     worker._object_size = 0
+    worker._session_request_ids = set()
+    worker._session_generation = 0
     return worker
 
 
@@ -547,6 +550,7 @@ def _prepare_output(
     query_start_loc=None,
     indexer_rows=None,
     hidden_states=None,
+    logits_fn=None,
 ):
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
@@ -570,6 +574,7 @@ def _prepare_output(
     pending = worker.prepare_output(
         _input_batch(request_ids, np.asarray(token_starts), query_start_loc),
         hidden_states,
+        logits_fn,
     )
     assert pending is not None
     pending.enqueue_cpu_copy(num_sampled, num_rejected)
@@ -3108,8 +3113,13 @@ def test_session_fields_follow_rejected_speculative_rows():
     client, store = fake_store()
     worker = _session_worker(store)
     worker._return_hidden_states = True
+    worker._topk_logprobs = 1
     routed = _position_rows(0, 5)
     hidden = torch.arange(5, dtype=torch.float32)[:, None]
+
+    def logits_fn(rows):
+        return torch.nn.functional.one_hot(rows[:, 0].long(), 5).float()
+
     for token_start, first, num_rejected, hashes in [
         (0, 0, 4, []),
         (5, 1, 3, []),
@@ -3130,6 +3140,7 @@ def test_session_fields_follow_rejected_speculative_rows():
             ["request"],
             np.array([num_rejected]),
             hidden_states=hidden[first:],
+            logits_fn=logits_fn,
         )
         worker.process_output(pending)
     terminal = _metadata(0, [], {"request": []})
@@ -3142,6 +3153,9 @@ def test_session_fields_follow_rejected_speculative_rows():
     np.testing.assert_array_equal(read_aux_rows(store, keys, "routed_experts"), routed)
     np.testing.assert_array_equal(
         read_aux_rows(store, keys, "hidden_states"), hidden.numpy()
+    )
+    np.testing.assert_array_equal(
+        read_aux_rows(store, keys, "topk_token_ids"), hidden.int().numpy()
     )
 
 
@@ -3176,3 +3190,112 @@ def test_session_object_with_incomplete_field_rows_is_rejected():
     with pytest.raises(AssertionError, match="incomplete"):
         writer.add_blocks(state, [(0, _position_rows(0, _BLOCK_SIZE))], _BLOCK_SIZE)
     writer.close()
+
+
+@pytest.mark.parametrize(
+    "gathered", [True, False], ids=["logits-rank", "non-logits-rank"]
+)
+def test_topk_logprobs_are_computed_in_chunks(gathered):
+    hidden_states = torch.randn(5, 3)
+    weight = torch.randn(7, 3)
+    calls = []
+
+    def logits_fn(rows):
+        calls.append(len(rows))
+        return rows @ weight.T if gathered else None
+
+    topk = compute_topk_logprobs(hidden_states, logits_fn, 2, chunk_size=2)
+    assert calls == [2, 2, 1]
+    if not gathered:
+        assert topk is None
+        return
+    token_ids, logprobs = topk
+    expected = torch.log_softmax(hidden_states @ weight.T, dim=-1).topk(2, dim=-1)
+    assert token_ids.dtype == torch.int32
+    assert token_ids.tolist() == expected.indices.tolist()
+    torch.testing.assert_close(logprobs, expected.values)
+
+
+def test_topk_logprobs_need_the_logits_on_ranks_without_storage():
+    worker = object.__new__(AuxOutputWorkerConnector)
+    worker._buffer = None
+    worker._store = None
+    worker._object_writer = None
+    worker._topk_logprobs = 2
+    worker._session_request_ids = set()
+    worker._session_generation = 0
+    step = _metadata(0, [], {})
+    step.metadata.sessions = {"a": "s"}
+    worker.begin_step(step.metadata)
+    calls = []
+
+    def logits_fn(rows):
+        calls.append(len(rows))
+
+    batch = _input_batch(["a"], np.array([0]), np.array([0, 3]))
+    assert worker.prepare_output(batch, torch.zeros(4, 2), logits_fn) is None
+    assert calls == [3]
+
+
+def test_worker_snapshots_topk_logprobs_of_session_rows_only():
+    worker = _make_worker(2)
+    worker._topk_logprobs = 2
+    step = _metadata(
+        0,
+        [
+            _request_metadata("plain", 0, 2, 0, []),
+            _request_metadata("session", 0, 3, 0, []),
+        ],
+        {},
+    )
+    step.metadata.sessions = {"session": "s"}
+    _begin_step(worker, step)
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = torch.zeros(
+        (5, *_SHAPE), dtype=torch.uint8
+    )
+    hidden_states = torch.randn(6, 3)
+    weight = torch.randn(7, 3)
+    pending = worker.prepare_output(
+        _input_batch(["plain", "session"], np.array([0, 0]), np.array([0, 2, 5])),
+        hidden_states,
+        lambda rows: rows @ weight.T,
+    )
+    pending.enqueue_cpu_copy(np.array([0, 0]), np.array([0, 0]))
+    expected = torch.log_softmax(hidden_states[2:5] @ weight.T, dim=-1).topk(2)
+    assert pending.fields["topk_token_ids"].tolist() == expected.indices.tolist()
+    np.testing.assert_allclose(
+        pending.fields["topk_logprobs"], expected.values.numpy(), rtol=1e-6
+    )
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    "sessions,expected_rows",
+    [(set(), []), ({"b"}, [2, 3, 4]), ({"a", "b"}, [0, 1, 2, 3, 4])],
+    ids=["no-session", "one-session", "all-sessions"],
+)
+def test_topk_logprobs_cover_only_session_rows(sessions, expected_rows):
+    worker = object.__new__(AuxOutputWorkerConnector)
+    worker._buffer = None
+    worker._store = None
+    worker._object_writer = None
+    worker._topk_logprobs = 2
+    worker._session_request_ids = set()
+    worker._session_generation = 0
+    step = _metadata(0, [], {})
+    step.metadata.sessions = {request: "s" for request in sessions}
+    worker.begin_step(step.metadata)
+    hidden_states = torch.randn(6, 3)
+    computed = []
+
+    def logits_fn(rows):
+        computed.append(rows)
+        return torch.zeros(len(rows), 4)
+
+    worker.prepare_output(
+        _input_batch(["a", "b"], np.array([0, 0]), np.array([0, 2, 5])),
+        hidden_states,
+        logits_fn,
+    )
+    selected = torch.cat(computed) if computed else hidden_states[:0]
+    assert torch.equal(selected, hidden_states[expected_rows])

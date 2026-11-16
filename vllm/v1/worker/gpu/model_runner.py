@@ -2365,7 +2365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         pending_aux_output = None
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(
-                input_batch, hidden_states
+                input_batch, hidden_states, self.model.compute_logits
             )
 
         num_drafted_tokens_per_req, num_verified_tokens_per_req = (

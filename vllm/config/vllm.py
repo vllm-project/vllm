@@ -1285,6 +1285,15 @@ class VllmConfig:
                 "AuxOutput Connector is incompatible with "
                 "context parallelism (DCP/PCP > 1)."
             )
+        k = self.aux_output_config.return_topk_logprobs
+        if k:
+            if self.lora_config is not None:
+                raise ValueError("return_topk_logprobs does not support LoRA.")
+            if k > self.model_config.get_vocab_size():
+                raise ValueError(
+                    f"return_topk_logprobs={k} exceeds the vocabulary size "
+                    f"{self.model_config.get_vocab_size()}."
+                )
 
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
