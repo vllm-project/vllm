@@ -281,7 +281,7 @@ def _merge_kernel(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class Nvfp4DecodeCPPlan:
     """Per padded batch size: the 4-head score wrapper and its buffers."""
 
@@ -293,7 +293,7 @@ class Nvfp4DecodeCPPlan:
     num_reqs: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Nvfp4DecodeCPLayer:
     """One sparse layer's symmetric buffers."""
 
