@@ -31,8 +31,10 @@ can differ from stock's `0.5 tanh(0.5 x) + 0.5` in the last bit.
 
 Cluster 0 also quantizes the tokens to FP8 E4M3 in 128-wide blocks (power-of-two
 scales with `ue8m0`, as the stock input quant) in the layout the FFN kernel
-reads with TMA (`moe_experts`): `[M / 8][256][8][16]` bytes and `[MP][32]` FP32
-scales.
+reads with TMA (`moe_experts`): `[M / 8][256][8][16]` bytes and `[M][32]` FP32
+scales. It does so after releasing its logits, so the top-k cluster does not wait
+for it; the FFN kernel reads the FP8 copy only after `griddepcontrol.wait`,
+which waits for the whole grid.
 
 The kernel triggers its programmatic dependents (the FFN kernel) right after
 its MMAs.
@@ -44,16 +46,22 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, Uint32
 
-from ._moe_ptx import (
+from ..cutedsl.primitives import (
     add_rn,
-    bf16x2_to_f32x2,
-    bits_f32,
+    bits_float,
+    float_bits,
+    mma,
+    pack_fp8,
+    prefetch_l2,
+    redux,
+    sleep_ns,
+    unpack_bf16,
+)
+from ._moe_ptx import (
     cluster_rank,
     cluster_sync_all,
-    cvt_e4m3x4,
     div_rn,
     eq_u32,
-    f32_bits,
     fabs,
     fence_proxy_async_global,
     fmax,
@@ -69,12 +77,8 @@ from ._moe_ptx import (
     lds_f32,
     mapa,
     minmax_key,
-    mma_bf16,
     mul_rn,
-    nanosleep,
-    prefetch_l2,
     red_release_add,
-    redux_max_u32,
     score_key,
     sel_f32,
     sel_u32,
@@ -117,11 +121,13 @@ def _sort9_desc(hi, lo):
 @cute.jit
 def pow2_ceil(x: Float32):
     """(2^ceil(log2 x), its reciprocal) of a positive normal `x`."""
-    b = f32_bits(x)
+    b = Uint32(float_bits(x))
     e = Int32(b >> Uint32(23))
     if (b & Uint32(0x7FFFFF)) != Uint32(0):
         e = e + 1
-    return bits_f32(Uint32(e) << Uint32(23)), bits_f32(Uint32(254 - e) << Uint32(23))
+    return bits_float(Uint32(e) << Uint32(23)), bits_float(
+        Uint32(254 - e) << Uint32(23)
+    )
 
 
 class RouterKernel:
@@ -134,8 +140,8 @@ class RouterKernel:
         self.rows = 8 * groups
         self.scale = scale
         self.ue8m0 = ue8m0
-        self.outputs = self.rows * GROUP
-        self.per_thread = (self.outputs + THREADS - 1) // THREADS
+        outputs = self.rows * GROUP
+        self.per_thread = (outputs + THREADS - 1) // THREADS
         self.smem = max(WARPS * self.per_thread * THREADS * 4, WARPS * EXPERTS * 4)
 
     @cute.jit
@@ -171,8 +177,8 @@ class RouterKernel:
         head = Uint32(0)
         hs, ls = _sort9_desc(hi, lo)
         for k in cutlass.range_constexpr(TOP_K):
-            mh = redux_max_u32(hs[0])
-            ml = redux_max_u32(sel_u32(eq_u32(hs[0], mh), ls[0], Uint32(0)))
+            mh = redux(hs[0], "max")
+            ml = redux(sel_u32(eq_u32(hs[0], mh), ls[0], Uint32(0)), "max")
             mine = eq_u32(Uint32(lane), Uint32(k))
             expert = sel_u32(mine, Uint32(65535) - ml, expert)
             head = sel_u32(mine, mh, head)
@@ -186,9 +192,9 @@ class RouterKernel:
         if lane < TOP_K and head != Uint32(NEG_INF_KEY):
             finite = Int32(1)
         score = sel_f32(
-            finite, bits_f32(lds32(scores + Int32(expert) * 4)), Float32(0.0)
+            finite, bits_float(lds32(scores + Int32(expert) * 4)), Float32(0.0)
         )
-        any_finite = redux_max_u32(Uint32(finite))
+        any_finite = redux(Uint32(finite), "max")
         total = score
         for i in cutlass.range_constexpr(5):
             total = add_rn(total, shfl_xor_f32(total, 16 >> i))
@@ -250,52 +256,14 @@ class RouterKernel:
                 address = x + (Int64(n) * HIDDEN + kb) * 2
                 row.append(ldg128_cg(address) + ldg128_cg(address + 16))
             xr.append(row)
-        if cluster == 0:
-            # FP8 block-128 copy of the tokens: block 4 rank + warp; this thread
-            # holds [16c, 16c + 16) and [64 + 16c, 64 + 16c + 16) of the block.
-            b = rank * 4 + warp
-            for i in cutlass.range_constexpr(groups):
-                n = r8 + 8 * i
-                f = []
-                for j in cutlass.range_constexpr(2):
-                    for q in cutlass.range_constexpr(8):
-                        low, high = bf16x2_to_f32x2(xr[j][i][q])
-                        f.append(low)
-                        f.append(high)
-                amax = fabs(f[0])
-                for u in cutlass.range_constexpr(1, 32):
-                    amax = fmax(amax, fabs(f[u]))
-                for u in cutlass.range_constexpr(2):
-                    amax = fmax(amax, shfl_xor_f32(amax, 1 << u))
-                amax = fmax(amax, Float32(1e-12))
-                scale = amax * Float32(1.0 / 448.0)
-                inverse = Float32(448.0) / amax
-                if cutlass.const_expr(self.ue8m0):
-                    scale, inverse = pow2_ceil(scale)
-                if n < m:
-                    if c == 0:
-                        stg_f32(xs + (Int64(n) * 32 + b) * 4, scale)
-                    for j in cutlass.range_constexpr(2):
-                        words = [
-                            cvt_e4m3x4(
-                                f[16 * j + 4 * u] * inverse,
-                                f[16 * j + 4 * u + 1] * inverse,
-                                f[16 * j + 4 * u + 2] * inverse,
-                                f[16 * j + 4 * u + 3] * inverse,
-                            )
-                            for u in range(4)
-                        ]
-                        chunk = 8 * b + 4 * j + c
-                        offset = (Int64(n // 8) * 256 + chunk) * 8 + n % 8
-                        stg_u32x4(xq + offset * 16, *words)
-            fence_proxy_async_global()
         acc = [[Float32(0.0)] * 4 for _ in range(groups)]
         for j in cutlass.range_constexpr(2):
             for s in cutlass.range_constexpr(4):
                 a = [wr[0][j][2 * s], wr[1][j][2 * s], wr[0][j][2 * s + 1],
                      wr[1][j][2 * s + 1]]  # fmt: skip
                 for i in cutlass.range_constexpr(groups):
-                    acc[i] = mma_bf16(acc[i], a, [xr[j][i][2 * s], xr[j][i][2 * s + 1]])
+                    tokens = (xr[j][i][2 * s], xr[j][i][2 * s + 1])
+                    acc[i] = mma(a, tokens, acc[i], bf16=True)
         griddep_launch()
         # Partial sums [warp][token * GROUP + expert].
         for h in cutlass.range_constexpr(2):
@@ -347,9 +315,45 @@ class RouterKernel:
                 red_release_add(counter, 1)
                 if cluster == CLUSTERS - 1:  # the top-k cluster
                     while ld_acquire_i32(counter) < CLUSTERS:
-                        nanosleep(20)
+                        sleep_ns(20)
                     stg_i32(counter, 0)
         cluster_sync_all()
+        if cluster == 0:
+            # FP8 block-128 copy of the tokens: block 4 rank + warp; this thread
+            # holds [16c, 16c + 16) and [64 + 16c, 64 + 16c + 16) of the block.
+            b = rank * 4 + warp
+            for i in cutlass.range_constexpr(groups):
+                n = r8 + 8 * i
+                f = []
+                for j in cutlass.range_constexpr(2):
+                    for q in cutlass.range_constexpr(8):
+                        low, high = unpack_bf16(xr[j][i][q])
+                        f.append(low)
+                        f.append(high)
+                amax = fabs(f[0])
+                for u in cutlass.range_constexpr(1, 32):
+                    amax = fmax(amax, fabs(f[u]))
+                for u in cutlass.range_constexpr(2):
+                    amax = fmax(amax, shfl_xor_f32(amax, 1 << u))
+                amax = fmax(amax, Float32(1e-12))
+                scale = amax * Float32(1.0 / 448.0)
+                inverse = Float32(448.0) / amax
+                if cutlass.const_expr(self.ue8m0):
+                    scale, inverse = pow2_ceil(scale)
+                if n < m:
+                    if c == 0:
+                        stg_f32(xs + (Int64(n) * 32 + b) * 4, scale)
+                    for j in cutlass.range_constexpr(2):
+                        words = [
+                            pack_fp8(
+                                tuple(f[16 * j + 4 * u + v] * inverse for v in range(4))
+                            )
+                            for u in range(4)
+                        ]
+                        chunk = 8 * b + 4 * j + c
+                        offset = (Int64(n // 8) * 256 + chunk) * 8 + n % 8
+                        stg_u32x4(xq + offset * 16, *words)
+            fence_proxy_async_global()
         if cluster == CLUSTERS - 1:
             t = rank * WARPS + warp
             if t < m:

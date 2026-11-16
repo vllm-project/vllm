@@ -7,7 +7,9 @@ kernel, finalized: BF16 `[M, 4096]` = sum_k w_k * expert_k(x) + shared(x).
 
 It runs as a programmatic dependent of the router (`moe_router`) and reads its
 int32 ids, FP32 weights and FP8 input. Before `griddepcontrol.wait` it only
-initializes its barriers and shared tables and prefetches the tensor maps.
+initializes its barriers and shared tables, prefetches the tensor maps and
+prefetches the shared expert's weights into L2 (they do not depend on the
+routing, and DRAM is idle while the router runs).
 
 Two CTAs per SM, 4 consumer warps and a producer warp each. After the wait,
 every CTA builds the same table of the distinct experts the tokens route to
@@ -15,14 +17,15 @@ every CTA builds the same table of the distinct experts the tokens route to
 
 - GEMM1: items (slot, 64 gate rows and the matching 64 up rows) over all of K,
   handed out in slot order by an atomic counter (the first item of each CTA is
-  its block index). A ring of TMA stages (W gate, W up, the FP8 tokens; the
-  first stage also the weight and token scales) feeds `wgmma` with the weights
-  as the register A operand and the tokens as the N = 8 * groups B operand;
-  every 128-K block's partials take the weight block scale times the token
-  scale in FP32. The epilogue applies the clamped SwiGLU, quantizes each
-  token's 64 hidden values to FP8 (block 64) and folds the routing weight into
-  the hidden scale (0 for tokens not routed to the expert), then releases the
-  slot's readiness counter.
+  its block index). A ring of TMA stages (W gate, W up, the FP8 tokens; an
+  item's first stage also its weight scales, the CTA's first the token scales)
+  feeds `wgmma` with the weights as the A operand (by descriptor, in the
+  stage's 128B swizzle) and the tokens as the N = 8 * groups B operand; every
+  128-K block's partials take the weight block scale times the token scale in
+  FP32. The epilogue applies the clamped
+  SwiGLU, quantizes each token's 64 hidden values to FP8 (block 64) and folds
+  the routing weight into the hidden scale (0 for tokens not routed to the
+  expert), then releases the slot's readiness counter.
 - GEMM2: items (slot, 64 output rows) of 32 KB, in slot order, each waiting
   once for its slot's 8 GEMM1 items. With the routing weight in the hidden
   scale, the output of token t's k-th expert is a plain FP32 store to its own
@@ -40,15 +43,19 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, Uint32
 
+from ..cutedsl.primitives import (
+    bf16x2,
+    bits_float,
+    float_bits,
+    named_barrier,
+    pack_fp8,
+    sleep_ns,
+)
 from ._moe_ptx import (
     atom_add_acqrel_gpu,
     atom_add_relaxed,
-    bits_f32,
     bulk_g2s,
-    cvt_bf16x2,
-    cvt_e4m3x4,
     evict_first_policy,
-    f32_bits,
     fabs,
     fence_gpu,
     fence_mbar_init,
@@ -65,12 +72,11 @@ from ._moe_ptx import (
     lds_f32,
     lds_u8,
     make_desc_nosw,
+    make_desc_sw128,
     mbar_arrive,
     mbar_arrive_expect_tx,
     mbar_init,
     mbar_wait,
-    named_barrier,
-    nanosleep,
     prefetch_tmap,
     rcp,
     red_add_gpu,
@@ -89,9 +95,10 @@ from ._moe_ptx import (
     swiglu,
     tma_load_3d,
     tma_load_4d,
+    tma_prefetch_3d,
     wgmma_commit,
     wgmma_fence,
-    wgmma_rs,
+    wgmma_ss,
     wgmma_wait_n,
 )
 from .moe import EXPERTS, HIDDEN, INTER, MAX_TOKENS, SWIGLU_LIMIT, TOP_K
@@ -102,8 +109,10 @@ K1_BLOCKS = HIDDEN // 128
 K2_BLOCKS = INTER // 128
 OUT_TILES = HIDDEN // 64  # GEMM2 items per slot
 SHARED = EXPERTS  # the shared expert's id in the slot table
-# Slots: every distinct routed expert of 32 tokens plus the shared expert.
-SLOTS = 290
+# Slots: the shared expert plus every distinct routed expert of MAX_TOKENS
+# tokens (the slot-indexed tables and workspace; the expert-indexed ones take
+# EXPERTS entries).
+SLOTS = 1 + MAX_TOKENS * TOP_K
 CONSUMERS = 4
 PRODUCER = CONSUMERS  # warp index
 THREADS = 32 * (CONSUMERS + 1)
@@ -149,9 +158,9 @@ class ExpertsKernel:
         self.tab_e = off
         off += 4 * SLOTS
         self.s_tmask = off
-        off += 4 * SLOTS
+        off += 4 * EXPERTS
         self.s_e2s = off
-        off += 4 * SLOTS
+        off += 4 * EXPERTS
         # [slot][32 tokens] u8: the slot's k in the token's top-k, 8 for the
         # shared expert, 0xFF if not routed.
         self.s_kmap = _align(off, 16)
@@ -250,11 +259,6 @@ class ExpertsKernel:
             sts_u8(s_kmap + r * 32 + i // TOP_K, Uint32(i % TOP_K))
         cute.arch.sync_threads()
         return Int32(lds32(s_tot))
-
-    @cute.jit
-    def _loc(self, x: Int32):
-        """The 128B-swizzled shared offset of byte `x` of a 128-byte-row tile."""
-        return x ^ (((x >> 7) & 7) << 4)
 
     @cute.jit
     def _route_w(self, e: Int32, n: Int32, m: Int32, s_ids: Int32, s_tw: Int32):
@@ -389,15 +393,13 @@ class ExpertsKernel:
     @cute.jit
     def _consume1(
         self, stage: Int32, phase: Int32, sbase: Int32, full: Int32, empty: Int32,
-        w: Int32, lane: Int32, slot: Int32, s_xs: Int32, s_ws1: Int32,
+        lane: Int32, slot: Int32, s_xs: Int32, s_ws1: Int32,
         ag: cute.Tensor, au: cute.Tensor,
     ):  # fmt: skip
         size = self.sb1
         ns = self.ns1
         groups = self.groups
-        row0 = w * 16 + lane // 4
         c = lane % 4
-        c4 = c * 4
         for i in cutlass.range_constexpr(4 * groups):
             ag[i] = Float32(0.0)
             au[i] = Float32(0.0)
@@ -407,31 +409,17 @@ class ExpertsKernel:
             if js > 0:
                 mbar_wait(full + stage * 8, phase)
             st = sbase + stage * size
-            for i in cutlass.range_constexpr(4 * groups):
-                dg[i] = Float32(0.0)
-                du[i] = Float32(0.0)
-            gr = cute.make_rmem_tensor((16,), Uint32)
-            ur = cute.make_rmem_tensor((16,), Uint32)
-            for kc in cutlass.range_constexpr(4):
-                ks = kc * 32
-                for h in cutlass.range_constexpr(2):
-                    for v in cutlass.range_constexpr(2):
-                        x = (row0 + 8 * v) * 128 + ks + c4 + 16 * h
-                        gr[4 * kc + 2 * h + v] = lds32(st + G1_GATE + self._loc(x))
-                        ur[4 * kc + 2 * h + v] = lds32(st + G1_UP + self._loc(x))
             wgmma_fence()
+            # The first K step overwrites the accumulators (scale-d 0).
             vg = [dg[i] for i in range(4 * groups)]
             vu = [du[i] for i in range(4 * groups)]
             for kc in cutlass.range_constexpr(4):
                 bd = make_desc_nosw(st + G1_B + 2 * kc * 128, 128, 1024)
-                vg = wgmma_rs(
-                    8 * groups, vg, gr[4 * kc], gr[4 * kc + 1], gr[4 * kc + 2],
-                    gr[4 * kc + 3], bd, Int32(1),
-                )  # fmt: skip
-                vu = wgmma_rs(
-                    8 * groups, vu, ur[4 * kc], ur[4 * kc + 1], ur[4 * kc + 2],
-                    ur[4 * kc + 3], bd, Int32(1),
-                )  # fmt: skip
+                scale_d = Int32(min(kc, 1))
+                gd = make_desc_sw128(st + G1_GATE + 32 * kc)
+                ud = make_desc_sw128(st + G1_UP + 32 * kc)
+                vg = wgmma_ss(8 * groups, vg, gd, bd, scale_d)
+                vu = wgmma_ss(8 * groups, vu, ud, bd, scale_d)
             wgmma_commit()
             wgmma_wait_n(0)
             vg = fence_regs(vg)
@@ -467,7 +455,7 @@ class ExpertsKernel:
         isc: Int64, sync: Int64, ag: cute.Tensor, au: cute.Tensor,
     ):  # fmt: skip
         """SwiGLU and FP8 (block 64) of this 64-row pair; the hidden scale times
-        the routing weight, as `[slot][block][MP]`."""
+        the routing weight, as `[slot][block][rows]`."""
         groups = self.groups
         c = lane % 4
         mp = self.rows
@@ -490,12 +478,12 @@ class ExpertsKernel:
             for g in cutlass.range_constexpr(groups):
                 for vv in cutlass.range_constexpr(2):
                     red_max_shared_u32(
-                        s_amax + (8 * g + 2 * c + vv) * 4, f32_bits(am[2 * g + vv])
+                        s_amax + (8 * g + 2 * c + vv) * 4, float_bits(am[2 * g + vv])
                     )
         named_barrier(3, CONSUMER_THREADS)
         for g in cutlass.range_constexpr(groups):
             for vv in cutlass.range_constexpr(2):
-                am[2 * g + vv] = bits_f32(lds32(s_amax + (8 * g + 2 * c + vv) * 4))
+                am[2 * g + vv] = bits_float(lds32(s_amax + (8 * g + 2 * c + vv) * 4))
         m0 = w * 16 + lane // 4
         e = Int32(lds32(tab_e + r * 4))
         for g in cutlass.range_constexpr(groups):
@@ -508,8 +496,8 @@ class ExpertsKernel:
             if cutlass.const_expr(self.ue8m0):
                 s0, i0 = pow2_ceil(s0)
                 s1, i1 = pow2_ceil(s1)
-            q = cvt_e4m3x4(
-                h[4 * g] * i0, h[4 * g + 1] * i1, h[4 * g + 2] * i0, h[4 * g + 3] * i1
+            q = pack_fp8(
+                (h[4 * g] * i0, h[4 * g + 1] * i1, h[4 * g + 2] * i0, h[4 * g + 3] * i1)
             )
             n0 = 8 * g + 2 * c
             n1 = n0 + 1
@@ -575,7 +563,7 @@ class ExpertsKernel:
                     if cutlass.const_expr(js == 0):  # noqa: SIM102
                         if r != last_r:
                             while ld_acquire_i32(sync + Int64(r) * 4) < PAIRS:
-                                nanosleep(32)
+                                sleep_ns(32)
                             fence_proxy_async_global()
                             last_r = r
                     hidden_scales = isc + ((Int64(r) * 8 + 2 * js) * mp) * 4
@@ -594,16 +582,14 @@ class ExpertsKernel:
     @cute.jit
     def _consume2(
         self, stage: Int32, phase: Int32, sbase: Int32, full: Int32, empty: Int32,
-        w: Int32, lane: Int32, acc: cute.Tensor,
+        lane: Int32, acc: cute.Tensor,
     ):  # fmt: skip
         size = self.sb2
         sc = self.sc2
         ns = self.ns2
         groups = self.groups
         mp = self.rows
-        row0 = w * 16 + lane // 4
         c = lane % 4
-        c4 = c * 4
         for i in cutlass.range_constexpr(4 * groups):
             acc[i] = Float32(0.0)
         d = cute.make_rmem_tensor((4 * groups,), Float32)
@@ -612,17 +598,14 @@ class ExpertsKernel:
             st = sbase + stage * size
             ws = lds_f32(st + sc + js * 4)
             for kc2 in cutlass.range_constexpr(2):
-                for i in cutlass.range_constexpr(4 * groups):
-                    d[i] = Float32(0.0)
                 wgmma_fence()
+                # The first K step overwrites the accumulators (scale-d 0).
                 vv = [d[i] for i in range(4 * groups)]
                 for k1 in cutlass.range_constexpr(2):
-                    ks = (2 * kc2 + k1) * 32
-                    rows = [(row0 + 8 * v) * 128 + ks + c4 + 16 * h
-                            for h in range(2) for v in range(2)]  # fmt: skip
-                    a = [lds32(st + G2_W + self._loc(x)) for x in rows]
-                    bd = make_desc_nosw(st + G2_B + 2 * (2 * kc2 + k1) * 128, 128, 1024)
-                    vv = wgmma_rs(8 * groups, vv, a[0], a[1], a[2], a[3], bd, Int32(1))
+                    k = 2 * kc2 + k1
+                    ad = make_desc_sw128(st + G2_W + 32 * k)
+                    bd = make_desc_nosw(st + G2_B + 2 * k * 128, 128, 1024)
+                    vv = wgmma_ss(8 * groups, vv, ad, bd, Int32(k1))
                 wgmma_commit()
                 wgmma_wait_n(0)
                 vv = fence_regs(vv)
@@ -673,7 +656,7 @@ class ExpertsKernel:
             fence_gpu()
             atom_add_relaxed(cnt + C_DONE * 4, 1)
             while ld_acquire_i32(cnt + C_DONE * 4) < nblk:
-                nanosleep(64)
+                sleep_ns(64)
         cute.arch.sync_threads()
         fence_gpu()
         quads = m * (HIDDEN // 4)
@@ -699,8 +682,8 @@ class ExpertsKernel:
                     s[j] = s[j] + x[4 * k + j]
             stg_u32x2(
                 out + (Int64(t) * HIDDEN + 4 * q) * 2,
-                cvt_bf16x2(s[0], s[1]),
-                cvt_bf16x2(s[2], s[3]),
+                bf16x2(s[0], s[1]),
+                bf16x2(s[2], s[3]),
             )
 
     # ----------------------------------------------------------------- kernel
@@ -737,6 +720,10 @@ class ExpertsKernel:
         full2 = sbase + self.full2
         empty2 = sbase + self.empty2
         s_tot = sbase + self.s_tot
+        # Every consumer thread fences its generic reads of a stage into the
+        # async proxy and arrives itself (count CONSUMER_THREADS). With a warp
+        # sync and a lane-0 arrive, racecheck reports WAR races between those
+        # reads and the producer's next TMA write to the stage.
         if tid == 0:
             for s in cutlass.range_constexpr(self.ns1):
                 mbar_init(full1 + s * 8, 1)
@@ -749,6 +736,22 @@ class ExpertsKernel:
         if warp == PRODUCER and lane == 0:
             for i in cutlass.range_constexpr(MAPS):
                 prefetch_tmap(maps + i * 128)
+        # The shared expert does not depend on the router: into L2 while the
+        # router runs, one box per producer lane.
+        if warp == PRODUCER:
+            boxes13 = K1_BLOCKS * (2 * INTER // 64)
+            for i in cutlass.range(
+                bid * 32 + lane, boxes13 + K2_BLOCKS * OUT_TILES, nblk * 32, unroll=1
+            ):
+                if i < boxes13:
+                    tma_prefetch_3d(
+                        tsw13, (i % K1_BLOCKS) * 128, (i // K1_BLOCKS) * 64, Int32(0)
+                    )
+                else:
+                    j = i - boxes13
+                    tma_prefetch_3d(
+                        tsw2, (j % K2_BLOCKS) * 128, (j // K2_BLOCKS) * 64, Int32(0)
+                    )
         self._front_init(tid, s_tmask, s_kmap)
         griddep_wait()
         fence_proxy_async_global()
@@ -787,7 +790,7 @@ class ExpertsKernel:
                     r = ch // PAIRS
                     p = ch % PAIRS
                     stage, phase = self._consume1(
-                        stage, phase, sbase, full1, empty1, w, lane, item % 2, s_xs,
+                        stage, phase, sbase, full1, empty1, lane, item % 2, s_xs,
                         s_ws1, ag, au,
                     )  # fmt: skip
                     self._epilogue1(
@@ -809,7 +812,7 @@ class ExpertsKernel:
                     r = ch // OUT_TILES
                     nb = ch % OUT_TILES
                     stage, phase = self._consume2(
-                        stage, phase, sbase, full2, empty2, w, lane, acc
+                        stage, phase, sbase, full2, empty2, lane, acc
                     )
                     self._epilogue2(r, nb, m, w, lane, s_kmap, slots, acc)
         cute.arch.sync_threads()

@@ -11,8 +11,10 @@ from vllm.platforms import current_platform
 
 EXPERTS, HIDDEN, INTER, TOP_K, LIMIT, SCALE = 288, 4096, 512, 8, 10.0, 2.5
 FP8 = torch.float8_e4m3fn
-# Token counts: plain decode, MTP5 verify steps of 1-4 requests, the row cap.
-TOKENS = (1, 6, 12, 18, 24, 32)
+# Token counts: plain decode, MTP5 verify steps of 1-5 requests (30: four token
+# groups, the last one partial), the row cap.
+TOKENS = (1, 6, 12, 18, 24, 30, 32)
+ROUTINGS = ("uniform", "skewed", "real")
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability(90), reason="Requires SM90"
@@ -206,7 +208,7 @@ def _moe(w, ue8m0=False):
 
 
 @pytest.mark.parametrize("m", TOKENS)
-@pytest.mark.parametrize("routing", ["uniform", "skewed", "real"])
+@pytest.mark.parametrize("routing", ROUTINGS)
 def test_router_matches_stock(weights, m, routing):
     w, x = _inputs(weights, m, routing, seed=m)
     moe = _moe(w)
@@ -267,7 +269,7 @@ MAX_ERROR_UNQUANTIZED = 0.06
 
 
 @pytest.mark.parametrize("m", TOKENS)
-@pytest.mark.parametrize("routing", ["uniform", "skewed", "real"])
+@pytest.mark.parametrize("routing", ROUTINGS)
 def test_routed_experts_no_worse_than_stock(weights, m, routing):
     """With a zero shared expert: the routed sum against FP64 and the stock
     Triton FP8 experts on the same routing."""
@@ -297,7 +299,7 @@ def test_shared_expert_no_worse_than_stock(weights, m):
 
 
 @pytest.mark.parametrize("m", TOKENS)
-@pytest.mark.parametrize("routing", ["uniform", "skewed", "real"])
+@pytest.mark.parametrize("routing", ROUTINGS)
 def test_moe_against_reference(weights, m, routing):
     """The whole layer against FP64, deterministic and finite."""
     w, x = _inputs(weights, m, routing, seed=2500 + m)
@@ -446,9 +448,10 @@ def test_moe_extreme_inputs(weights):
 
 
 def test_moe_cuda_graph():
-    """Two layers sharing the workspace in one graph: each replay equals eager."""
+    """Two layers sharing the workspace in one graph: each replay with new inputs
+    equals eager (the router writes the FP8 input after its logits release)."""
     first, second = _moe(_weights(1)), _moe(_weights(2))
-    for m in (6, 24):
+    for m in (1, 6, 24, 32):
         xa = torch.zeros(m, HIDDEN, dtype=torch.bfloat16, device="cuda")
         xb = torch.zeros_like(xa)
         first.prepare([m])
@@ -478,15 +481,13 @@ def _late_writer(words: int, delay_ns: int):
     import cutlass.cute as cute
     from cutlass import Int32, Int64
     from cutlass.cute.runtime import make_fake_stream
-    from cutlass.cutlass_dsl import T, dsl_user_op
 
+    from vllm.models.glm5next.nvidia.specialized_decode.cutedsl import primitives
     from vllm.models.glm5next.nvidia.specialized_decode.hopper import _moe_ptx as P
 
-    @dsl_user_op
-    def now(*, loc=None, ip=None):
-        return Int64(
-            P._asm(T.i64(), [], "mov.u64 $0, %globaltimer;", "=l", loc, ip, True)
-        )
+    @primitives.asm(Int64)
+    def now():
+        return "mov.u64 $0, %globaltimer;", "=l", ()
 
     class LateWriter:
         @cute.jit
@@ -502,11 +503,11 @@ def _late_writer(words: int, delay_ns: int):
             P.griddep_launch()
             start = now()
             while now() - start < Int64(delay_ns):
-                P.nanosleep(200)
+                primitives.sleep_ns(200)
             i = bid * 128 + tid
             while i < Int32(words):
                 v = P.ldg_cg_f32x4(src + Int64(i) * 16)
-                P.stg_u32x4(dst + Int64(i) * 16, *(P.f32_bits(e) for e in v))
+                P.stg_u32x4(dst + Int64(i) * 16, *(primitives.float_bits(e) for e in v))
                 i = i + 4 * 128
 
     return cute.compile(LateWriter(), Int64(0), Int64(0), make_fake_stream())

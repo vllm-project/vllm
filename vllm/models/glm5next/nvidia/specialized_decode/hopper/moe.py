@@ -24,8 +24,8 @@ of the shared expert (on the last layer's real inputs one such column lands
 9% low with power-of-two hidden scales, 1% with exact ones).
 
 Every layer on a device shares one workspace: calls are ordered on the
-forward stream, and the experts kernel resets its counters when it ends, so
-CUDA graph replays need no reset.
+forward stream, and both kernels reset their counters when they end, so CUDA
+graph replays need no reset.
 
 The TMA descriptors are built once from the weights' addresses, and packed
 UE8M0 scales are converted to an FP32 copy then. So a weight reload after the
@@ -202,9 +202,9 @@ def unsupported(moe, config) -> list[str]:
             reasons.append(f"{name} {got} (expects {shape}, {dtype})")
         elif not t.is_contiguous():
             reasons.append(f"non-contiguous {name}")
-    for linear in (shared.gate_up_proj, shared.down_proj):
-        if getattr(linear, "weight_scale_inv", None) is None:
-            reasons.append("shared expert without block scales")
+    linears = (shared.gate_up_proj, shared.down_proj)
+    if any(getattr(lin, "weight_scale_inv", None) is None for lin in linears):
+        reasons.append("shared expert without block scales")
     bias = moe.gate.e_score_correction_bias
     if bias is None or tuple(bias.shape) != (EXPERTS,):
         reasons.append("no score correction bias")
