@@ -42,7 +42,7 @@ class PPTestOptions(NamedTuple):
     load_format: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
