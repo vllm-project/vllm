@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -34,14 +34,14 @@ from .base_device_communicator import All2AllManagerBase, Cache
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
-    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll
+    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll, NVLinkTwoSidedAlltoAll
 
 
 logger = init_logger(__name__)
 
 
 class PassThroughAll2AllManager(All2AllManagerBase):
-    """Placeholder for ``all2all_backend="passthrough"``.
+    """Placeholder for `all2all_backend="passthrough"`.
 
     The MoE backend dispatches and combines itself, so there is no all2all to
     manage.
@@ -334,12 +334,16 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
-          can dispatch all the ranks must hold the same value.
-        token_hidden_size: the hidden dimension of each token.
-        num_ep_ranks: the number of EP group ranks.
-        num_global_experts: Number of experts in the model.
-        num_local_experts: Number of experts in an EP rank.
+        """Build the kwargs for the DeepEP low-latency buffer.
+
+        Args:
+            max_num_tokens_per_dp_rank: The maximum number of tokens a DP rank can
+                dispatch. All the ranks must hold the same value.
+            token_hidden_size: The hidden dimension of each token.
+            num_ep_ranks: The number of EP group ranks.
+            num_global_experts: Number of experts in the model.
+            num_local_experts: Number of experts in an EP rank.
+
         """
         import deep_ep  # type: ignore[import-not-found]
 
@@ -426,7 +430,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
 
 
-@dataclass
+@dataclass(slots=True)
 class _NixlEPBufferState:
     buffer: Any
     max_num_ep_ranks: int
@@ -570,7 +574,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             self._unmask_connected_ranks(target_ep_size)
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         peers = [rank for rank in range(self.world_size) if rank != self.rank]
         assert NixlEPAll2AllManager._buffer is not None
         buffer = NixlEPAll2AllManager._buffer.buffer
@@ -691,30 +695,31 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             self.rank,
             self.world_size,
         )
-        self.initialized = False
-        self.alltoall_info = None
+        self.communications: dict[tuple[int, ...], NVLinkTwoSidedAlltoAll] = {}
 
-    def initialize(
+    def get_communication(
         self,
-        world_size: int,
-        rank: int,
-        gpus_per_node: int,
-    ):
-        """Initialize workspace."""
-        from flashinfer.comm import Mapping
-        from flashinfer.comm.mnnvl import MnnvlConfig
-        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+    ) -> "NVLinkTwoSidedAlltoAll":
+        """Return the communication for these sizes, creating it on first use.
 
-        if self.initialized:
-            return
+        Creation is collective over the EP group. FlashInfer keeps one
+        workspace per process and shares it across communications.
+        """
+        key = (max_num_tokens, top_k, num_experts, hidden_size)
+        communication = self.communications.get(key)
+        if communication is not None:
+            return communication
 
-        self.cleanup()
-        logger.debug("making map: rank=%d, world size=%d", rank, world_size)
-        self.mapping = Mapping(
-            world_size,
-            rank,
-            gpus_per_node,
-            tp_size=world_size,
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            MoEEpCommParams,
+            NVLinkTwoSidedAlltoAll,
+            NVLinkTwoSidedConfig,
+            create_communication,
         )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
@@ -724,68 +729,83 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         # MNNVL workspace is allocated per rank in the comm_backend's group; the
         # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
         # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(self.cpu_group),
-            fabric_page_size=1 << 29,  # 512MB
-            allocation_granularity=0,  # Auto-detect
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            device=torch.accelerator.current_device_index(),
+            process_group=self.cpu_group,
         )
-
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
-        self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, ep_config
+        params = MoEEpCommParams(
+            num_experts=num_experts,
+            top_k=top_k,
+            max_tokens_per_rank=max_num_tokens,
+            hidden_size=hidden_size,
+            invalid_expert_id=-1,
         )
-
-        self.world_size = world_size
-        self.rank = rank
-        self.gpus_per_node = gpus_per_node
-        self.initialized = True
-
+        config = NVLinkTwoSidedConfig(comm_backend=CustomCommunicator(self.cpu_group))
+        # Bootstrap metadata must stay on the CPU even when model layers are
+        # constructed under a CUDA default-device context.
+        with torch.device("cpu"):
+            communication = create_communication(bootstrap, params, backend=config)
+        assert isinstance(communication, NVLinkTwoSidedAlltoAll)
+        self.communications[key] = communication
         logger.info(
-            "FlashInfer All2All initialized for rank %s, size %s", rank, world_size
+            "FlashInfer All2All initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
         )
-
-    def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized."""
-        if not has_flashinfer_nvlink_two_sided():
-            return False
-
-        if self.world_size <= 1:
-            return False
-
-        if not self.initialized:
-            self.initialize(
-                world_size=self.world_size,
-                rank=self.rank,
-                gpus_per_node=torch.accelerator.device_count,
-            )
-        return self.initialized
+        return communication
 
     def get_handle(self, kwargs):
         return self
 
     def cleanup(self):
-        """Clean up workspace."""
-        if (
-            self.initialized
-            and self.workspace_tensor is not None
-            and self.prepare_workspace_tensor is not None
-        ):
-            try:
-                del self.workspace_tensor
-                del self.prepare_workspace_tensor
-            except Exception as e:
-                logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
-            finally:
-                self.workspace_tensor = None
-                self.prepare_workspace_tensor = None
-                self.mapping = None
-                self.initialized = False
+        for communication in self.communications.values():
+            communication.destroy()
+        self.communications.clear()
+
+
+def _require_single_node_without_mnnvl() -> None:
+    """Fail clearly if one-sided all2all would span hosts without MNNVL.
+
+    GB200/GB300/VR200 connect hosts over MNNVL. On other hardware (HGX B200 and
+    B300) the NVLink domain ends at the node, so every rank must share one host.
+    """
+    from vllm.config.parallel import _is_gb200_gb300_or_vr200
+    from vllm.distributed.parallel_state import get_node_count
+
+    if _is_gb200_gb300_or_vr200():
+        return
+    try:
+        node_count = get_node_count()
+    except AssertionError:
+        # Used outside vLLM's distributed environment: the node count is unknown.
+        return
+    if node_count == 1:
+        return
+    auto = False
+    with suppress(Exception):
+        auto = get_current_vllm_config().parallel_config._all2all_backend_auto_one_sided
+    origin = (
+        " It was picked by default (all2all_backend='auto'), which assumes a "
+        "single physical node."
+        if auto
+        else ""
+    )
+    raise RuntimeError(
+        "The 'flashinfer_nvlink_one_sided' all2all backend needs every rank on "
+        "one physical node on this GPU, which has no NVLink between hosts, but "
+        f"the ranks span {node_count} nodes.{origin} Switch to the "
+        "'allgather_reducescatter' backend manually with "
+        "`--all2all-backend allgather_reducescatter`."
+    )
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
+        _require_single_node_without_mnnvl()
         assert has_flashinfer_nvlink_one_sided(), (
             "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
             "Please install FlashInfer 0.7.2 or later."
@@ -1094,7 +1114,7 @@ def _mori_epv2_arena_bytes(cfg) -> int:
 _MORI_EPV2_WINDOW_ALIGN = 4 << 30
 
 
-@dataclass
+@dataclass(slots=True)
 class _MoriEPv2Window:
     comm: Any
     free_bytes: int

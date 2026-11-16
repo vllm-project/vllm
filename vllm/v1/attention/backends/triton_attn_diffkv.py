@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton attention backend with different K/V head dimensions (DiffKV).
 
-The KV cache layout is identical to ``FlashAttentionDiffKVBackend``: K and V
+The KV cache layout is identical to `FlashAttentionDiffKVBackend`: K and V
 are packed along the last dim in the logical shape
-``[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]``.
+`[num_blocks, num_kv_heads, block_size, head_size_qk + head_size_v]`.
 """
 
 from typing import ClassVar
@@ -36,10 +36,10 @@ logger = init_logger(__name__)
 class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
     """Override the parent's softmax buffer last-dim to head_size_v.
 
-    The parent allocates ``softmax_segm_output`` with last-dim sized to
-    ``next_power_of_2(head_size)`` (== Q/K head size).  For DiffKV the
+    The parent allocates `softmax_segm_output` with last-dim sized to
+    `next_power_of_2(head_size)` (== Q/K head size).  For DiffKV the
     accumulator and per-segment partial outputs are V-shaped, so we
-    re-allocate with ``next_power_of_2(head_size_v)`` instead.
+    re-allocate with `next_power_of_2(head_size_v)` instead.
     """
 
     def __init__(

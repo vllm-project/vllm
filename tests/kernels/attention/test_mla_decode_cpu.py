@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 

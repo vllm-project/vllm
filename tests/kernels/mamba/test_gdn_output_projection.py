@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shape contract for ``QwenGatedDeltaNetAttention._output_projection``.
+"""Shape contract for `QwenGatedDeltaNetAttention._output_projection`.
 
-Every ``forward_*`` already allocates ``core_attn_out`` and ``z`` as
-``(N, H, D)``. The helper now norms those tensors as-is and flattens once
-for ``out_proj``; it used to be rank-agnostic via ``reshape(z_shape_og)``.
+Every `forward_*` already allocates `core_attn_out` and `z` as
+`(N, H, D)`. The helper now norms those tensors as-is and flattens once
+for `out_proj`; it used to be rank-agnostic via `reshape(z_shape_og)`.
 """
 
 from __future__ import annotations
@@ -58,17 +58,17 @@ def test_output_projection_norms_per_head_and_flattens(
 @pytest.mark.parametrize("norm_before_gate", [True, False])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="the fused gated RMS norm Triton kernel requires CUDA",
+    not current_platform.is_cuda_alike(),
+    reason="the fused gated RMS norm Triton kernel requires CUDA or ROCm",
 )
 @torch.inference_mode()
 def test_fused_gated_rms_norm_strided_z_bitwise(
     num_tokens: int, norm_before_gate: bool, activation: str
 ) -> None:
     """The Qwen3.5 fused gated RMS norm reads z from its packed strided view
-    of the qkvz projection and matches ``rmsnorm_fn`` on the copied/reshaped
+    of the qkvz projection and matches `rmsnorm_fn` on the copied/reshaped
     z bitwise."""
-    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+    from vllm.models.qwen3_5.common.fused_gdn_gated_norm import (
         fused_gdn_gated_rms_norm,
     )
     from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
@@ -118,8 +118,18 @@ def test_fused_gated_rms_norm_strided_z_bitwise(
 @pytest.mark.parametrize("num_heads", [48, 24, 12])
 @pytest.mark.parametrize("num_tokens", [1, 37, 300])
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
-    reason="the FP8 (e4m3fn) output of the fused gated RMS norm requires NVIDIA SM89+",
+    not (
+        (current_platform.is_cuda() and current_platform.has_device_capability(89))
+        or (
+            current_platform.is_rocm()
+            and (
+                current_platform.is_device_capability(95)
+                or current_platform.is_device_capability(125)
+            )
+        )
+    ),
+    reason="the FP8 (e4m3fn) output of the fused gated RMS norm requires SM89+ "
+    "or CDNA4+ (gfx950, gfx1250)",
 )
 @torch.inference_mode()
 def test_fused_gated_rms_norm_fp8_matches_chain(
@@ -128,7 +138,7 @@ def test_fused_gated_rms_norm_fp8_matches_chain(
     """The FP8 output (fused out_proj input quant) equals the bf16 kernel
     followed by static scaled_fp8_quant."""
     from vllm import _custom_ops as ops
-    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+    from vllm.models.qwen3_5.common.fused_gdn_gated_norm import (
         fused_gdn_gated_rms_norm,
     )
 

@@ -8,6 +8,7 @@ use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_chat::ChatTool;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -218,6 +219,10 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
 pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
+    /// A refusal the model gave earlier. Valid only in assistant messages,
+    /// where it is replayed as text.
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
     #[serde(rename = "image_url")]
     ImageUrl {
         image_url: ImageUrl,
@@ -242,6 +247,22 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    /// A vLLM extension naming a tool, as tool search returns it in a tool
+    /// result (Anthropic's `tool_reference` block).
+    #[serde(rename = "tool_reference")]
+    ToolReference { name: String },
+}
+
+impl ContentPart {
+    /// The media modality this part carries, if any.
+    pub fn modality(&self) -> Option<MmModality> {
+        match self {
+            Self::ImageUrl { .. } => Some(MmModality::Image),
+            Self::VideoUrl { .. } => Some(MmModality::Video),
+            Self::AudioUrl { .. } | Self::InputAudio { .. } => Some(MmModality::Audio),
+            Self::Text { .. } | Self::Refusal { .. } | Self::ToolReference { .. } => None,
+        }
+    }
 }
 
 #[serde_with::skip_serializing_none]
@@ -624,6 +645,25 @@ impl<'de> Deserialize<'de> for ChatMessage {
     }
 }
 
+impl ChatMessage {
+    /// The message's content parts; empty for string or absent content.
+    pub fn content_parts(&self) -> &[ContentPart] {
+        let content = match self {
+            Self::System { content, .. }
+            | Self::User { content, .. }
+            | Self::Tool { content, .. }
+            | Self::Developer { content, .. }
+            | Self::Custom { content, .. } => Some(content),
+            Self::Assistant { content, .. } => content.as_ref(),
+            Self::Function { .. } => None,
+        };
+        match content {
+            Some(MessageContent::Parts(parts)) => parts,
+            Some(MessageContent::Text(_)) | None => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MessageContent {
@@ -689,6 +729,24 @@ impl Usage {
             completion_tokens_details: reasoning_tokens
                 .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
+    }
+
+    /// Fold in the usage of another choice of the same request. Like Python
+    /// for `n > 1`, the prompt counts once, while completion and reasoning
+    /// tokens add up over the choices.
+    pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(completion_tokens), Some(other)) =
+            (&mut self.completion_tokens, other.completion_tokens)
+        {
+            *completion_tokens += other;
+        }
+        if let (Some(details), Some(other)) = (
+            &mut self.completion_tokens_details,
+            &other.completion_tokens_details,
+        ) {
+            details.reasoning_tokens += other.reasoning_tokens;
+        }
+        self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
     }
 }
 

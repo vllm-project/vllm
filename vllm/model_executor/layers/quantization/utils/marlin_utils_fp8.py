@@ -193,7 +193,7 @@ def prepare_fp8_layer_for_marlin(
 
 
 def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n, ...)`` tensor to padded_n
+    """Zero-pad each gate/up shard of a `(E, 2 * n, ...)` tensor to padded_n
     rows. FP8 zero decodes to 0.0, so the padded rows contribute nothing."""
     if padded_n == n:
         return x
@@ -205,7 +205,7 @@ def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
 
 
 def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad the last dim of a ``(E, ..., n)`` tensor to padded_n."""
+    """Zero-pad the last dim of a `(E, ..., n)` tensor to padded_n."""
     if padded_n == n:
         return x
     return torch.nn.functional.pad(x, (0, padded_n - n))

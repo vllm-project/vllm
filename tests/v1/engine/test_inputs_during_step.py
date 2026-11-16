@@ -35,6 +35,7 @@ class PollableFuture(Future):
         self.ready_after = ready_after
         self.on_poll = on_poll
         self.polls = 0
+        self.waits = 0
 
     def poll(self) -> bool:
         self.polls += 1
@@ -43,6 +44,9 @@ class PollableFuture(Future):
         if self.polls >= self.ready_after and not self.done():
             self.set_result("output")
         return self.done()
+
+    def wait_briefly(self, pending, deadline) -> None:
+        self.waits += 1
 
     def result(self, timeout=None):
         # Stands in for blocking until the output arrives.
@@ -128,11 +132,8 @@ def test_blocks_for_output_after_spin_period():
     engine, handled = make_engine()
     engine.input_queue.put((ADD, "a"))
     future = PollableFuture(ready_after=1000)
-    with (
-        mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0),
-        mock.patch.object(engine_core, "sched_yield") as sched_yield,
-    ):
+    with mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0):
         assert engine._wait_for_output(future) == "output"
-    sched_yield.assert_not_called()
+    assert future.waits == 0
     assert future.polls == 2
     assert handled == [(ADD, "a")]

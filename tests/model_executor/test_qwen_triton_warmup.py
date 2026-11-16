@@ -15,6 +15,7 @@ from vllm.model_executor.warmup.qwen_triton_warmup import (
     _warm_fused_gdn_decode_post_conv_mtp_kernel,
     _warm_fused_post_conv_kernel,
     _warm_gated_rms_norm_kernel,
+    _warm_state_gather_scatter_kernels,
 )
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
@@ -57,6 +58,7 @@ def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
     )
     _warm_causal_conv1d_fwd_kernel(device, config)
     _warm_fused_post_conv_kernel(device, config)
+    _warm_state_gather_scatter_kernels(device, config)
     assert _FLA_POST_CONV_WARMUP_LENGTHS == (1, 2, 16)
     torch.accelerator.synchronize(device)
 
