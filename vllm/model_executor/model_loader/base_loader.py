@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
+    log_backend_summary,
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
@@ -132,36 +133,6 @@ class BaseModelLoader(ABC):
             torch.accelerator.empty_cache()
 
         return model.eval()
-
-
-def log_backend_summary(
-    model: nn.Module, model_config: ModelConfig, load_failed: bool = False
-) -> None:
-    """Log which backend each kind of layer selected. The individual
-    selections are logged at DEBUG where they are made."""
-    from vllm.model_inspection import format_backend_summary
-
-    try:
-        summary = format_backend_summary(model)
-    except Exception as e:
-        # Only a log: a layer it cannot describe must not fail the load.
-        logger.warning_once(
-            "Could not summarize the backends selected for %s (%r). Set "
-            "VLLM_LOGGING_LEVEL=DEBUG to log each selection.",
-            model_config.model,
-            e,
-        )
-        return
-    if summary is not None:
-        # A draft model can share its class with the target: name the model.
-        logger.info_once(
-            "Backends selected for %s (%s)%s:\n%s",
-            type(model).__name__,
-            model_config.model,
-            " before loading failed" if load_failed else "",
-            summary,
-            scope="global",
-        )
 
 
 def log_model_inspection(model: nn.Module) -> None:

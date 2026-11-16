@@ -9,11 +9,9 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.model_loader import base_loader
-from vllm.model_executor.model_loader.base_loader import (
-    BaseModelLoader,
-    log_backend_summary,
-)
+from vllm.model_executor.model_loader import utils as loader_utils
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.utils import log_backend_summary
 from vllm.model_inspection import _format_layer_names, format_backend_summary
 
 pytestmark = pytest.mark.cpu_test
@@ -92,7 +90,7 @@ def test_backends_are_logged_when_loading_fails(monkeypatch):
             raise RuntimeError("out of memory")
 
     logger = Mock()
-    monkeypatch.setattr(base_loader, "logger", logger)
+    monkeypatch.setattr(loader_utils, "logger", logger)
     vllm_config = SimpleNamespace(
         device_config=SimpleNamespace(device="cpu"),
         load_config=SimpleNamespace(device=None),
