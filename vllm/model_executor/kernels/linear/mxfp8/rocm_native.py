@@ -412,7 +412,7 @@ def _select_cfg(M, N, K):
     if _ON_GFX950 and M > 1024 and N > 1024 and K <= 1024 and K % 128 == 0:
         # Short-K large prefill (e.g. shared_down K=768): 128x128x128 with two
         # stages and unmasked M/N loads beats the deeper 3-stage / BLOCK_K=256
-        # tiles below; at larger K those stay faster.
+        # tiles below. At larger K it is not a consistent win, so those stay.
         return 128, 128, 128, 8, 2
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
