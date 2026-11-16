@@ -3,6 +3,7 @@
 
 import queue
 import random
+import types
 import typing
 
 import pytest
@@ -15,6 +16,7 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
@@ -138,3 +140,79 @@ def test_dp_with_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch):
         data_parallel_backend="mp",
     )
     LLMEngine.from_engine_args(engine_args)
+
+
+@pytest.mark.parametrize(
+    "capability,world_size,force_multimem,expected",
+    [
+        # Capabilities that list the world size as multimem-capable.
+        ("9.0", 4, None, True),
+        ("9.0", 8, None, True),
+        # Same capability, world size that falls back to two-shot.
+        ("9.0", 2, None, False),
+        ("10.0", 4, None, False),
+        # Unknown capability must not raise; two-shot is the safe default.
+        ("8.0", 2, None, False),
+        ("8.0", 8, None, False),
+        # Explicit override wins either way (used by benchmarks/tests).
+        ("9.0", 2, True, True),
+        ("9.0", 8, False, False),
+    ],
+)
+def test_uses_multimem(capability, world_size, force_multimem, expected):
+    """`_uses_multimem` decides whether a multicast pointer is required.
+
+    Guards against re-introducing a multicast capability check that disables
+    the two-shot path, which never uses multicast.
+    """
+    comm = object.__new__(SymmMemCommunicator)
+    comm.device_capability = capability
+    comm.world_size = world_size
+    assert comm._uses_multimem(force_multimem) is expected
+
+
+@pytest.mark.parametrize(
+    "capability,world_size,expected_op",
+    [
+        # Multimem world size for this capability -> multimem kernel.
+        ("9.0", 4, "multimem_all_reduce_"),
+        # Same capability, world size 2 falls back to two-shot.
+        ("9.0", 2, "two_shot_all_reduce_"),
+        ("10.0", 4, "two_shot_all_reduce_"),
+    ],
+)
+def test_all_reduce_dispatch(monkeypatch, capability, world_size, expected_op):
+    """`all_reduce` must pick the kernel `_uses_multimem` advertises.
+
+    The guard in ``__init__`` and the dispatch here have to agree; they were
+    previously separate expressions and disagreed about whether multicast was
+    required.
+    """
+    called = []
+
+    class _FakeOps:
+        @staticmethod
+        def multimem_all_reduce_(*args, **kwargs):
+            called.append("multimem_all_reduce_")
+
+        @staticmethod
+        def two_shot_all_reduce_(*args, **kwargs):
+            called.append("two_shot_all_reduce_")
+
+    monkeypatch.setattr(torch.ops, "symm_mem", _FakeOps, raising=False)
+
+    comm = object.__new__(SymmMemCommunicator)
+    comm.disabled = False
+    comm.dtype = torch.bfloat16
+    comm.max_size = 1 << 20
+    comm.device_capability = capability
+    comm.world_size = world_size
+    comm.force_multimem = None
+    comm.group = types.SimpleNamespace(group_name="test_group")
+    comm.buffer = torch.zeros(1024, dtype=torch.bfloat16)
+
+    inp = torch.ones(1024, dtype=torch.bfloat16)
+    out = comm.all_reduce(inp)
+
+    assert called == [expected_op]
+    assert out is not None and out.shape == inp.shape
