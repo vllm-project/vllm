@@ -118,7 +118,7 @@ def _shard_all_ranks(
 ):
     """Simulate every TP rank by faking get_tp_group() per BatchSharder.
 
-    ``owners_np`` is a sharded DraftLogitsCache owner table indexed by request
+    `owners_np` is a sharded DraftLogitsCache owner table indexed by request
     slot. Without it, requests are owned by batch position.
     """
     draft_logits = None
@@ -514,7 +514,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         run(rank)
     # Zero the uninitialized padding rows so the comparison is deterministic;
     # the real path never reads them (gathered_src_indices skips padding).
-    for rank, (local, _, metadata) in enumerate(results):
+    for rank, (_, _, metadata) in enumerate(results):
         packed_blocks[rank][metadata.num_local_reqs :] = 0
     gathered_full.append(torch.cat([packed_blocks[r] for r in range(tp_size)]))
 
@@ -672,7 +672,9 @@ def test_finish_requests_frees_slots_in_sorted_order():
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     removed: list[str] = []
-    fake_runner = SimpleNamespace(_remove_request=removed.append, pooling_runner=None)
+    fake_runner = SimpleNamespace(
+        _remove_request=removed.append, pooling_runner=None, speculator=None
+    )
     scheduler_output = SimpleNamespace(
         finished_req_ids={"req-b", "req-c", "req-a"},
         preempted_req_ids={"req-e", "req-d"},

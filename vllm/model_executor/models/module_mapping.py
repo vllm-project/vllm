@@ -7,7 +7,7 @@
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModelKeys:
     language_model: list[str] = field(default_factory=list)
     connector: list[str] = field(default_factory=list)
