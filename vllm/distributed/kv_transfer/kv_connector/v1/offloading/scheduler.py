@@ -242,11 +242,11 @@ class OffloadingConnectorScheduler:
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
-        for config_idx, group_config in enumerate(self.config.kv_group_configs):
+        for config_group_idx, group_config in enumerate(self.config.kv_group_configs):
             if group_config.sliding_window_size_in_chunks is None:
-                full_attention_groups.append(config_idx)
+                full_attention_groups.append(config_group_idx)
             else:
-                sliding_window_groups.append(config_idx)
+                sliding_window_groups.append(config_group_idx)
 
         # sort sliding window groups by window size in decreasing order
         def _sliding_window_sort_key(i: int) -> int:
@@ -542,11 +542,13 @@ class OffloadingConnectorScheduler:
             looked_up_full_attention = False
             groups_iter = iter(lookup_groups)
             lookup_groups = ()
-            for group_idx in groups_iter:
+            for config_group_idx in groups_iter:
                 group_config: GroupOffloadConfig = self.config.kv_group_configs[
-                    group_idx
+                    config_group_idx
                 ]
-                group_state: RequestGroupState = req_status.group_states[group_idx]
+                group_state: RequestGroupState = req_status.group_states[
+                    config_group_idx
+                ]
                 tokens_per_chunk = group_config.tokens_per_chunk
                 offload_keys = group_state.offload_keys
 
@@ -559,7 +561,7 @@ class OffloadingConnectorScheduler:
                     group_config.is_eagle_group and not self.use_lookahead_block_hashes
                 )
                 is_eagle_unverified = (
-                    apply_eagle_drop and group_idx not in eagle_verified
+                    apply_eagle_drop and config_group_idx not in eagle_verified
                 )
 
                 # Constrain to a chunk-aligned boundary for this group.
@@ -648,7 +650,7 @@ class OffloadingConnectorScheduler:
                 else:
                     if is_eagle_unverified:
                         num_hit_chunks -= 1
-                        eagle_verified.add(group_idx)
+                        eagle_verified.add(config_group_idx)
 
                     max_hit_size_tokens = min(
                         max_hit_size_tokens,
@@ -857,8 +859,8 @@ class OffloadingConnectorScheduler:
         req_context = req_status.req_context
         pending = bridge_pending
         boundary_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
-        for config_idx, group_config in enumerate(self.config.kv_group_configs):
-            key_tokens = self.config.partial_tail_key_tokens(config_idx, boundary)
+        for config_group_idx, group_config in enumerate(self.config.kv_group_configs):
+            key_tokens = self.config.partial_tail_key_tokens(config_group_idx, boundary)
             key = req_status.register_boundary_key(group_config.group_idx, key_tokens)
             # The offload manager can report HIT as soon as the source chunk
             # is ready, while its earlier GPU load is still in flight.  Do
@@ -1092,7 +1094,7 @@ class OffloadingConnectorScheduler:
         # per group
         group_sizes: list[int] = []
         block_indices: list[int] = []
-        for config_idx, (group_config, group_state) in enumerate(
+        for config_group_idx, (group_config, group_state) in enumerate(
             zip(self.config.kv_group_configs, req_status.group_states)
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
@@ -1142,7 +1144,7 @@ class OffloadingConnectorScheduler:
                         req_status.register_boundary_key(
                             group_config.group_idx,
                             self.config.partial_tail_key_tokens(
-                                config_idx, partial_tail_boundary
+                                config_group_idx, partial_tail_boundary
                             ),
                         )
                     )
@@ -1221,8 +1223,8 @@ class OffloadingConnectorScheduler:
             if block_id_groups:
                 if self._sliding_window_groups:
                     new_block_ids_end[req_id] = tuple(
-                        len(req_status.group_states[grp_idx].block_ids)
-                        for grp_idx in self._sliding_window_groups
+                        len(req_status.group_states[config_group_idx].block_ids)
+                        for config_group_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(block_id_groups)
                 for group_config in self.config.kv_group_configs:
@@ -1245,10 +1247,10 @@ class OffloadingConnectorScheduler:
             blocks_per_chunk = self.config.blocks_per_chunk
             for req_id, req_status in self._req_status.items():
                 ends = new_block_ids_end.get(req_id)
-                for i, grp_idx in enumerate(self._sliding_window_groups):
-                    group_state = req_status.group_states[grp_idx]
+                for i, config_group_idx in enumerate(self._sliding_window_groups):
+                    group_state = req_status.group_states[config_group_idx]
                     first_live_idxs = (
-                        handler.first_live_chunk_idx(req_status, grp_idx)
+                        handler.first_live_chunk_idx(req_status, config_group_idx)
                         for handler in self._store_handlers.values()
                     )
                     start = (
