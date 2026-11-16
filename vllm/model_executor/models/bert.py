@@ -15,8 +15,11 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -188,7 +191,7 @@ class BertLayer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor):
         attn_output = self.attention(hidden_states)
-        intermediate_output = self.intermediate(attn_output)
+        intermediate_output = self.intermediate(attn_output, self.output.dense)
         output = self.output(intermediate_output, attn_output)
         return output
 
@@ -329,10 +332,13 @@ class BertIntermediate(nn.Module):
         )
         self.intermediate_act_fn = get_act_fn(hidden_act)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, next_linear: LinearBase
+    ) -> torch.Tensor | QuantizedActivation:
         hidden_states, _ = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-        return hidden_states
+        return maybe_fused_act_quant(
+            self.intermediate_act_fn, hidden_states, next_linear
+        )
 
 
 class BertOutput(nn.Module):
@@ -357,7 +363,9 @@ class BertOutput(nn.Module):
         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor | QuantizedActivation,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
@@ -394,6 +402,12 @@ class BertModel(nn.Module, SupportsQuant):
         embedding_class: type[nn.Module] = BertEmbedding,
     ) -> None:
         super().__init__()
+
+        if vllm_config.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with BERT/RoBERTa models "
+                "because they encode token type IDs in input_ids."
+            )
 
         self.config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(self.config)

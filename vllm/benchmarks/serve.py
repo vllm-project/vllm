@@ -216,7 +216,7 @@ async def get_first_model_from_server(
             ) from e
 
 
-@dataclass
+@dataclass(slots=True)
 class SpecDecodeMetrics:
     """Speculative decoding metrics from the server's Prometheus endpoint."""
 
@@ -224,6 +224,7 @@ class SpecDecodeMetrics:
     num_draft_tokens: int
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
+    num_verified_tokens: int
 
 
 async def fetch_spec_decode_metrics(
@@ -244,6 +245,7 @@ async def fetch_spec_decode_metrics(
             num_draft_tokens = 0
             num_accepted_tokens = 0
             accepted_per_pos: dict[int, int] = {}
+            num_verified_tokens = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -276,6 +278,8 @@ async def fetch_spec_decode_metrics(
                                 )
                         elif "num_accepted_tokens" in metric_name:
                             num_accepted_tokens += int(float(parts[-1]))
+                        elif "num_verified_tokens_total" in metric_name:
+                            num_verified_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -285,12 +289,13 @@ async def fetch_spec_decode_metrics(
                 num_draft_tokens=num_draft_tokens,
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
+                num_verified_tokens=num_verified_tokens,
             )
     except (TimeoutError, aiohttp.ClientError):
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class DiffusionMetrics:
     """Diffusion (dLLM) decoding metrics from the server's Prometheus endpoint."""
 
@@ -357,7 +362,7 @@ class TaskType(Enum):
     POOLING = "pooling"
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkMetrics:
     completed: int
     failed: int
@@ -392,7 +397,7 @@ class BenchmarkMetrics:
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
 
 
-@dataclass
+@dataclass(slots=True)
 class EmbedBenchmarkMetrics:
     completed: int
     failed: int
@@ -1199,6 +1204,10 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
+        delta_verified = (
+            spec_decode_metrics_after.num_verified_tokens
+            - spec_decode_metrics_before.num_verified_tokens
+        )
         per_pos_rates: list[float] = []
         if delta_drafts > 0:
             positions = sorted(
@@ -1222,6 +1231,7 @@ async def benchmark(
                 "num_drafts": delta_drafts,
                 "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
+                "verified_tokens": delta_verified,
                 "acceptance_rate": acceptance_rate,
                 "acceptance_length": acceptance_length,
                 "per_position_acceptance_rates": per_pos_rates,
@@ -1438,6 +1448,9 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
+        result["spec_decode_verified_tokens"] = int(
+            spec_decode_stats["verified_tokens"]
+        )
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
@@ -1544,6 +1557,11 @@ async def benchmark(
         print(
             "{:<40} {:<10}".format(
                 "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Verified tokens:", int(spec_decode_stats["verified_tokens"])
             )
         )
         per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])
