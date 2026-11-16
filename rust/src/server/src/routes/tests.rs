@@ -783,7 +783,7 @@ async fn test_chat_with_engine_outputs(
     .await
 }
 
-async fn test_app() -> axum::Router {
+async fn test_app() -> (axum::Router, MockEngineTask) {
     test_app_with_dev_mode(false).await
 }
 
@@ -832,14 +832,14 @@ fn test_render_state(
     }
 }
 
-async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    build_router_with_gates(
+    let app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
@@ -849,7 +849,50 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
             scale_out: true,
             ..RouteGates::default()
         },
+    );
+    (app, engine_task)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_with_tools_returns_400_when_tool_parser_disabled() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tool-parser-disabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
     )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat.with_tool_call_parser(ParserSelection::None),
+        )),
+        RouteGates::default(),
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -957,7 +1000,7 @@ async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str,
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_python_routes_return_not_implemented() {
-    let app = test_app().await;
+    let (app, _engine_task) = test_app().await;
 
     for (method, uri) in [
         ("POST", "/v1/messages"),
@@ -2253,7 +2296,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn list_models_returns_configured_model() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
         .await
@@ -2355,7 +2398,7 @@ async fn list_models_lists_loras_in_load_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn request_id_header_is_absent_by_default() {
-    let app = test_app().await;
+    let (app, _engine_task) = test_app().await;
     let response = health_response(&app, None).await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -2839,7 +2882,7 @@ async fn cors_explicit_headers_union_safelisted_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn version_returns_engine_vllm_version() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(Request::builder().uri("/version").body(Body::empty()).expect("build request"))
         .await
@@ -2910,7 +2953,7 @@ async fn kv_event_sources_reports_each_ready_engine() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -3142,7 +3185,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn server_info_endpoint_returns_not_found_without_snapshot() {
-    let mut app = test_app_with_dev_mode(true).await;
+    let (mut app, _engine_task) = test_app_with_dev_mode(true).await;
     let response = app
         .call(
             Request::builder()
@@ -3381,7 +3424,7 @@ async fn load_lora_adapter_rejects_base_model_name_collision() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn http_metrics_record_list_models_requests() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let before = METRICS.render().unwrap();
 
     let response = app
@@ -3594,7 +3637,7 @@ async fn request_metrics_use_served_model_name_label() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn wrong_model_returns_not_found() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -3662,7 +3705,7 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn invalid_request_returns_openai_error() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -3731,7 +3774,7 @@ async fn chat_completions_unconnected_data_parallel_rank_reports_connected_ranks
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -5668,7 +5711,7 @@ async fn happy_path_returns_sse_stream() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn http_metrics_exclude_metrics_route() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let before = METRICS.render().unwrap();
 
     let response = app
@@ -5715,7 +5758,7 @@ async fn http_metrics_exclude_metrics_route() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn http_metrics_group_error_statuses() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let before = METRICS.render().unwrap();
 
     let response = app
@@ -5755,7 +5798,7 @@ async fn http_metrics_group_error_statuses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn http_metrics_collapse_unknown_methods() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let before = METRICS.render().unwrap();
 
     for (method, path) in [
@@ -6335,7 +6378,7 @@ async fn stream_without_include_usage_keeps_existing_shape() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn completions_invalid_request_returns_openai_error() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -6365,7 +6408,7 @@ async fn completions_invalid_request_returns_openai_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn completions_empty_allowed_token_ids_returns_openai_error() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -7848,7 +7891,7 @@ async fn stream_raw_generate_error_finish_returns_sse_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn raw_generate_rejects_empty_token_ids() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let response = app
         .call(
@@ -7877,38 +7920,167 @@ async fn raw_generate_rejects_empty_token_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn raw_generate_rejects_parallel_sampling() {
-    let mut app = test_app().await;
+async fn raw_generate_rejects_invalid_parallel_sampling() {
+    let (mut app, _engine_task) = test_app().await;
 
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/inference/v1/generate")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "token_ids": [11, 22],
-                        "sampling_params": {"n": 4}
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
+    for (sampling_params, message) in [
+        (json!({"n": 0}), "n must be at least 1"),
+        (
+            json!({"n": 2, "temperature": 0.0}),
+            "n must be 1 when using greedy sampling",
+        ),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/inference/v1/generate",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22],
+                "sampling_params": sampling_params
+            }),
         )
-        .await
-        .expect("call app");
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"]["message"].as_str().is_some_and(|text| text.contains(message)),
+            "{json}"
+        );
+    }
+}
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["param"], "n");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_n_returns_one_choice_per_sample() {
+    let (mut app, engine_task, requests) =
+        test_app_with_parallel_samples(two_sample_outputs()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "request_id": "raw-n",
+            "token_ids": [11, 22],
+            "sampling_params": {"n": 2, "seed": 7}
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+
+    let requests = requests.await.expect("engine requests");
+    let mut children = requests
+        .iter()
+        .map(|request| {
+            (
+                request.request_id.clone(),
+                request.external_req_id.clone(),
+                request.sampling_params.as_ref().and_then(|params| params.seed),
+            )
+        })
+        .collect::<Vec<_>>();
+    children.sort();
+    assert_eq!(
+        children,
+        [
+            ("0_raw-n".to_string(), Some("raw-n".to_string()), Some(7)),
+            ("1_raw-n".to_string(), Some("raw-n".to_string()), Some(8)),
+        ]
+    );
+
+    assert_eq!(json["request_id"], "raw-n");
+    let choices = json["choices"]
+        .as_array()
+        .expect("choices")
+        .iter()
+        .map(|choice| {
+            (
+                choice["index"].clone(),
+                choice["token_ids"].clone(),
+                choice["finish_reason"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        choices,
+        [
+            (json!(0), json!([104, 105, 33]), json!("stop")),
+            (json!(1), json!([121, 111]), json!("length")),
+        ]
+    );
+    // The prompt counts once; completion tokens add up over the samples.
+    assert_eq!(json["usage"]["prompt_tokens"], 2);
+    assert_eq!(json["usage"]["completion_tokens"], 5);
+    assert_eq!(json["usage"]["total_tokens"], 7);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_raw_generate_n_sends_prompt_once_and_one_usage_chunk() {
+    let (mut app, engine_task, _requests) =
+        test_app_with_parallel_samples(two_sample_outputs()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "return_token_ids": true,
+            "sampling_params": {"n": 2}
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+    let text = json["raw"].as_str().expect("SSE body");
+    let payloads = sse_json_payloads(text);
+
+    for (index, token_ids, finish_reason) in [
+        (0, vec![104, 105, 33], "stop"),
+        (1, vec![121, 111], "length"),
+    ] {
+        let choice_chunks = payloads
+            .iter()
+            .filter_map(|payload| payload["choices"].as_array()?.first())
+            .filter(|choice| choice["index"] == json!(index))
+            .collect::<Vec<_>>();
+        let streamed = choice_chunks
+            .iter()
+            .flat_map(|choice| choice["token_ids"].as_array().cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(json!(streamed), json!(token_ids), "{text}");
+        let finish_reasons = choice_chunks
+            .iter()
+            .filter_map(|choice| choice["finish_reason"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(finish_reasons, [finish_reason], "{text}");
+    }
+
+    let prompt_chunks = payloads
+        .iter()
+        .filter(|payload| !payload["prompt_token_ids"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(prompt_chunks.len(), 1, "{text}");
+    assert_eq!(prompt_chunks[0]["prompt_token_ids"], json!([11, 22]));
+
+    let usage_chunks = payloads
+        .iter()
+        .filter(|payload| payload["choices"] == json!([]))
+        .collect::<Vec<_>>();
+    assert_eq!(usage_chunks.len(), 1, "{text}");
+    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 2);
+    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 5);
+    assert_eq!(usage_chunks[0]["usage"]["total_tokens"], 7);
+    assert_eq!(payloads.last(), Some(usage_chunks[0]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn raw_generate_rejects_streaming_prompt_logprobs() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     for prompt_logprobs in [0, 1] {
         let response = app
@@ -7947,7 +8119,7 @@ async fn raw_generate_rejects_streaming_prompt_logprobs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn raw_generate_rejects_wrong_model() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let response = app
         .call(
@@ -10966,7 +11138,7 @@ async fn post_json(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_completion_round_trips_through_detokenize() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let prompt = "Hello world";
 
     let (_, tokenize_json) = post_json(
@@ -11003,7 +11175,7 @@ async fn tokenize_completion_round_trips_through_detokenize() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_completion_add_special_tokens_changes_ids() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (_, with_special) = post_json(
         &mut app,
@@ -11047,7 +11219,7 @@ async fn tokenize_completion_add_special_tokens_changes_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_completion_return_token_strs_matches_tokens() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11072,7 +11244,7 @@ async fn tokenize_completion_return_token_strs_matches_tokens() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_completion_count_and_max_model_len() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11096,7 +11268,7 @@ async fn tokenize_completion_count_and_max_model_len() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_includes_generation_prompt_in_token_count() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let messages = json!([{"role": "user", "content": "hi"}]);
 
     let (_, with_prompt) = post_json(
@@ -11130,7 +11302,7 @@ async fn tokenize_chat_includes_generation_prompt_in_token_count() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_with_tools_does_not_require_output_parser() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11241,7 +11413,7 @@ async fn chat_and_completions_reject_max_tokens_above_max_model_len() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_conflicting_generation_flags_returns_400() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11262,7 +11434,7 @@ async fn tokenize_chat_conflicting_generation_flags_returns_400() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_empty_messages_returns_400() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11282,7 +11454,7 @@ async fn tokenize_chat_empty_messages_returns_400() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_accepts_empty_message_content() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     for content in [json!(""), json!([])] {
         let (status, json) = post_json(
@@ -11303,7 +11475,7 @@ async fn tokenize_chat_accepts_empty_message_content() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_unknown_model_returns_404() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11323,7 +11495,7 @@ async fn tokenize_unknown_model_returns_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn detokenize_unknown_model_returns_404() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11343,7 +11515,7 @@ async fn detokenize_unknown_model_returns_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn detokenize_empty_tokens_returns_empty_prompt() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11365,7 +11537,7 @@ async fn detokenize_empty_tokens_returns_empty_prompt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn detokenize_decodes_known_token_ids() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11385,7 +11557,7 @@ async fn detokenize_decodes_known_token_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_continue_without_assistant_returns_400() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
 
     let (status, json) = post_json(
         &mut app,
@@ -11407,7 +11579,7 @@ async fn tokenize_chat_continue_without_assistant_returns_400() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let messages = json!([
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "partial,"}
@@ -11446,7 +11618,7 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn world_size_endpoint_is_dev_mode_only() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     let response = app
         .call(
             Request::builder()
@@ -12576,10 +12748,16 @@ async fn test_app_with_parallel_samples(
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        ),
         engine_task,
         requests_rx,
     )
@@ -12846,7 +13024,7 @@ async fn completions_stream_n_indexes_chunks_and_sends_one_usage_chunk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn n_is_checked_like_python_sampling_params() {
-    let mut app = test_app().await;
+    let (mut app, _engine_task) = test_app().await;
     for (uri, body, expected_message) in [
         (
             "/v1/chat/completions",
@@ -12948,7 +13126,7 @@ async fn n_limit_follows_max_n_sequences_option() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn render_forwards_n_to_the_generate_request_check() {
+async fn render_forwards_n_to_the_generate_request() {
     let mut app = test_render_app();
     let (status, json) = post_json(
         &mut app,
@@ -12960,6 +13138,6 @@ async fn render_forwards_n_to_the_generate_request_check() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["param"], "n");
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["sampling_params"]["n"], 2, "{json}");
 }
