@@ -230,10 +230,21 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        # The plan covers every row count the scheduler can send; b12x rejects
-        # a larger call instead of preparing a new plan on first use.
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        # The plan covers every row count the scheduler can send. A larger
+        # call cannot prepare a new plan on first use without evicting kernels
+        # already captured in CUDA graphs.
+        capacity = layer.b12x_nvfp4_plan_query.num_tokens
+        if x_2d.shape[0] > capacity:
+            raise ValueError(
+                f"b12x NVFP4 W4A16 got {x_2d.shape[0]} rows, above the planned "
+                f"capacity of {capacity} (the scheduler's token budget). Inputs "
+                "outside the language model, such as vision-encoder linears, are "
+                "not supported on this backend: keep them unquantized or use "
+                "another --linear-backend."
+            )
         output = blockscaled.mm(
-            x.reshape(-1, x.shape[-1]).contiguous(),
+            x_2d,
             layer.b12x_nvfp4_packed_weight,
             plan=layer.b12x_nvfp4_plan,
             required_mode="a16",
