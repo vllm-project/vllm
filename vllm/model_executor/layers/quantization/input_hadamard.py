@@ -4,8 +4,8 @@
 format.
 
 Rotating each contiguous block of the input dimension by an orthonormal
-Hadamard matrix ``H`` on both operands leaves the product unchanged,
-``(x H)(w H)^T = x w^T``, while spreading outliers across each block, which
+Hadamard matrix `H` on both operands leaves the product unchanged,
+`(x H)(w H)^T = x w^T`, while spreading outliers across each block, which
 shrinks the error of block-scaled quantization (MXFP4, MXFP8, ...).
 """
 
@@ -23,8 +23,8 @@ from vllm.model_executor.utils import set_weight_attrs
 
 @functools.cache
 def hadamard_matrix(size: int, device: torch.device) -> torch.Tensor:
-    """Orthonormal Sylvester Hadamard matrix, ``scipy.linalg.hadamard(size)``
-    scaled by ``1 / sqrt(size)``, in fp32. ``size`` must be a power of two."""
+    """Orthonormal Sylvester Hadamard matrix, `scipy.linalg.hadamard(size)`
+    scaled by `1 / sqrt(size)`, in fp32. `size` must be a power of two."""
     if size <= 0 or size & (size - 1):
         raise ValueError(f"Hadamard size must be a power of two, got {size}")
     h = torch.ones(1, 1, dtype=torch.float32, device=device)
@@ -34,9 +34,9 @@ def hadamard_matrix(size: int, device: torch.device) -> torch.Tensor:
 
 
 def block_hadamard_rotate(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
-    """Rotate each contiguous ``hadamard.shape[0]``-wide block of the last
-    dimension of ``x`` by ``hadamard``, computed in fp32 and returned in
-    ``x.dtype``."""
+    """Rotate each contiguous `hadamard.shape[0]`-wide block of the last
+    dimension of `x` by `hadamard`, computed in fp32 and returned in
+    `x.dtype`."""
     size = hadamard.shape[0]
     rotated = x.float().unflatten(-1, (-1, size)) @ hadamard
     return rotated.flatten(-2).to(x.dtype)
@@ -48,10 +48,10 @@ class InputHadamardLinearMethod(LinearMethodBase):
     block Hadamard matrix before the wrapped `apply`, in the manner of
     `CompressedTensorsLinearTransformMethod`.
 
-    With ``rotate_weight``, the weight (``[out, in]``) is rotated the same way
+    With `rotate_weight`, the weight (`[out, in]`) is rotated the same way
     right before the wrapped method processes it, for example before online
     quantization. Otherwise the checkpoint stores the weight already rotated,
-    together with an int8 ``input_rotation`` tensor holding the unnormalized
+    together with an int8 `input_rotation` tensor holding the unnormalized
     (+-1) Sylvester matrix, which is checked and then dropped.
     """
 

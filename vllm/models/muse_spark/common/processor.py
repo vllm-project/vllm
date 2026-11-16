@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multimodal preprocessing for MuseSpark1x Omni checkpoints."""
+"""Multimodal preprocessing for Muse Spark Omni checkpoints."""
 
 import itertools
 import math
@@ -48,7 +48,7 @@ DEFAULT_IMAGE_STD: tuple[float, float, float] = (0.5, 0.5, 0.5)
 RGBA_BACKGROUND_COLOR: tuple[int, int, int] = (255, 255, 255)
 
 
-@dataclass
+@dataclass(slots=True)
 class PreprocessConfig:
     patch_height: int = 14
     patch_width: int = 14
@@ -343,7 +343,7 @@ def preprocess_video(
     return video_tensor, per_frame_token_counts, factored_timestamps
 
 
-@dataclass
+@dataclass(slots=True)
 class VideoClipMetadata:
     """Metadata for temporal clips in a preprocessed video."""
 
@@ -446,11 +446,11 @@ VIDEO_PROCESSOR_MAPPING_NAMES.setdefault("muse_spark", "MuseSparkVideoProcessor"
     "muse_spark",
     video_processor="MuseSparkVideoProcessor",
 )
-class MuseSpark1xOmniVideoBackend(VideoBackend):
+class MuseSparkOmniVideoBackend(VideoBackend):
     """Video loader that applies the model's frame sampling at load time.
 
-    The connector's default ``num_frames=32`` is indistinguishable from an
-    explicit request, so ``num_frames`` is always replaced by the model's cap.
+    The connector's default `num_frames=32` is indistinguishable from an
+    explicit request, so `num_frames` is always replaced by the model's cap.
     """
 
     @classmethod
@@ -481,7 +481,7 @@ class MuseSpark1xOmniVideoBackend(VideoBackend):
         return np.linspace(0, total - 1, n, dtype=int).tolist()
 
 
-class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
+class MuseSparkOmniProcessingInfo(BaseProcessingInfo):
     def get_placeholder(self, modality: str) -> str:
         if modality == "image":
             return "<|patch|>"
@@ -568,8 +568,8 @@ class MuseSpark1xOmniProcessingInfo(BaseProcessingInfo):
         )
 
 
-class MuseSpark1xOmniDummyInputsBuilder(
-    BaseDummyInputsBuilder[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniDummyInputsBuilder(
+    BaseDummyInputsBuilder[MuseSparkOmniProcessingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         parts: list[str] = ["Question:"]
@@ -623,8 +623,8 @@ class MuseSpark1xOmniDummyInputsBuilder(
         return data
 
 
-class MuseSpark1xOmniMultiModalProcessor(
-    BaseMultiModalProcessor[MuseSpark1xOmniProcessingInfo]
+class MuseSparkOmniMultiModalProcessor(
+    BaseMultiModalProcessor[MuseSparkOmniProcessingInfo]
 ):
     """Omni processor using native preprocessing instead of an HF processor."""
 

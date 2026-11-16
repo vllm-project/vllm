@@ -22,7 +22,7 @@ DEVICE = torch.device("cuda")
 
 def _local_draft(hist, k, depth):
     """Continuation of the longest, rightmost earlier occurrence of a suffix
-    of ``hist`` within ``hist`` (empty if no token matches)."""
+    of `hist` within `hist` (empty if no token matches)."""
     best_len, best_pos = 0, 0
     for i in range(1, len(hist)):
         m = 0

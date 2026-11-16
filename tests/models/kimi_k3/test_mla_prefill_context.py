@@ -4,7 +4,7 @@
 
 The layer owns its own context loop so it can fuse the per-chunk K/V pack and
 skip re-quantizing an already-quantized query. That is only safe if it feeds the
-prefill backend exactly what ``MLACommonBaseImpl._compute_prefill_context``
+prefill backend exactly what `MLACommonBaseImpl._compute_prefill_context`
 would, chunk for chunk.
 """
 
@@ -44,8 +44,8 @@ _QUERY_LENS = [8, 4, 6, 5]
 class _RecordingPrefillBackend:
     """Records what each chunk is asked to attend over.
 
-    ``honors_out`` mimics the two backend families: one that writes into a
-    caller-provided ``out`` (trtllm_ragged, flashinfer, tokenspeed) and one that
+    `honors_out` mimics the two backend families: one that writes into a
+    caller-provided `out` (trtllm_ragged, flashinfer, tokenspeed) and one that
     always returns its own buffer (flash_attn with a padded V, aiter).
     """
 
@@ -86,7 +86,7 @@ class _RecordingPrefillBackend:
 
 
 class _KVBProj(torch.nn.Module):
-    """Stand-in for the layer's ``kv_b_proj`` (returns an (out, bias) tuple).
+    """Stand-in for the layer's `kv_b_proj` (returns an (out, bias) tuple).
 
     Enforces the same input contract as the real linear methods, because that is
     what decides whether the gathered latent needs a cast:
@@ -94,7 +94,7 @@ class _KVBProj(torch.nn.Module):
     * an fp8 weight consumes the fp8 latent directly and dequantizes internally,
       so it takes fp8 or bf16;
     * a bf16 weight -- what a stock K3 checkpoint carries -- is a plain
-      ``F.linear`` and rejects anything but bf16, exactly as torch does.
+      `F.linear` and rejects anything but bf16, exactly as torch does.
 
     Either weight dtype produces a bf16 output.
     """
@@ -207,11 +207,11 @@ def _build_prefill_metadata(
 def test_fused_context_matches_generic_impl(
     kv_b_proj_quantized: bool, kv_cache_dtype: str, honors_out: bool
 ) -> None:
-    """Cache dtype and ``kv_b_proj`` dtype vary independently.
+    """Cache dtype and `kv_b_proj` dtype vary independently.
 
-    A stock K3 checkpoint pairs a bf16 ``kv_b_proj`` with an fp8 cache, so the
+    A stock K3 checkpoint pairs a bf16 `kv_b_proj` with an fp8 cache, so the
     fused loop cannot assume the gathered latent is already in the dtype
-    ``kv_b_proj`` accepts.
+    `kv_b_proj` accepts.
     """
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -331,7 +331,7 @@ _DCP_TOKENS = 48
 
 
 def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
-    """Drive ``MLACommonImpl._context_parallel_compute_prefill_context`` on one
+    """Drive `MLACommonImpl._context_parallel_compute_prefill_context` on one
     chunk with the collective pieces (gather, allgather, reorg) stubbed out."""
     torch.manual_seed(0)
     device = torch.device("cuda")
