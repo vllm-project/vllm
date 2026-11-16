@@ -163,8 +163,12 @@ def test_collective_rpc_aggregates_pp_leaders_with_other_connectors(use_kv, use_
     executor.futures_queue = deque()
     requests: list[Any] = []
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=requests.append)
+    replying = range(6) if use_kv or use_ec else stage_ranks
     executor.response_mqs = [
-        SimpleNamespace(dequeue=partial(dequeue, rank)) for rank in range(6)
+        SimpleNamespace(
+            dequeue=partial(dequeue, rank), readable=partial(bool, rank in replying)
+        )
+        for rank in range(6)
     ]
     output = executor.collective_rpc(
         "sample_tokens",
@@ -175,6 +179,7 @@ def test_collective_rpc_aggregates_pp_leaders_with_other_connectors(use_kv, use_
         ec_output_aggregator=ECOutputAggregator() if use_ec else None,
     )
     assert received_ranks == []
+    assert output.response_ready()
     output = output.result()
 
     expected_reply_ranks = None if use_kv or use_ec else stage_ranks

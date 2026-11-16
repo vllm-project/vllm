@@ -529,6 +529,7 @@ class MultiprocExecutor(Executor):
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         ranks = range(len(response_mqs)) if reply_ranks is None else reply_ranks
+        reply_mqs = [response_mqs[rank] for rank in ranks]
 
         def get_response():
             # Indexed by rank; ranks that do not reply stay None.
@@ -586,7 +587,7 @@ class MultiprocExecutor(Executor):
             return responses
 
         def wait_for_response(pending: Sized, deadline: float) -> None:
-            for mq in response_mqs:
+            for mq in reply_mqs:
                 if not mq.readable():
                     mq.spin_until_readable(pending, deadline)
                     return
@@ -595,7 +596,7 @@ class MultiprocExecutor(Executor):
             self.futures_queue,
             get_response=get_response,
             aggregate=aggregate,
-            response_ready=lambda: all(mq.readable() for mq in response_mqs),
+            response_ready=lambda: all(mq.readable() for mq in reply_mqs),
             wait_for_response=wait_for_response,
         )
 
