@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExampleTierInfo(ConfigInfo):
     """Config facts of one ExampleSecondaryTierManager.
 

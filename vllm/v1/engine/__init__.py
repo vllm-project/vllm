@@ -90,7 +90,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +106,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -159,6 +159,10 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
 
 
 class EngineCoreRequest(

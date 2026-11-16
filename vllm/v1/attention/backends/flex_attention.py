@@ -42,9 +42,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_attn_type_from_layers
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
     is_quantized_kv_cache,
 )
@@ -856,7 +856,18 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
-        uses_paged_kv = not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec)
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.uses_paged_kv = (
+            get_attn_type_from_layers(vllm_config, layer_names)
+            != AttentionType.ENCODER_ONLY
+        )
+        uses_paged_kv = self.uses_paged_kv
+        sliding_windows = {
+            getattr(layer.impl, "sliding_window", None) for layer in layers.values()
+        }
+        self.sliding_window = (
+            sliding_windows.pop() if len(sliding_windows) == 1 else None
+        )
         self.direct_build: bool = supports_small_blocks
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
@@ -1076,7 +1087,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             copy_to_persistent(self.persistent_rswa_prefix_lens, rswa_prefix_lens)
             rswa_prefix_lens = self.persistent_rswa_prefix_lens
 
-        uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        uses_paged_kv = self.uses_paged_kv
         logical_mask_mod = (
             bidirectional_mask_mod
             if uses_paged_kv and not common_attn_metadata.causal
@@ -1087,7 +1098,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         if self._uses_full_cudagraphs():
             if self.custom_logical_mask_mod is not None:
                 logical_mask_mod = self.custom_logical_mask_mod
-            sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+            sliding_window = self.sliding_window
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
