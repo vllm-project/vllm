@@ -6,7 +6,7 @@ Like `generate_attention_backends.py`, this parses source with `ast` instead of
 importing it, so the docs build does not need CUDA, ROCm, or `torch`.
 
 Only registries written as literals are read: method, shorthand and scheme
-names, the per-platform allow-lists, and the linear kernel priority lists.
+names, the per-platform allow-lists, and the linear kernel registries.
 Whether a kernel runs on a device is decided by code (`is_supported`,
 `can_implement`) and is deliberately not rendered.
 
@@ -88,13 +88,13 @@ CONFIG_DOCS: dict[str, str] = {
     "TorchAOConfig": "torchao.md",
 }
 
-# Headings for the linear kernel registries.
+# Short names for the linear kernel registries.
 LINEAR_FAMILY_TITLES: dict[str, str] = {
     "_POSSIBLE_FP8_KERNELS": "FP8",
-    "_POSSIBLE_FP8_BLOCK_KERNELS": "FP8, block-scaled",
-    "_POSSIBLE_WFP8A16_KERNELS": "FP8 weights, 16-bit activations",
+    "_POSSIBLE_FP8_BLOCK_KERNELS": "FP8 block",
+    "_POSSIBLE_WFP8A16_KERNELS": "FP8 W8A16",
     "_POSSIBLE_INT8_KERNELS": "INT8",
-    "_POSSIBLE_KERNELS": "Integer weights",
+    "_POSSIBLE_KERNELS": "WNA16",
     "_POSSIBLE_MXFP8_KERNELS": "MXFP8",
     "_POSSIBLE_MXFP6_KERNELS": "MXFP6",
     "_POSSIBLE_MXFP4_KERNELS": "MXFP4",
@@ -444,12 +444,15 @@ def render_schemes(schemes: list[Scheme]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_platform_allow_lists() -> dict[str, set[str]]:
-    """Platforms that restrict `--quantization`, with the values they accept.
+def parse_platform_allow_lists() -> dict[str, set[str] | None]:
+    """The `--quantization` values each platform accepts.
 
-    A platform without a `supported_quantization` list accepts every value.
+    None is a platform without a `supported_quantization` list, which accepts
+    every value.
     """
-    allow_lists: dict[str, set[str]] = {}
+    interface = PLATFORMS_DIR / "interface.py"
+    allow_lists: dict[str, set[str] | None] = {}
+    found_default = False
     for path in sorted(PLATFORMS_DIR.glob("*.py")):
         source = Source(path)
         for cls in source.tree.body:
@@ -457,35 +460,35 @@ def parse_platform_allow_lists() -> dict[str, set[str]]:
                 continue
             assigned = _assignments(cls.body)
             allowed = assigned.get("supported_quantization")
-            if allowed is None or (isinstance(allowed, ast.List) and not allowed.elts):
+            if path == interface:
+                found_default |= allowed is not None
+                continue
+            if isinstance(allowed, ast.List) and not allowed.elts:
+                allowed = None
+            if allowed is None and "_enum" not in assigned:
                 continue
             name = cls.name.removesuffix("Platform")
             if "_enum" in assigned:
                 enum = _short(assigned["_enum"])
                 name = PLATFORM_NAMES.get(enum, enum)
-            allow_lists[name] = set(
-                source.strings(f"{cls.name}.supported_quantization", allowed)
+            allow_lists[name] = (
+                None
+                if allowed is None
+                else set(source.strings(f"{cls.name}.supported_quantization", allowed))
             )
-    interface = Source(PLATFORMS_DIR / "interface.py")
-    if not any(
-        isinstance(cls, ast.ClassDef)
-        and "supported_quantization" in _assignments(cls.body)
-        for cls in interface.tree.body
-    ):
-        raise interface.error("Platform.supported_quantization not found")
-    return allow_lists
+    if not found_default:
+        raise Source(interface).error("Platform.supported_quantization not found")
+    return dict(sorted(allow_lists.items(), key=lambda i: _platform_sort_key(i[0])))
 
 
-def _refused_on(names: list[str], allow_lists: dict[str, set[str]]) -> str:
-    """Platforms that refuse `names`, naming the aliases when only some are."""
-    cells = []
-    for platform in sorted(allow_lists, key=_platform_sort_key):
-        refused = [name for name in names if name not in allow_lists[platform]]
-        if refused and len(refused) < len(names):
-            cells.append(f"{platform} ({', '.join(_code(name) for name in refused)})")
-        elif refused:
-            cells.append(platform)
-    return ", ".join(cells) or "–"
+def _accepted_on(names: list[str], allow_lists: dict[str, set[str] | None]) -> str:
+    """Platforms that accept at least one of `names`."""
+    platforms = [
+        platform
+        for platform, allowed in allow_lists.items()
+        if allowed is None or allowed.intersection(names)
+    ]
+    return ", ".join(platforms) or "–"
 
 
 @dataclass(frozen=True)
@@ -554,7 +557,7 @@ def parse_shorthands(keys: QuantKeys) -> list[Shorthand]:
 def render_shorthands(
     shorthands: list[Shorthand],
     schemes: list[Scheme],
-    allow_lists: dict[str, set[str]],
+    allow_lists: dict[str, set[str] | None],
 ) -> str:
     weight_names: dict[QuantKeySpec, str] = {}
     for scheme in schemes:
@@ -580,11 +583,11 @@ def render_shorthands(
             _code(shorthand.name),
             cell(shorthand.linear),
             cell(shorthand.moe),
-            _refused_on([shorthand.name], allow_lists),
+            _accepted_on([shorthand.name], allow_lists),
         ]
         for shorthand in shorthands
     ]
-    table = _table(["Name", "Linear weights", "MoE weights", "Refused on"], rows)
+    table = _table(["Name", "Linear weights", "MoE weights", "Platforms"], rows)
     deferred = [_code(s.name) for s in shorthands if s.deferred]
     if not deferred:
         return table
@@ -657,7 +660,7 @@ def parse_methods() -> tuple[list[Method], set[str]]:
 
 
 def render_methods(
-    methods: list[Method], deprecated: set[str], allow_lists: dict[str, set[str]]
+    methods: list[Method], deprecated: set[str], allow_lists: dict[str, set[str] | None]
 ) -> str:
     rows = []
     for method in methods:
@@ -670,11 +673,11 @@ def render_methods(
             [
                 ", ".join(names),
                 _code(method.config),
-                _refused_on(method.names, allow_lists),
+                _accepted_on(method.names, allow_lists),
                 f"[Guide]({page})" if page else "–",
             ]
         )
-    return _table(["Names", "Implementation", "Refused on", "Guide"], rows)
+    return _table(["Names", "Implementation", "Platforms", "Guide"], rows)
 
 
 # ---------------------------------------------------------------------------
@@ -800,18 +803,6 @@ def parse_linear_families() -> tuple[list[LinearFamily], dict[str, list[str]]]:
     return families, backends
 
 
-def render_linear_families(families: list[LinearFamily]) -> str:
-    rows = [
-        [
-            family.title,
-            ", ".join(_code(key) for key in family.quant_keys) or "–",
-            ", ".join(family.kernels),
-        ]
-        for family in families
-    ]
-    return _table(["Layer type", "`linear_backend_per_quant` key", "Platforms"], rows)
-
-
 def render_linear_backends(
     families: list[LinearFamily], backends: dict[str, list[str]]
 ) -> str:
@@ -834,36 +825,25 @@ def render_linear_backends(
         rows.append(
             [
                 _code(backend),
-                "; ".join(family.title for family in covered) or "–",
                 ", ".join(platforms) or "–",
+                ", ".join(family.title for family in covered) or "–",
             ]
         )
-    return _table(["Backend", "Has a kernel for", "Platforms"], rows)
+    return _table(["Backend", "Platforms", "Quantization types"], rows)
 
 
-def render_linear_priority(
-    families: list[LinearFamily], backends: dict[str, list[str]]
-) -> str:
-    backend_of: dict[str, list[str]] = {}
-    for backend, kernels in backends.items():
-        for kernel in kernels:
-            backend_of.setdefault(kernel, []).append(backend)
-
-    sections = []
-    for family in families:
-        rows = [
-            [
-                platform if index == 1 else "",
-                str(index),
-                _code(kernel),
-                ", ".join(_code(b) for b in backend_of.get(kernel, [])) or "–",
-            ]
-            for platform, kernels in family.kernels.items()
-            for index, kernel in enumerate(kernels, start=1)
+def render_linear_families(families: list[LinearFamily]) -> str:
+    rows = [
+        [
+            family.title,
+            ", ".join(_code(key) for key in family.quant_keys) or "–",
+            ", ".join(family.kernels),
         ]
-        table = _table(["Platform", "Priority", "Kernel", "Backend"], rows)
-        sections.append(f"### {family.title}\n\n{table}")
-    return "\n\n".join(sections)
+        for family in families
+    ]
+    return _table(
+        ["Quantization type", "`linear_backend_per_quant` key", "Platforms"], rows
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -888,9 +868,8 @@ def build_blocks() -> dict[str, dict[str, str]]:
             "quantization-schemes": render_schemes(schemes),
         },
         KERNELS_PAGE: {
-            "linear-families": render_linear_families(families),
             "linear-backends": render_linear_backends(families, backends),
-            "linear-kernel-priority": render_linear_priority(families, backends),
+            "linear-families": render_linear_families(families),
         },
     }
 

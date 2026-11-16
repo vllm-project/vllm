@@ -23,7 +23,7 @@ td:first-child code {
 | **Method** | The implementation that loads a quantized model. Most methods read one checkpoint format and are named after the toolkit that writes it, e.g. `compressed-tensors`, `modelopt`, `quark`. | `quant_method` in the model's `config.json`, or `--quantization` |
 | **Online quantization** | Quantizing full-precision weights while the model loads. | `--quantization <shorthand>`, `--quantization-config` |
 | **Scheme** | The numeric format of one tensor: its data format, its scale format, and what shares a scale. | The `weight` and `activation` fields of `--quantization-config` |
-| **Kernel** | The code that runs a layer for a given weight and activation scheme. | `--linear-backend`, `--moe-backend`; see [Kernel Selection](kernels.md) |
+| **Kernel** | The code that runs a layer for a given weight and activation scheme. | `--linear-backend`, `--moe-backend`; see [Kernel Backends](kernels.md) |
 
 A method names how a model is loaded; a scheme names the format of one tensor.
 One checkpoint can hold layers with different schemes, and kernels are selected
@@ -45,12 +45,10 @@ used only when it is passed explicitly.
 --8<-- "gen:quantization-methods"
 
 - Names on one row are aliases of one implementation.
-- **Refused on** lists the platforms whose allow-list omits the name; vLLM
-  exits at startup when the method it resolves to is refused. CUDA and CPU have
-  no allow-list. A name in parentheses is the only alias on the row that is
-  omitted, and an alias can resolve to another name on its row. An accepted
-  method can still have no kernel for a given device; see
-  [Kernel Selection](kernels.md).
+- **Platforms** lists where vLLM accepts the name at startup. ROCm and XPU
+  accept only the names on their allow-list; CUDA and CPU accept every name. An
+  accepted method can still have no kernel for a given device; see
+  [Kernel Backends](kernels.md).
 - A deprecated method also needs `--allow-deprecated-quantization`.
 
 ## Online shorthands
@@ -110,7 +108,7 @@ NVFP4.
 
 ## See also
 
-- [Kernel Selection](kernels.md): which kernel runs a layer, and how to pin one.
+- [Kernel Backends](kernels.md): which kernel runs a layer, and how to pin one.
 - [Online Quantization](online.md): the `--quantization-config` schema,
   per-layer targeting, and re-quantizing a quantized checkpoint.
 - [Quantized KV Cache](quantized_kvcache.md): a separate setting from weight
