@@ -3,6 +3,7 @@
 
 from collections.abc import Sequence
 from concurrent.futures import Executor
+from dataclasses import replace
 from typing import Any, Final, cast
 
 from vllm import (
@@ -214,36 +215,55 @@ class PoolingIOProcessor:
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        # `add_special_tokens` is tri-state on the offline context. When
-        # unset (`None`), keep the per-path default that mirrors the online
-        # request mixins:
-        #   - completion: `True`  (`CompletionRequestMixin.add_special_tokens`)
-        #   - chat:       `False` (`ChatRequestOptionsMixin.add_special_tokens`)
-        # An explicit `True` / `False` overrides both paths.
+        # `add_special_tokens` is tri-state on the offline context:
+        #   - `None`: keep the per-path default. For completion this means the
+        #     renderer's `default_cmpl_tok_params` is used as-is, which for some
+        #     multimodal models (Paligemma, Gemma4-MM, Ovis2.5, LFM2-VL, ...) is
+        #     `add_special_tokens=False` to avoid a duplicate BOS. For chat this
+        #     means `False`, mirroring the online `ChatRequestOptionsMixin`.
+        #   - explicit `True` / `False`: overrides both paths.
         # User-provided `tokenization_kwargs` still wins over the default.
-        def _build_tok_params(add_special_tokens: bool) -> TokenizeParams:
-            tok_kwargs: dict[str, Any] = {
-                "add_special_tokens": add_special_tokens,
-            }
+        def _build_tok_params(add_special_tokens: bool | None) -> TokenizeParams:
+            tok_kwargs: dict[str, Any] = {}
+            if add_special_tokens is not None:
+                tok_kwargs["add_special_tokens"] = add_special_tokens
             tok_kwargs.update(ctx.tokenization_kwargs or {})
+            if not tok_kwargs:
+                return self.renderer.default_cmpl_tok_params
             return self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
 
         if ctx.add_special_tokens is not None:
             cmpl_add_special_tokens = ctx.add_special_tokens
             chat_add_special_tokens = ctx.add_special_tokens
         else:
-            cmpl_add_special_tokens = True
+            # completion: leave the renderer/model default untouched so that
+            # multimodal models with `add_special_tokens=False` keep it.
+            cmpl_add_special_tokens = None
+            # chat: mirror the online default (`False`).
             chat_add_special_tokens = False
 
         cmpl_tok_params = _build_tok_params(cmpl_add_special_tokens)
         chat_tok_params = _build_tok_params(chat_add_special_tokens)
 
-        # Validate before building `ChatParams`
-        self._validate_chat_template(
-            request_chat_template=ctx.chat_template,
-            chat_template_kwargs=ctx.chat_template_kwargs,
-            trust_request_chat_template=self.trust_request_chat_template,
+        extra_kwargs: dict[str, Any] = {}
+        if isinstance(ctx.pooling_params, PoolingParams):
+            extra_kwargs = dict(ctx.pooling_params.extra_kwargs or {})
+
+        merged_chat_template_kwargs = merge_kwargs(
+            extra_kwargs.get("chat_template_kwargs"),
+            ctx.chat_template_kwargs,
         )
+
+        prompt_extras = dict(ctx.build_prompt_extras() or {})
+        for key in ("mm_processor_kwargs", "cache_salt"):
+            if key not in prompt_extras and extra_kwargs.get(key) is not None:
+                prompt_extras[key] = extra_kwargs[key]
+        prompt_extras = prompt_extras or None
+
+        # Rebuild `chat_params` from a context whose `chat_template_kwargs`
+        # are the merged result. `dataclasses.replace` keeps this local to the
+        # current call so the caller's context is not mutated.
+        ctx = replace(ctx, chat_template_kwargs=merged_chat_template_kwargs)
 
         # Mirror `get_request_factory_online`: apply the same template
         # defaults so that chat rendering is byte-identical between
@@ -269,8 +289,6 @@ class PoolingIOProcessor:
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
-
-        prompt_extras = ctx.build_prompt_extras()
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):

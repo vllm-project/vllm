@@ -27,7 +27,6 @@ def llm(vllm_runner):
         limit_mm_per_prompt={"image": 1},
         enforce_eager=True,
         seed=0,
-        trust_request_chat_template=True,
     ) as runner:
         # pytest caches yielded fixtures until after teardown, so use a proxy to
         # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.

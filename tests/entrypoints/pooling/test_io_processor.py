@@ -42,7 +42,6 @@ def _make_offline_processor(monkeypatch: pytest.MonkeyPatch) -> PoolingIOProcess
     proc.renderer.tokenizer = MagicMock()
     proc.chat_template = "engine_jinja"
     cast(Any, proc).chat_template_content_format = "string"
-    proc.trust_request_chat_template = True
     proc.template_kwargs = None
     proc.tool_dicts = None
 
@@ -450,7 +449,6 @@ class TestOfflineFactoryDefaults:
         """`_validate_chat_template` must reject untrusted templates before
         the offline factory builds `ChatParams` for them."""
         proc = _make_offline_processor(monkeypatch)
-        proc.trust_request_chat_template = False
 
         ctx = _make_encode_ctx(chat_template="user_jinja")
         build_calls: list[str] = []
@@ -478,7 +476,6 @@ class TestCrossEncoderChatTemplateValidation:
         """`LLM.score(..., chat_template=...)` with the trust flag off must be
         rejected before any rendering happens."""
         proc = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-        proc.trust_request_chat_template = False
 
         ctx = OfflineScoringInputsContext(
             pooling_task="classify",

@@ -354,11 +354,13 @@ def is_conversations(prompt_or_conversations: PoolingInput) -> TypeGuard[ChatTyp
 def input_to_seq(
     input_or_inputs: PoolingInput | Sequence[PoolingInput],
 ) -> Sequence[PoolingInput]:
-    # Non-list input is a single prompt (str / prompt dict / embeds prompt).
-    if not isinstance(input_or_inputs, (list, tuple)):
+    # Treat non-Sequence, str, bytes, and dict as a single prompt.
+    if not isinstance(input_or_inputs, Sequence) or isinstance(
+        input_or_inputs, (str, bytes, dict)
+    ):
         return [cast(PoolingInput, input_or_inputs)]
 
-    # Empty list: nothing to normalize.
+    # Empty sequence: nothing to normalize.
     if len(input_or_inputs) == 0:
         return input_or_inputs  # type: ignore[return-value]
 
@@ -366,9 +368,9 @@ def input_to_seq(
     if all(isinstance(x, int) for x in input_or_inputs):
         return [input_or_inputs]  # type: ignore[list-item]
 
-    # list of messages is a single conversation, not a batch of inputs.
+    # A sequence of chat messages is a single conversation, not a batch of inputs.
     if all(_is_chat_message(x) for x in input_or_inputs):
         return [input_or_inputs]  # type: ignore[list-item]
 
-    # Otherwise it is already a batch of prompts / conversations.
+    # Any other Sequence is already a batch of prompts / conversations.
     return input_or_inputs  # type: ignore[return-value]

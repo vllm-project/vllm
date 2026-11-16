@@ -85,7 +85,6 @@ def late_chunk_processor():
     processor.template_kwargs = None
     processor.tool_dicts = None
     cast(Any, processor).chat_template_content_format = "auto"
-    processor.trust_request_chat_template = True
     return processor
 
 

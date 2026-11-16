@@ -35,7 +35,6 @@ def offline_processor_and_context():
     proc.template_kwargs = None
     proc.tool_dicts = None
     cast(Any, proc).chat_template_content_format = "auto"
-    proc.trust_request_chat_template = True
     ctx = OfflineScoringInputsContext(
         pooling_task="token_embed",
         scoring_data=ScoringData(

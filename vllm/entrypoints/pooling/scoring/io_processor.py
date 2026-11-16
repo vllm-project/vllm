@@ -575,12 +575,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
-        self._validate_chat_template(
-            request_chat_template=ctx.chat_template,
-            chat_template_kwargs=ctx.chat_template_kwargs,
-            trust_request_chat_template=self.trust_request_chat_template,
-        )
-
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
         num_requests = len(data_2)
@@ -604,9 +598,22 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_kwargs.update(ctx.tokenization_kwargs or {})
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
 
-        # Pack `mm_processor_kwargs` / `cache_salt` into the renderer-side
-        # `prompt_extras`, mirroring the encode path.
-        prompt_extras = ctx.build_prompt_extras()
+        # Merge `PoolingParams.extra_kwargs` so offline `LLM.score` callers
+        # that pass `chat_template_kwargs`, `mm_processor_kwargs` or
+        # `cache_salt` via `PoolingParams(extra_kwargs=...)` keep working.
+        # Explicit context values win over `extra_kwargs`.
+        extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
+
+        prompt_extras = dict(ctx.build_prompt_extras() or {})
+        for key in ("mm_processor_kwargs", "cache_salt"):
+            if key not in prompt_extras and extra_kwargs.get(key) is not None:
+                prompt_extras[key] = extra_kwargs[key]
+        prompt_extras = prompt_extras or None
+
+        merged_chat_template_kwargs = merge_kwargs(
+            extra_kwargs.get("chat_template_kwargs"),
+            ctx.chat_template_kwargs,
+        )
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -621,7 +628,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     data_1=data_1[i],
                     data_2=data_2[i],
                     chat_template=chat_template,
-                    chat_template_kwargs=ctx.chat_template_kwargs,
+                    chat_template_kwargs=merged_chat_template_kwargs,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -1003,9 +1010,16 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
 
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
-        chat_template_kwargs = ctx.chat_template_kwargs
+
+        extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
+        merged_chat_template_kwargs = merge_kwargs(
+            extra_kwargs.get("chat_template_kwargs"),
+            ctx.chat_template_kwargs,
+        )
         instruction = (
-            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+            merged_chat_template_kwargs.get("instruction")
+            if merged_chat_template_kwargs
+            else None
         )
 
         if len(queries) == 1:
@@ -1022,10 +1036,17 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        return PoolingIOProcessor.get_request_factory_offline(
-            self,
-            ctx.to_encode_context(inputs_seq=prompts),
-        )
+        encode_ctx = ctx.to_encode_context(inputs_seq=prompts)
+        encode_ctx.chat_template_kwargs = merged_chat_template_kwargs
+        if (
+            encode_ctx.mm_processor_kwargs is None
+            and extra_kwargs.get("mm_processor_kwargs") is not None
+        ):
+            encode_ctx.mm_processor_kwargs = extra_kwargs["mm_processor_kwargs"]
+        if encode_ctx.cache_salt is None and extra_kwargs.get("cache_salt") is not None:
+            encode_ctx.cache_salt = extra_kwargs["cache_salt"]
+
+        return PoolingIOProcessor.get_request_factory_offline(self, encode_ctx)
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         final_res_batch: list[PoolingRequestOutput] = []
