@@ -25,6 +25,10 @@ VLLM_RELOAD_MODE=direct vllm serve <model>
 No layer is buffered and no tensor changes address, so captured CUDA graphs
 stay valid. Each update must send every weight.
 
+The [sharded RDT](weight_transfer/sharded_rdt.md) backend requires direct
+reload: it writes each worker's slices straight into the tensors the load plan
+names, and refuses to start under `VLLM_RELOAD_MODE=layerwise`.
+
 ## Online Quantization
 
 [Online quantization](../features/quantization/online.md) works in direct mode.
@@ -60,7 +64,7 @@ Direct reload raises an error for the following; use
 - gpt-oss models with online quantization.
 - `fp8_per_block` linear layers whose tensor-parallel shards are not
   multiples of 128.
-- The NCCL weight transfer load plan (`use_load_plan`) with online
-  quantization.
+- The NCCL weight transfer load plan (`use_load_plan`) and the `sharded_rdt`
+  weight transfer backend with online quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading,
-  `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
+  and `draft_lm_head_quantization`.

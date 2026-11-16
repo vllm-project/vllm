@@ -1284,7 +1284,14 @@ class VllmConfig:
         """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
         # loaders into every process that builds a config
+        transfer = self.weight_transfer_config
         if envs.VLLM_RELOAD_MODE != "direct":
+            if transfer is not None and transfer.backend == "sharded_rdt":
+                # it writes through the load plan, which needs direct reload
+                raise ValueError(
+                    "The sharded_rdt weight-transfer backend requires "
+                    "VLLM_RELOAD_MODE=direct."
+                )
             return
         offload = self.offload_config
         if (
@@ -1310,13 +1317,6 @@ class VllmConfig:
             # lm_head's storage: post-load processing would write it there
             raise ValueError(
                 "Direct reload does not support draft_lm_head_quantization."
-            )
-        transfer = self.weight_transfer_config
-        if transfer is not None and transfer.backend == "sharded_rdt":
-            # its replay plan is baked by a layerwise (meta) dry run
-            raise ValueError(
-                "Direct reload does not support the sharded_rdt weight-transfer "
-                "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
             )
 
     def _verify_kv_transfer_compat(self) -> None:
