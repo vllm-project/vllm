@@ -83,6 +83,7 @@ async def _align_prompts_to_server_tokenizer(
     model_id: str,
     input_requests: list[SampleRequest],
     ssl_context: ssl.SSLContext | bool | None = None,
+    headers: dict | None = None,
 ) -> list[SampleRequest]:
     """Re-align prompts if local/server tokenizers disagree."""
     if not input_requests or not isinstance(input_requests[0].prompt, str):
@@ -92,7 +93,7 @@ async def _align_prompts_to_server_tokenizer(
     detok_url = f"{base_url}/detokenize"
     connector = aiohttp.TCPConnector(ssl=ssl_context)
 
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         sem = asyncio.Semaphore(64)
 
         async def _tokenize(prompt: str) -> list[int]:
@@ -2234,7 +2235,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.dataset_name in ("random", "prefix_repetition"):
         input_requests = await _align_prompts_to_server_tokenizer(
-            base_url, model_id, input_requests, ssl_context
+            base_url, model_id, input_requests, ssl_context, headers
         )
 
     goodput_config_dict = check_goodput_args(args)

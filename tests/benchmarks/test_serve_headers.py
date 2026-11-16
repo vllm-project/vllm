@@ -129,3 +129,30 @@ def test_benchmark_preserves_decode_metrics_with_headers(
     assert result["spec_decode_accepted_tokens"] == 1
     assert result["spec_decode_acceptance_rate"] == 50.0
     assert result["diffusion_committed_tokens"] == 2
+
+
+def test_tokenizer_alignment_sends_headers() -> None:
+    """random/prefix_repetition prompt alignment must pass --header too."""
+    from vllm.benchmarks.datasets import SampleRequest
+    from vllm.benchmarks.serve import _align_prompts_to_server_tokenizer
+
+    headers = {"X-Benchmark-Tenant": "test-tenant"}
+    calls: list[str] = []
+
+    async def tokenize(request: web.Request) -> web.Response:
+        if request.headers.get("X-Benchmark-Tenant") != "test-tenant":
+            raise web.HTTPUnauthorized()
+        calls.append(request.path)
+        return web.json_response({"tokens": [1, 2, 3]})
+
+    async def run() -> list[SampleRequest]:
+        app = web.Application()
+        app.router.add_post("/tokenize", tokenize)
+        async with TestServer(app) as server:
+            base_url = str(server.make_url("")).rstrip("/")
+            reqs = [SampleRequest(prompt="hello", prompt_len=3)]
+            return await _align_prompts_to_server_tokenizer(
+                base_url, "test-model", reqs, headers=headers
+            )
+
+    assert asyncio.run(run())[0].prompt == "hello"
