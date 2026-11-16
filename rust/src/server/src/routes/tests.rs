@@ -1790,13 +1790,32 @@ async fn test_app_with_chat_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_ready_and_engine_request_check(
+        default_ready_response(),
+        build_chat,
+        check_request,
+    )
+    .await
+}
+
+/// Like [`test_app_with_chat_and_engine_request_check`], with a custom engine
+/// ready response.
+async fn test_app_with_ready_and_engine_request_check<F>(
+    ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
+    build_chat: impl FnOnce(EngineCoreLlm) -> ChatLlm,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready_response,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -5564,6 +5583,60 @@ async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
         json["error"]["message"],
         "At most 0 image(s) may be provided in one prompt."
     );
+}
+
+/// When the engine does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), a request asking for them, directly or through
+/// completions `echo` with `logprobs`, is a 400 naming the parameter; other
+/// requests still run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
+    let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
+        vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
+        },
+        |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
+        |request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            assert_eq!(params.prompt_logprobs, None);
+        },
+    )
+    .await;
+
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let chat = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 2,
+    });
+    let mut chat_with_prompt_logprobs = chat.clone();
+    chat_with_prompt_logprobs["prompt_logprobs"] = json!(1);
+    let completions_echo = json!({
+        "model": model,
+        "prompt": "hi",
+        "max_tokens": 2,
+        "echo": true,
+        "logprobs": 1,
+    });
+    for (uri, body) in [
+        ("/v1/chat/completions", chat_with_prompt_logprobs),
+        ("/v1/completions", completions_echo),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+        assert_eq!(json["error"]["param"], "prompt_logprobs", "{uri} {json}");
+        let message = json["error"]["message"].as_str().expect("error message");
+        assert!(
+            message.contains("--kv-sharing-fast-prefill"),
+            "{uri} {json}"
+        );
+    }
+
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", chat).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
