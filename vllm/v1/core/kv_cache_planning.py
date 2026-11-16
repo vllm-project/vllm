@@ -69,10 +69,11 @@ def _mm_profiling_hint(vllm_config: VllmConfig) -> str:
     ):
         return ""
     return (
-        "Memory profiling reserved activation memory for the multimodal "
-        "encoder at the maximum input size; reduce it with size hints in "
-        "`limit_mm_per_prompt`, `mm_processor_kwargs` (e.g. `max_pixels`) "
-        "or `skip_mm_profiling`. "
+        "Memory profiling may have reserved activation memory for the "
+        "multimodal encoder at its maximum input size. Bounding input sizes "
+        "through `mm_processor_kwargs` reduces it; size hints in "
+        "`limit_mm_per_prompt` or `skip_mm_profiling` also do, but larger "
+        "inputs can then run out of memory at runtime. "
     )
 
 
