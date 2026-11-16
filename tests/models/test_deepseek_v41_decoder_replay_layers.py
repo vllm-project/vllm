@@ -231,6 +231,7 @@ def _graph_config(monkeypatch, moe_backend="auto"):
     cfg.cache_config.use_kda_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
     cfg.model_config.dtype = torch.float32
+    cfg.model_config.max_model_len = 64
     cfg.kernel_config.moe_backend = moe_backend
     return cfg
 
