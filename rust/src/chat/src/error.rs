@@ -54,10 +54,8 @@ pub enum Error {
     InvalidPreprocessedMultimodal { message: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
-    // Not a `#[source]`: a 400 body shows only `Display`, so it carries the
-    // whole chain; reqwest keeps the cause (a refused connection) in its source.
-    #[error("{}", .0.as_report())]
-    Media(llm_multimodal::MediaConnectorError),
+    #[error(transparent)]
+    Media(#[from] llm_multimodal::MediaConnectorError),
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,
@@ -178,12 +176,6 @@ impl Error {
     /// succeed.
     pub fn is_unavailable(&self) -> bool {
         matches!(self, Self::Text(error) if error.is_unavailable())
-    }
-}
-
-impl From<llm_multimodal::MediaConnectorError> for Error {
-    fn from(error: llm_multimodal::MediaConnectorError) -> Self {
-        Self::Media(error)
     }
 }
 
