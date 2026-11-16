@@ -830,6 +830,9 @@ steps:
   - vllm/version.py
   - cmake/utils.cmake
   - cmake/hipify.py
+  - cmake/external_projects/deepgemm.cmake
+  - cmake/external_projects/deepselect.cmake
+  - cmake/external_projects/flashkda.cmake
   - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
@@ -890,6 +893,8 @@ steps:
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
   - pytest -v -s tools/test_dependency_pins.py
+  - uv pip install cmake
+  - uv run --active --no-project --no-sync pytest -v -s --noconftest test_cmake_utils.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
