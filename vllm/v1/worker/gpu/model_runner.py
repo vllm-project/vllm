@@ -1808,12 +1808,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _compute_logits(
         self, sample_hidden_states: torch.Tensor, input_batch: InputBatch
     ) -> tuple[torch.Tensor, bool]:
-        """The target logits of ``sample_hidden_states``, and whether their
+        """The target logits of `sample_hidden_states`, and whether their
         consumer (the rejection sampler on a step with drafts, the sampler
         otherwise) may process them in place.
 
-        For a model that opts in (``fused_logits_gather``), they are computed
-        under a forward context whose ``logits_gather_dtype`` has
+        For a model that opts in (`fused_logits_gather`), they are computed
+        under a forward context whose `logits_gather_dtype` has
         `LogitsProcessor` gather them in one fused pass: in FP32 (exact) when
         the consumer wants FP32 (see `Sampler.wants_fp32_logits`), which then
         skips its copy, else in the head's dtype. Other models compute them

@@ -84,7 +84,7 @@ def all_gather_vocab_parallel_logits(
     logits: torch.Tensor, vocab_size: int, out_dtype: torch.dtype
 ) -> torch.Tensor:
     """TP all-gather of vocab-parallel logits [num_rows, shard_size] into a new
-    contiguous [num_rows, vocab_size] tensor of ``out_dtype``.
+    contiguous [num_rows, vocab_size] tensor of `out_dtype`.
 
     Gathers along rows (the rank-major layout NCCL produces, no copy) and
     writes the vocab-major result, the padding cut off and the dtype cast in
@@ -186,9 +186,9 @@ class LogitsProcessor(PluggableLayer):
         return logits
 
     def _fused_gather_dtype(self, logits: torch.Tensor) -> torch.dtype | None:
-        """Output dtype of the fused vocab-parallel gather of ``logits``, or
+        """Output dtype of the fused vocab-parallel gather of `logits`, or
         None for the unfused gather: the forward context's
-        ``logits_gather_dtype`` if set (see `ForwardContext`)."""
+        `logits_gather_dtype` if set (see `ForwardContext`)."""
         requested = (
             get_forward_context().logits_gather_dtype
             if is_forward_context_available()
