@@ -452,6 +452,49 @@ def test_mla_without_metadata_reserves_only_before_the_workspace_locks(
     assert torch.equal(output, torch.zeros(3, 8))
 
 
+@pytest.mark.parametrize("locked", [False, True])
+def test_rocm_sparse_indexer_without_metadata_reserves_only_before_the_workspace_locks(
+    monkeypatch, locked
+):
+    """The ROCm sparse attention indexer (DSA models such as GLM-5.3) also
+    takes missing attention metadata for the profile run and reserves k and
+    decode-logits buffers that scale with max_model_len. A microbatch wholly in
+    the DP padding must not ask its locked workspace to grow."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse
+
+    manager = Mock()
+    manager.is_locked.return_value = locked
+    monkeypatch.setattr(
+        sparse, "is_workspace_manager_initialized", lambda: True, raising=False
+    )
+    monkeypatch.setattr(sparse, "current_workspace_manager", lambda: manager)
+    monkeypatch.setattr(sparse, "_decode_logits_workspace", Mock())
+    monkeypatch.setattr(
+        sparse, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None)
+    )
+    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
+    topk_indices_buffer = torch.full((4, 8), -1, dtype=torch.int32)
+
+    output = sparse.rocm_aiter_sparse_attn_indexer(
+        hidden_states=torch.zeros(4, 16),
+        k_cache_prefix="model.layers.0.self_attn.indexer.k_cache",
+        kv_cache=torch.zeros(1),
+        q_fp8=torch.zeros(4, 2, 8),
+        k=None,
+        weights=torch.zeros(4, 2),
+        quant_block_size=128,
+        scale_fmt="ue8m0",
+        topk_tokens=8,
+        head_dim=8,
+        max_model_len=1024,
+        total_seq_lens=4,
+        topk_indices_buffer=topk_indices_buffer,
+    )
+
+    assert output is topk_indices_buffer
+    assert manager.get_simultaneous.called is not locked
+
+
 def test_microbatching_off_when_a_rank_does_not_allow_it():
     assert _sync_dp([256, 256], allow_ubatching=False)[0].num_ubatches == 1
 
