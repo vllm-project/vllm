@@ -32,6 +32,17 @@ pub async fn authenticate_api_key(
         return next.run(req).await;
     }
 
+    // Accept the Anthropic-style `x-api-key` header as an alternative to Bearer.
+    if let Some(key) = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        if verify_raw_key(key, state.api_key_hashes()) {
+            return next.run(req).await;
+        }
+    }
+
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": "Unauthorized" })),
@@ -65,6 +76,14 @@ fn verify_token(authorization: Option<&HeaderValue>, api_key_hashes: &[ApiKeyHas
     token_match
 }
 
+/// Verify a bare key value (e.g. the Anthropic-style `x-api-key` header).
+fn verify_raw_key(key: &str, api_key_hashes: &[ApiKeyHash]) -> bool {
+    let key_hash = hash_api_key(key);
+    api_key_hashes
+        .iter()
+        .any(|api_key_hash| constant_time_eq(&key_hash, api_key_hash))
+}
+
 fn constant_time_eq(left: &ApiKeyHash, right: &ApiKeyHash) -> bool {
     use subtle::ConstantTimeEq;
 
@@ -75,6 +94,15 @@ fn constant_time_eq(left: &ApiKeyHash, right: &ApiKeyHash) -> bool {
 mod tests {
     use super::constant_time_eq;
     use crate::state::hash_api_key;
+
+    #[test]
+    fn verify_raw_key_matches_configured_key() {
+        let hashes = [hash_api_key("secret")];
+        assert!(super::verify_raw_key("secret", &hashes));
+        assert!(!super::verify_raw_key("secrex", &hashes));
+        assert!(!super::verify_raw_key("", &hashes));
+        assert!(!super::verify_raw_key("secret-more", &hashes));
+    }
 
     #[test]
     fn constant_time_eq_checks_sha256_digests() {
