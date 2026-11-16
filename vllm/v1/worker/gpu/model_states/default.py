@@ -179,10 +179,10 @@ class DefaultModelState(ModelState):
             return {}  # Common case (1D positions).
 
         self.rope_state.prepare_positions(
-            input_batch.idx_mapping,
+            input_batch.idx_mapping[: input_batch.num_reqs],
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
-            req_states.num_computed_tokens.gpu,
+            input_batch.positions,
         )
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}

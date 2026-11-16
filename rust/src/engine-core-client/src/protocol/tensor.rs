@@ -496,7 +496,21 @@ mod tests {
         assert_eq!(array.dtype, NumpyDtype::native(TensorDtype::F32));
         let bytes = rmp_serde::to_vec_named(&array).unwrap();
         let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
-        assert_eq!(wire.as_array().unwrap()[0], Value::from("=f4"));
+        // Native byte order is spelled as the plain name, which a tensor
+        // reads too: Python sends tensor fields this way.
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("float32"));
+        let tensor: WireTensor = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(tensor.dtype, TensorDtype::F32);
+
+        // An explicit byte order is a NumPy descriptor only.
+        let array = WireNdArray::from_raw_bytes(
+            NumpyDtype::little(TensorDtype::F32),
+            vec![1],
+            Bytes::from_static(&[0; 4]),
+        );
+        let bytes = rmp_serde::to_vec_named(&array).unwrap();
+        let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("<f4"));
         assert!(rmp_serde::from_slice::<WireTensor>(&bytes).is_err());
     }
 

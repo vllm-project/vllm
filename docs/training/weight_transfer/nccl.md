@@ -297,7 +297,7 @@ for patches in patch_chunks:
 client.finish_weight_update()
 ```
 
-Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
+Sparse NCCL sends only `O(nnz)` indices and values, in batches of at most 512 MiB (a larger patch travels alone). Workers validate and apply each batch before receiving the next, so an invalid batch fails after earlier ones landed. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
 
 [`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
 
