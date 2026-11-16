@@ -4784,7 +4784,8 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
             assert_eq!(features[0].modality.as_str(), "image");
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
+            assert_eq!(features[0].mm_hash.as_deref(), Some("uuid:image-1"));
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
 
@@ -4855,14 +4856,14 @@ fn multimodal_render_app() -> axum::Router {
     }))
 }
 
-async fn render_image_chat(mm_payload: Option<&str>) -> axum::body::Bytes {
+async fn render_image_chat(mm_payload: Option<&str>, uuid: Option<&str>) -> axum::body::Bytes {
     let mut body = json!({
         "model": "render-model",
         "messages": [{
             "role": "user",
             "content": [
                 {"type": "text", "text": "describe "},
-                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"}
+                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": uuid}
             ]
         }],
         "max_completion_tokens": 8
@@ -4890,11 +4891,11 @@ async fn render_image_chat(mm_payload: Option<&str>) -> axum::body::Bytes {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged() {
-    let render_body = render_image_chat(None).await;
+    let render_body = render_image_chat(None, Some("image-1")).await;
     let render_json: serde_json::Value =
         serde_json::from_slice(&render_body).expect("decode render response");
     let features = &render_json["features"];
-    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(
         features["kwargs_data"]["image"][0].is_string(),
         "{features}"
@@ -4917,7 +4918,7 @@ async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged(
             );
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
             assert_eq!(features[0].mm_position.offset, offset);
             assert_eq!(features[0].mm_position.length, length);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -4956,12 +4957,35 @@ async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged(
 #[tokio::test]
 async fn render_chat_mm_payload_none_returns_layout_only() {
     let render_json: serde_json::Value =
-        serde_json::from_slice(&render_image_chat(Some("none")).await).expect("decode json");
+        serde_json::from_slice(&render_image_chat(Some("none"), Some("image-1")).await)
+            .expect("decode json");
 
     let features = &render_json["features"];
-    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert_eq!(features["mm_hashes"], json!({"image": ["uuid:image-1"]}));
     assert!(features["mm_placeholders"]["image"][0]["length"].as_u64().unwrap() > 1);
     assert!(features.get("kwargs_data").is_none(), "{features}");
+}
+
+/// A client `uuid` spelled like another item's content hash gets a different
+/// cache key, so it cannot hit that item's engine cache entries.
+#[tokio::test]
+async fn render_chat_mm_cache_keys_keep_uuids_apart_from_content_hashes() {
+    let image_key = |body: axum::body::Bytes| {
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        json["features"]["mm_hashes"]["image"][0]
+            .as_str()
+            .expect("image key")
+            .to_owned()
+    };
+
+    let content_key = image_key(render_image_chat(Some("none"), None).await);
+    let digest = content_key.strip_prefix("content:").expect("content-tagged key");
+    let uuid_key = image_key(render_image_chat(Some("none"), Some(digest)).await);
+    assert_eq!(uuid_key, format!("uuid:{digest}"));
+
+    // A `uuid` that already carries a tag is tagged again, never trusted.
+    let uuid_key = image_key(render_image_chat(Some("none"), Some(&content_key)).await);
+    assert_eq!(uuid_key, format!("uuid:{content_key}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5100,7 +5124,7 @@ async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
             assert_eq!(features[0].modality, MmModality::Image);
-            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].identifier, "uuid:image-1");
             assert_eq!(features[0].mm_position.length, 169 + 2);
 
             let is_embed = features[0].mm_position.is_embed.as_ref().expect("is_embed mask");

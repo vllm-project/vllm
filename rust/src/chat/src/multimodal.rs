@@ -922,6 +922,13 @@ impl MultimodalModelInfo {
                 );
             }
             for (item, range) in izip!(media.items, media_ranges) {
+                // Like Python, tag the cache key with its source, so a client
+                // `uuid` spelled like another item's content hash cannot hit
+                // that item's entries in the engine's caches.
+                let cache_key = match item.uuid {
+                    Some(uuid) => format!("uuid:{uuid}"),
+                    None => format!("content:{}", item.hash),
+                };
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -929,9 +936,9 @@ impl MultimodalModelInfo {
                         Modality::Video => MmModality::Video,
                         Modality::Audio => MmModality::Audio,
                     },
-                    identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                    identifier: cache_key.clone(),
                     mm_position: range,
-                    mm_hash: Some(item.hash),
+                    mm_hash: Some(cache_key),
                 });
             }
         }
