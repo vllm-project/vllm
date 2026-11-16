@@ -56,7 +56,15 @@ A complete example is available at [`examples/features/speculative_decoding/extr
 A custom KV connector can receive hidden states after sampling by overriding
 `KVConnectorBase_V1.get_required_hidden_states` to return a `HiddenStatesRequest`
 and implementing `save_hidden_states(StepHiddenStates)`. The default request is
-`None`, which disables the hook.
+`None`, which disables the hook. The worker selects the sampling implementation
+during initialization: only requesting connectors install a hidden-state
+wrapper. Ordinary inference runs the original sampler without a per-step
+hidden-state feature check or no-op callback.
+
+The wrapper invokes `save_hidden_states` immediately after sampling, before
+prompt-logprob processing and submission of the sampled-token host copy.
+Connector work queued on the main stream therefore precedes that copy; this
+ordering tradeoff applies only when hidden-state collection is enabled.
 
 `HiddenStatesRequest(layers=())` requests only the final hidden states.
 For auxiliary states, explicit layer IDs are sorted and deduplicated, and

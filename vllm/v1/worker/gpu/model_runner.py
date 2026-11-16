@@ -46,7 +46,6 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import StepHiddenStates
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -145,8 +144,10 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
+    SampleResult,
     get_kv_connector,
     get_required_hidden_states,
+    with_hidden_states,
 )
 from vllm.v1.worker.gpu.lora_utils import (
     LoraState,
@@ -327,10 +328,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The hidden states the KV connector receives each step, if any.
         self.connector_hidden_states = get_required_hidden_states(vllm_config)
         self.connector_hidden_state_layers: tuple[int, ...] = ()
-        if self.connector_hidden_states is not None and (
-            self.connector_hidden_states.layers != ()
-        ):
-            self.use_aux_hidden_state_outputs = True
+        if self.connector_hidden_states is not None:
+            self._sample_without_connector = self.sample
+            if self.connector_hidden_states.layers != ():
+                self.use_aux_hidden_state_outputs = True
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -906,6 +907,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.kv_caches_by_layer = kv_caches_dict
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            if self.connector_hidden_states is not None:
+                self.sample = with_hidden_states(  # type: ignore[method-assign]
+                    self._sample_without_connector,
+                    lambda: self.kv_connector,
+                    self.connector_hidden_state_layers,
+                    self.speculator_uses_aux_hidden_states,
+                )
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
@@ -1757,7 +1765,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
-    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        aux_hidden_states: list[torch.Tensor] | None = None,
+    ) -> SampleResult:
         shard_metadata = None
         global_input_batch = input_batch
         if self.batch_sharder is not None:
@@ -1829,7 +1838,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         assert sampler_output is not None
-        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+        return (
+            sampler_output,
+            sampler_output.num_sampled,
+            sampler_output.num_rejected,
+            aux_hidden_states,
+        )
 
     def postprocess_sampled(
         self,
@@ -2340,8 +2354,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
+        sampler_output, num_sampled, num_rejected, aux_hidden_states = self.sample(
+            hidden_states, input_batch, grammar_output, aux_hidden_states
         )
 
         if self.pp_handler is not None:
@@ -2399,38 +2413,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_verified_tokens_per_req=num_verified_tokens_per_req,
         )
 
-        if self.connector_hidden_states is not None:
-            layers = self.connector_hidden_state_layers
-            query_start_loc_np = input_batch.query_start_loc_np
-            if input_batch.num_admitted_draft_tokens is not None:
-                # Under adaptive verification a binding draft budget is split
-                # across requests on the device only; the host layout spreads
-                # it evenly. The admitted counts landed early in the step.
-                assert input_batch.num_draft_tokens_per_req is not None
-                num_reqs = input_batch.num_reqs
-                rows = (
-                    input_batch.num_scheduled_tokens[:num_reqs]
-                    - input_batch.num_draft_tokens_per_req[:num_reqs]
-                    + input_batch.num_admitted_draft_tokens.wait()[:num_reqs]
-                )
-                query_start_loc_np = query_start_loc_np.copy()
-                np.cumsum(rows, out=query_start_loc_np[1 : num_reqs + 1])
-            self.kv_connector.save_hidden_states(
-                StepHiddenStates(
-                    req_ids=input_batch.req_ids,
-                    query_start_loc=query_start_loc_np,
-                    num_tokens=input_batch.num_tokens,
-                    input_ids=input_batch.input_ids,
-                    positions=input_batch.positions,
-                    layers=layers,
-                    aux_hidden_states=list(aux_hidden_states or []) if layers else [],
-                    hidden_states=hidden_states,
-                    sampled_token_ids=sampler_output.sampled_token_ids,
-                    num_sampled=num_sampled,
-                    num_rejected=num_rejected,
-                )
-            )
-
         # Collect KV transfer results now; finalize saves after the drafter runs.
         defer_kv_finalize = self.speculator is not None
         model_runner_output.kv_connector_output = self.kv_connector.post_forward(
@@ -2483,9 +2465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     slot_mappings_by_layer,
                     spec_hidden_states,
-                    aux_hidden_states
-                    if self.speculator_uses_aux_hidden_states
-                    else None,
+                    aux_hidden_states,
                     num_sampled,
                     num_rejected,
                     self.req_states.last_sampled_tokens,

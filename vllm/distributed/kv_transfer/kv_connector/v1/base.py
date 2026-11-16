@@ -504,6 +504,10 @@ class KVConnectorBase_V1(ABC):
         tensor-parallel ranks. Must not block: start the copies it needs and
         return.
 
+        The hook runs before prompt-logprob processing and sampled-token host
+        copies are submitted. Work queued on the current stream precedes those
+        copies.
+
         Args:
             hidden_states (StepHiddenStates): the step's hidden states.
 

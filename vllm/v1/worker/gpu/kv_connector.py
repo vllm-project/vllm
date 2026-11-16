@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -11,6 +13,7 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import StepHiddenStates
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -25,10 +28,74 @@ from vllm.v1.outputs import (
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         HiddenStatesRequest,
-        StepHiddenStates,
     )
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+SampleResult = tuple[
+    "SamplerOutput", torch.Tensor, torch.Tensor, list[torch.Tensor] | None
+]
+SampleFn = Callable[
+    [torch.Tensor, "InputBatch", "GrammarOutput | None", list[torch.Tensor] | None],
+    SampleResult,
+]
+
+
+def with_hidden_states(
+    sample: SampleFn,
+    get_connector: Callable[[], "KVConnector"],
+    layers: tuple[int, ...],
+    speculator_uses_aux_hidden_states: bool,
+) -> SampleFn:
+    """Wrap sampling at initialization only for connectors requesting hidden states."""
+
+    def sample_and_save(
+        hidden_states: torch.Tensor,
+        input_batch: "InputBatch",
+        grammar_output: "GrammarOutput | None",
+        aux_hidden_states: list[torch.Tensor] | None = None,
+    ) -> SampleResult:
+        sampler_output, num_sampled, num_rejected, aux_hidden_states = sample(
+            hidden_states, input_batch, grammar_output, aux_hidden_states
+        )
+        query_start_loc = input_batch.query_start_loc_np
+        if input_batch.num_admitted_draft_tokens is not None:
+            # Adaptive verification's host layout is provisional until the
+            # per-request admitted draft counts arrive from the device.
+            assert input_batch.num_draft_tokens_per_req is not None
+            num_reqs = input_batch.num_reqs
+            rows = (
+                input_batch.num_scheduled_tokens[:num_reqs]
+                - input_batch.num_draft_tokens_per_req[:num_reqs]
+                + input_batch.num_admitted_draft_tokens.wait()[:num_reqs]
+            )
+            query_start_loc = query_start_loc.copy()
+            np.cumsum(rows, out=query_start_loc[1 : num_reqs + 1])
+        # Extensible KV-cache initialization and growth replace the connector.
+        get_connector().save_hidden_states(
+            StepHiddenStates(
+                req_ids=input_batch.req_ids,
+                query_start_loc=query_start_loc,
+                num_tokens=input_batch.num_tokens,
+                input_ids=input_batch.input_ids,
+                positions=input_batch.positions,
+                layers=layers,
+                aux_hidden_states=list(aux_hidden_states or []) if layers else [],
+                hidden_states=hidden_states,
+                sampled_token_ids=sampler_output.sampled_token_ids,
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+            )
+        )
+        return (
+            sampler_output,
+            num_sampled,
+            num_rejected,
+            aux_hidden_states if speculator_uses_aux_hidden_states else None,
+        )
+
+    return sample_and_save
 
 
 class KVConnector:

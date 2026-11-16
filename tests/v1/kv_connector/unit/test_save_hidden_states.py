@@ -233,6 +233,8 @@ def test_save_hidden_states_matches_generation(monkeypatch, tmp_path, speculativ
         model=MODEL,
         max_model_len=1024,
         gpu_memory_utilization=0.3,
+        # Initialization replaces the no-op connector after reserving the cache.
+        enable_extensible_kv_cache=True,
         kv_transfer_config={
             "kv_connector": "RecordingConnector",
             "kv_role": "kv_both",
