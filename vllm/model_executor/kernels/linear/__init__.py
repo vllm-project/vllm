@@ -247,6 +247,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
+    XPUFp8W8A16BlockScaledMMKernel,
     XPUW8A8FP8LinearKernel,
     XPUW8A16FP8LinearKernel,
 )
@@ -300,6 +301,20 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
             linear_backend,
         )
     return kernel
+
+
+def _xpu_preferred_fp8_block_kernel(
+    quantization: str,
+) -> type[Fp8BlockScaledMMLinearKernel] | None:
+    """XPUs without native FP8 (not Xe3p) run block FP8 faster weight-only:
+    skip the activation quantization and use W8A16. Returns None to keep the
+    normal list order (W8A8 first), which is also the fallback if the forced
+    kernel cannot be used."""
+    if _get_linear_backend(quantization=quantization) != "auto":
+        return None
+    if XPUW8A8FP8LinearKernel.has_native_fp8():
+        return None
+    return XPUFp8W8A16BlockScaledMMKernel
 
 
 def _xpu_preferred_fp8_kernel(
@@ -417,6 +432,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "xpu_woq": {
         XPUW8A16FP8LinearKernel,
+        XPUFp8W8A16BlockScaledMMKernel,
     },
 }
 
@@ -545,6 +561,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
     PlatformEnum.XPU: [
         XPUFp8BlockScaledMMKernel,
+        XPUFp8W8A16BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -833,6 +850,8 @@ def init_fp8_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 "fp8_block_w8a8",
             )
+        elif current_platform.is_xpu() and force_kernel is None:
+            force_kernel = _xpu_preferred_fp8_block_kernel("fp8_block_w8a8")
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
