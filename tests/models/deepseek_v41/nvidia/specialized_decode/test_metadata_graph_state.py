@@ -22,7 +22,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper.attention import 
     DeepseekV41HopperAttention,
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (  # noqa: E501
-    _RECORDABLE_BUILDERS,
+    _recordable_builders,
 )
 from vllm.v1.attention.backends.mla.indexer import DeepseekV41IndexerBackend
 
@@ -74,4 +74,4 @@ def test_other_deployments_build_eagerly(monkeypatch, config):
     ],
 )
 def test_sm80_and_sm90_builders_are_recordable(backend):
-    assert backend.get_builder_cls() in _RECORDABLE_BUILDERS
+    assert backend.get_builder_cls() in _recordable_builders()
