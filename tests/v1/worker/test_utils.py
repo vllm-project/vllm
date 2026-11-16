@@ -13,6 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
@@ -38,7 +39,6 @@ from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
 )
@@ -113,6 +113,7 @@ def test_hisparse_group_prefetch_requires_bounded_decode_only(
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
+    worker._in_step = True
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
@@ -909,6 +910,26 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors(monkeypatch):
     enqueue_row_dma.assert_not_called()
 
 
+def test_hisparse_skips_layer_mirrors_outside_a_step(monkeypatch):
+    """CUDA graph warmup and capture run forwards with no step; mirroring
+    their dummy rows would fail as a duplicate mirror of the next forward."""
+    worker = _make_hisparse_worker()
+    worker._in_step = False
+    monkeypatch.setattr(
+        worker,
+        "cache_handles",
+        [SimpleNamespace(host_mirror_required=True)],
+        raising=False,
+    )
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_layer_mirror(0)
+
+    enqueue_row_dma.assert_not_called()
+
+
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group(
     monkeypatch,
 ):
@@ -935,6 +956,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group(
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
+    worker._in_step = True
     worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     enqueue_row_dma = MagicMock()
@@ -1242,6 +1264,57 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     torch.testing.assert_close(handle.mirror_slot_mapping, torch.tensor([4, 5]))
 
 
+def test_hisparse_layer_mirror_only_inside_connector_step(monkeypatch):
+    """Layers mirror between start_step and finish_forward only: graph-capture
+    forwards run outside connector steps and must not mirror."""
+    handle = SimpleNamespace(
+        runtime=SimpleNamespace(eager_host_mirror=False, resident_source_index=0),
+        decode_batch=False,
+        host_mirror_required=False,
+        num_actual_tokens=0,
+        num_decode_tokens=0,
+        req_id_per_token=None,
+        mirror_slot_mapping=torch.empty(0, dtype=torch.int64),
+    )
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = True
+    worker._forward_ready_event = MagicMock()
+    worker._layer_ready_events = (MagicMock(),)
+    worker.host_caches = ()
+    worker.host_num_blocks = 1
+    worker.cache_handles = _as_cache_handles(handle)
+    worker._post_forward_transfers = []
+    worker._pending_invalid_block_ids = []
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock)
+
+    worker.start_step(
+        SimpleNamespace(
+            host_block_copies=[],
+            command=None,
+            source_block_ids=[],
+            row_mirrors={},
+            all_context_pages_resident=True,
+            row_mirrors_from_resident=False,
+            residency_updates={},
+        ),
+        None,
+    )
+    handle.host_mirror_required = True
+    worker._enqueue_layer_mirror(0)
+    enqueue_row_dma.assert_called_once_with(
+        (0,), ready_event=worker._layer_ready_events[0]
+    )
+    worker.finish_forward()
+
+    enqueue_row_dma.reset_mock()
+    handle.host_mirror_required = True
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_layer_mirror(0)
+    enqueue_row_dma.assert_not_called()
+
+
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
     """Followers must not allocate duplicate runtime state before profiling."""
     monkeypatch.setattr(
@@ -1404,8 +1477,8 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         block_stride_alignment=16,
     )
     groups = [
-        KVCacheGroupSpec([names[0], names[2]], spec),
-        KVCacheGroupSpec([names[1]], spec),
+        new_kv_cache_group([names[0], names[2]], spec),
+        new_kv_cache_group([names[1]], spec),
     ]
     config = SimpleNamespace(
         cache_config=CacheConfig(),
@@ -1481,7 +1554,7 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
     config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
+        kv_cache_groups=[new_kv_cache_group(names, spec)],
     )
     pages = {name: torch.zeros((9, 1, 1, 128), dtype=torch.int8) for name in names}
 
@@ -1538,8 +1611,8 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([names[2], names[0]], spec),
-            KVCacheGroupSpec([names[1]], spec),
+            new_kv_cache_group([names[2], names[0]], spec),
+            new_kv_cache_group([names[1]], spec),
         ],
     )
     bind_kv_cache_to_layers(

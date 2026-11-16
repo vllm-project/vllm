@@ -1063,7 +1063,7 @@ guide: |
     --max-model-len 131072        # 128K instead of the full 1M
   ```
 
-  AMD ROCm notes: Native context is 512K. To go past it, supply a YaRN rope_scaling on the text config
+  AMD ROCm notes: Native context is 512K. To go past it, supply YaRN rope_parameters on the text config
   (a top-level override silently misses the decoder's config) and allow the long max length.
   TP=8 + fp8 KV is the practical combo at 1M:
 
@@ -1080,7 +1080,7 @@ guide: |
     --tool-call-parser minimax_m3 \
     --enable-auto-tool-choice \
     --reasoning-parser minimax_m3 \
-    --hf-overrides '{"text_config":{"rope_scaling":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":524288}}}'
+    --hf-overrides '{"text_config":{"rope_parameters":{"rope_type":"yarn","rope_theta":5000000,"factor":2.0,"original_max_position_embeddings":524288}}}'
   ```
 
   - Set `--max-model-len` to the longest prompt + output you actually serve
