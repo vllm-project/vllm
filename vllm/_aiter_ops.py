@@ -2156,6 +2156,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H: With the above, also routes the
+            96-head DCP calls to the many-head FlyDSL kernel.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2230,6 +2232,7 @@ class rocm_aiter_ops:
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
     _FLYDSL_SPARSE_MLA_MIN_TOKENS = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+    _FLYDSL_SPARSE_MLA_96H = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that are
     # compiled and loaded, by flydsl_sparse_mla_warmup or an eager first call;
     # see _flydsl_sparse_mla_fwd.
@@ -2267,6 +2270,7 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
         )
+        cls._FLYDSL_SPARSE_MLA_96H = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -3843,7 +3847,13 @@ class rocm_aiter_ops:
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return
-        keys = [(num_heads, hi, rl) for hi in (False, True) for rl in (False, True)]
+        many_heads = num_heads > 16
+        if many_heads and not cls._FLYDSL_SPARSE_MLA_96H:
+            return
+        # The many-head kernel serves no has_invalid; its warmup compiles both
+        # of its row-count configs per key.
+        invalid = (False,) if many_heads else (False, True)
+        keys = [(num_heads, hi, rl) for hi in invalid for rl in (False, True)]
         if all(key in cls._FLYDSL_SPARSE_MLA_COMPILED for key in keys):
             return
         if cls._flydsl_sparse_mla_ops() is None:
@@ -3852,7 +3862,7 @@ class rocm_aiter_ops:
         if warmup is None:
             return
         start = time.perf_counter()
-        warmup(heads=(num_heads,))
+        warmup(heads=(num_heads,), has_invalid=invalid)
         cls._FLYDSL_SPARSE_MLA_COMPILED.update(keys)
         logger.info(
             "FlyDSL sparse MLA: compiled heads=%d (%d configs) in %.1f s",
@@ -3881,16 +3891,21 @@ class rocm_aiter_ops:
         Returns (handled, lse). The FlyDSL kernel covers the bf16 q, fp8_ds_mla
         cache form with no scales, sink or extra segment (Kimi-K3.1 DSA); its
         supports() check reads host metadata only, so it is CUDA-graph safe.
-        The kernel runs one workgroup per query row, so batches below
-        VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small chunks)
-        stay on the Triton kernel, which splits the rows and is faster there. A config that never ran eagerly is not compiled
+        The <= 16-head kernel runs one workgroup per query row, so its batches
+        below VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small
+        chunks) stay on the Triton kernel, which splits the rows and is faster
+        there; the 96-head calls (VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H) split
+        rows themselves and take any batch. A config that never ran eagerly is not compiled
         yet, so under graph capture it stays on the Triton kernel rather than
         JIT-compiling and loading a module mid-capture. A row with no unmasked
         key gives out 0 and lse -inf (the Triton kernel gives NaN).
         """
         if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
             return False, None
-        if q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
+        if q.shape[1] > 16:
+            if not cls._FLYDSL_SPARSE_MLA_96H:
+                return False, None
+        elif q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
             return False, None
         flydsl_ops = cls._flydsl_sparse_mla_ops()
         if flydsl_ops is None:
@@ -3903,6 +3918,7 @@ class rocm_aiter_ops:
             kv_indices,
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
             out=o,
             **support_kwargs,
         ):

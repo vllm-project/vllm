@@ -1156,6 +1156,11 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             # JIT the FlyDSL sparse MLA now, not on the first prefill that
             # reaches it (or never, inside a CUDA-graph capture).
             rocm_aiter_ops.flydsl_sparse_mla_warmup(self.num_heads)
+            if self.dcp_world_size > 1:
+                # The DCP branch attends every rank's heads (query gather).
+                rocm_aiter_ops.flydsl_sparse_mla_warmup(
+                    self.num_heads * self.dcp_world_size
+                )
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig
