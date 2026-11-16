@@ -181,3 +181,27 @@ def test_load_tuning_dir_datacenter_blackwell_family(
     fi.load_flashinfer_bf16_tuning_dir()
     assert tuner_gpus == {"model.json": expected}
     assert json.loads(path.read_text())["_metadata"]["gpu"] == saved
+
+
+def test_tuning_file_checks_only_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "model.json"
+    metadata = {
+        "flashinfer_version": "0.7.4",
+        "cuda_version": "13.0",
+        "cublas_version": "13.8.0",
+        "cudnn_version": "92400",
+        "cudnn_frontend_version": "1.32.3",
+        "cutlass_dsl_version": "4.8.0",
+        "gpu": "NVIDIA H100",
+    }
+    source.write_text(json.dumps({"_metadata": metadata, "entry": [1]}))
+    _set_gpu(monkeypatch, "NVIDIA H100", (9, 0))
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    loaded = json.loads(fi._bf16_tuning_path_for_this_gpu(source, workdir).read_text())
+    assert loaded["_metadata"] == {
+        **{key: "*" for key in metadata},
+        "gpu": "NVIDIA H100",
+    }
+    assert loaded["entry"] == [1]
+    assert json.loads(source.read_text())["_metadata"] == metadata

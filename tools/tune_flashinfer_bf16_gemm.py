@@ -16,12 +16,20 @@ the file into `vllm/model_executor/layers/gemmbf16_configs` and start vLLM with
 
 Usage:
     python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 --bs 1,2,4 --out F.json
+    python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 4 --gpus 4 ...
+
+With --gpus N the shapes are split over N worker processes, one per GPU, and the
+results are merged into one file.
 """
 
 import argparse
 import gc
+import hashlib
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import timedelta
 
@@ -288,6 +296,80 @@ def tune(args: argparse.Namespace, shapes: list[tuple[int, int]]) -> None:
     release_cudnn_graphs()
 
 
+def split_shapes(
+    shapes: list[tuple[int, int]], parts: int
+) -> list[list[tuple[int, int]]]:
+    """Greedy balance of the shapes over `parts` workers by weight size."""
+    groups: list[list[tuple[int, int]]] = [[] for _ in range(parts)]
+    load = [0] * parts
+    for n, k in sorted(shapes, key=lambda nk: -nk[0] * nk[1]):
+        i = load.index(min(load))
+        groups[i].append((n, k))
+        load[i] += n * k + (1 << 24)
+    return [g for g in groups if g]
+
+
+def merge_tuning_files(paths: list[str], out: str) -> None:
+    """Merge FlashInfer autotune JSON files written by the workers."""
+    metadata: dict = {}
+    records: dict = {}
+    configs: dict = {}
+    for path in paths:
+        with open(path) as f:
+            data = json.load(f)
+        metadata = metadata or data.get("_metadata", {})
+        for namespace, items in data.get("_records", {}).items():
+            records.setdefault(namespace, {}).update(items)
+        configs.update({k: v for k, v in data.items() if not k.startswith("_")})
+    merged: dict = {"_metadata": metadata}
+    if records:
+        merged["_records"] = records
+    for key in sorted(configs):
+        merged[key] = configs[key]
+    source = json.dumps(merged, sort_keys=True, separators=(",", ":")).encode()
+    merged["_generation"] = hashlib.sha256(source).hexdigest()
+    with open(out, "w") as f:
+        json.dump(merged, f, indent=2)
+
+
+def tune_on_gpus(args: argparse.Namespace, shapes: list[tuple[int, int]]) -> None:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    devices = visible.split(",") if visible else [str(i) for i in range(args.gpus)]
+    if len(devices) < args.gpus:
+        sys.exit(f"--gpus {args.gpus} but only {len(devices)} GPUs are visible")
+    groups = split_shapes(shapes, args.gpus)
+    start = time.perf_counter()
+    with tempfile.TemporaryDirectory() as workdir:
+        workers = []
+        for i, group in enumerate(groups):
+            shapes_file = f"{workdir}/shapes-{i}.json"
+            out_file = f"{workdir}/part-{i}.json"
+            with open(shapes_file, "w") as f:
+                json.dump(group, f)
+            command = [
+                sys.executable,
+                __file__,
+                "--shapes-json",
+                shapes_file,
+                "--bs",
+                *args.bs,
+                "--out",
+                out_file,
+            ]
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": devices[i]}
+            print(f"GPU {devices[i]}: {len(group)} shapes", flush=True)
+            workers.append((subprocess.Popen(command, env=env), out_file))
+        codes = [worker.wait() for worker, _ in workers]
+        if any(codes):
+            sys.exit(f"worker exit codes: {codes}")
+        merge_tuning_files([out_file for _, out_file in workers], args.out)
+    total = time.perf_counter() - start
+    elapsed = timedelta(seconds=round(total))
+    print(
+        f"tuned {len(shapes)} shapes on {len(groups)} GPUs in {elapsed} -> {args.out}"
+    )
+
+
 def release_cudnn_graphs() -> None:
     from flashinfer.gemm.gemm_base import clear_cudnn_graph_cache
 
@@ -304,6 +386,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--model", default="", help="Hugging Face model name")
     parser.add_argument("--tp", type=int, nargs="+", default=[1])
+    parser.add_argument(
+        "--gpus", type=int, default=1, help="tune on this many GPUs in parallel"
+    )
     parser.add_argument("--out", required=True, help="output FlashInfer tuning JSON")
     parser.add_argument(
         "--bs", nargs="+", required=True, help="M buckets, e.g. --bs 1,2,4,8"
@@ -312,7 +397,11 @@ def main() -> None:
         "--shapes-json", default="", help="JSON list of [n, k] replacing the model"
     )
     args = parser.parse_args()
-    tune(args, collect_shapes(args))
+    shapes = collect_shapes(args)
+    if args.gpus > 1:
+        tune_on_gpus(args, shapes)
+    else:
+        tune(args, shapes)
 
 
 if __name__ == "__main__":

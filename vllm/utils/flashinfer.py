@@ -59,11 +59,15 @@ def is_flashinfer_bf16_tuning_loaded() -> bool:
 def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
     """Return the file FlashInfer should load for the current GPU.
 
+    Only the GPU name of a tuning file is checked. Every other metadata field
+    (library versions) is replaced with the wildcard "*" in a copy of the file,
+    which FlashInfer never reports as a mismatch.
+
     FlashInfer ignores a tuning file whose recorded GPU name differs from the
     current device. A file tuned on any datacenter Blackwell GPU (GB200, B200,
-    GB300, B300) is meant for all of them, so on such a GPU load a copy with the
-    current name recorded. Consumer Blackwell and other architectures keep the
-    original file and are rejected by FlashInfer as before.
+    GB300, B300) is meant for all of them, so on such a GPU the copy records the
+    current name. Consumer Blackwell and other architectures keep the recorded
+    name and are rejected by FlashInfer as before.
     """
     with open(file) as f:
         configs = json.load(f)
@@ -71,20 +75,25 @@ def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
     if not isinstance(metadata, dict):
         return file
     saved = metadata.get("gpu")
-    if not isinstance(saved, str) or not _DATACENTER_BLACKWELL_GPU_NAME.match(saved):
-        return file
-    current = torch.cuda.get_device_name()
+    for key in metadata:
+        if key != "gpu":
+            metadata[key] = "*"
     if (
-        current == saved
-        or tuple(torch.cuda.get_device_capability())
-        not in _DATACENTER_BLACKWELL_CAPABILITIES
+        isinstance(saved, str)
+        and _DATACENTER_BLACKWELL_GPU_NAME.match(saved)
+        and tuple(torch.cuda.get_device_capability())
+        in _DATACENTER_BLACKWELL_CAPABILITIES
     ):
-        return file
-    metadata["gpu"] = current
+        metadata["gpu"] = torch.cuda.get_device_name()
     path = workdir / file.name
     with open(path, "w") as f:
         json.dump(configs, f)
-    logger.info("Using FlashInfer tuning file %s (%s) on %s", file.name, saved, current)
+    logger.info(
+        "Using FlashInfer tuning file %s (%s) on %s",
+        file.name,
+        saved,
+        metadata.get("gpu"),
+    )
     return path
 
 
