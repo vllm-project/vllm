@@ -393,6 +393,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker._sync_device_after_direct_recv = MagicMock()
     worker.use_host_buffer = False
     worker._reqs_to_send = {}
+    worker._engine_clock_offset = {}
     result = worker.get_transfer_results()
     expected = torch.full_like(backing, 7)
     expected[2, 1] = 0

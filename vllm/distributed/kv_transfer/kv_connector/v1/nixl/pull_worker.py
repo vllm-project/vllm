@@ -14,7 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -142,6 +144,27 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._remote_leases.get((remote.engine_id, remote.request_id), -math.inf),
         )
         return time.perf_counter() + self._lease_safety_margin >= deadline
+
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed reads that may have overlapped the remote's lease expiry,
+        so the blocks could have been recycled while being read."""
+        lapsed: set[ReqId] = set()
+        for req_id in done_recving:
+            meta = self._recving_metadata.get(req_id)
+            if meta is None or meta.remote is None:
+                continue
+            # Completion is observed no earlier than it happened: conservative.
+            if self._is_remote_read_expired(meta):
+                logger.debug(
+                    "Lease of %s (remote %s on engine %s) may have run out "
+                    "before its read completed",
+                    req_id,
+                    meta.remote.request_id,
+                    meta.remote.engine_id,
+                )
+                self.xfer_stats.record_declined_expired_read()
+                lapsed.add(req_id)
+        return lapsed
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -754,7 +777,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 
-        Also handles heartbeat notifications ("HB:req1,req2,...") by
+        Also handles heartbeat notifications (HB_NOTIF_PREFIX + "req1,req2") by
         extending the lease on the referenced requests.
         """
         assert self.transfer_topo is not None
@@ -764,8 +787,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 msg = notif.decode("utf-8")
 
                 # Handle heartbeat messages from D-side.
-                if msg.startswith("HB:"):
-                    self._handle_heartbeat(msg[3:])
+                if msg.startswith(HB_NOTIF_PREFIX):
+                    self._handle_heartbeat(msg[len(HB_NOTIF_PREFIX) :])
                     continue
 
                 req_id, expected_consumers = msg.rsplit(":", 1)

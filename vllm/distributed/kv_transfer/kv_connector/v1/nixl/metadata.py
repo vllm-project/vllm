@@ -24,6 +24,9 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Lease renewal notification, D worker -> P worker: HB_NOTIF_PREFIX + "req1,req2".
+HB_NOTIF_PREFIX = "HB:"
 #
 # NIXL Connector Version
 #

@@ -77,6 +77,11 @@ notification-only agents, a permanently unreachable rank means no round is ever
 recorded for that engine, and heartbeated waits longer than the lease are
 declined).
 
+The same check runs again when the read is observed complete: if the lease may
+have run out while the transfer was in flight, the KV is discarded as if the
+read had been declined (completion is observed no earlier than it happened, so
+this only errs on the side of declining).
+
 A declined read is reported to the scheduler as `failed_recving`, counted in
 `vllm:nixl_num_declined_expired_reads` on the reading instance (the P-side
 `vllm:nixl_num_kv_expired_reqs` counts the leases that ran out), and the request
@@ -110,9 +115,6 @@ What this does not cover:
   remote re-registers). Both hosts' monotonic clocks are assumed to be
   rate-disciplined (NTP/chrony); an undisciplined drift that exceeds the
   margin over the lifetime of the pairing would defeat the check.
-- The check happens right before the read is posted. A lease that runs out
-  while the transfer is in flight is the existing race that
-  `vllm:nixl_num_notifications_after_expiry` surfaces on P.
 - Blocks released for other reasons: P frees them as soon as the expected
   consumers' completion notifications arrive, so replayed or duplicated
   `kv_transfer_params` read blocks the lease model considers live; and a P

@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HB_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -3429,6 +3430,10 @@ class NixlBaseConnectorWorker:
                     self._recv_failures.remove(req_id)
                     failed_recv_reqs.add(req_id)
             done_recving.update(failed_recv_reqs)
+        # KV read while the remote may have released the blocks must not be used.
+        failed_recv_reqs |= self._get_lease_lapsed_recvs(
+            done_recving - failed_recv_reqs
+        )
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -3555,6 +3560,10 @@ class NixlBaseConnectorWorker:
         Subclasses must implement this to handle mode-specific notifications.
         """
         raise NotImplementedError
+
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed receives whose remote lease may have lapsed mid-read."""
+        return set()
 
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into `done_sending`.
@@ -3744,8 +3753,7 @@ class NixlBaseConnectorWorker:
             # Refresh the TTL: a heartbeat means the router still paired this P-D,
             # so requests are still waiting on this engine
             self._engine_last_active[engine_id] = time.perf_counter()
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            hb_msg = (HB_NOTIF_PREFIX + ",".join(hb_info.req_ids)).encode()
             all_sent = True
             for agent_name in self._remote_agents[engine_id].values():
                 try:

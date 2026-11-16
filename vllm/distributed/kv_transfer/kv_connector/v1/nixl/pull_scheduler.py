@@ -267,12 +267,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 request.request_id,
                 request_kv_blocks_ttl,
             )
-            self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + request_kv_blocks_ttl
-            )
             # Lets the consumer decline reads of recycled blocks. P blocks: the
             # initial lease, extended by heartbeats; D blocks: the turn-2 TTL.
-            blocks_expiry_time = self._reqs_need_send[request.request_id]
+            blocks_expiry_time = time.perf_counter() + request_kv_blocks_ttl
+            self._reqs_need_send[request.request_id] = blocks_expiry_time
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
