@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-@dataclass
+@dataclass(slots=True)
 class MxFp6LinearLayerConfig:
     """Configuration for an MXFP6 linear layer.
 
