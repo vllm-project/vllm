@@ -611,7 +611,7 @@ class CanonicalKVCacheTensor:
 
 @dataclass(frozen=True, slots=True)
 class CopyRun:
-    """A strided byte correspondence between this worker's physical page and
+    """A strided byte correspondence between this worker's unpadded payload and
     a canonical page: for i in range(num_fragments), fragment i spans
     [local_offset + i * local_stride, +fragment_size) in the worker's page and
     [canonical_offset + i * canonical_stride, +fragment_size) canonically."""
@@ -663,6 +663,9 @@ class CanonicalKVCacheRef:
     page_size_bytes: int
     # How this worker's page maps into a canonical page; None = uncertified
     mapping: CanonicalPageMapping | None = None
+    # Payload and physical stride of padded kernel pages, or None if contiguous.
+    kernel_page_size_bytes: int | None = None
+    kernel_page_stride_bytes: int | None = None
 
 
 @dataclass(slots=True)

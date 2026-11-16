@@ -91,6 +91,7 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
+        kernel_pages: dict[str, tuple[int, int]] = {}
         for kv_cache_group in selected_groups:
             assert not kv_cache_group.host_resident
             num_blocks = kv_cache_config.num_blocks
@@ -98,17 +99,23 @@ class OffloadingConnectorWorker:
             for layer_name, layer_kv_cache_spec in per_layer_specs.items():
                 ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
-                # A padded page split into kernel blocks spreads its padding
-                # over them, but offloading copies the payload from page start.
+                # Canonical copy plans skip padding between kernel payloads.
                 if (
                     isinstance(layer_kv_cache_spec, AttentionSpec)
                     and page > layer_kv_cache_spec.unpadded_page_size_bytes
                     and kv_caches[layer_name].shape[0] != num_blocks
                 ):
-                    raise NotImplementedError(
-                        "KV offloading does not support padded KV pages split "
-                        f"into kernel blocks (layer {layer_name}). Use an "
-                        "attention backend that takes the full block size."
+                    if not self.spec.config.canonical_layout:
+                        raise NotImplementedError(
+                            "KV offloading does not support padded KV pages split "
+                            f"into kernel blocks (layer {layer_name}). Use an "
+                            "attention backend that takes the full block size."
+                        )
+                    cache = kv_caches[layer_name]
+                    ratio = cache.shape[0] // num_blocks
+                    kernel_pages[layer_name] = (
+                        layer_kv_cache_spec.unpadded_page_size_bytes // ratio,
+                        cache.stride(0) * cache.element_size(),
                     )
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
@@ -210,6 +217,12 @@ class OffloadingConnectorWorker:
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
                             mapping=mapping,
+                            kernel_page_size_bytes=kernel_pages.get(
+                                layer_name, (None, None)
+                            )[0],
+                            kernel_page_stride_bytes=kernel_pages.get(
+                                layer_name, (None, None)
+                            )[1],
                         )
                     )
 

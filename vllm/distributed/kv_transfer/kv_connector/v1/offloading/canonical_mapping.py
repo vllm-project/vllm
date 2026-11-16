@@ -339,7 +339,8 @@ def _layer_mapping(
         )
         if regions is None:
             return None
-        kernel_stride = kv_cache.stride(0) * kv_cache.element_size()
+        # Runs index payload bytes; copy plans skip physical page padding.
+        kernel_stride = page // kernel_blocks
         runs = _coalesce_runs(
             [
                 replace(run, local_offset=run.local_offset + i * kernel_stride)
