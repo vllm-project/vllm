@@ -161,6 +161,9 @@ void moe_permute_impl(
         in_s.scalar_type() == torch::headeronly::ScalarType::Float &&
             out_s.scalar_type() == torch::headeronly::ScalarType::Float,
         "input scales must be float32");
+    STD_TORCH_CHECK(
+        in_s.device() == input.device() && out_s.device() == input.device(),
+        "input_scale and permuted_input_scale must be on the input's device");
     STD_TORCH_CHECK(in_s.is_contiguous() && out_s.is_contiguous(),
                     "input scales must be contiguous");
     STD_TORCH_CHECK(in_s.dim() == 2 && in_s.size(0) == input.size(0),
