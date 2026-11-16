@@ -146,7 +146,7 @@ def pack_tensors(
 def wire_segments(
     shape: Sequence[int], dtype: torch.dtype, limit: int
 ) -> list[tuple[int, int]] | None:
-    """Dim-0 row ranges a tensor travels as, or ``None`` to send it whole.
+    """Dim-0 row ranges a tensor travels as, or `None` to send it whole.
 
     A tensor over twice the buffer (e.g. one layer's expert stack) is split
     along dim 0 so that no side needs a buffer of its size."""
@@ -168,7 +168,7 @@ def _pieces(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], limit: int
 ) -> Iterator[tuple[bool, Piece]]:
     """Each piece in order, and whether it closes its chunk: a chunk takes
-    pieces until it holds more than ``limit`` bytes (``pack_tensors``'s rule)."""
+    pieces until it holds more than `limit` bytes (`pack_tensors`'s rule)."""
     size = 0
     for index, (shape, dtype) in enumerate(specs):
         nbytes = math.prod(shape) * dtype.itemsize
@@ -190,15 +190,15 @@ def _pieces(
 
 @dataclass
 class ChunkLayout:
-    """How a sequence of tensors travels as packed chunks: ``chunks[k]`` holds
-    the pieces of chunk k, which is ``sizes[k]`` bytes. The producer and every
+    """How a sequence of tensors travels as packed chunks: `chunks[k]` holds
+    the pieces of chunk k, which is `sizes[k]` bytes. The producer and every
     consumer derive it from the metadata alone, so they always agree."""
 
     chunks: list[list[Piece]]
     sizes: list[int]
 
     def views(self, k: int, buf: torch.Tensor) -> list[torch.Tensor]:
-        """Chunk k's pieces in ``buf``: typed, or raw bytes for a piece at an
+        """Chunk k's pieces in `buf`: typed, or raw bytes for a piece at an
         offset its dtype cannot view (pieces are packed back to back)."""
         out = []
         for _, _, shape, dtype, off, n in self.chunks[k]:
@@ -228,7 +228,7 @@ def chunk_layout(
 
 
 def _source(piece: Piece, tensor: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
-    """What a piece copies from ``tensor`` into its ``view``."""
+    """What a piece copies from `tensor` into its `view`."""
     rows = piece[1]
     part = tensor if rows is None else tensor[rows[0] : rows[1]]
     return (
@@ -248,7 +248,7 @@ def packed_nccl_broadcast_producer(
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
-    Each chunk is one ``_foreach_copy_`` of its tensors into a buffer, then one
+    Each chunk is one `_foreach_copy_` of its tensors into a buffer, then one
     broadcast.
 
     Args:
