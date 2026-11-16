@@ -6,34 +6,34 @@ The contract, in the LLVM "AMDGPU Memory Model" (llvm/docs/AMDGPUMemoryModel.md,
 AMM) and AMDGPUUsage "Execution Barriers":
 
 - A pair is one naturally aligned 64-bit atomic, (value | tag << 32),
-  ``monotonic`` at its space's scope (``agent`` for this GPU's scratch, system
+  `monotonic` at its space's scope (`agent` for this GPU's scratch, system
   for the peer heap). An atomic access is never split, so a load that sees a
-  pair's tag sees that store's value. A triple pair (``put_triple``, the
+  pair's tag sees that store's value. A triple pair (`put_triple`, the
   attention seam) is the same atomic with three bf16 in bits 0 .. 47 under a
   16-bit tag, unique between epoch resets (the kernel's EPOCH_LIMIT).
 - Data a pair announces is stored *store-available* and loaded *load-visible*
-  at agent scope (AMM: agent atomics of 16 to 64 bits, ``llvm.amdgcn.av.load.
-  b128``; ``store_dev`` / ``load_dev``).
+  at agent scope (AMM: agent atomics of 16 to 64 bits, `llvm.amdgcn.av.load.
+  b128`; `store_dev` / `load_dev`).
 - Happens-before from producer to consumer: the producer's release fence
-  before the pair (``publish``), the consumer's acquire fence after the poll
-  that saw it (``acquire``), and within a CTA release, ``s_barrier``, acquire
-  (``gpu.barrier``; "Execution Barriers": they synchronize). These fences are
-  tagged ``!{"amdgcn-av", "none"}``: they synchronize and keep the compiler
+  before the pair (`publish`), the consumer's acquire fence after the poll
+  that saw it (`acquire`), and within a CTA release, `s_barrier`, acquire
+  (`gpu.barrier`; "Execution Barriers": they synchronize). These fences are
+  tagged `!{"amdgcn-av", "none"}`: they synchronize and keep the compiler
   from moving accesses across them, but make nothing available or visible.
 - AMM visibility: a store-available write that happens-before a load-visible
   read of the same agent is visible to it, so the read returns that write (the
   previous launch's writes to the location are ordered before it by the
   kernel boundary).
 
-The av operations are lowered with the agent-scope cache bits (``sc1``) and
+The av operations are lowered with the agent-scope cache bits (`sc1`) and
 the av-none fences to waits only, so no L2 write-back or invalidate is
-emitted. The GFX942 workgroup release waits ``lgkmcnt(0)`` only outside
+emitted. The GFX942 workgroup release waits `lgkmcnt(0)` only outside
 tgsplit mode, so a publishing CTA also has every wave wait for its own stores
-before the barrier (``cta_sync(drain=True)``). The step-end fault handshake
+before the barrier (`cta_sync(drain=True)`). The step-end fault handshake
 uses plain system release / acquire once a step.
 
-A poll gives up after ``ticks`` of the 100 MHz clock or once any rank has set
-the error word; a timeout sets ``[1, rank, epoch, site]`` on every rank.
+A poll gives up after `ticks` of the 100 MHz clock or once any rank has set
+the error word; a timeout sets `[1, rank, epoch, site]` on every rank.
 """
 
 import flydsl.expr as fx
@@ -53,7 +53,7 @@ _SCOPE = {Space.SCRATCH: "agent", Space.PEER: None}
 
 
 def _ptr(addr, i, bits=64):
-    """The global pointer to element i (of ``bits``) of address ``addr``."""
+    """The global pointer to element i (of `bits`) of address `addr`."""
     at = addr + fx.Int64(i) * (bits // 8)
     return fx.inttoptr(
         fx.PointerType.get(
@@ -107,7 +107,7 @@ def store16(addr, i, v, scope):
 
 
 def load128(addr, i, scope):
-    """Dwords i .. i + 3 (i a multiple of 4): one load-visible at ``scope``."""
+    """Dwords i .. i + 3 (i a multiple of 4): one load-visible at `scope`."""
     ptr = _llvm.IntToPtrOp(
         ir.Type.parse("!llvm.ptr<1>"), as_ir_value(addr + fx.Int64(i) * 4)
     ).result
@@ -123,7 +123,7 @@ def load128(addr, i, scope):
 
 
 def store_dev(addr, i, words):
-    """Dwords i .. of this GPU's scratch := ``words`` (1 or 2, i aligned),
+    """Dwords i .. of this GPU's scratch := `words` (1 or 2, i aligned),
     store-available at agent scope."""
     if const_expr(len(words) == 1):
         store32(addr, i, words[0], "agent")
@@ -171,7 +171,7 @@ def acquire_fence(scope):
 def wave_sync(count, target):
     """Every lane of the wave: what each lane did before (its acquires)
     happens before what any lane does after. Each lane releases, adds one to
-    the wave's LDS ``count``, and acquires once it reads ``target``; the read
+    the wave's LDS `count`, and acquires once it reads `target`; the read
     value comes after every lane's add in the counter's order (a release
     sequence), so it synchronizes with every lane's release."""
     sync_release("wavefront")
@@ -193,8 +193,8 @@ def wave_sync(count, target):
 
 
 def cta_sync(drain=False):
-    """``gpu.barrier``: workgroup release fence, ``s_barrier``, acquire fence
-    (HIP's ``__syncthreads``). ``drain``: every wave's stores complete first."""
+    """`gpu.barrier`: workgroup release fence, `s_barrier`, acquire fence
+    (HIP's `__syncthreads`). `drain`: every wave's stores complete first."""
     if const_expr(drain):
         rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
@@ -229,7 +229,7 @@ def _fail_if(timed_out, fail, site):
 
 
 class Mailbox:
-    """Tagged pairs of one launch (``tag``), every address an ``Addr``."""
+    """Tagged pairs of one launch (`tag`), every address an `Addr`."""
 
     def __init__(
         self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS, tag16=None
@@ -244,7 +244,7 @@ class Mailbox:
         self.ticks = ticks
 
     def put(self, a, i, v):
-        """Pair i of ``a`` := (v, tag), monotonic: a value no other data hangs on."""
+        """Pair i of `a` := (v, tag), monotonic: a value no other data hangs on."""
         bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
         store64(a.value, i, pack(bits, self.tag), _SCOPE[a.space])
 
@@ -253,8 +253,8 @@ class Mailbox:
             store64(a.value, i + k, pack(words[k], self.tag), _SCOPE[a.space])
 
     def publish(self, a, i, v):
-        """Pair i of ``a`` := (v, tag) after a synchronizing release: what
-        happened before it (the CTA's stores past a ``cta_sync(drain=True)``,
+        """Pair i of `a` := (v, tag) after a synchronizing release: what
+        happened before it (the CTA's stores past a `cta_sync(drain=True)`,
         pairs it acquired) happens before an acquire of the pair."""
         sync_release(_SCOPE[a.space])
         self.put(a, i, v)
@@ -264,7 +264,7 @@ class Mailbox:
         sync_acquire(_SCOPE[space])
 
     def put_release_all(self, addrs, i, v):
-        """Pair i of every ``addrs`` := (v, tag) after one release fence."""
+        """Pair i of every `addrs` := (v, tag) after one release fence."""
         release(_SCOPE[addrs[0].space])
         for a in addrs:
             self.put(a, i, v)
@@ -282,14 +282,14 @@ class Mailbox:
             store64(base, 0, lo, None)
 
     def put_triple(self, a, i, bits48):
-        """Pair i of ``a`` := (48 value bits | tag16 << 48), monotonic."""
+        """Pair i of `a` := (48 value bits | tag16 << 48), monotonic."""
         word = (bits48 & ((1 << 48) - 1)) | (fx.Int64(self.tag16) << 48)
         store64(a.value, i, word, _SCOPE[a.space])
 
     def poll(self, specs, batch=POLL_MAX, site=0, triples=False):
-        """Pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})], all of one
+        """Pairs `specs` = [(Addr, pair index, npairs in {1, 2})], all of one
         space, re-loaded together until every tag is this launch's. Returns the
-        value words; ``triples``: of triple pairs (``put_triple``), both
+        value words; `triples`: of triple pairs (`put_triple`), both
         words."""
         if const_expr(len(specs) == 0):
             return []

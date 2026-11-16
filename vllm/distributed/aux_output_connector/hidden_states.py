@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.request import Request
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -29,6 +30,31 @@ class HiddenStatePlan:
     generated: bool = True
     prompt: bool = False
 
+    @classmethod
+    def for_request(cls, request: Request) -> HiddenStatePlan | None:
+        params = request.sampling_params
+        if params is None or not params.aux_outputs:
+            return None
+        generated = "hidden_states" in params.aux_outputs
+        prompt = "prompt_hidden_states" in params.aux_outputs
+        needs_generated = generated and (
+            request.num_output_tokens == 0
+            or params.hidden_states_end is None
+            or request.num_tokens - 1 < params.hidden_states_end
+        )
+        needs_prompt = (
+            prompt and request.num_computed_tokens < request.num_prompt_tokens - 1
+        )
+        if not (needs_generated or needs_prompt):
+            return None
+        return cls(
+            request.num_prompt_tokens,
+            params.hidden_states_start,
+            params.hidden_states_end,
+            generated,
+            prompt,
+        )
+
     def select(self, step_start: int, step_end: int) -> tuple[int, int]:
         start = max(step_start, self.prompt_len - 1, self.start)
         end = step_end if self.end is None else min(step_end, self.end)
@@ -36,7 +62,7 @@ class HiddenStatePlan:
 
 
 def verify_hidden_config(config: VllmConfig) -> None:
-    if not config.use_v2_model_runner or config.device_config.device_type != "cuda":
+    if config.device_config.device_type != "cuda":
         raise ValueError("Hidden states require the CUDA Model Runner V2")
     if config.scheduler_config.async_scheduling:
         raise ValueError("Hidden states require async_scheduling=False")
@@ -92,26 +118,27 @@ def validate_capture_request(
         raise VLLMValidationError("Hidden states do not support streaming input")
     if "prompt_hidden_states" in names and config.cache_config.kv_sharing_fast_prefill:
         raise VLLMValidationError("Prompt hidden states do not support fast prefill")
-    if (
-        params.presence_penalty != 0
-        or params.frequency_penalty != 0
-        or params.repetition_penalty != 1
-        or params.logit_bias
-    ):
-        raise VLLMValidationError(
-            "Hidden states do not support penalties or logit_bias"
+    if "hidden_states" in names:
+        if (
+            params.presence_penalty != 0
+            or params.frequency_penalty != 0
+            or params.repetition_penalty != 1
+            or params.logit_bias
+        ):
+            raise VLLMValidationError(
+                "Hidden states do not support penalties or logit_bias"
+            )
+        masked = (
+            params.top_p < 1
+            or params.min_p > 0
+            or params.allowed_token_ids
+            or params.bad_words
+            or params.structured_outputs is not None
         )
-    masked = (
-        params.top_p < 1
-        or params.min_p > 0
-        or params.allowed_token_ids
-        or params.bad_words
-        or params.structured_outputs is not None
-    )
-    if params.top_k > 256 or (masked and params.top_k <= 0):
-        raise VLLMValidationError(
-            "Truncated or masked hidden-state requests require 1 <= top_k <= 256"
-        )
+        if params.top_k > 256 or (masked and params.top_k <= 0):
+            raise VLLMValidationError(
+                "Truncated or masked hidden-state requests require 1 <= top_k <= 256"
+            )
     maximum = min(prompt_len - 1 + (params.max_tokens or limit), limit - 1)
     if end is not None:
         maximum = min(maximum, end)
@@ -171,7 +198,6 @@ class PendingHiddenOutput:
     request_ids: list[str]
     # request id -> (selected absolute start, full step end, owned GPU rows)
     snapshots: dict[str, tuple[int, int, torch.Tensor]]
-    empty: torch.Tensor
     prompt_snapshots: dict[str, tuple[int, torch.Tensor]] = field(default_factory=dict)
     prompt_rows: dict[str, torch.Tensor] = field(default_factory=dict)
     rows: dict[str, torch.Tensor] = field(default_factory=dict)
@@ -183,9 +209,6 @@ class PendingHiddenOutput:
     ) -> None:
         self.num_sampled, self.num_rejected = num_sampled, num_rejected
         for request_id, (_, _, rows) in self.snapshots.items():
-            if not len(rows):
-                self.rows[request_id] = self.empty
-                continue
             cpu = torch.empty_like(rows, device="cpu", pin_memory=True)
             cpu.copy_(rows, non_blocking=True)
             self.rows[request_id] = cpu
@@ -222,9 +245,6 @@ class HiddenStateCapturer:
         logger.info("Inline hidden-state metadata: %s", self.metadata)
         self.plans: dict[str, HiddenStatePlan] = {}
         self.pending: PendingHiddenOutput | None = None
-        self.empty = torch.empty(
-            (0, self.metadata["hidden_size"]), dtype=config.model_config.dtype
-        )
 
     def prepare(
         self,
@@ -248,7 +268,11 @@ class HiddenStateCapturer:
             if plan.prompt:
                 computed = int(batch.num_computed_tokens_np[index])
                 lo = max(computed, plan.start)
-                hi = min(step_end, plan.prompt_len - 1, plan.end or step_end)
+                hi = min(
+                    step_end,
+                    plan.prompt_len - 1,
+                    step_end if plan.end is None else plan.end,
+                )
                 if lo < hi:
                     offset = int(batch.query_start_loc_np[index]) + lo - computed
                     prompt_snapshots[request_id] = (
@@ -264,9 +288,7 @@ class HiddenStateCapturer:
             rows = sample_hidden_states[offset : offset + end - start].clone()
             snapshots[request_id] = (start, step_end, rows)
         self.pending = (
-            PendingHiddenOutput(
-                list(batch.req_ids), snapshots, self.empty, prompt_snapshots
-            )
+            PendingHiddenOutput(list(batch.req_ids), snapshots, prompt_snapshots)
             if snapshots or prompt_snapshots
             else None
         )

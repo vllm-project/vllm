@@ -7,10 +7,10 @@ import torch
 import vllm.models.muse_spark.common.ops.fused_rmsnorm as fused_rmsnorm_ops
 import vllm.models.muse_spark.nvidia.model as model_ops
 from vllm.models.muse_spark.nvidia.model import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xResidualStream,
-    MuseSpark1xRMSNorm,
-    MuseSpark1xRMSNormWithInputScale,
+    MuseSparkNormPreservingResidualConnection,
+    MuseSparkResidualStream,
+    MuseSparkRMSNorm,
+    MuseSparkRMSNormWithInputScale,
 )
 from vllm.platforms import current_platform
 
@@ -63,19 +63,19 @@ def make_norm(
 
 def make_residual_boundary(rows, *, post_input_scale=False):
     post_norm = make_norm(
-        MuseSpark1xRMSNormWithInputScale if post_input_scale else MuseSpark1xRMSNorm,
+        MuseSparkRMSNormWithInputScale if post_input_scale else MuseSparkRMSNorm,
         has_weight=post_input_scale,
         is_post_norm=True,
         eps=1e-8,
     )
-    pre_norm = make_norm(MuseSpark1xRMSNorm, is_post_norm=False)
-    connection = MuseSpark1xNormPreservingResidualConnection(HIDDEN).cuda()
+    pre_norm = make_norm(MuseSparkRMSNorm, is_post_norm=False)
+    connection = MuseSparkNormPreservingResidualConnection(HIDDEN).cuda()
     with torch.no_grad():
         connection.gate.copy_(torch.linspace(-0.9, 0.9, HIDDEN, device="cuda"))
     connection.materialize_coefficients()
     branch = torch.randn(rows, HIDDEN, device="cuda", dtype=torch.bfloat16)
     stream = torch.randn(rows, HIDDEN, device="cuda", dtype=torch.float32)
-    boundary = MuseSpark1xResidualStream(
+    boundary = MuseSparkResidualStream(
         stream=stream,
         branch=branch,
         post_norm=post_norm,
@@ -102,7 +102,7 @@ def rel_err(got, ref64):
 
 
 @requires_cuda
-@pytest.mark.parametrize("cls", [MuseSpark1xRMSNorm, MuseSpark1xRMSNormWithInputScale])
+@pytest.mark.parametrize("cls", [MuseSparkRMSNorm, MuseSparkRMSNormWithInputScale])
 @pytest.mark.parametrize("num_tokens", [1, 4096])
 def test_nothing_is_rounded_before_the_store(cls, num_tokens):
     """An fp32 result must carry fp32 error, not bf16 error (~4e-3 relative)."""
@@ -116,7 +116,7 @@ def test_nothing_is_rounded_before_the_store(cls, num_tokens):
 
 
 @requires_cuda
-@pytest.mark.parametrize("cls", [MuseSpark1xRMSNorm, MuseSpark1xRMSNormWithInputScale])
+@pytest.mark.parametrize("cls", [MuseSparkRMSNorm, MuseSparkRMSNormWithInputScale])
 def test_folding_the_cast_in_beats_casting_around_it(cls):
     """Reading the fp32 stream directly must not be worse than pre-casting."""
     torch.manual_seed(0)
@@ -132,7 +132,7 @@ def test_folding_the_cast_in_beats_casting_around_it(cls):
 
 
 @requires_cuda
-@pytest.mark.parametrize("cls", [MuseSpark1xRMSNorm, MuseSpark1xRMSNormWithInputScale])
+@pytest.mark.parametrize("cls", [MuseSparkRMSNorm, MuseSparkRMSNormWithInputScale])
 @pytest.mark.parametrize("has_weight", [True, False])
 def test_triton_matches_torch(cls, has_weight):
     torch.manual_seed(0)
@@ -151,7 +151,7 @@ def test_triton_matches_torch(cls, has_weight):
 
 @requires_cuda
 def test_out_dtype_defaults_to_the_input_dtype():
-    norm = make_norm(MuseSpark1xRMSNorm)
+    norm = make_norm(MuseSparkRMSNorm)
     for dtype in (torch.float32, torch.bfloat16):
         x = torch.randn(8, HIDDEN, device="cuda", dtype=dtype)
         assert norm(x).dtype == dtype
@@ -228,7 +228,7 @@ def test_flashinfer_residual_boundary_matches_triton(
 def test_unsupported_flashinfer_post_norm_uses_triton(monkeypatch):
     """Keep weighted post-norms on Triton when FlashInfer lacks the post weight."""
     boundary, pre_norm = make_residual_boundary(17)
-    boundary.post_norm = make_norm(MuseSpark1xRMSNormWithInputScale)
+    boundary.post_norm = make_norm(MuseSparkRMSNormWithInputScale)
     monkeypatch.setattr(model_ops, "_FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT", False)
 
     def unexpected_flashinfer_call(*args, **kwargs):

@@ -7,7 +7,7 @@
 ## Training Data Capture
 
 See [hidden-state outputs](../training/hidden_states.md)
-for generated-position training features returned through the Python and HTTP APIs.
+for generated and prompt-position training features returned through the Python and HTTP APIs.
 
 ## Compatibility Matrix
 

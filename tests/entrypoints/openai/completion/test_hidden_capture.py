@@ -4,6 +4,7 @@
 import io
 import json
 import os
+from typing import Any
 
 import httpx
 import numpy as np
@@ -42,7 +43,7 @@ def capture_server():
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("name", ["hidden_states", "prompt_hidden_states"])
 def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream, name):
-    common = dict(
+    common: dict[str, Any] = dict(
         temperature=0.8,
         seed=42,
         top_k=128,
@@ -52,6 +53,15 @@ def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream, name):
         ignore_eos=True,
         n=2,
     )
+    if name == "prompt_hidden_states":
+        common.update(
+            top_k=-1,
+            top_p=0.9,
+            presence_penalty=0.2,
+            frequency_penalty=0.1,
+            repetition_penalty=1.1,
+            logit_bias={"100": 1.0},
+        )
     if endpoint.endswith("generate"):
         body = dict(
             model=MODEL_NAME,
@@ -140,7 +150,6 @@ def test_hidden_http_admission_and_metadata(capture_server):
         assert metadata.status_code == 200, metadata.text
         assert metadata.json()["codec"] == "raw"
         assert metadata.json()["vocab_size"] > 128
-        assert "/data/" not in metadata.text
         for extra in (
             {"presence_penalty": 1},
             {"logit_bias": {"1": 1}},

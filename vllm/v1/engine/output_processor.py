@@ -163,13 +163,13 @@ class StreamingInputOutputCollector(RequestOutputCollector):
         return output
 
 
-@dataclass
+@dataclass(slots=True)
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingUpdate:
     """Streaming input update data for output processor.
 
@@ -457,6 +457,7 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            error=error,
         )
 
     def _new_request_output(
@@ -510,6 +511,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            error=error,
         )
 
     def _new_completion_output(
@@ -569,12 +571,10 @@ class RequestState:
                 if chunks
                 else self.hidden_states_empty
             )
-            if hidden_states is None or len(hidden_states) != expected:
-                if finish_reason not in (FinishReason.ABORT, FinishReason.ERROR):
-                    raise GenerationError(
-                        "Requested hidden-state rows were not delivered"
-                    )
-                assert hidden_states is not None
+            if (
+                hidden_states is None or len(hidden_states) != expected
+            ) and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR):
+                raise GenerationError("Requested hidden-state rows were not delivered")
 
         prompt_hidden_states = None
         if finished and self.prompt_hidden_chunks is not None:
@@ -702,9 +702,9 @@ class OutputProcessor:
     def get_num_queued_tokens(self) -> int:
         """Total prompt tokens of requests currently in the prefill phase.
 
-        Uses ``prompt_len`` rather than remaining prefill work because the
-        scheduler's ``num_computed_tokens`` is not propagated to the API
-        server until prefill completes.  See ``SchedulerConfig`` docs.
+        Uses `prompt_len` rather than remaining prefill work because the
+        scheduler's `num_computed_tokens` is not propagated to the API
+        server until prefill completes.  See `SchedulerConfig` docs.
         """
         return sum(
             req.prompt_len for req in self.request_states.values() if req.is_prefilling
@@ -922,7 +922,6 @@ class OutputProcessor:
             if engine_core_output.hidden_states is not None:
                 rows = engine_core_output.hidden_states
                 assert req_state.hidden_states_chunks is not None
-                req_state.hidden_states_empty = rows[:0]
                 if len(rows):
                     req_state.hidden_states_chunks.append(rows)
             if engine_core_output.routed_experts is not None:
@@ -1005,7 +1004,20 @@ class OutputProcessor:
                 if req_state.queue is not None:
                     req_state.queue.put(exc)
                     continue
-                raise
+                request_output = req_state.make_request_output(
+                    new_token_ids,
+                    pooling_output,
+                    FinishReason.ERROR,
+                    stop_reason,
+                    kv_transfer_params,
+                    ec_transfer_params,
+                    error=RequestError(
+                        code="hidden_states_unavailable", message=str(exc)
+                    ),
+                )
+                if request_output is not None:
+                    request_outputs.append(request_output)
+                continue
             if request_output:
                 if streaming_chunk_boundary:
                     request_output.finished = False

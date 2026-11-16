@@ -38,16 +38,12 @@ const fn default_clear_cache() -> bool {
     true
 }
 
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), Some("mode"))
-}
-
 /// Pause the scheduler so generation can be halted (e.g. for weight updates).
 pub async fn pause(
     State(state): State<Arc<AppState>>,
     params: Result<Query<PauseParams>, QueryRejection>,
 ) -> Result<Json<StatusResponse>, ApiError> {
-    let Query(params) = params.map_err(invalid_query)?;
+    let Query(params) = params?;
 
     state
         .engine_core_client()

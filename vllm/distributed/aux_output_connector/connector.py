@@ -14,18 +14,46 @@ import numpy as np
 import torch
 
 from vllm.distributed.aux_output_connector.hidden_states import HiddenStatePlan
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    get_routed_experts_bytes_per_token,
+)
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import (
+    maybe_convert_block_hash,
+    resolve_kv_cache_block_sizes,
+)
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
-@dataclass
+def retained_objects(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> tuple[int, int]:
+    """Number of hash-block objects whose routed experts the scheduler retains
+    and the worker stores, and the tokens per object."""
+    block_size, hash_block_size = resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    max_bytes = vllm_config.aux_output_config.max_bytes
+    if max_bytes is not None:
+        object_nbytes = hash_block_size * get_routed_experts_bytes_per_token(
+            vllm_config
+        )
+        return max(max_bytes // object_nbytes, 1), hash_block_size
+    num_blocks = kv_cache_config.num_blocks
+    if vllm_config.kv_transfer_config is not None:
+        num_blocks *= 2
+    return num_blocks * (block_size // hash_block_size), hash_block_size
+
+
+@dataclass(slots=True)
 class PackedBlockHashes:
     """Contiguous, self-contained block hashes for scheduler-worker IPC."""
 
@@ -37,7 +65,7 @@ class PackedBlockHashes:
             yield self.data[start : start + self.item_size]
 
 
-@dataclass
+@dataclass(slots=True)
 class AuxOutputConnectorMetadata:
     generation: int
     requests: dict[str, int]
@@ -48,7 +76,7 @@ class AuxOutputConnectorMetadata:
     hidden_plans: dict[str, HiddenStatePlan] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class AuxRequestOutput:
     token_start: int = 0
     rows: np.ndarray | None = None
@@ -63,7 +91,7 @@ class AuxOutputSchedulerConnector:
     def __init__(
         self,
         kv_cache_manager: KVCacheManager,
-        kv_connector: KVConnectorBase_V1 | None = None,
+        num_objects: int,
         *,
         enable_routed_experts: bool = True,
     ) -> None:
@@ -83,9 +111,12 @@ class AuxOutputSchedulerConnector:
             OrderedDict()
         )
         self._loading: dict[str, set[ExternalBlockHash]] = {}
-        self._capacity = kv_cache_manager.kv_cache_config.num_blocks * (
-            2 if kv_connector else 1
-        )
+        # KV blocks whose rows are not all here: loaded without rows, or
+        # computed from mid-block on. Any other cached GPU block has rows.
+        self._rowless: dict[ExternalBlockHash, BlockHash] = {}
+        # First token each active request computes here.
+        self._computed_from: dict[str, int] = {}
+        self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
 
@@ -97,61 +128,24 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         hidden_plans = {}
         for request_id in scheduler_output.num_scheduled_tokens:
-            request = requests[request_id]
-            params = request.sampling_params
-            if (
-                params is not None
-                and params.aux_outputs
-                and (
-                    (
-                        "hidden_states" in params.aux_outputs
-                        and (
-                            request.num_output_tokens == 0
-                            or params.hidden_states_end is None
-                            or request.num_tokens - 1 < params.hidden_states_end
-                        )
-                    )
-                    or (
-                        "prompt_hidden_states" in params.aux_outputs
-                        and request.num_computed_tokens < request.num_prompt_tokens - 1
-                    )
-                )
-            ):
-                hidden_plans[request_id] = HiddenStatePlan(
-                    request.num_prompt_tokens,
-                    params.hidden_states_start,
-                    params.hidden_states_end,
-                    generated="hidden_states" in params.aux_outputs,
-                    prompt="prompt_hidden_states" in params.aux_outputs,
-                )
+            plan = HiddenStatePlan.for_request(requests[request_id])
+            if plan is not None:
+                hidden_plans[request_id] = plan
         if not self._routing:
-            return AuxOutputConnectorMetadata(
-                0,
-                {},
-                {},
-                (),
-                hidden_plans=hidden_plans,
-            )
+            return AuxOutputConnectorMetadata(0, {}, {}, (), hidden_plans=hidden_plans)
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            self._computed_from.setdefault(request_id, request.num_computed_tokens)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
             self._loading.pop(request_id, None)
-            assert request.sampling_params is not None
-            # A P/D prefiller may cut the prompt short of the requested start.
-            scheduled_requests[request_id] = max(
-                min(
-                    request.sampling_params.routed_experts_prompt_start,
-                    request.num_prompt_tokens,
-                ),
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
-            )
+            scheduled_requests[request_id] = self._emit_start(request)
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -177,10 +171,21 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            hidden_plans=hidden_plans,
         )
         self._retained_hashes, self._released_hashes = [], []
-        metadata.hidden_plans = hidden_plans
         return metadata
+
+    @staticmethod
+    def _emit_start(request: Request) -> int:
+        if request.num_output_tokens:
+            return request.num_tokens - 1
+        assert request.sampling_params is not None
+        # A P/D prefiller may cut the prompt short of the requested start.
+        return min(
+            request.sampling_params.routed_experts_prompt_start,
+            request.num_prompt_tokens,
+        )
 
     def max_cache_hit(self, request: Request) -> int | None:
         if not self._routing:
@@ -189,10 +194,12 @@ class AuxOutputSchedulerConnector:
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
                 self._kv_cached.move_to_end(block)
-            elif not self._gpu_cached(keys[-1]):
+            elif block in self._rowless or not self._gpu_cached(keys[-1]):
                 break
             num_blocks += 1
-        return min(num_blocks * self._block_size, request.num_tokens - 1)
+        # A hit needs rows only from the first returned position on.
+        num_hit = max(num_blocks * self._block_size, self._emit_start(request))
+        return min(num_hit, request.num_tokens - 1)
 
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
@@ -200,25 +207,40 @@ class AuxOutputSchedulerConnector:
         if not self._routing:
             return num_external
         num_hit = num_local + num_external
-        limit = self.max_cache_hit(request)
-        assert limit is not None
-        if num_hit % self._block_size == 0 and num_hit <= limit:
-            return num_external
-        return 0
+        if num_hit <= self._emit_start(request):
+            for block, keys in islice(
+                self._kv_blocks(request.block_hashes),
+                num_local // self._block_size,
+                cdiv(num_hit, self._block_size),
+            ):
+                if block not in self._kv_cached:
+                    self._rowless[block] = keys[-1]
+        else:
+            limit = self.max_cache_hit(request)
+            assert limit is not None
+            if num_hit % self._block_size or num_hit > limit:
+                return 0
+        return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
         if not self._routing:
             return
         blocks = islice(
-            self._kv_blocks(request.block_hashes), num_tokens // self._block_size
+            self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
         )
         self._loading[request.request_id] = {block for block, _ in blocks}
 
     def _release_unheld(self) -> None:
+        loading = set().union(*self._loading.values())
+        if len(self._rowless) > self._capacity:
+            self._rowless = {
+                block: block_hash
+                for block, block_hash in self._rowless.items()
+                if block in loading or self._gpu_cached(block_hash)
+            }
         excess = len(self._kv_cached) - self._capacity
         if excess <= 0:
             return
-        loading = set().union(*self._loading.values())
         victims = []
         for block, keys in self._kv_cached.items():
             if block not in loading and not self._gpu_cached(keys[-1]):
@@ -242,49 +264,83 @@ class AuxOutputSchedulerConnector:
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-    ) -> tuple[np.ndarray | None, torch.Tensor | None]:
-        """Settle the rows against the request's accepted output tokens."""
-        request_output = (output or {}).get(request.request_id)
-        hidden = None
-        if request_output is not None and request_output.hidden_states is not None:
-            rows = request_output.hidden_states
-            end = max(0, request.num_tokens - 1 - request_output.hidden_start)
-            hidden = rows[:end]
-        if not self._routing:
-            return None, hidden
-        assert request_output is not None and request_output.rows is not None, (
-            f"auxiliary output worker output is missing {request.request_id}"
+    ) -> tuple[np.ndarray | None, torch.Tensor | None, tuple[int, torch.Tensor] | None]:
+        """Return the accepted R3 rows for one scheduled request."""
+        request_id = request.request_id
+        request_output = (output or {}).get(request_id)
+        hidden = prompt = None
+        if request_output is not None:
+            prompt = request_output.prompt_hidden_states
+            if request_output.hidden_states is not None:
+                end = max(0, request.num_tokens - 1 - request_output.hidden_start)
+                hidden = request_output.hidden_states[:end]
+        if not self._routing or (
+            request.num_output_tokens == 0 and not request.is_finished()
+        ):
+            return None, hidden, prompt
+        # The block this request started mid-block has no rows here. Its hash
+        # exists only once its last token is known; record the block before
+        # the scheduler can cache it.
+        computed_from = self._computed_from.get(request_id, 0)
+        index, offset = divmod(computed_from, self._block_size)
+        last = (index + 1) * (self._block_size // self._hash_block_size) - 1
+        if offset and self._sent_hash_counts[request_id] <= last < len(
+            request.block_hashes
+        ):
+            block_hash = request.block_hashes[last]
+            block = maybe_convert_block_hash(block_hash)
+            if block not in self._kv_cached:
+                self._rowless[block] = block_hash
+        assert output is not None and request_id in output, (
+            f"auxiliary output worker output is missing {request_id}"
         )
-        local_end = request.num_tokens - 1 - request_output.token_start
+        request_output = output[request_id]
+        assert request_output.rows is not None
+        token_end = request.num_tokens - 1
+        local_end = token_end - request_output.token_start
         if local_end < 0:
             assert not request.is_finished(), (
-                "finished auxiliary output output has no accepted token range"
+                "finished auxiliary output output has no accepted token range: "
+                f"request={request_id}, token_end={token_end}, "
+                f"output_start={request_output.token_start}, "
+                "output_end="
+                f"{request_output.token_start + len(request_output.rows)}"
             )
-            return None, hidden
+            return None, hidden, prompt
         assert local_end <= len(request_output.rows), (
-            "auxiliary output worker output has an invalid token range"
+            "auxiliary output worker output has an invalid token range: "
+            f"request={request_id}, token_end={token_end}, "
+            f"output_start={request_output.token_start}, "
+            f"output_end={request_output.token_start + len(request_output.rows)}"
         )
-        return request_output.rows[:local_end], hidden
+        return request_output.rows[:local_end], hidden, prompt
 
     def request_finished(self, request: Request) -> None:
-        """Queue a request's terminal event and final block hashes."""
         if not self._routing:
             return
+        """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
         self._loading.pop(request_id, None)
+        if request_id in self._sent_hash_counts:
+            # The next metadata delivers this terminal event to the worker.
+            self._finished_requests[request_id] = self._take_new_hashes(
+                request, request.num_computed_tokens
+            )
+            del self._sent_hash_counts[request_id]
+        computed_from = self._computed_from.pop(request_id, request.num_tokens)
         num_blocks = request.num_computed_tokens // self._block_size
-        for block, keys in islice(self._kv_blocks(request.block_hashes), num_blocks):
-            if block not in self._kv_cached and self._gpu_cached(keys[-1]):
+        blocks = islice(self._kv_blocks(request.block_hashes), num_blocks)
+        for index, (block, keys) in enumerate(blocks):
+            if index * self._block_size >= computed_from:
+                self._rowless.pop(block, None)
+            if (
+                block not in self._kv_cached
+                and block not in self._rowless
+                and self._gpu_cached(keys[-1])
+            ):
                 self._kv_cached[block] = keys
                 self._retained_hashes.extend(keys)
         self._release_unheld()
-        if request_id not in self._sent_hash_counts:
-            return
-        # The next metadata delivers this terminal event to the worker.
-        self._finished_requests[request_id] = self._take_new_hashes(
-            request, request.num_computed_tokens
-        )
-        del self._sent_hash_counts[request_id]
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
@@ -308,7 +364,9 @@ class AuxOutputSchedulerConnector:
         """Start a new auxiliary output namespace after a prefix-cache reset."""
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
+        self._computed_from.clear()
         self._finished_requests.clear()
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()
+        self._rowless.clear()

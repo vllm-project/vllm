@@ -368,6 +368,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     workspace = torch.empty(96, 8)
 
+    assert manager.v_up_proj_combine is None
     assert manager.query_gather == direct_query.gather
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
@@ -453,31 +454,24 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
         cp_group=group,
         is_lse_base_on_e=True,
     )
+    assert isinstance(manager.v_up_proj_combine, functools.partial)
+    assert manager.v_up_proj_combine.func is dcp_manager.dcp_a2a_v_up_proj_lse_reduce
+    assert manager.v_up_proj_combine.keywords == {
+        "cp_group": group,
+        "is_lse_base_on_e": True,
+    }
 
 
-@pytest.mark.parametrize(
-    ("parallel_drafting", "use_v2_model_runner", "expected"),
-    [
-        # Model runner V1's parallel drafter widens requests to 1 + 2 * 3.
-        (True, False, 28),
-        (True, True, 16),
-        # A diffusion canvas of 3 without a speculative config.
-        (None, True, 16),
-    ],
-)
-def test_dcp_workspace_covers_decode_width(
-    parallel_drafting, use_v2_model_runner, expected
-):
+# False: a diffusion canvas of 3 without a speculative config.
+@pytest.mark.parametrize("with_spec_config", [True, False])
+def test_dcp_workspace_covers_decode_width(with_spec_config):
     config = _manager_config()
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
-    config.use_v2_model_runner = use_v2_model_runner
-    if parallel_drafting is not None:
-        config.speculative_config = MagicMock(
-            num_speculative_tokens=3, parallel_drafting=parallel_drafting
-        )
+    if with_spec_config:
+        config.speculative_config = MagicMock(num_speculative_tokens=3)
 
-    assert dcp.get_dcp_workspace_max_num_tokens(config) == expected
+    assert dcp.get_dcp_workspace_max_num_tokens(config) == 16
 
 
 def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
@@ -500,6 +494,7 @@ def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
     assert isinstance(manager.combine, functools.partial)
     assert manager.combine.func is dcp_manager.cp_lse_ag_out_ar
     assert manager.query_gather is None
+    assert manager.v_up_proj_combine is None
 
 
 def test_dcp_chunk_workspace_alignment_covers_interleave():
@@ -1128,6 +1123,94 @@ def test_distributed_direct_a2a_matches_reference(
             "LSE_BASE_E": lse_base_e,
         },
     )
+
+
+def _distributed_direct_dcp_topk_worker(env: dict[str, str]) -> None:
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        DirectDCPTopKWorkspace,
+    )
+
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        topk, max_rows, local_len = 2048, 64, 3000
+        workspace = DirectDCPTopKWorkspace(dist.group.WORLD, device, max_rows, topk)
+
+        def make_inputs(rows: int, seed: int, valid: int):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed * 101 + rank)
+            logits = torch.randn(
+                rows, local_len, device=device, generator=generator
+            ).round_(decimals=1)
+            local = logits.topk(topk, dim=1).indices.to(torch.int32)
+            local[:, valid:] = -1
+            return logits, local
+
+        def reference(logits: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+            rows = local.shape[0]
+            packed = torch.empty((rows, topk, 2), device=device)
+            pack_dcp_topk_candidates_cutedsl(
+                logits, local, packed, rank, world_size, 1, None
+            )
+            gathered = torch.empty((world_size, rows, topk, 2), device=device)
+            dist.all_gather_into_tensor(gathered, packed)
+            out = torch.empty((rows, topk), device=device, dtype=torch.int32)
+            # The selector reads the rank-major all-gather layout as is.
+            stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=out)
+            return out
+
+        def check(actual: torch.Tensor, expected: torch.Tensor) -> None:
+            for row in range(actual.shape[0]):
+                assert sorted(actual[row].tolist()) == sorted(expected[row].tolist())
+            peers = [torch.empty_like(actual) for _ in range(world_size)]
+            dist.all_gather(peers, actual)
+            for peer in peers:
+                assert torch.equal(peer.sort(dim=1).values, actual.sort(dim=1).values)
+
+        # An odd number of exchanges covers both ping-pong inboxes; the
+        # rounded scores create top-k boundary ties; valid=200 fits in topk.
+        for it, (rows, valid) in enumerate(
+            ((1, topk), (64, topk), (17, topk), (3, 200), (64, 1000))
+        ):
+            logits, local = make_inputs(rows, it, valid)
+            expected = reference(logits, local)
+            actual = local.clone()
+            workspace.merge(logits, actual, 1, None)
+            check(actual, expected)
+
+        rows = 17
+        static_logits, static_local = make_inputs(rows, 100, topk)
+        static_topk = static_local.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            workspace.merge(static_logits, static_topk, 1, None)
+        for it in range(3):
+            logits, local = make_inputs(rows, 200 + it, topk)
+            expected = reference(logits, local)
+            static_logits.copy_(logits)
+            static_topk.copy_(local)
+            graph.replay()
+            check(static_topk, expected)
+        torch.accelerator.synchronize()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4 or not torch.cuda.is_available(),
+    reason="Need 4 GPUs.",
+)
+def test_distributed_direct_dcp_topk_matches_all_gather():
+    _distributed_run(_distributed_direct_dcp_topk_worker, world_size=4, extra_env={})
 
 
 if __name__ == "__main__":

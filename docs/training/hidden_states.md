@@ -1,6 +1,7 @@
 # Hidden-state outputs
 
-Return the exact inputs to `lm_head` for selected generated positions. Hidden
+Return the exact inputs to `lm_head` for selected generated positions or explicit
+prompt scoring. Hidden
 states travel inline with the final completion as one tensor, preserving their
 original dtype. A trainer can apply the matching model head to obtain the full
 vocabulary distribution. Use the engine's sampled-token logprobs for behavior
@@ -12,9 +13,11 @@ This initial implementation supports unquantized Qwen3 on CUDA Model Runner V2,
 without LoRA, pipeline/context parallelism, batch-sharded sampling or adaptive
 verification. Unsupported model logits paths fail during startup. Async
 scheduling is not supported yet; this restriction applies to the whole engine.
+The output APIs are implemented by the Python frontend; the Rust frontend does
+not expose these request or response fields.
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-0.6B \
+vllm serve Qwen/Qwen3-0.6B \
     --enable-return-hidden-states --no-async-scheduling
 ```
 
@@ -154,3 +157,10 @@ Auxiliary drafter layers, top-k tensor delivery, store mode and async scheduling
 are separate follow-ups. Prompt scoring is an explicit extension; generated
 `hidden_states` retains its sampling-following meaning. Earlier benchmarks of
 the combined prompt/auxiliary producer must be rerun for this implementation.
+
+Prompt-only capture returns the raw model rows independently of sampling
+penalties, logit bias or truncation. The generated-row sampling restrictions
+apply when `aux_outputs` includes `hidden_states`, including requests for both
+outputs. A missing required row fails its request; synchronous Python consumers
+receive `finish_reason="error"` and a structured `RequestOutput.error`. Other
+requests in the batch continue.

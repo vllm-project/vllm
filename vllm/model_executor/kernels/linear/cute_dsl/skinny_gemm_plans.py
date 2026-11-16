@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Measured skinny GEMM plans for unquantized BF16 linear layers.
 
-Plans are keyed by device capability, local ``(N, K)`` weight shape and token
+Plans are keyed by device capability, local `(N, K)` weight shape and token
 count. A layer whose shape is listed runs the planned config for that token
-count; other token counts use ``F.linear``. Entries are kept only where the
+count; other token counts use `F.linear`. Entries are kept only where the
 skinny GEMM beats cuBLAS by more than 5% under CUDA graph replay.
 """
 
@@ -69,7 +69,7 @@ SKINNY_GEMM_PLANS_BY_CAPABILITY: dict[
 
 
 def get_skinny_gemm_plan(n: int, k: int) -> SkinnyGemmPlan | None:
-    """Return the token-count plan for an ``(N, K)`` weight on this device."""
+    """Return the token-count plan for an `(N, K)` weight on this device."""
     plans = SKINNY_GEMM_PLANS_BY_CAPABILITY.get(
         current_platform.get_device_capability()
     )

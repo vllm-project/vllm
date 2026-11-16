@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -15,6 +15,8 @@ from vllm.entrypoints.generate.aux_outputs import (
     HiddenStatesResponse,
 )
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     AnyResponseFormat,
     MMPayload,
     PerRequestMetrics,
@@ -140,8 +142,8 @@ class CompletionRequest(HiddenStatesRequest, OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -314,7 +316,7 @@ class CompletionRequest(HiddenStatesRequest, OpenAIBaseModel):
         )
 
     # Default sampling parameters for completion requests
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -354,7 +356,7 @@ class CompletionRequest(HiddenStatesRequest, OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,

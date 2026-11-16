@@ -24,8 +24,9 @@ class HiddenCaptureReferenceExtension:
         model = runner.model
         logits = model.compute_logits(states)
         connector = runner.aux_output_connector
-        assert connector is not None and connector._hidden is not None
-        metadata = connector._hidden.metadata
+        assert connector is not None
+        metadata = connector.hidden_states_metadata
+        assert metadata is not None
         rebuilt = torch.nn.functional.linear(states, model.lm_head.weight)
         rebuilt = rebuilt[:, : metadata["vocab_size"]]
         if metadata["soft_cap"] is not None:
@@ -267,6 +268,26 @@ def test_prompt_hidden_scoring_matches_chunked_prefill_and_bounded_cache(
                     args=(window.prompt_hidden_states.tolist(),),
                 )
             )
+            if budget == 32:
+                engine = runner.llm.llm_engine
+                params = capture_params(
+                    aux_outputs=("prompt_hidden_states",), max_tokens=1, min_tokens=1
+                )
+                engine.add_request("abort-prefill", prompt, params)
+                assert engine.step() == []
+                assert engine.has_unfinished_requests()
+                engine.abort_request(["abort-prefill"])
+                assert not engine.has_unfinished_requests()
+                engine.add_request("abort-prefill", prompt, params)
+                completed = []
+                while engine.has_unfinished_requests():
+                    completed.extend(engine.step())
+                torch.testing.assert_close(
+                    completed[-1].outputs[0].prompt_hidden_states,
+                    reference,
+                    atol=0,
+                    rtol=0,
+                )
 
 
 def test_speculative_hidden_windows_follow_accepted_rows(vllm_runner, monkeypatch):

@@ -387,7 +387,7 @@ def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
     original_error = RuntimeError("GPU decoder unavailable")
 
-    def raise_unrelated_error(cls, file_path, nvc, max_width, max_height):
+    def raise_unrelated_error(cls, file_path, nvc, max_width, max_height, **kwargs):
         raise original_error
 
     monkeypatch.setattr(

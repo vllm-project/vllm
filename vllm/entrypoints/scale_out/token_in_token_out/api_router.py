@@ -104,7 +104,6 @@ async def abort_requests(raw_request: Request):
     return Response(status_code=200)
 
 
-# Under the `/inference` prefix, so `--api-key` guards it.
 @router.get("/inference/v1/hidden_states_metadata")
 async def get_hidden_states_metadata(request: Request):
     engine = engine_client(request)
@@ -114,6 +113,7 @@ async def get_hidden_states_metadata(request: Request):
     return JSONResponse(content=metadata[0])
 
 
+# Under the `/inference` prefix, so `--api-key` guards it.
 router.add_api_route("/inference/v1/abort_requests", abort_requests, methods=["POST"])
 # Unauthenticated legacy path, kept for existing `--tokens-only` deployments.
 abort_router.add_api_route("/abort_requests", abort_requests, methods=["POST"])

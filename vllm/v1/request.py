@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingUpdate:
     """Lightweight data for streaming session continuation.
 

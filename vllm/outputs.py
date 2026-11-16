@@ -76,9 +76,9 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
         spec_decode_metrics: Per-sequence speculative-decoding acceptance metrics,
             populated on finish when speculative decoding ran and
-            ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
-            Surfaced in the response as ``metrics.speculative_decoding`` for
-            single-sequence (``n == 1``) requests.
+            `--per-request-spec-decode-metrics` is enabled; None otherwise.
+            Surfaced in the response as `metrics.speculative_decoding` for
+            single-sequence (`n == 1`) requests.
         weight_versions: Contiguous weight version spans over output-token indexes.
             Set on the final output only.
 
@@ -89,8 +89,6 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
-    hidden_states: torch.Tensor | None = None
-    hidden_states_start: int | None = None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
@@ -98,6 +96,8 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    hidden_states: torch.Tensor | None = None
+    hidden_states_start: int | None = None
     prompt_hidden_states: torch.Tensor | None = None
     prompt_hidden_states_start: int | None = None
     prompt_hidden_states_weight_versions: list[WeightVersionSpan] | None = None
@@ -168,6 +168,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        error: Structured request-level error information, if generation failed.
 
     """
 
@@ -189,6 +190,7 @@ class RequestOutput:
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -212,10 +214,13 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.error = error
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
         self.finished |= next_output.finished
+        if next_output.error is not None:
+            self.error = next_output.error
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
 

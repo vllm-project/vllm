@@ -370,6 +370,11 @@ review process:
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
+- A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
+  `tools/vllm-rocm/therock_wheels.py` fails `pre-commit` until a maintainer
+  with write access comments `/ci rocm cache`, which copies the ROCm base image
+  the PR's CI built into `rocm/vllm-ci` so `main` reuses it after the merge, or
+  `/ci rocm nocache` to skip that. Then re-run the failed `pre-commit` check.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.
