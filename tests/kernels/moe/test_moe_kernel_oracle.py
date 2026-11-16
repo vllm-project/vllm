@@ -813,6 +813,21 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
+@pytest.mark.skip_global_cleanup
+def test_aiter_activation_bound_keeps_a_bf16_request(monkeypatch) -> None:
+    """The bound is process-wide: a layer with `activation: null` is not overridden
+    by a layer built later."""
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+    for activation, expected_bound in (
+        (None, _NO_ACTIVATION_BOUND),
+        (kMxfp8Dynamic, _NO_ACTIVATION_BOUND),
+    ):
+        spec = QuantSpec(weight=kMxfp4Static, activation=activation)
+        with layer_target_spec_scope(spec):
+            _set_aiter_bf16_fp8_moe_bound()
+        assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
+
+
 @pytest.mark.parametrize(
     "backend, expected_bound",
     [

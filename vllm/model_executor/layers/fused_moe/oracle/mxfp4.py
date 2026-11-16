@@ -526,6 +526,10 @@ def _serves_requested_activation(
     return on_gfx950()
 
 
+# `AITER_BF16_FP8_MOE_BOUND` value for bf16 activations at every token count.
+_ALWAYS_BF16_BOUND = str(2**31 - 1)
+
+
 def _set_aiter_bf16_fp8_moe_bound() -> None:
     """Select the activation dtype of the interleaved AITER_MXFP4_BF16 kernels.
 
@@ -543,7 +547,7 @@ def _set_aiter_bf16_fp8_moe_bound() -> None:
         bound = "0"
     elif requested_activation_key is None and requested:
         # `activation: null`: bf16 activations for every token count.
-        bound = str(2**31 - 1)
+        bound = _ALWAYS_BF16_BOUND
     elif envs.VLLM_STRICT_QUANT_SCHEME:
         # Adding activation quantization to a weight-only request is forbidden.
         bound = str(2**31 - 1)
@@ -551,6 +555,13 @@ def _set_aiter_bf16_fp8_moe_bound() -> None:
         # TODO: This should be cleaned up - this is silently overriding
         # model-requested activation quant key.
         bound = "0"
+    if (
+        os.environ.get("AITER_BF16_FP8_MOE_BOUND") == _ALWAYS_BF16_BOUND
+        and bound != _ALWAYS_BF16_BOUND
+    ):
+        # The variable is process-wide: once a layer asked for bf16 activations,
+        # later layers do not take that back.
+        return
     os.environ["AITER_BF16_FP8_MOE_BOUND"] = bound
 
 

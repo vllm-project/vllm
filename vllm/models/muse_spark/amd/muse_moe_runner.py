@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.online.base import (
 )
 from vllm.model_executor.layers.quantization.online.legacy_env import (
     muse_moe_online_quant_args,
+    reject_muse_env_with_quantization_config,
 )
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineMoEMethod,
@@ -695,6 +696,8 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         quant_config: QuantizationConfig | None,
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
+        if isinstance(quant_config, OnlineQuantizationConfig):
+            reject_muse_env_with_quantization_config()
         if quant_config is None:
             # Deprecated VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: same as the equivalent
             # `--quantization-config`.

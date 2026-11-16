@@ -57,6 +57,15 @@ def fp8_moe_requant_args() -> QuantizationConfigArgs | None:
     return QuantizationConfigArgs(moe=spec)
 
 
+def reject_muse_env_with_quantization_config() -> None:
+    """`VLLM_ROCM_MUSE_MOE_ONLINE_QUANT` and `--quantization-config` are exclusive."""
+    if envs.VLLM_ROCM_MUSE_MOE_ONLINE_QUANT == "mxfp4":
+        raise ValueError(
+            "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT (deprecated) and --quantization-config "
+            "cannot be used together. Remove VLLM_ROCM_MUSE_MOE_ONLINE_QUANT."
+        )
+
+
 def muse_moe_online_quant_args(num_hidden_layers: int) -> QuantizationConfigArgs | None:
     """Online quantization args equivalent to
     `VLLM_ROCM_MUSE_MOE_ONLINE_QUANT=mxfp4`: the first and last decoder layers

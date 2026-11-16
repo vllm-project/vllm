@@ -1090,3 +1090,8 @@ def test_muse_deprecated_online_quant_env_redirects_to_quantization_config(
     ):
         method = experts._get_quant_method(prefix.format(layer), None, config)
         assert type(method) is expected
+
+    # The env var and --quantization-config cannot be combined.
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe="mxfp4"))
+    with pytest.raises(ValueError, match="cannot be used together"):
+        experts._get_quant_method(prefix.format(5), online_config, config)
