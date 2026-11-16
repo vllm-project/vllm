@@ -138,6 +138,9 @@ variants:
         docker_image: "egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103"
         docker_serve_command: "vllm serve"
         install: { pip: false }
+      # The ROCm image's entrypoint is `vllm`, not `vllm serve`.
+      mi355x:
+        docker_serve_command: "serve"
       # The CUDA 13.4 build of this model's image; the Rubin stack needs CUDA 13.4.
       # This `install` also replaces the profile's note, which names its own
       # nightly image as the only one that runs on Rubin.
