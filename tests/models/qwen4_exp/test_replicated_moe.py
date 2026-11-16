@@ -13,6 +13,7 @@ host.
 """
 
 import zlib
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -282,45 +283,42 @@ def _forward(layer: nn.Module, config: VllmConfig) -> tuple:
     return calls, tuple(sp_all_gather(x.contiguous())[:T] for x in outputs)
 
 
-def _check_replicated_experts() -> None:
-    off_config, on_config = _make_config(), _make_config(**FLAG)
+def _check_replicated_experts(monokernel: bool, layout: str | None) -> None:
+    off_config = _make_config(monokernel=monokernel)
+    on_config = _make_config(
+        monokernel=monokernel, hc_sp_replicated_moe_decode_layout=layout, **FLAG
+    )
+    resolved = on_config.parallel_config.hc_sp_replicated_moe_decode_layout
     off, on = _build(off_config), _build(on_config)
     assert off.mlp.experts.moe_config.tp_size == 2
-    assert on.mlp.experts.moe_config.tp_size == 1
+    if resolved == "copy":
+        # The specialized decode reads the flag-off TP2 shards in place.
+        shards = on.mlp.experts
+        assert shards.moe_config.tp_size == 2
+        for name in ("w13_weight", "w2_weight"):
+            want_shard = getattr(off.mlp.experts.routed_experts, name)
+            assert torch.equal(getattr(shards.routed_experts, name), want_shard)
+        assert on.mlp.replicated["experts"].moe_config.tp_size == 1
+    else:
+        assert on.mlp.replicated is None
+        assert on.mlp.experts.moe_config.tp_size == 1
+    if monokernel:
+        reasons = guards._layer_reasons(on)
+        if resolved == "copy":
+            assert not any(r.startswith("routed experts at TP size") for r in reasons)
+        else:
+            # The specialized decode reads a rank's share of whole experts at
+            # the checkpoint's intermediate (640) only; this model's is 256.
+            refused = "routed experts at TP size 1, intermediate 256"
+            assert any(r.startswith(refused) for r in reasons)
+        off_reasons = guards._layer_reasons(off)
+        assert not any(r.startswith("routed experts at TP size") for r in off_reasons)
     _, want = _forward(off, off_config)
     calls, got = _forward(on, on_config)
     # The attention keeps its all-gather and reduce-scatter; the MoE has none.
     assert calls == (1, 1, 0)
     # TP2 rounds two bf16 partial sums, whole experts one: close, not equal.
     torch.testing.assert_close(got, want, atol=2e-3, rtol=2e-2)
-
-
-def _check_dual_layout() -> None:
-    off_config = _make_config(monokernel=True)
-    on_config = _make_config(monokernel=True, **FLAG)
-    off, on = _build(off_config), _build(on_config)
-    # The specialized decode reads the flag-off TP2 shards in place.
-    shards = on.mlp.experts
-    assert shards.moe_config.tp_size == 2
-    for name in ("w13_weight", "w2_weight"):
-        want_shard = getattr(off.mlp.experts.routed_experts, name)
-        assert torch.equal(getattr(shards.routed_experts, name), want_shard)
-    assert on.mlp.replicated["experts"].moe_config.tp_size == 1
-    _, want = _forward(off, off_config)
-    calls, got = _forward(on, on_config)
-    assert calls == (1, 1, 0)
-    torch.testing.assert_close(got, want, atol=2e-3, rtol=2e-2)
-
-
-def _check_decode_guard_reads_tp_shards() -> None:
-    # Whole experts are read only at the checkpoint's intermediate (640); this
-    # model's is 256.
-    refused = "routed experts at TP size 1, intermediate 256"
-    dual = _build(_make_config(monokernel=True, **FLAG))
-    one_layout = _build(_make_config(**FLAG))
-    dual_reasons = guards._layer_reasons(dual)
-    assert not any(r.startswith("routed experts at TP size") for r in dual_reasons)
-    assert any(r.startswith(refused) for r in guards._layer_reasons(one_layout))
 
 
 def _check_separate_shared_expert_refused() -> None:
@@ -358,27 +356,44 @@ def _run(rank: int, port: int, check) -> None:
         cleanup_dist_env_and_memory()
 
 
-def test_replicated_experts_run_whole_on_local_rows() -> None:
+@pytest.mark.parametrize(
+    ("monokernel", "layout"),
+    [(False, None), (True, "shares"), (True, "copy")],
+)
+def test_replicated_experts_run_whole_on_local_rows(
+    monokernel: bool, layout: str | None
+) -> None:
     """Each rank holds the whole experts and runs them on its own SP rows: the
     MoE seam loses its collectives and the layer's outputs match the TP-sharded
-    layer's (a doubled or missing sum would not)."""
-    mp.spawn(_run, args=(get_open_port(), _check_replicated_experts), nprocs=2)
+    layer's (a doubled or missing sum would not). With `--monokernel` the decode
+    layout "copy" also keeps the flag-off TP2 shards for the specialized decode,
+    and "shares" keeps none: its specialized decode refuses whole experts at an
+    intermediate other than the checkpoint's."""
+    check = partial(_check_replicated_experts, monokernel, layout)
+    mp.spawn(_run, args=(get_open_port(), check), nprocs=2)
 
 
-def test_dual_layout_keeps_shards_and_runs_whole_experts() -> None:
-    """With `--monokernel`, `mlp.experts` stays the TP2 shard the specialized
-    decode reads, while the stock forward runs the whole experts, loaded from
-    the same checkpoint tensors, on the rank's own rows."""
-    mp.spawn(_run, args=(get_open_port(), _check_dual_layout), nprocs=2)
+def test_decode_layout_is_settled_at_config_time() -> None:
+    """The layout is refused where nothing reads it, and the compile factors
+    name the layout the layers are built with."""
 
+    def factors(**flags) -> dict:
+        return _make_config(**flags).parallel_config.compile_factors()
 
-def test_specialized_decode_guard_refuses_whole_experts() -> None:
-    """The kernels sum the TP ranks' partial outputs: whole experts in
-    `mlp.experts` are read at each rank's share, which the kernels' builds
-    locate at the checkpoint's intermediate only."""
-    mp.spawn(
-        _run, args=(get_open_port(), _check_decode_guard_reads_tp_shards), nprocs=2
+    key = "hc_sp_replicated_moe_decode_layout"
+    for flags in (
+        dict(monokernel=True, **{key: "copy"}),
+        dict(monokernel=False, **FLAG, **{key: "shares"}),
+    ):
+        with pytest.raises(ValueError, match=f"--{key.replace('_', '-')} requires"):
+            _make_config(**flags)
+    copy, shares = (
+        factors(monokernel=True, **FLAG, **{key: v}) for v in ("copy", "shares")
     )
+    assert copy[key] == "copy" and shares[key] == "shares"
+    assert factors(monokernel=True, **FLAG) == copy
+    assert key not in factors(monokernel=True)
+    assert key not in factors(**FLAG)
 
 
 def test_separate_shared_expert_is_refused() -> None:

@@ -106,13 +106,19 @@ class SpecializedDecode:
         self.counted = torch.zeros(1, dtype=torch.int32, pin_memory=True)
         self.counted_event: torch.cuda.Event | None = None
         self.counted_at = 0
+        experts = next(ly.mlp.experts for ly in model.layers)
         logger.info(
-            "%s: %d layers, widths %s, %d builds, %d launches a step, %s TP "
-            "all-reduce lines; other steps run vLLM's decode",
+            "%s: %d layers, widths %s, %d builds (experts: %s at intermediate "
+            "%d), %d launches a step, %s TP all-reduce lines; other steps run "
+            "vLLM's decode",
             NAME,
             len(model.layers),
             ",".join(map(str, config.widths)),
             len(builds),
+            f"TP{L.TP} shards"
+            if experts.moe_config.tp_size == L.TP
+            else "each rank's share of the whole experts",
+            self.launch.rip,
             self.launch.launches,
             self.launch.allreduce,
         )

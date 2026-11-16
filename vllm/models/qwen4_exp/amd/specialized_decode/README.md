@@ -60,19 +60,26 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
   slot is the null block);
 - HC sequence parallelism (`--enable-hc-sp`): stock steps keep their sharded
   layout; specialized steps run every row, including the PLE, on every rank;
-- `--enable-hc-sp-replicated-moe` as a dual layout: `mlp.experts` stays the
-  TP2 shard the kernels read, and each layer also holds every expert whole
-  (`mlp.replicated.experts`, loaded from the same checkpoint tensors), which
-  vLLM's forward runs on the rank's own rows at every stock step; the dual
-  layout costs each rank the whole experts on top of its shard;
+- `--enable-hc-sp-replicated-moe`: every expert is whole on each rank, and
+  vLLM's forward runs them on the rank's own rows at every stock step. What
+  the kernels read is `--hc-sp-replicated-moe-decode-layout`:
+    - `copy`: `mlp.experts` stays the TP2 shard the kernels read, and each
+      layer also holds every expert whole (`mlp.replicated.experts`, loaded
+      from the same checkpoint tensors); each rank holds its shard on top of
+      the whole experts, which leaves less memory for the KV cache;
+    - `shares`: `mlp.experts` holds the whole experts, and the kernels read
+      the rank's TP2 share of them in place (gate and up rows and the down
+      projection's K at offsets, `runtime/guards.py`, `expert_slices`; the
+      down projection's scales remapped a lane, `wide/stages/moe.py`,
+      `share_groups`), so no second copy is held;
 - the checkpoint's shapes (`wide/layout.py`, `SHAPES`) and formats: online
   MXFP4 GDN projections (`--quantization-config.targets` for
   `linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) on either AITER FP4
   GEMM layout (ASM: shuffled; Triton: row-major, transposed scales),
   `AITER_MXFP4_MXFP4` experts with `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
-  (the shared expert is routed expert 512; gate and up padded to any multiple
-  of 128 rows), a BF16 conv state and an FP32 recurrent state with
-  `--no-enable-prefix-caching`.
+  (the shared expert is routed expert 512; TP2 shards with gate and up padded
+  to any multiple of 128 rows, or whole experts), a BF16 conv state and an FP32
+  recurrent state with `--no-enable-prefix-caching`.
 
 ## Refusals
 
@@ -84,7 +91,7 @@ weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
 an unfused shared expert, `STOCK_TORCH_COMPILE`, other model shapes, no
 capture size in 1-192, a platform other than unpartitioned gfx950); the
 loaded model (every layer's modules, quantization methods,
-weight layouts and shapes, `mlp.experts` at a TP size other than 2); the GDN
+weight layouts and shapes; experts neither TP2 shards nor whole); the GDN
 caches at every bind (dtypes, shapes, dense slots). The TP ranks agree on
 every stage.
 

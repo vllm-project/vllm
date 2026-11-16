@@ -173,7 +173,7 @@ def _tee_replicated_experts(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Yield every routed-expert weight, the fused shared expert's included,
-    a second time for the whole experts of the dual layout
+    a second time for the whole experts of the "copy" decode layout
     (`mlp.replicated.experts`)."""
     held: list[tuple[str, torch.Tensor]] = []
     held_block = None
@@ -210,10 +210,12 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation.
 
     `replicated` (`--enable-hc-sp-replicated-moe`) keeps every routed expert
-    whole on each rank. With `--monokernel` the block holds both layouts:
+    whole on each rank. With `--monokernel` and the "copy" decode layout
+    (`--hc-sp-replicated-moe-decode-layout`) the block holds both layouts:
     `experts` stays TP-sharded for the specialized decode, which reads it in
     place, and `replicated["experts"]` holds the whole experts vLLM's forward
-    runs.
+    runs. With "shares" the specialized decode reads each rank's share of the
+    whole experts in `experts`.
     """
 
     def __init__(
@@ -223,7 +225,8 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         reduce_results: bool = True,
         replicated: bool = False,
     ) -> None:
-        dual = replicated and vllm_config.kernel_config.monokernel
+        layout = vllm_config.parallel_config.hc_sp_replicated_moe_decode_layout
+        dual = replicated and layout == "copy"
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
