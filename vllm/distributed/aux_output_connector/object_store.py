@@ -81,7 +81,6 @@ def aux_object_names(keys: Sequence[str], pipeline_parallel_size: int = 1) -> li
 
 
 def aux_session_pattern(key_prefix: str, session: str) -> str:
-    """Pattern for `remove_by_regex` that matches every object of a session."""
     return "^" + re.escape(f"{key_prefix}/{session}/")
 
 

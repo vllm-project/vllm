@@ -373,8 +373,6 @@ class AuxOutputSchedulerConnector:
         return min(num_hit, request.num_tokens - 1)
 
     def salt_from_hit(self, request: Request, num_hit: int) -> None:
-        """Salt the positions a session request computes, from its prefix-cache
-        hit on, with the current weight version."""
         if self._session(request) is None:
             return
         segments = request.cache_salt_segments
