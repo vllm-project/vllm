@@ -1438,17 +1438,17 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     out_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """AllReduce + add-RMSNorm, then an MXFP4 dynamic-quant linear
-    (``gemm_with_dynamic_quant`` on the ASM-layout weights) on the normed
+    (`gemm_with_dynamic_quant` on the ASM-layout weights) on the normed
     activation. Returns (linear output, normed activation, residual).
 
     Below M=32 the preshuffled Triton GEMM takes unshuffled per-1x32 scales,
     which is the layout AITER's fused AR+RMSNorm+MXFP4 epilogue writes, so
     there the quant runs in the all-reduce kernel instead of as a separate
     launch. Everywhere else this is the unfused sequence. Batch-invariant mode
-    always takes the unfused sequence, as ``gemm_with_dynamic_quant`` skips the
+    always takes the unfused sequence, as `gemm_with_dynamic_quant` skips the
     preshuffled GEMM there and would read these scales as shuffled.
 
-    The pattern only matches linears with ``use_asm_gemm``, which requires a
+    The pattern only matches linears with `use_asm_gemm`, which requires a
     tuned preshuffled config for the weight shape.
     """
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()

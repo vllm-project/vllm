@@ -1572,13 +1572,13 @@ class AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
 ):
     """AllReduce + fused-add RMSNorm feeding an MXFP4 dynamic-quant linear.
 
-    Matches ``all_reduce -> fused_add_rms_norm -> gemm_with_dynamic_quant``
-    (``AiterMxfp4LinearKernel`` with ``use_asm_gemm``)
-    and lowers it to ``rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm``, which
+    Matches `all_reduce -> fused_add_rms_norm -> gemm_with_dynamic_quant`
+    (`AiterMxfp4LinearKernel` with `use_asm_gemm`)
+    and lowers it to `rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm`, which
     moves the per-1x32 activation quant into the all-reduce epilogue at
     decode. The normed activation stays a pattern output, so bf16 consumers
-    of the same norm (e.g. Qwen3.5/3.8 GDN ``in_proj_ba`` next to the MXFP4
-    ``in_proj_qkvz``) keep working.
+    of the same norm (e.g. Qwen3.5/3.8 GDN `in_proj_ba` next to the MXFP4
+    `in_proj_qkvz`) keep working.
     """
 
     gemma_norm = False
@@ -1652,7 +1652,7 @@ class AiterAllreduceFusedAddRMSNormMxfp4GemmPattern(
 class AiterAllreduceFusedAddGemmaRMSNormMxfp4GemmPattern(
     AiterAllreduceFusedAddRMSNormMxfp4GemmPattern
 ):
-    """Gemma (1 + w) variant of ``AiterAllreduceFusedAddRMSNormMxfp4GemmPattern``."""
+    """Gemma (1 + w) variant of `AiterAllreduceFusedAddRMSNormMxfp4GemmPattern`."""
 
     gemma_norm = True
 

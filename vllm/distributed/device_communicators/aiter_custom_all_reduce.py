@@ -181,7 +181,7 @@ class AiterCustomAllreduce:
         kernel, None when neither launcher accepts the shape or the AITER
         build lacks the Gemma-capable kernel.
 
-        Mirrors ``CudaCommunicator.fused_allreduce_rmsnorm_mxfp4_quant`` in
+        Mirrors `CudaCommunicator.fused_allreduce_rmsnorm_mxfp4_quant` in
         aiter/dist/device_communicators/communicator_cuda.py.
         """
         if not self.build_supports_gemma_mxfp4_quant():
