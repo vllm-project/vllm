@@ -49,6 +49,7 @@ def _make_region(
     rank: int = 0,
     barrier=None,
     populate_shard: tuple[int, int] | None = None,
+    mmap_path: str | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -59,6 +60,7 @@ def _make_region(
         cpu_page_size=cpu_page_size,
         barrier=barrier,
         populate_shard=populate_shard,
+        mmap_path=mmap_path,
     )
 
 
@@ -495,6 +497,61 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
+# ---------------------------------------------------------------------------
+# mmap_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def region_dir():
+    """A fresh directory on /dev/shm, the filesystem regions live on."""
+    with tempfile.TemporaryDirectory(prefix="vllm_offload_", dir="/dev/shm") as d:
+        yield d
+
+
+def test_mmap_path_places_every_segment_file(iid, region_dir, monkeypatch):
+    """With mmap_path, every segment file is created there and nothing at the
+    per-engine path, and cleanup removes them all."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    path = os.path.join(region_dir, "region.mmap")
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+        mmap_path=path,
+    )
+    segments = region._segments
+    try:
+        assert [p for p, _, _ in segments] == [path, f"{path}.1", f"{path}.2"]
+        assert all(os.path.exists(p) for p, _, _ in segments)
+        assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+    finally:
+        region.cleanup()
+    assert not any(os.path.exists(p) for p, _, _ in segments)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_mmap_path_checks_free_space_where_the_region_lives(
+    iid, region_dir, monkeypatch, relative
+):
+    """The creator checks free space in mmap_path's directory, not /dev/shm;
+    a relative path resolves against the working directory."""
+    check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", check)
+    monkeypatch.chdir(region_dir)
+    path = "region.mmap" if relative else os.path.join(region_dir, "region.mmap")
+    with _region(iid, mmap_path=path):
+        assert os.path.exists(os.path.join(region_dir, "region.mmap"))
+    check.assert_called_once_with(
+        4 * PAGE_SIZE,
+        shm_path=region_dir,
+        allocation_name=f"CPU KV offload shared region in {region_dir}",
+    )
+
+
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
     helper must never be invoked on a kernel that accepts the advice.
@@ -655,6 +712,27 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+
+
+def test_madvise_efault_raises_shm_diagnostic():
+    """EFAULT from MADV_POPULATE_WRITE (a full tmpfs) becomes an OSError naming
+    /dev/shm, chained to the original error; EINVAL passes through."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    efault = OSError(errno.EFAULT, "Bad address")
+    with pytest.raises(OSError, match="/dev/shm") as exc_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=efault)), 0, PAGE_SIZE
+        )
+    assert exc_info.value.errno == errno.EFAULT
+    assert exc_info.value.__cause__ is efault
+
+    einval = OSError(errno.EINVAL, "Invalid argument")
+    with pytest.raises(OSError) as einval_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=einval)), 0, PAGE_SIZE
+        )
+    assert einval_info.value is einval
 
 
 def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
@@ -1246,6 +1324,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 
