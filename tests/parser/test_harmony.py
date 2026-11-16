@@ -464,8 +464,11 @@ class TestParse:
                 "I'll search for that",
             ),
             (
-                "<|channel|>commentary<|message|>Let me look that up.<|end|>"
-                "<|start|>assistant<|channel|>final<|message|>The answer is 42.<|end|>",
+                (
+                    "<|channel|>commentary<|message|>Let me look that up.<|end|>"
+                    "<|start|>assistant<|channel|>final<|message|>"
+                    "The answer is 42.<|end|>"
+                ),
                 "Let me look that up.\nThe answer is 42.",
             ),
         ],
@@ -561,7 +564,8 @@ class TestParseDelta:
                 request=chat_request,
                 finished=False,
             )
-            assert delta.reasoning or delta.content == "thinking"
+            assert delta is not None
+            assert (delta.reasoning or delta.content) == "thinking"
             assert not delta.tool_calls
 
         last_delta = parser.parse_delta(
@@ -654,6 +658,8 @@ class TestParseDelta:
             finished=False,
         )
 
+        assert delta_a is not None
+        assert delta_b is not None
         assert [tool.function.name for tool in tool_call_headers(delta_a)] == [
             "get_weather"
         ]

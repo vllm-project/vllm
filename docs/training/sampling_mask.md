@@ -63,7 +63,6 @@ With `stream=true`, each chunk carries the masks of the tokens it emits.
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
 | `temperature > 0` | Greedy has no truncated distribution |
 | `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
-| Model Runner V2 | Required by the async D2H copy pipeline |
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.
@@ -139,8 +138,9 @@ Each position then carries the sampled token's logprob and the top-128
   drop them. The finite entries are the sampling mask when it has at most `k`
   tokens.
 - The sampled token is always the first entry and may repeat inside the top-k.
-- `/inference/v1/generate` encodes IDs as `token_id:<id>`; the OpenAI
-  endpoints need `return_tokens_as_token_ids`.
+- The `token_id:<id>` strings come from the OpenAI endpoints with
+  `return_tokens_as_token_ids`; `/inference/v1/generate` returns an integer
+  `token_id` instead.
 
 ## Limitations
 

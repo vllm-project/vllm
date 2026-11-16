@@ -10,20 +10,20 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.models.qwen4_exp.amd import indexer_qsa
 from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
-from vllm.models.qwen4_exp.amd.indexer_qsa import (
-    QSAIndexer,
-    apply_qsa_rmsnorm,
-    apply_qsa_rope,
-)
+from vllm.models.qwen4_exp.amd import qsa_indexer
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
     qsa_prepare,
     supports_fused_pre_indexer,
+)
+from vllm.models.qwen4_exp.amd.qsa_indexer import (
+    QSAIndexer,
+    apply_qsa_rmsnorm,
+    apply_qsa_rope,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -132,6 +132,7 @@ def _make_attn(*, use_fused: bool) -> SimpleNamespace:
     return SimpleNamespace(
         use_fused_qsa_prepare=use_fused,
         kv_cache=torch.zeros(1, 2, 16, 8),
+        kv_cache_dtype="auto",
         q_norm=GemmaRMSNorm(4, eps=1e-6),
         k_norm=GemmaRMSNorm(4, eps=1e-6),
         _k_scale_float=1.0,
@@ -139,7 +140,9 @@ def _make_attn(*, use_fused: bool) -> SimpleNamespace:
     )
 
 
-def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
+def _make_indexer(
+    monkeypatch: pytest.MonkeyPatch, *, use_fused: bool, num_tokens: int = 2
+) -> QSAIndexer:
     """A QSAIndexer whose unfused path runs for real, with no projection weights.
 
     Both branches have to be reachable: a fused-path test is only meaningful if
@@ -152,6 +155,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
     indexer.index_kv_heads = 1
     indexer.index_head_dim = head_dim
     indexer.compress_ratio = 2
+    indexer.indexer_dtype = torch.bfloat16
     indexer.use_fused_pre_indexer = use_fused
     indexer.skip_topk = True
     indexer.index_qk_proj = lambda hidden_states: (
@@ -190,7 +194,9 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
         slot_mapping=torch.arange(num_tokens),
         k_work_metadata=torch.zeros(1, 2, dtype=torch.int32),
     )
-    indexer._metadata = lambda: (raw_metadata, compressed_metadata)
+    monkeypatch.setattr(
+        indexer, "_metadata", lambda: (raw_metadata, compressed_metadata)
+    )
     indexer.test_metadata = (raw_metadata, compressed_metadata)
     return indexer
 
@@ -199,7 +205,7 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
 def test_qsa_fused_prepare_replaces_the_unfused_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    indexer = _make_indexer(use_fused=True)
+    indexer = _make_indexer(monkeypatch, use_fused=True)
     attn = _make_attn(use_fused=True)
     calls = []
     main_outputs = (torch.empty(0), torch.empty(0))
@@ -208,7 +214,7 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
         calls.append((args, kwargs))
         return main_outputs
 
-    monkeypatch.setattr(indexer_qsa, "qsa_prepare", fake_prepare)
+    monkeypatch.setattr(qsa_indexer, "qsa_prepare", fake_prepare)
     monkeypatch.setattr(
         QSAIndexer,
         "_update_and_compress",
@@ -260,9 +266,9 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
 def test_qsa_unsupported_config_keeps_the_unfused_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    indexer = _make_indexer(use_fused=False)
+    indexer = _make_indexer(monkeypatch, use_fused=False)
     monkeypatch.setattr(
-        indexer_qsa,
+        qsa_indexer,
         "qsa_prepare",
         lambda *args, **kwargs: pytest.fail("unfused path ran the fused kernel"),
     )
@@ -393,8 +399,9 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
+    "num_rows,num_query_heads,num_kv_heads,page_size",
     [
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
@@ -408,6 +415,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    use_fp8: bool,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -429,7 +437,18 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
-    k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+    if use_fp8:
+        fp8_dtype = current_platform.fp8_dtype()
+        # The kernel's contract is that the cache already holds values in
+        # the attention dtype's numeric space; quantize the stored cache and
+        # have the reference consume the stored (quantized) values upcast
+        # to float, not the original bf16 — the fp8 cast is lossy.
+        kv_stored = kv_cache.to(fp8_dtype)
+        k_cache, v_cache = kv_stored.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache.float(), v_cache.float()
+    else:
+        k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache, v_cache
     block_table = (
         torch.randperm(num_cache_blocks, device="cuda")
         .reshape(num_requests, num_pages_per_request)
@@ -482,8 +501,8 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
-        k_cache,
-        v_cache,
+        ref_k,
+        ref_v,
         logical_indices,
         block_table,
         token_to_req,
@@ -491,3 +510,19 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
+    """QSA accepts FP8 KV cache dtypes without probing FlashAttention."""
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAImpl
+
+    impl = Qwen4ExpQSAImpl(
+        num_heads=24,
+        head_size=128,
+        scale=0.088,
+        num_kv_heads=2,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    assert impl.kv_cache_dtype == kv_cache_dtype

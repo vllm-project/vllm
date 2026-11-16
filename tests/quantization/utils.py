@@ -131,20 +131,12 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
 def _test_online_quant_peak_mem_impl(
     quantization_arg_value,
+    model_name,
+    expected_model_memory_gib,
     vllm_runner,
     caplog_mp_spawn,
     monkeypatch,
 ) -> None:
-    # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
-    # 1. it covers both Linear and MoE paths
-    # 2. it is already used by other tests in CI, so adding it here
-    #    does not increase disk space for CI runners
-    # I really wanted to use `ibm-granite/granite-3.0-1b-a400m-base`
-    # which I think is the smallest MoE model in vLLM (2.5 GiB bf16,
-    # 1.3 GiB fp8), but could not as adding one more model makes CI
-    # run out of disk space.
-    model_name = "allenai/OLMoE-1B-7B-0125-Instruct"
-
     # Force spawn to ensure caplog_mp_spawn works consistently
     # (it relies on VLLM_LOGGING_CONFIG_PATH which spawn reads but fork ignores)
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -182,13 +174,8 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
-    expected_model_memory_gib = 6.7
-
-    # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
-    # GiB on CUDA, which is 1.36x above model_memory_gib. A slightly higher
-    # number is expected as when we load and quantize weights in a streaming
-    # fashion we need to have individual weights in bf16 + fp8 alive at the
-    # same time.
+    # Streaming quantization keeps each weight alive in both bf16 and fp8, so
+    # peak memory is slightly above the final model memory
     expected_peak_memory_gib = expected_model_memory_gib * 1.4
 
     assert model_memory_gib < expected_model_memory_gib, (
