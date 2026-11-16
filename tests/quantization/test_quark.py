@@ -109,7 +109,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.transformers import TransformersForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
@@ -1633,7 +1633,7 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(
         "model.layers.0.self_attn.k_proj.output_scale",
         "model.layers.0.self_attn.v_proj.output_scale",
     }
-    original_load_weights = LlamaForCausalLM.load_weights
+    original_load_weights = TransformersForCausalLM.load_weights
 
     def load_weights(self, weights):
         def capture_scales():
@@ -1644,7 +1644,7 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(
 
         return original_load_weights(self, capture_scales())
 
-    monkeypatch.setattr(LlamaForCausalLM, "load_weights", load_weights)
+    monkeypatch.setattr(TransformersForCausalLM, "load_weights", load_weights)
     model, vllm_config = load_model_without_vllm_runner(
         model_path,
         model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
