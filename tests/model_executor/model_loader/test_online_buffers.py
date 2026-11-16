@@ -420,3 +420,165 @@ def test_load_plan_sends_online_names_through_load_weights(direct):
     model.load_weights(weights)
     finish_reload(model, _MODEL_CONFIG, torch.device("cpu"))
     _assert_equal(model.qkv, _reference(full))
+
+
+class _Biased(_QKV):
+    """A QKV whose linear adds a real bias after `create_weights`, loaded in
+    place, as `QKVParallelLinear` does; or registers `bias=None`."""
+
+    def __init__(self, bias=True):
+        super().__init__()
+        if bias:
+            self.bias = torch.nn.Parameter(torch.zeros(8, dtype=BF16), False)
+            set_weight_attrs(self.bias, {"weight_loader": self._bias_loader})
+        else:
+            self.register_parameter("bias", None)
+
+    def _bias_loader(self, param, loaded_weight, loaded_shard_id=None):
+        param.data.copy_(loaded_weight)
+
+
+def test_update_keeps_a_real_bias_loadable():
+    layer = _Biased()
+    _load_qkv(layer, _rand(8, 4))
+    layer.bias.weight_loader(layer.bias, _rand(8, seed=10))
+    bias, ptr = layer.bias, layer.bias.data_ptr()
+
+    begin_online_reload(layer)
+    params = dict(layer.named_parameters())
+    assert params["bias"] is bias  # a model's load_weights finds it
+    bias.weight_loader(params["bias"], _rand(8, seed=11))
+    _load_qkv(layer, _rand(8, 4, seed=1))
+    assert layer.bias is bias and bias.data_ptr() == ptr
+    assert torch.equal(layer.bias, _rand(8, seed=11))
+    _assert_equal(layer, _reference(_rand(8, 4, seed=1)))
+
+
+def test_update_keeps_bias_none():
+    layer = _Biased(bias=False)
+    _load_qkv(layer, _rand(8, 4))
+    begin_online_reload(layer)
+    assert "bias" in layer._parameters and layer.bias is None
+    _load_qkv(layer, _rand(8, 4, seed=1))
+    assert "bias" in layer._parameters and layer.bias is None  # forward reads it
+
+
+def test_begin_again_after_a_failed_update_keeps_startup_tensors():
+    layer = _QKV()
+    _load_qkv(layer, _rand(8, 4))
+    held = {name: (p, p.data_ptr()) for name, p in layer.named_parameters()}
+    begin_online_reload(layer)
+    layer.weight.weight_loader(layer.weight, _rand(4, 4, seed=1), "q")  # fails here
+    begin_online_reload(layer)  # the next update
+    _load_qkv(layer, _rand(8, 4, seed=2))
+    _assert_equal(layer, _reference(_rand(8, 4, seed=2)))
+    for name, (param, ptr) in held.items():
+        assert getattr(layer, name) is param and param.data_ptr() == ptr, name
+
+
+def test_update_with_a_load_without_shard_key_raises_when_strict():
+    class _NoShardArg(_QKV):
+        def weight_loader(self, param, loaded_weight):  # no loaded_shard_id
+            param.data[:4].copy_(loaded_weight[:4])  # part of the layer
+
+    layer = _NoShardArg()
+    layer.weight.weight_loader(layer.weight, _rand(8, 4))
+    finalize_online(layer, strict=False)  # cold start: processed as before
+    assert layer.quant_method.runs == 1
+    begin_online_reload(layer)
+    layer.weight.weight_loader(layer.weight, _rand(8, 4, seed=1))
+    with pytest.raises(RuntimeError, match="no shard key"):
+        finalize_online(layer, strict=True)
+
+
+def test_update_recomputes_expected_experts():
+    # expert parallel rescaling: fewer local experts than at cold start
+    layer, full = _MoE(), _rand(2, 4, 4)
+    loader = layer.w13_weight.weight_loader
+    for global_id, local in layer._local.items():
+        loader(layer.w13_weight, full[local, :2], "w", "w1", global_id)
+        loader(layer.w13_weight, full[local, 2:], "w", "w3", global_id)
+    assert layer.quant_method.runs == 1
+    begin_online_reload(layer)
+    layer._local, layer.local_num_experts = {1: 0}, 1
+    loader = layer.w13_weight.weight_loader
+    loader(layer.w13_weight, full[0, :2], "w", "w1", 1)
+    loader(layer.w13_weight, full[0, 2:], "w", "w3", 1)
+    assert layer.quant_method.runs == 2
+
+
+def test_update_refills_tensors_pwal_rebuilds():
+    """What PWAL builds besides parameters (a derived tensor on the layer, a
+    quant config holding the new scale parameter) ends up on the startup
+    storage, which captured CUDA graphs read."""
+
+    class _Derived(_ToyOnline):
+        def process_weights_after_loading(self, layer):
+            if getattr(layer, _GUARD, False):
+                return
+            super().process_weights_after_loading(layer)
+            layer.derived = layer.weight_scale.data * 2  # new tensor each run
+            self.config_scale = layer.weight_scale  # e.g. moe_quant_config
+
+    layer = _QKV()
+    layer.quant_method = _Derived("weight")
+    _load_qkv(layer, _rand(8, 4))
+    derived, scale = layer.derived, layer.weight_scale
+    ptrs = derived.data_ptr(), scale.data_ptr()
+    begin_online_reload(layer)
+    _load_qkv(layer, _rand(8, 4, seed=1))
+    expected = _reference(_rand(8, 4, seed=1))["weight_scale"]
+    assert layer.derived is derived and derived.data_ptr() == ptrs[0]
+    assert torch.equal(derived, expected * 2)
+    assert layer.quant_method.config_scale.data_ptr() == ptrs[1]
+    assert layer.weight_scale is scale and torch.equal(scale, expected)
+
+
+def test_direct_reload_allows_quantized_lm_head_copy(monkeypatch):
+    from vllm.model_executor.layers.quantization.online import lm_head
+    from vllm.model_executor.model_loader.reload import direct
+
+    model = _cold_start(0)
+    copy = torch.nn.Module()
+    copy.quant_method = _ToyOnline("weight")  # online, never loaded: no buffers
+    model.lm_head = copy
+    monkeypatch.setitem(lm_head._SOURCES, copy, (None, "fp8"))
+    direct._check_supported_modules(model)
+
+
+def test_direct_reload_refuses_online_mxfp4_on_triton():
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import TRITON_BACKENDS
+    from vllm.model_executor.model_loader.reload import direct
+
+    model = _cold_start(0)
+    model.qkv.quant_method.mxfp4_backend = next(iter(TRITON_BACKENDS))
+    with pytest.raises(RuntimeError, match="online MXFP4"):
+        direct._check_supported_modules(model)
+
+
+def test_dummy_load_keeps_non_persistent_buffers():
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    layer = _QKV()
+    layer.register_buffer("table", torch.arange(4.0), persistent=False)
+    DummyModelLoader(LoadConfig()).load_weights(layer, _MODEL_CONFIG)
+    assert layer.quant_method.runs == 1
+    assert torch.equal(layer.table, torch.arange(4.0))
+
+
+def test_auto_weights_loader_warns_on_narrowing_into_a_buffer(monkeypatch):
+    from vllm.model_executor.models import utils
+
+    warned = []
+    monkeypatch.setattr(utils.logger, "warning", lambda *a: warned.append(a))
+    model = torch.nn.Module()
+    model.lin = _Layer()
+    loader = utils.AutoWeightsLoader(model)
+    list(loader._load_module("", model, [("lin.weight", _rand(8, 4).float())]))
+    assert warned and warned[0][2] == torch.float32 and warned[0][3] == BF16
+    warned.clear()
+    # a BF16 load into the processed (FP8) layer is not a narrowing
+    model.lin.weight.weight_loader(model.lin.weight, _rand(8, 4))
+    list(loader._load_module("", model, [("lin.weight", _rand(8, 4))]))
+    assert not warned

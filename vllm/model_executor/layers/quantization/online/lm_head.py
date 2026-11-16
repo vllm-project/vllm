@@ -315,6 +315,11 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
 _SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDictionary()
 
 
+def is_quantized_lm_head_copy(module: Module) -> bool:
+    """Whether `module` is a quantized copy made by `quantized_lm_head_copy`."""
+    return module in _SOURCES
+
+
 def quantized_lm_head_copy(
     lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
 ) -> ParallelLMHead:

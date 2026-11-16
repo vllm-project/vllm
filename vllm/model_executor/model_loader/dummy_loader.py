@@ -4,18 +4,11 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.reload.layerwise import (
-    _get_original_loader,
-    get_layerwise_info,
-)
-from vllm.model_executor.model_loader.reload.meta import materialize_layer
 from vllm.model_executor.model_loader.reload.online import (
     fill_online_layer,
     has_online_buffers,
 )
-from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
@@ -38,43 +31,18 @@ class DummyModelLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         for layer in model.modules():
-            if has_online_buffers(layer):
-                # Online quantization: dummy checkpoint weights, then quantize.
-                def fill(layer: nn.Module = layer) -> None:
-                    for name, tensor in get_layer_tensors(layer).items():
-                        initialize_single_dummy_weight(tensor, name=name)
-
-                fill_online_layer(layer, fill)
-                continue
-            info = get_layerwise_info(layer)
-            if info.can_load():
-                self._process_online_quant_layer(layer, info)
-            else:
-                # NOTE(woosuk): For accurate performance evaluation, we assign
-                # random values to the weights.
-                # Initialize only local tensors: state_dict() would recursively
-                # initialize descendants that model.modules() also visits.
-                # Exclude nonpersistent buffers, matching state_dict().
+            # NOTE(woosuk): For accurate performance evaluation, we assign
+            # random values to the weights.
+            # Initialize only local tensors: state_dict() would recursively
+            # initialize descendants that model.modules() also visits.
+            # Exclude nonpersistent buffers, matching state_dict().
+            def fill(layer: nn.Module = layer) -> None:
                 for name, tensor in get_layer_tensors(layer).items():
                     if name not in layer._non_persistent_buffers_set:
                         initialize_single_dummy_weight(tensor, name=name)
 
-    def _process_online_quant_layer(
-        self,
-        layer: nn.Module,
-        info: LayerReloadingInfo,
-    ) -> None:
-        """Materialize, apply dummy weights, and run quantization processing."""
-        materialize_layer(layer, info)
-
-        for name, tensor in get_layer_tensors(layer).items():
-            initialize_single_dummy_weight(tensor, name=name)
-
-        for param in get_layer_tensors(layer).values():
-            param.weight_loader = _get_original_loader(param)
-
-        quant_method = getattr(layer, "quant_method", None)
-        if isinstance(quant_method, QuantizeMethodBase):
-            quant_method.process_weights_after_loading(layer)
-
-        info.reset()
+            if has_online_buffers(layer):
+                # online quantization: dummy checkpoint weights, then quantize
+                fill_online_layer(layer, fill)
+            else:
+                fill()

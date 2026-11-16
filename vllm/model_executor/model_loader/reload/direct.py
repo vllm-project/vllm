@@ -104,6 +104,16 @@ def _unvalidated_online_methods() -> tuple[type, ...]:
     return (Fp8BlockExpertsAsMxfp4FusedMoE, LutBOnlineMoEMethod)
 
 
+def _wrapped_backends() -> tuple:
+    """MXFP4 MoE backends that hold weights outside torch parameters."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        TRITON_BACKENDS,
+        Mxfp4MoeBackend,
+    )
+
+    return (*TRITON_BACKENDS, Mxfp4MoeBackend.AITER_MXFP4_FP8)
+
+
 def _check_supported_modules(model: torch.nn.Module) -> None:
     # config-level refusals: VllmConfig._verify_direct_reload_compat
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -112,6 +122,9 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
         HummingMoEMethod,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        is_quantized_lm_head_copy,
+    )
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
@@ -124,6 +137,8 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
         # fused shared experts, which quantize staging parameters that PWAL
         # deletes; a method wrapping an online one (input Hadamard); and the
         # schemes no reload test covers yet.
+        if is_quantized_lm_head_copy(module):
+            continue  # derived from the target lm_head, re-derived after updates
         if (
             (online and not has_online_buffers(module))
             or getattr(module, "shared_expert_online_loader", None) is not None
@@ -147,6 +162,14 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
             raise RuntimeError(f"direct reload: humming is not supported ({name})")
+        backend = getattr(method, "mxfp4_backend", None)
+        if online and backend is not None and backend in _wrapped_backends():
+            # weights live in triton_kernels tensors and precision configs,
+            # which PWAL rebuilds; graphs would keep reading the old ones
+            raise RuntimeError(
+                f"direct reload: online MXFP4 with the {backend.name} MoE "
+                f"backend is not supported ({name})"
+            )
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:

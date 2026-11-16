@@ -336,9 +336,10 @@ class AutoWeightsLoader:
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            # online quantization loads into a checkpoint-dtype buffer
-            buffered = getattr(weight_loader, "loads_into_buffer", False)
-            if param.dtype != weight_data.dtype and not buffered:
+            # online quantization loads into a buffer of the parameter's dtype
+            # before PWAL, whatever `param` holds after it (e.g. FP8)
+            param_dtype = getattr(weight_loader, "buffer_dtype", param.dtype)
+            if param_dtype != weight_data.dtype:
                 # An exact widening -- an fp32 accumulator reading a bf16
                 # table, say -- keeps every stored value, so it is a debug
                 # line. Every other mismatch still warns.
@@ -346,13 +347,13 @@ class AutoWeightsLoader:
                     torch.float16,
                     torch.bfloat16,
                     torch.float32,
-                ) and param.dtype in (torch.float32, torch.float64)
+                ) and param_dtype in (torch.float32, torch.float64)
                 (logger.debug if exact_widening else logger.warning)(
                     "Attempted to load weight %s with dtype %s into "
                     "parameter with dtype %s",
                     weight_qualname,
                     weight_data.dtype,
-                    param.dtype,
+                    param_dtype,
                 )
             weight_loader(param, weight_data)
 

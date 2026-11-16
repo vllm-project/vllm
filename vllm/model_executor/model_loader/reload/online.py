@@ -30,6 +30,7 @@ from functools import wraps
 from weakref import WeakSet
 
 import torch
+from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -66,9 +67,18 @@ class _State:
     loaded: set[str] = field(default_factory=set)  # params holding a buffer
     unknown_key: bool = False  # a load whose shard key could not be derived
     defer: bool = False  # process only in `finalize_online`
+    # parameters PWAL registered at cold start, each with what the name held
+    # before (None, or absent): hidden during an update, as PWAL first saw them
+    created: dict[str, None | object] = field(default_factory=dict)
     # (params, buffers, non-persistent names) held when the update began, each
     # with the tensor it held: PWAL may rebind a kept parameter's `.data`
     kernel: tuple[dict, dict, set[str]] | None = None
+    # plain tensor attributes of the layer and its quant method at that time
+    # (derived tensors captured CUDA graphs read), refilled in place
+    attrs: list[tuple[object, str, torch.Tensor]] | None = None
+
+
+_ABSENT = object()
 
 
 def _state(module: torch.nn.Module) -> _State | None:
@@ -95,7 +105,7 @@ def install_online_buffers(layer: torch.nn.Module) -> None:
         if not param.is_meta:
             continue  # e.g. a bias the layer adds later, loaded in place
         original = getattr(param, "weight_loader", default_weight_loader)
-        wrapper = _make_loader(layer, name, original)
+        wrapper = _make_loader(layer, name, original, param.dtype)
         param.weight_loader = wrapper
         state.ckpt[name] = param
         state.loaders[name] = original
@@ -170,7 +180,9 @@ def _load_keys(
     return {(name, None)}
 
 
-def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Callable:
+def _make_loader(
+    layer: torch.nn.Module, name: str, original: Callable, buffer_dtype: torch.dtype
+) -> Callable:
     signature = inspect.signature(original)
 
     # inspect.signature follows __wrapped__, so callers that look for
@@ -229,31 +241,58 @@ def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Calla
             _process(layer, state)
         return ret
 
-    online_buffer_loader.loads_into_buffer = True  # type: ignore[attr-defined]
+    online_buffer_loader.buffer_dtype = buffer_dtype  # type: ignore[attr-defined]
     return online_buffer_loader
+
+
+def _tensor_attrs(layer: torch.nn.Module) -> list[tuple[object, str, torch.Tensor]]:
+    """Plain tensor attributes (not parameters or buffers) of `layer` and its
+    quant method."""
+    owners = (layer, getattr(layer, "quant_method", None))
+    return [
+        (owner, name, value)
+        for owner in owners
+        if owner is not None
+        for name, value in vars(owner).items()
+        if isinstance(value, torch.Tensor) and not isinstance(value, Parameter)
+    ]
 
 
 def begin_online_reload(model: torch.nn.Module, defer: bool = False) -> None:
     """Start a weight update of `model`'s online layers: remember the tensors
     each holds, which receive the update once it is processed. With `defer`,
-    layers are processed only by `finalize_online`."""
+    layers are processed only by `finalize_online`.
+
+    Beginning again before an update finished (it failed part way) keeps the
+    tensors remembered first: those are what captured CUDA graphs read."""
     for layer, state in _online_layers(model):
-        state.kernel = (
-            {n: (p, p.data) for n, p in layer._parameters.items() if p is not None},
-            {n: (b, b) for n, b in layer._buffers.items() if b is not None},
-            set(layer._non_persistent_buffers_set),
-        )
+        if state.kernel is None:
+            state.kernel = (
+                {
+                    n: (p, None if p is None else p.data)
+                    for n, p in layer._parameters.items()
+                },
+                {n: (b, b) for n, b in layer._buffers.items() if b is not None},
+                set(layer._non_persistent_buffers_set),
+            )
+            state.attrs = _tensor_attrs(layer)
         # until processed, the layer shows its checkpoint format, as other
         # layers do during an update, and as its PWAL saw it at cold start:
-        # parameters that PWAL created are hidden (`_restore` brings them back)
-        for name in [n for n in layer._parameters if n not in state.ckpt]:
-            delattr(layer, name)
+        # parameters that PWAL created are hidden (`_restore` brings them
+        # back); others, e.g. a bias loaded in place, stay loadable
+        for name, before in state.created.items():
+            if name in layer._parameters:
+                delattr(layer, name)
+            if before is None:
+                layer.register_parameter(name, None)
         for name, meta in state.ckpt.items():
             layer.register_parameter(name, meta)
+        state.expected = None  # local experts may change (elastic EP)
         state.seen.clear()
         state.loaded.clear()
         state.unknown_key = False
         state.defer = defer
+        _LOADING.discard(layer)
 
 
 def fill_online_layer(layer: torch.nn.Module, fill: Callable[[], None]) -> None:
@@ -285,20 +324,24 @@ def finalize_online(model: torch.nn.Module, strict: bool) -> None:
             _restore(layer, state.kernel)
             state.kernel = None
             continue
-        missing = sorted(map(str, (state.expected or set()) - state.seen))
-        if missing and not state.unknown_key:
-            if strict and state.kernel is not None:
-                raise RuntimeError(
-                    f"online quantization: {type(layer).__name__} received only "
-                    f"part of its weights in this update (missing {missing[:4]}); "
-                    "send every tensor of the layer"
-                )
-            if state.loaded:
-                logger.warning(
-                    "%s: missing weights %s, processed as zeros",
-                    type(layer).__name__,
-                    missing[:4],
-                )
+        if state.expected is None:
+            state.expected = _expected_keys(layer, state.ckpt)
+        missing = sorted(map(str, state.expected - state.seen))
+        if missing and strict and state.kernel is not None:
+            # with a load whose shard key could not be derived, completeness
+            # cannot be shown: refuse rather than quantize zeros over weights
+            unknown = " (some loads had no shard key)" if state.unknown_key else ""
+            raise RuntimeError(
+                f"online quantization: {type(layer).__name__} received only "
+                f"part of its weights in this update (missing {missing[:4]})"
+                f"{unknown}; send every tensor of the layer"
+            )
+        if missing and not state.unknown_key and state.loaded:
+            logger.warning(
+                "%s: missing weights %s, processed as zeros",
+                type(layer).__name__,
+                missing[:4],
+            )
         _process(layer, state)
 
 
@@ -317,6 +360,7 @@ def _process(layer: torch.nn.Module, state: _State) -> None:
     for name, meta in state.ckpt.items():
         if name not in state.loaded:  # nothing arrived for it
             layer.register_parameter(name, _materialize(meta, state.device))  # type: ignore[arg-type]
+    before = dict(layer._parameters)
     layer.__dict__.pop(_GUARD, None)
     quant_method = layer.quant_method
     timing = (
@@ -328,14 +372,22 @@ def _process(layer: torch.nn.Module, state: _State) -> None:
         quant_method.process_weights_after_loading(layer)
     if hasattr(layer, "update_param_tp_status"):
         layer.update_param_tp_status()
-    if state.kernel is not None:
+    if state.kernel is None:  # cold start: what PWAL registers
+        state.created = {
+            name: before.get(name, _ABSENT)
+            for name, param in layer._parameters.items()
+            if param is not None and before.get(name) is None
+        }
+    else:
         _copy_back(layer, state.kernel)
+        _refill_attrs(layer, state.attrs or [])
     for name, wrapper in state.wrappers.items():  # undo an override (EPLB)
         state.ckpt[name].weight_loader = wrapper
         param = layer._parameters.get(name)
         if param is not None:
             param.weight_loader = wrapper
     state.kernel = None
+    state.attrs = None
     state.seen.clear()
     state.loaded.clear()
     state.unknown_key = False
@@ -347,21 +399,43 @@ def _layout(t: torch.Tensor) -> tuple:
     return t.data_ptr(), t.shape, t.stride(), t.dtype
 
 
+def _copy_into(layer: torch.nn.Module, name: str, new, data: torch.Tensor) -> None:
+    if new.shape != data.shape or new.dtype != data.dtype:
+        raise RuntimeError(
+            f"online quantization: reprocessing {type(layer).__name__}.{name} "
+            f"gave {tuple(new.shape)} {new.dtype}, but it holds "
+            f"{tuple(data.shape)} {data.dtype}"
+        )
+    data.copy_(new.data)
+
+
 def _copy_back(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> None:
     params, buffers, _ = kernel
     for held, live in ((params, layer._parameters), (buffers, layer._buffers)):
-        for name, (_, data) in held.items():
+        for name, (kept, data) in held.items():
             new = live.get(name)
-            if new is None or _layout(new) == _layout(data):
-                continue  # dropped, or written in place
-            if new.shape != data.shape or new.dtype != data.dtype:
-                raise RuntimeError(
-                    f"online quantization: reprocessing {type(layer).__name__}."
-                    f"{name} gave {tuple(new.shape)} {new.dtype}, but it holds "
-                    f"{tuple(data.shape)} {data.dtype}"
-                )
-            data.copy_(new.data)
+            if new is None or data is None or _layout(new) == _layout(data):
+                continue  # dropped, never held, or written in place
+            _copy_into(layer, name, new, data)
+            if new is not kept and isinstance(new, Parameter):
+                # what PWAL built (a kernel, its quant config) may hold the new
+                # object: point it at the kept storage, and free the new one
+                new.data = data
     _restore(layer, kernel)
+
+
+def _refill_attrs(
+    layer: torch.nn.Module, attrs: list[tuple[object, str, torch.Tensor]]
+) -> None:
+    """Copy plain tensor attributes PWAL replaced into the tensors held when
+    the update began, and hold those again."""
+    for owner, name, data in attrs:
+        new = vars(owner).get(name)
+        if new is None or new is data or not isinstance(new, torch.Tensor):
+            continue
+        if _layout(new) != _layout(data):
+            _copy_into(layer, name, new, data)
+        setattr(owner, name, data)
 
 
 def _restore(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> None:
@@ -370,7 +444,8 @@ def _restore(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> Non
         for name in [n for n, t in live.items() if t is not None]:
             delattr(layer, name)
     for name, (param, data) in params.items():
-        param.data = data
+        if param is not None:
+            param.data = data
         layer.register_parameter(name, param)
     for name, (buffer, _) in buffers.items():
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)
