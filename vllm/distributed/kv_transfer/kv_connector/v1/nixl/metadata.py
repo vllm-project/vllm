@@ -309,10 +309,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
         # Push mode (P side): computed prompt blocks to send before the request
-        # finishes, and requests preempted in this step, whose chunk WRITEs are
-        # settled before their blocks are reused.
+        # finishes, and the chunk-pushed requests preempted or aborted since
+        # the last step, whose chunk WRITEs are settled before their blocks are
+        # reused.
         self.push_chunk_jobs: list[NixlPushChunkJob] = []
         self.push_chunk_preemptions: set[ReqId] = set()
+        self.push_chunk_aborts: set[ReqId] = set()
 
     def _add_new_req(
         self,

@@ -340,11 +340,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         pushes its prompt again from the first block once recomputed, unless
         its last chunk already handed it off to D."""
         if not self._chunked_push or not (
-            metadata.push_chunk_preemptions or metadata.reqs_not_processed
+            metadata.push_chunk_preemptions or metadata.push_chunk_aborts
         ):
             return
         retirement = _ChunkRetirement(
-            set(metadata.push_chunk_preemptions), set(metadata.reqs_not_processed)
+            set(metadata.push_chunk_preemptions), set(metadata.push_chunk_aborts)
         )
         self._chunk_job_inbox.put(retirement)
         self._push_writer_wake.set()

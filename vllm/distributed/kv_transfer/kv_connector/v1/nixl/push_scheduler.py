@@ -113,6 +113,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self._chunked_push = bool(extra_config.get("enable_chunked_push", False))
         self._chunk_trackers: dict[ReqId, _ChunkPushTracker] = {}
+        self._chunk_aborts: set[ReqId] = set()
 
         if self._chunked_push:
             parallel_config = vllm_config.parallel_config
@@ -288,12 +289,16 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not is_p_node:
             return False, None
 
-        if self._chunked_push:
-            self._chunk_trackers.pop(request.request_id, None)
+        tracked = (
+            self._chunked_push
+            and self._chunk_trackers.pop(request.request_id, None) is not None
+        )
         if request.status not in (
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
+            if tracked:
+                self._chunk_aborts.add(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
             return False, None
@@ -391,6 +396,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         for req_id in scheduler_output.preempted_req_ids or ():
             if req_id in self._chunk_trackers:
                 meta.push_chunk_preemptions.add(req_id)
+        meta.push_chunk_aborts, self._chunk_aborts = self._chunk_aborts, set()
 
         block_state = scheduler_output.kv_connector_block_state
         assert block_state is not None

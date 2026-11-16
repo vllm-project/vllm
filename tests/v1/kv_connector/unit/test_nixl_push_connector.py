@@ -392,6 +392,22 @@ class TestChunkedPushScheduler:
         (job,) = sched.build_connector_meta(output).push_chunk_jobs
         assert (job.start_block, job.end_block) == (0, 2)
 
+    @pytest.mark.parametrize("tracked", [True, False])
+    def test_only_tracked_aborts_reach_the_worker(self, tracked):
+        from vllm.v1.request import RequestStatus
+
+        sched, request, output = self._scheduler_with_request()
+        if not tracked:  # e.g. the scheduler fell back to whole push
+            sched._chunk_trackers.clear()
+        request.status = RequestStatus.FINISHED_ABORTED
+        sched.request_finished(request, ([1, 2, 3],))
+
+        output.num_scheduled_tokens = {}
+        meta = sched.build_connector_meta(output)
+        assert meta.push_chunk_aborts == ({request.request_id} if tracked else set())
+        assert request.request_id in meta.reqs_not_processed
+        assert sched.build_connector_meta(output).push_chunk_aborts == set()
+
 
 # ----------------------------------------------------------------- #
 #  Worker-side tests                                                 #
