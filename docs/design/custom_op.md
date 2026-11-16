@@ -160,8 +160,6 @@ For example:
 ```python
 --8<-- "vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
 
---8<-- "vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
-
 --8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
 ```
 
