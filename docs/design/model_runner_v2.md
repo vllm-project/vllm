@@ -199,6 +199,76 @@ Some attention backends also materialize derived state, such as scheduler metada
 
 For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
 
+## Per-field Pipeline Tensor Layouts
+
+Models can register per-field tensor layouts through
+`vllm.distributed.pp_transport.schema`. This schema uses the existing tensor-dict
+channel and is separate from the `PPTransport` communication-backend interface.
+
+```python
+from vllm.distributed import get_tp_group
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+    PPTransportTensorSpec,
+)
+
+self.pp_transport_schema = PPTransportSchema(
+    {
+        "hidden_states": PPTransportTensorSpec(
+            (hidden_size,), sequence_parallel=True
+        ),
+        "residual": PPTransportTensorSpec((hidden_size,)),
+    },
+    tp_size=get_tp_group().world_size,
+)
+self.make_empty_intermediate_tensors = (
+    self.pp_transport_schema.make_empty_intermediate_tensors
+)
+```
+
+Expose `pp_transport_schema` on the top-level model. Non-last stages return
+their output fields in the existing `IntermediateTensors` container.
+The token count includes the runner's padding. Shapes exclude the token
+dimension; an explicit `dtype` overrides the runner's requested dtype.
+
+Full tensors retain TP slice-send/all-gather. A field marked
+`sequence_parallel=True` has `ceil(num_global_tokens / tp_size)` local rows and
+travels directly to the matching TP lane. Adjacent stages must use the same
+per-field layouts, TP ordering and padded token count. The schema does not
+perform a model's SP collectives or enable SP+PP for an unsupported model.
+
+MRV2 shares per-field views across profiling, capture and execution. CUDA graph
+replay preserves each output field's captured shape and persistent addresses.
+SP-sharded bindings use NCCL when `VLLM_PP_TRANSPORT=auto`; forcing
+`copy_engine` is unsupported. SP bindings with ubatching/DBO are also unsupported.
+Models without a schema retain full-tensor behavior, including arbitrary legacy
+intermediate keys and dtype-converting receive copies.
+
+The NVIDIA DeepSeek V4 implementation declares its multi-stream hidden state
+with shape `(hc_mult, hidden_size)`. It retains its existing full-tensor PP
+boundary; this declaration does not enable a new SP mode for DeepSeek V4.
+
+### Downstream fields
+
+Register additional fields during model initialization using string names:
+
+```python
+schema.register_tensor("routing_state", PPTransportTensorSpec((2,), dtype=torch.int32))
+```
+
+The schema can be subclassed directly. A tensor descriptor can override
+`allocate` to return a view into an existing model-owned receive buffer.
+For stages with different incoming and outgoing fields, use `send=False`
+for incoming-only fields and `receive=False` for outgoing-only fields.
+Pass `recv_all_gather_tensors` / `send_all_gather_tensors` to the respective
+tensor-dict channel operations. Adjacent stage descriptors must agree at each
+boundary. Configure all fields before allocating buffers or capturing graphs.
+
+These extension points cover tensor layouts and buffers. Cache gather/scatter,
+state synchronization and device collectives remain downstream responsibilities.
+`vllm.distributed.pp_transport.ops` contains the tensor-copy helper used by
+CUDA graph capture and replay. NPU integration requires downstream validation.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
