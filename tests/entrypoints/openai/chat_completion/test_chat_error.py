@@ -34,7 +34,7 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
@@ -72,12 +72,12 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig

@@ -5381,6 +5381,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
         dcp_world_size=2,
         dcp_rank=0,
         need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=True,
         _fp8_flash_mla_kernel=run_kernel,
     )
 
@@ -5397,6 +5398,77 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+
+@pytest.mark.parametrize("supports_topk_length", [True, False])
+@pytest.mark.parametrize("num_tokens", [31, 32])
+def test_fp8_mixed_batch_dcp_compacts_topk_from_32_tokens(
+    monkeypatch, num_tokens, supports_topk_length
+):
+    """From 32 tokens on, the rank-local top-k is compacted to the row front
+    and the kernel is bounded by the largest valid count, unless the kernel
+    rejects `topk_length` (SM90): then the -1 holes stay and it masks them."""
+    num_heads, topk = 2, 8
+    counts = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE_TYPE) % 5
+    compacted = torch.where(
+        torch.arange(topk, device=DEVICE_TYPE) < counts.view(-1, 1), 7, -1
+    ).to(torch.int32)
+    converter_kwargs = {}
+
+    def convert(*args, **kwargs):
+        converter_kwargs.update(kwargs)
+        return (compacted, counts) if kwargs["return_valid_counts"] else compacted
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        convert,
+    )
+    kernel_kwargs = {}
+
+    def run_kernel(**kwargs):
+        kernel_kwargs.update(kwargs)
+        out = torch.ones((1, num_tokens, num_heads, 1), device=DEVICE_TYPE)
+        lse = torch.ones((1, num_heads, num_tokens), device=DEVICE_TYPE)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        index_group=None,
+        index_group_index=0,
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        fp8_supports_topk_length=supports_topk_length,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    q = torch.empty(num_tokens, num_heads, 1, device=DEVICE_TYPE)
+    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=DEVICE_TYPE)
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), topk_indices, metadata
+    )
+
+    assert lse is not None
+    compact = supports_topk_length and num_tokens >= 32
+    assert converter_kwargs["compact_valid_to_front"] is compact
+    if compact:
+        assert kernel_kwargs["topk_length"].tolist() == [4]
+    else:
+        assert kernel_kwargs["topk_length"] is None
+    empty = counts == 0
+    assert torch.isneginf(lse[empty]).all() and (out[empty] == 0).all()
+    assert (lse[~empty] == 1).all() and (out[~empty] == 1).all()
 
 
 @pytest.mark.skipif(
@@ -5688,16 +5760,16 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "rms_norm_eps": 1e-06,
-        "rope_scaling": {
+        "rope_parameters": {
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 40,
             "mscale": 1.0,
             "mscale_all_dim": 1.0,
             "original_max_position_embeddings": 4096,
-            "type": "yarn",
+            "rope_theta": 10000,
+            "rope_type": "yarn",
         },
-        "rope_theta": 10000,
         "routed_scaling_factor": 2.5,
         "scoring_func": "sigmoid",
         "tie_word_embeddings": False,
