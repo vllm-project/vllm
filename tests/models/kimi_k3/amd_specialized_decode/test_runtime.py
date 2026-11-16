@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3's specialized decode on CPU: the switch, its widths and layers, its
-refusals (config, loaded weights, caches) and plan() routing."""
+"""Kimi-K3's specialized decode without running a model: the switch, its widths
+and layers, its refusals (config, loaded weights, caches) and plan() routing.
+Only the bf16-copy marking test needs a visible GPU (it uses dist_init)."""
 
 from types import SimpleNamespace
 
@@ -264,10 +265,11 @@ def _marked(linear) -> bool:
 
 
 def test_bf16_copies_mark_the_online_fp8_linears_the_kernels_read(
-    default_vllm_config,
+    default_vllm_config, dist_init
 ):
     """Only this rank's kernel layers, and in them only the online-FP8 linears
     K1 / K2 read: KDA layers also keep in_proj and f_b_proj."""
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     config = _k3_text_config()
     layers = [_k3_layer_before_load() for _ in range(93)]
     model = SimpleNamespace(config=config, layers=layers, start_layer=0, end_layer=47)
