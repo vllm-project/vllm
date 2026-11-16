@@ -348,9 +348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
-                need_aux_output=(
-                    vllm_config.aux_output_config.enable_return_routed_experts
-                ),
+                need_aux_output=vllm_config.aux_output_config.enabled,
             )
 
         # Samplers and decode_query_len created in load_model() after

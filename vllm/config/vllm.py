@@ -1248,6 +1248,11 @@ class VllmConfig:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
             return
+        if (
+            self.aux_output_config.max_bytes is not None
+            and not self.aux_output_config.enable_return_routed_experts
+        ):
+            raise ValueError("max_bytes requires enable_return_routed_experts.")
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
         if (
@@ -3319,7 +3324,7 @@ class VllmConfig:
             unsupported.append("expert parallel load balancing")
 
         if self.aux_output_config.enabled:
-            unsupported.append("routed-expert auxiliary outputs")
+            unsupported.append("auxiliary outputs")
 
         if self.lora_config and self.lora_config.enable_tower_connector_lora:
             unsupported.append("multimodal tower and connector LoRA")

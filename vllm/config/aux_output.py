@@ -33,13 +33,15 @@ class AuxOutputConfig:
 
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or `None` to derive it from the KV cache capacity.
-    Grows when every object is referenced.
+    Grows when every object is referenced. Requires
+    `enable_return_routed_experts`.
     Under pipeline parallelism, this is the total across all stages."""
 
     object_key_prefix: str | None = None
     """First segment of the keys of the shared objects that deliver the
     auxiliary outputs of requests with `SamplingParams.aux_session`. Must not
-    be reused: choose a new one for every engine start."""
+    be reused: choose a new one for every engine start. Any one enabled output
+    suffices, so dense models can deliver hidden states and top-k logprobs."""
 
     @model_validator(mode="after")
     def _check_object_key_prefix(self) -> Self:
@@ -48,17 +50,27 @@ class AuxOutputConfig:
             for name in ("enable_return_hidden_states", "return_topk_logprobs"):
                 if getattr(self, name):
                     raise ValueError(f"{name} requires object_key_prefix.")
-        if prefix is not None and not (self.enabled and prefix and "/" not in prefix):
+        outputs = (
+            self.enable_return_routed_experts
+            or self.enable_return_indexer_topk
+            or self.enable_return_hidden_states
+            or self.return_topk_logprobs
+        )
+        if prefix is not None and not (outputs and prefix and "/" not in prefix):
             raise ValueError(
-                "object_key_prefix requires enable_return_routed_experts or "
-                "enable_return_indexer_topk and must be non-empty and without '/'."
+                "object_key_prefix requires at least one output and must be "
+                "non-empty and without '/'."
             )
         return self
 
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts or self.enable_return_indexer_topk
+        return (
+            self.enable_return_routed_experts
+            or self.enable_return_indexer_topk
+            or self.object_key_prefix is not None
+        )
 
     def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config, add it to

@@ -157,7 +157,23 @@ def test_indexer_only_does_not_require_moe_routing():
         ({"object_key_prefix": "runs/1"}, "without '/'"),
         (
             {"object_key_prefix": "run-1", "enable_return_routed_experts": False},
-            "enable_return_routed_experts",
+            "at least one output",
+        ),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
+                "enable_return_hidden_states": True,
+            },
+            None,
+        ),
+        (
+            {
+                "object_key_prefix": "run-1",
+                "enable_return_routed_experts": False,
+                "return_topk_logprobs": 2,
+            },
+            None,
         ),
         (
             {
@@ -168,7 +184,15 @@ def test_indexer_only_does_not_require_moe_routing():
             None,
         ),
     ],
-    ids=["valid", "empty-prefix", "slash", "no-capture", "indexer-only"],
+    ids=[
+        "valid",
+        "empty-prefix",
+        "slash",
+        "no-output",
+        "hidden-states-only",
+        "topk-logprobs-only",
+        "indexer-only",
+    ],
 )
 def test_object_key_prefix_is_validated(kwargs, error):
     kwargs = {"enable_return_routed_experts": True, **kwargs}
@@ -205,6 +229,38 @@ def test_topk_logprobs_are_validated_against_the_model(k, lora, error):
         object_key_prefix="run-1",
         return_topk_logprobs=k,
     )
+    if error is None:
+        VllmConfig._verify_aux_output_compatibility(config)
+        return
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
+def test_dense_model_without_routed_experts_is_accepted():
+    config = _config(is_moe=False)
+    config.aux_output_config = AuxOutputConfig(
+        object_key_prefix="run-1", enable_return_hidden_states=True
+    )
+    assert config.aux_output_config.enabled
+    VllmConfig._verify_aux_output_compatibility(config)
+
+
+@pytest.mark.parametrize(
+    "routed_experts,legacy_flag,error",
+    [(False, False, "max_bytes requires"), (True, False, None), (False, True, None)],
+    ids=["without-routed-experts", "with-routed-experts", "legacy-flag"],
+)
+def test_max_bytes_requires_routed_experts(routed_experts, legacy_flag, error):
+    config = _config()
+    config.aux_output_config = EngineArgs(
+        aux_output_config={
+            "enable_return_routed_experts": routed_experts,
+            "max_bytes": 1 << 20,
+            "object_key_prefix": "run-1",
+            "enable_return_hidden_states": True,
+        },
+        enable_return_routed_experts=legacy_flag,
+    ).aux_output_config
     if error is None:
         VllmConfig._verify_aux_output_compatibility(config)
         return
