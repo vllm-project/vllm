@@ -307,7 +307,7 @@ def _check_batch_sharded_logits(rank: int) -> None:
         qwen4_model.Qwen4ExpForCausalLM
     )
     model = qwen4_model.Qwen4ExpForConditionalGeneration.__new__(
-        qwen4_model.Qwen4ExpForConditionalGeneration
+        qwen4_model.Qwen4ExpForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
     for module in (language_model, model):
         nn.Module.__init__(module)
@@ -330,6 +330,7 @@ def _check_batch_sharded_logits(rank: int) -> None:
     ).to(lm_head.weight)
 
     gathered = model.compute_logits(hidden)
+    assert gathered is not None
     assert ((gathered == gathered.amax(-1, keepdim=True)).sum(-1) >= 4).all()
 
     # Rows in owner order, as BatchSharder passes them: request i belongs to
