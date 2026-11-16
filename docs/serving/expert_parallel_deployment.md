@@ -136,6 +136,22 @@ EPv2 limitations:
 - Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
 - Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
+### FlashInfer MegaMoE on SM107
+
+`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 expert checkpoints. ModelOpt NVFP4 is the validated format; compressed-tensors NVFP4 checkpoints have not yet been tested on SM107. It is never selected automatically.
+
+Requirements:
+
+- The `nvshmem4py-cu13` package (`uv pip install nvshmem4py-cu13`).
+- `CUTE_DSL_ARCH=sm_107a` exported before vLLM starts.
+- `NVSHMEM_SYMMETRIC_SIZE`: `(2 * top_k + 1) * hidden_size * max_num_batched_tokens` bytes is enough; set it only if that exceeds NVSHMEM's default heap size.
+
+Behavior:
+
+- The checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load.
+- For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
+- Not supported on SM107 with this backend: MXFP4 expert layers, including MXFP4 draft or MTP experts under speculative decoding; EPLB; and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+
 ## Multi-Node Deployment
 
 For multi-node deployment, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
