@@ -2164,6 +2164,7 @@ def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path, monkeypat
         real_update(submit_time, num_bytes)
 
     detector.update = recording_update  # type: ignore[method-assign]
+    write_bytes: list[int] = []
 
     # Blocks another instance already published to the shared directory.
     for k in to_keys([3, 5, 6]):
@@ -2180,9 +2181,15 @@ def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path, monkeypat
             manager.complete_store(keys, _CTX, trigger=trigger)  # cascades to fs tier
             tier.drain_jobs()
             manager._process_finished_jobs()
+            stats = manager.get_stats()
+            assert stats is not None
+            write_bytes.append(
+                stats.data["data"][TieringOffloadingMetrics.WRITE_BYTES][("1:fs",)]
+            )
     finally:
         tier.shutdown()
 
     assert update_bytes == [2 * block_size, block_size, 0]
+    assert write_bytes == [2 * block_size, block_size, 0]
     # The store that wrote nothing contributes no latency sample.
     assert detector._completions == 2
