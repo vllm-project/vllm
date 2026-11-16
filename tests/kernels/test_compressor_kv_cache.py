@@ -1303,7 +1303,6 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_compressor_inserts_main_cache_in_compression_launch(compress_ratio):
-    """Given the RoPE, the compression launch inserts what insert_cache would."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.compressor import (
         CompressorMetadata,
