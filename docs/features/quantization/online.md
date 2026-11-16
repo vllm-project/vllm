@@ -65,7 +65,8 @@ weight sync): the trainer sends BF16 weights under their checkpoint names.
 With the `VLLM_RELOAD_MODE` environment variable set to `direct`, each tensor
 is quantized as it is loaded;
 `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
-on linear and MoE layers, and `mxfp4` and `nvfp4_per_token` on MoE layers. See
+on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
+and `nvfp4_per_token` on MoE layers. See
 [Direct Reload: Weight Updates with Online Quantization](../../training/layerwise.md#direct-reload-weight-updates-with-online-quantization)
 for the refused schemes and the NVFP4 delivery rule.
 

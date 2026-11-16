@@ -74,7 +74,7 @@ their checkpoint names, through `reload_weights` or a checkpoint-format
 | `--quantization` | Linear layers | MoE layers |
 | - | - | - |
 | `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8` | Supported | Supported |
-| `mxfp4` | Refused | Supported |
+| `mxfp4` (`--quantization-config.moe mxfp4`) | Refused | Supported |
 | `nvfp4_per_token` | Not quantized | Supported |
 
 With NVFP4, the w1 and w3 (gate and up) weights of an expert share one global
@@ -89,6 +89,10 @@ Direct reload raises an error for the following; use the default
   lm_head, activation overrides, `hadamard_size`, and re-quantization of checkpoint-quantized
   layers.
 - gpt-oss models with any online quantization.
+- `fp8_per_block` linear layers whose tensor-parallel shards are not
+  multiples of 128.
+- The NCCL weight transfer load plan (`use_load_plan`) with online
+  quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading,
   `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
 
