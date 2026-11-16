@@ -146,6 +146,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "mxfp4_gemm_rdna4(Tensor a, Tensor a_fp8, Tensor a_scale, Tensor b_q, "
       "Tensor b_scales) -> Tensor");
   rocm_ops.impl("mxfp4_gemm_rdna4", torch::kCUDA, &mxfp4_gemm_rdna4);
+  rocm_ops.def("mxfp4_repack_rdna4(Tensor b_q) -> Tensor");
+  rocm_ops.impl("mxfp4_repack_rdna4", torch::kCUDA, &mxfp4_repack_rdna4);
 #endif
 
 #ifdef VLLM_ROCM_GFX115X

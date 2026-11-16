@@ -28,7 +28,9 @@
 //
 // Layouts (match the RDNA3 WMMA path):
 //   a        [M, K]     fp16 / bf16
-//   b_q      [K/8, N]   uint32, 8 E2M1 codes per word, nibble i = K+i
+//   b_q      [K/32, N, 4] uint32 (fragment-major, from mxfp4_repack_rdna4):
+//            b_q[g][n][o] holds K codes 32g+8o .. 32g+8o+7 of column n, nibble
+//            i = K+i; one 16-byte load gives a column's whole E8M0 group
 //   b_scale  [K/32, N]  uint8 E8M0
 //   out      [M, N]     same dtype as a
 
@@ -131,22 +133,26 @@ __global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t* __restrict__ aq,
       KSPLIT ? ((blockIdx.z == gridDim.z - 1) ? K : k_begin + k_per_split) : K;
   for (int k_g = k_begin; k_g < k_end; k_g += kGroup) {
     v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
+    // K-octet assignment: WMMA step s, lane half hi covers octet 2*hi + s.
+    // A and B agree, so the K sum is unchanged, and each lane's two B words
+    // (fragment-major layout) and 16 A bytes are each one contiguous load.
+    uint2 bw = {0u, 0u};
+    if (n_ok)
+      __builtin_memcpy(
+          &bw, b_q + ((size_t)(k_g / kGroup) * N + n_col) * 4 + 2 * hi, 8);
+    uint4 aw = {0u, 0u, 0u, 0u};
+    if (a_ok) __builtin_memcpy(&aw, aq + (size_t)a_row * K + k_g + 16 * hi, 16);
   #pragma unroll
     for (int s = 0; s < 2; s++) {
-      const int k_tile = k_g + s * 16;
-
-      v2i32 af = {0, 0};
-      if (a_ok)
-        __builtin_memcpy(&af, aq + (size_t)a_row * K + k_tile + 8 * hi, 8);
-
-      v2i32 bf = {0, 0};
-      if (n_ok) {
-        const uint32_t qa = b_q[(size_t)((k_tile >> 3) + hi) * N + n_col];
-        uint32_t blo, bhi;
-        dequant_mxfp4_8_e4m3(qa, blo, bhi);
-        bf[0] = (int)blo;
-        bf[1] = (int)bhi;
-      }
+      v2i32 af;
+      af[0] = (int)(s == 0 ? aw.x : aw.z);
+      af[1] = (int)(s == 0 ? aw.y : aw.w);
+      const uint32_t qa = s == 0 ? bw.x : bw.y;
+      uint32_t blo, bhi;
+      dequant_mxfp4_8_e4m3(qa, blo, bhi);
+      v2i32 bf;
+      bf[0] = (int)blo;
+      bf[1] = (int)bhi;
       grp = wmma_fp8(af, bf, grp);
     }
     // E8M0 is constant across the group and across this lane's 8 outputs,
@@ -200,7 +206,8 @@ __global__ void __launch_bounds__(32 * WM * WN)
   constexpr int BM = 16 * WM * TM;
   constexpr int BN = 16 * WN * TN;
   constexpr int NT = 32 * WM * WN;
-  constexpr int WORDS = (BN * 4 + NT - 1) / NT;  // B words per thread / group
+  constexpr int WORDS =
+      (BN + NT - 1) / NT;  // 16-byte B columns per thread / group
 
   const int tid = threadIdx.x;
   const int wave = tid >> 5;
@@ -236,7 +243,7 @@ __global__ void __launch_bounds__(32 * WM * WN)
       KSPLIT ? ((blockIdx.z == gridDim.z - 1) ? K : k_begin + k_per_split) : K;
   const int ngroups = (k_end - k_begin) / kGroup;
 
-  uint32_t qa_nx[WORDS];
+  uint4 qa_nx[WORDS];
   v2i32 a_nx[TM][2];
   float wsc_nx[TN];
 
@@ -244,25 +251,24 @@ __global__ void __launch_bounds__(32 * WM * WN)
     const int k_g = k_begin + g * kGroup;
   #pragma unroll
     for (int w = 0; w < WORDS; w++) {
-      const int idx = tid + w * NT;
-      uint32_t v = 0;
-      if (idx < BN * 4) {
-        const int cc = idx % BN, o = idx / BN;
-        const int n = bn0 + cc;
-        if (n < N) v = b_q[(size_t)((k_g >> 3) + o) * N + n];
-      }
+      const int cc = tid + w * NT;
+      uint4 v = {0u, 0u, 0u, 0u};
+      if (cc < BN && bn0 + cc < N)
+        __builtin_memcpy(&v, b_q + ((size_t)(k_g / kGroup) * N + bn0 + cc) * 4,
+                         16);
       qa_nx[w] = v;
     }
   #pragma unroll
     for (int tm = 0; tm < TM; tm++) {
-  #pragma unroll
-      for (int st = 0; st < 2; st++) {
-        v2i32 af = {0, 0};
-        if (a_ok[tm])
-          __builtin_memcpy(
-              &af, aq + (size_t)a_row[tm] * K + k_g + 16 * st + 8 * hi, 8);
-        a_nx[tm][st] = af;
-      }
+      // Step st, half hi covers K-octet 2*hi + st (matches the B read below),
+      // so both steps' A bytes are one 16-byte load.
+      uint4 aw = {0u, 0u, 0u, 0u};
+      if (a_ok[tm])
+        __builtin_memcpy(&aw, aq + (size_t)a_row[tm] * K + k_g + 16 * hi, 16);
+      a_nx[tm][0][0] = (int)aw.x;
+      a_nx[tm][0][1] = (int)aw.y;
+      a_nx[tm][1][0] = (int)aw.z;
+      a_nx[tm][1][1] = (int)aw.w;
     }
   #pragma unroll
     for (int tn = 0; tn < TN; tn++)
@@ -274,12 +280,15 @@ __global__ void __launch_bounds__(32 * WM * WN)
   auto store_group = [&](int buf) {
   #pragma unroll
     for (int w = 0; w < WORDS; w++) {
-      const int idx = tid + w * NT;
-      if (idx < BN * 4) {
-        const int cc = idx % BN, o = idx / BN;
-        uint32_t blo, bhi;
-        dequant_mxfp4_8_e4m3(qa_nx[w], blo, bhi);
-        b_lds[buf][o][cc] = make_uint2(blo, bhi);
+      const int cc = tid + w * NT;
+      if (cc < BN) {
+        const uint32_t q[4] = {qa_nx[w].x, qa_nx[w].y, qa_nx[w].z, qa_nx[w].w};
+  #pragma unroll
+        for (int o = 0; o < 4; o++) {
+          uint32_t blo, bhi;
+          dequant_mxfp4_8_e4m3(q[o], blo, bhi);
+          b_lds[buf][o][cc] = make_uint2(blo, bhi);
+        }
       }
     }
   };
@@ -319,7 +328,7 @@ __global__ void __launch_bounds__(32 * WM * WN)
     for (int st = 0; st < 2; st++) {
   #pragma unroll
       for (int tn = 0; tn < TN; tn++) {
-        const uint2 bw = b_lds[buf][2 * st + hi][wn_loc + 16 * tn + lo];
+        const uint2 bw = b_lds[buf][2 * hi + st][wn_loc + 16 * tn + lo];
         v2i32 bf;
         bf[0] = (int)bw.x;
         bf[1] = (int)bw.y;
@@ -406,28 +415,31 @@ __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
   const int n = blockIdx.x * blockDim.y + threadIdx.y;  // one wave per column
   if (n >= N) return;
   const int lane = threadIdx.x;  // 0..31
-  const int k_words = K >> 3;    // uint32 words along K
+  const int ngroups = K / kGroup;
 
   float acc[M_MAX];
 #pragma unroll
   for (int m = 0; m < M_MAX; m++) acc[m] = 0.0f;
 
-  for (int w = lane; w < k_words; w += 32) {
-    const uint32_t qa = b_q[(size_t)w * N + n];
-    const int k0 = w << 3;
-    const float wsc =
-        mxfp4_e8m0_to_f32(b_scales[(size_t)(k0 / kGroup) * N + n]);
-
-    float dq[8];
+  for (int g = lane; g < ngroups; g += 32) {
+    uint4 bw;
+    __builtin_memcpy(&bw, b_q + ((size_t)g * N + n) * 4, 16);
+    const float wsc = mxfp4_e8m0_to_f32(b_scales[(size_t)g * N + n]);
+    const uint32_t q[4] = {bw.x, bw.y, bw.z, bw.w};
 #pragma unroll
-    for (int i = 0; i < 8; i++) dq[i] = e2m1_mag((qa >> (4 * i)) & 0xFu) * wsc;
-
-    for (int m = 0; m < M; m++) {
-      const T* ar = a + (size_t)m * K + k0;
-      float s = 0.0f;
+    for (int o = 0; o < 4; o++) {
+      const int k0 = g * kGroup + o * 8;
+      float dq[8];
 #pragma unroll
-      for (int i = 0; i < 8; i++) s = fmaf(to_f<T>(ar[i]), dq[i], s);
-      acc[m] += s;
+      for (int i = 0; i < 8; i++)
+        dq[i] = e2m1_mag((q[o] >> (4 * i)) & 0xFu) * wsc;
+      for (int m = 0; m < M; m++) {
+        const T* ar = a + (size_t)m * K + k0;
+        float s = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 8; i++) s = fmaf(to_f<T>(ar[i]), dq[i], s);
+        acc[m] += s;
+      }
     }
   }
 
@@ -631,6 +643,16 @@ void launch_wmma(const uint8_t* aqp, const float* asp, const uint32_t* bq,
 // ---------------------------------------------------------------------------
 // Torch entry point
 // ---------------------------------------------------------------------------
+// [K/8, N] uint32 (8 E2M1 codes per word along K) -> fragment-major
+// [K/32, N, 4]: out[g][n][o] = in[4g + o][n]. Done once at weight load; every
+// RDNA4 kernel then reads a column's whole E8M0 group with one 16-byte load.
+torch::Tensor mxfp4_repack_rdna4(torch::Tensor const& b_q) {
+  TORCH_CHECK(b_q.dim() == 2 && b_q.size(0) % 4 == 0,
+              "mxfp4_repack_rdna4: expected [K/8, N] with K % 32 == 0");
+  const int64_t G = b_q.size(0) / 4, N = b_q.size(1);
+  return b_q.contiguous().view({G, 4, N}).permute({0, 2, 1}).contiguous();
+}
+
 // `a` is the original fp16/bf16 activation, used by the GEMV path which keeps
 // full precision. `a_fp8`/`a_scale` are its per-token E4M3 quantization from
 // vLLM's scaled_fp8_quant, and drive the WMMA path.
@@ -641,13 +663,15 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
                                torch::Tensor const& b_scales) {
   using namespace vllm::mxfp4_rdna4;
   TORCH_CHECK(a.is_cuda() && b_q.is_cuda() && b_scales.is_cuda());
-  TORCH_CHECK(a.dim() == 2 && b_q.dim() == 2 && b_scales.dim() == 2);
+  TORCH_CHECK(a.dim() == 2 && b_q.dim() == 3 && b_scales.dim() == 2);
   TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16,
               "mxfp4_gemm_rdna4: activation must be fp16 or bf16");
 
   const int M = a.size(0), K = a.size(1), N = b_q.size(1);
   TORCH_CHECK(K % kGroup == 0, "K must be a multiple of 32");
-  TORCH_CHECK(b_q.size(0) == K / 8, "b_q must be [K/8, N]");
+  TORCH_CHECK(
+      b_q.size(0) == K / kGroup && b_q.size(2) == 4 && b_q.is_contiguous(),
+      "b_q must be the fragment-major [K/32, N, 4] from mxfp4_repack_rdna4");
   TORCH_CHECK(b_scales.size(0) == K / kGroup, "b_scales must be [K/32, N]");
   TORCH_CHECK(a_fp8.size(0) == M && a_fp8.size(1) == K, "a_fp8 must be [M, K]");
   TORCH_CHECK(a_scale.numel() == M, "a_scale must have M entries");

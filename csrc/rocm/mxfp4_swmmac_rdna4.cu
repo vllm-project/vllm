@@ -97,9 +97,11 @@ __global__ void __launch_bounds__(32 * KW)
     q0 = q1 = 0u;
     ws = 0.0f;
     if (n_ok) {
-      const size_t row = (size_t)((k_g >> 3) + 2 * hi) * N + n_col;
-      q0 = b_q[row];
-      q1 = b_q[row + (size_t)N];
+      // Fragment-major B [K/32][N][4]: octets 2*hi, 2*hi+1 are adjacent.
+      uint2 bw;
+      __builtin_memcpy(&bw, b_q + ((size_t)g * N + n_col) * 4 + 2 * hi, 8);
+      q0 = bw.x;
+      q1 = bw.y;
       ws = mxfp4_e8m0_to_f32(b_scales[(size_t)(k_g / kGroup) * N + n_col]);
     }
   };

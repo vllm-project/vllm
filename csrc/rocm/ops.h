@@ -43,6 +43,8 @@ void mxfp4_swmmac_skinny_launch(const uint8_t* aq, const float* ascale,
                                 void* c, bool out_bf16, int M, int N, int K,
                                 void* stream);
 
+torch::Tensor mxfp4_repack_rdna4(torch::Tensor const& b_q);
+
 torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
                                torch::Tensor const& a_fp8,
                                torch::Tensor const& a_scale,
