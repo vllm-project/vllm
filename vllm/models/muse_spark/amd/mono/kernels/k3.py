@@ -401,7 +401,7 @@ REGION_IDS.update(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Build:
     S: int = 8  # rows (8 or 16)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)

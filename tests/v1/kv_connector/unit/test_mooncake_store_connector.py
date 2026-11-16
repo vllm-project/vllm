@@ -9,6 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    mamba_layer,
+)
 from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, set_current_vllm_config
@@ -48,12 +53,9 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -97,7 +99,7 @@ def test_store_tp_does_not_override_backend_kv_cache_layout(extra_config):
 def _make_kv_cache_config() -> KVCacheConfig:
     """Single-group full-attention KVCacheConfig — enough for the connector
     constructor's validate() pass."""
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
@@ -108,22 +110,20 @@ def _make_kv_cache_config() -> KVCacheConfig:
                 block_stride=2048,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        kv_cache_groups=[make_kv_cache_group(["layer0"], spec)],
     )
 
 
 def _make_qsa_hybrid_kv_cache_config(mamba_mode: str):
-    full_spec = FullAttentionSpec(
-        block_size=800, num_kv_heads=8, head_size=64, dtype=None
-    )
-    qsa_spec = CircularBufferSpec(
+    full_spec = AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
+    qsa_spec = circular_buffer_layer(
         block_size=8,
         num_kv_heads=1,
         head_size=64,
         head_size_v=0,
         dtype=torch.float16,
     )
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_layer(
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -133,9 +133,9 @@ def _make_qsa_hybrid_kv_cache_config(mamba_mode: str):
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full_spec),
-            KVCacheGroupSpec(["qsa"], qsa_spec),
-            KVCacheGroupSpec(["mamba"], mamba_spec),
+            make_kv_cache_group(["full"], full_spec),
+            make_kv_cache_group(["qsa"], qsa_spec),
+            make_kv_cache_group(["mamba"], mamba_spec),
         ],
     )
 
@@ -163,9 +163,9 @@ def _make_mamba_none_kv_cache_config(
     attention_block_size: int | None, mamba_block_size: int
 ) -> KVCacheConfig:
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=mamba_block_size,
                 shapes=((1, 1),),
                 dtypes=(torch.float32,),
@@ -178,9 +178,9 @@ def _make_mamba_none_kv_cache_config(
         # group block sizes, so no lookup coordinator can be built.
         groups.insert(
             0,
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["attention"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=attention_block_size,
                     num_kv_heads=8,
                     head_size=64,
@@ -1515,9 +1515,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         kv_cache_tensors=[],
         cache_hit_alignment_tokens=4,
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["attn"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=16,
                     num_kv_heads=1,
                     head_size=1,
@@ -1525,9 +1525,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
                 ),
                 is_eagle_group=True,
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                mamba_layer(
                     block_size=16,
                     shapes=((1,),),
                     dtypes=(torch.float32,),
