@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from openai.types.responses import CustomTool
 
 from tests.parser.engine.replay_harness import (
     DUMMY_TOOLS,
@@ -12,6 +13,8 @@ from tests.parser.engine.replay_harness import (
     collect_output,
     replay_streaming,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import GenerationError
 from vllm.parser.deepseek_v41 import deepseek_v41_config
 from vllm.parser.parser_manager import ParserManager
 
@@ -50,6 +53,236 @@ def parser_for(tokenizer, controls):
     )
     assert cls is not None
     return cls(tokenizer, chat_template_kwargs=controls)
+
+
+def custom_grammar_call(model: str, payload: str) -> str:
+    if model == "deepseek_v4":
+        begin = (
+            '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="emit">\n'
+            '<｜DSML｜parameter name="input" string="true">'
+        )
+        end = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+    else:
+        begin = (
+            '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="emit">\n'
+            '<｜DSML｜ parameter name="input" string="true">'
+        )
+        end = "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    return begin + payload + end
+
+
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 10000])
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_custom_grammar_input_is_data_in_full_and_streamed_calls(
+    model, chunk_size, reasoning
+):
+    payload = "\n你好😀\n" + (
+        '</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="other">\n'
+        if model == "deepseek_v4"
+        else "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+        '<｜DSML｜ invoke name="other">\n'
+    )
+    request = ResponsesRequest(
+        input="Call emit.",
+        tools=[
+            CustomTool(
+                type="custom",
+                name="emit",
+                format={
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /[\\s\\S]*/",
+                },
+            )
+        ],
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=model,
+        reasoning_parser_name=model if reasoning else None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    text = ("<think>Plan.</think>" if reasoning else "") + custom_grammar_call(
+        model, payload
+    )
+    tokenizer, _ = tokenizer_for(text, reasoning)
+
+    parser = parser_cls(tokenizer, request.tools)
+    parser.adjust_request(request)
+    parsed_reasoning, _, calls = parser.parse(text, request, enable_auto_tools=True)
+    assert calls is not None and len(calls) == 1
+    assert calls[0].name == "emit"
+    assert parsed_reasoning == ("Plan." if reasoning else None)
+    assert json.loads(calls[0].arguments) == {"input": payload}
+
+    parser = parser_cls(tokenizer, request.tools)
+    deltas = []
+    for start in range(0, len(text), chunk_size):
+        deltas.append(
+            parser.parse_delta(
+                text[start : start + chunk_size],
+                [],
+                request,
+                prompt_token_ids=([50] if reasoning and start == 0 else None)
+                if reasoning
+                else [],
+                finished=start + chunk_size >= len(text),
+            )
+        )
+    output = collect_output(deltas)
+    assert len(output.tool_calls) == 1
+    assert output.tool_calls[0]["name"] == "emit"
+    assert json.loads(output.tool_calls[0]["arguments"]) == {"input": payload}
+
+
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("chunk_size", [1, 10000])
+def test_truncated_custom_grammar_input_does_not_parse_as_tools(model, chunk_size):
+    payload = (
+        '\n</｜DSML｜parameter>\n</｜DSML｜ invoke>\n<｜DSML｜invoke name="other">\n'
+    )
+    request = ResponsesRequest(
+        input="Call emit.",
+        tools=[
+            CustomTool(
+                type="custom",
+                name="emit",
+                format={
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /[\\s\\S]*/",
+                },
+            )
+        ],
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=model,
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    tool_end = (
+        "</｜DSML｜tool_calls>" if model == "deepseek_v4" else "</｜DSML｜ calls>"
+    )
+    text = custom_grammar_call(model, payload).removesuffix(tool_end)
+    tokenizer, _ = tokenizer_for(text, False)
+
+    parser = parser_cls(tokenizer, request.tools)
+    parser.adjust_request(request)
+    _, _, calls = parser.parse(text, request, enable_auto_tools=True)
+    assert not calls
+
+    parser = parser_cls(tokenizer, request.tools)
+    deltas = []
+    for start in range(0, len(text), chunk_size):
+        deltas.append(
+            parser.parse_delta(
+                text[start : start + chunk_size],
+                [],
+                request,
+                prompt_token_ids=[] if start == 0 else None,
+                finished=start + chunk_size >= len(text),
+            )
+        )
+    assert not collect_output(deltas).tool_calls
+
+
+def test_custom_grammar_validation_is_disabled_in_unguarded_fallback():
+    tool = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": "lark", "definition": 'start: "ok"'},
+    )
+    request = ResponsesRequest(input="Call emit.", tools=[tool])
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v41",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    text = custom_grammar_call("deepseek_v41", "not-ok")
+    tokenizer, _ = tokenizer_for(text, False)
+
+    _, _, calls = parser_cls(tokenizer, request.tools).parse(
+        text, request, enable_auto_tools=True
+    )
+
+    assert calls is not None and len(calls) == 1
+    assert json.loads(calls[0].arguments) == {"input": "not-ok"}
+
+
+def test_unguarded_fallback_keeps_parallel_tool_calls_separate():
+    custom = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": "lark", "definition": 'start: "ok"'},
+    )
+    function = {
+        "type": "function",
+        "name": "get_weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    }
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "Call both.",
+            "tools": [custom, function],
+            "_custom_tool_grammar_enforced": True,
+        }
+    )
+    assert request._custom_tool_grammar_enforced is False
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v41",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    text = (
+        "\n\n<｜DSML｜ calls>\n"
+        '<｜DSML｜ invoke name="emit">\n'
+        '<｜DSML｜ parameter name="input" string="true">not-ok'
+        "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+        '<｜DSML｜ invoke name="get_weather">\n'
+        '<｜DSML｜ parameter name="city" string="true">Paris'
+        "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+        "</｜DSML｜ calls>"
+    )
+    tokenizer, _ = tokenizer_for(text, False)
+
+    _, _, calls = parser_cls(tokenizer, request.tools).parse(
+        text, request, enable_auto_tools=True
+    )
+
+    assert calls is not None and [call.name for call in calls] == [
+        "emit",
+        "get_weather",
+    ]
+
+
+def test_native_custom_grammar_validation_rejects_mismatched_payload():
+    tool = CustomTool(
+        type="custom",
+        name="emit",
+        format={"type": "grammar", "syntax": "lark", "definition": 'start: "ok"'},
+    )
+    request = ResponsesRequest(input="Call emit.", tools=[tool])
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v41",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    text = custom_grammar_call("deepseek_v41", "not-ok")
+    tokenizer, _ = tokenizer_for(text, False)
+    parser = parser_cls(tokenizer, request.tools)
+    parser.adjust_request(request)
+
+    with pytest.raises(GenerationError):
+        parser.parse(text, request, enable_auto_tools=True)
 
 
 @pytest.mark.parametrize("thinking", [False, True])

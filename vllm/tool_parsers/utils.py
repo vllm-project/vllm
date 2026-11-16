@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
@@ -98,6 +98,18 @@ def warn_custom_tool_grammar_fallback(tools: Sequence[Tool] | None) -> None:
         "included in the tool description but it is not enforced by the sampler.",
         scope="local",
     )
+
+
+def validate_custom_tool_input(tool: CustomTool, payload: str) -> None:
+    """Reject parsed custom-tool input that does not complete its grammar."""
+    import xgrammar as xgr
+
+    assert tool.format is not None and tool.format.type == "grammar"
+    matcher = xgr.GrammarMatcher(
+        compile_custom_tool_grammar(tool.format.syntax, tool.format.definition)
+    )
+    if not matcher.accept_string(payload) or not matcher.is_completed():
+        raise GenerationError("Generated custom tool input does not match its grammar.")
 
 
 def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:

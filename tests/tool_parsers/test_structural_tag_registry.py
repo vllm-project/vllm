@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.responses import CustomTool, ToolChoiceFunction
+from openai.types.responses import CustomTool, ToolChoiceCustom, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
 from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
@@ -216,6 +216,52 @@ def test_deepseek_v41_constrains_parameters_after_reasoning(
         grammar, "reason</think>" + begin + parameter + end
     )
     assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+@pytest.mark.parametrize(
+    ("model", "call_start", "param_start", "param_end", "tool_end"),
+    [
+        (
+            "deepseek_v4",
+            '\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n',
+            '<｜DSML｜parameter name="input" string="true">',
+            "</｜DSML｜parameter>\n</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>",
+        ),
+        (
+            "deepseek_v4_1",
+            '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="apply_patch">\n',
+            '<｜DSML｜ parameter name="input" string="true">',
+            "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n",
+            "</｜DSML｜ calls>",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required", ToolChoiceCustom(type="custom", name="apply_patch")],
+)
+def test_deepseek_custom_tool_grammar_constrains_raw_input(
+    model, call_start, param_start, param_end, tool_end, tool_choice
+):
+    tool = CustomTool(
+        type="custom",
+        name="apply_patch",
+        format={
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": 'start: "hello"',
+        },
+    )
+    tag = get_model_structural_tag(model, [tool], tool_choice, reasoning=False)
+    assert isinstance(tag, StructuralTag)
+    grammar = Grammar.from_structural_tag(tag)
+
+    valid = call_start + param_start + "hello" + param_end + tool_end
+    invalid = call_start + param_start + "goodbye" + param_end + tool_end
+
+    assert _is_grammar_accept_string(grammar, valid)
+    assert not _is_grammar_accept_string(grammar, invalid)
 
 
 def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):

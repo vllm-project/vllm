@@ -128,7 +128,13 @@ For parsers using schema-derived JSON constraints, required and named calls cont
 
 Responses API custom tools may declare a `format` with `type: "grammar"` and either Lark or regex syntax. vLLM validates the definition and rejects malformed grammars with HTTP 400. A valid grammar is included in the function shim description, and the tool is marked strict so the call envelope is constrained when structural tags are available.
 
-In this change the grammar is not enforced during sampling: vLLM uses best-effort free-form generation and logs a warning; the grammar is guidance only. Native grammar enforcement can be added by parsers that support it.
+Native grammars constrain the custom tool's raw input during sampling. When the selected parser or structured-output configuration cannot enforce the grammar, vLLM falls back to best-effort free-form generation and logs a warning; the grammar is guidance in that mode and is not enforced by the sampler.
+DeepSeek V4 and V4.1 parsers support native Lark and regex constraints for custom tool input.
+
+DeepSeek native grammar mode requires `--enable-auto-tool-choice`, `--tool-call-parser deepseek_v4` or `deepseek_v41`, and `VLLM_ENFORCE_STRICT_TOOL_CALLING` left enabled. A generated custom tool input that does not complete its grammar is reported as a generation error.
+Requests that include a native grammar tool are limited to one tool call per response, even when `parallel_tool_calls` is enabled.
+DeepSeek streaming buffers a tool call from its first tool-call marker until the stream ends when the request contains a grammar custom tool; this also applies to other tool calls in the same request.
+If generation ends before the custom grammar input is complete, no tool call is emitted.
 
 ### Strict Mode
 

@@ -561,6 +561,7 @@ class DelegatingParser(Parser):
                     "constraint applies.",
                     scope="local",
                 )
+                warn_custom_tool_grammar_fallback(request.tools)
                 return request
             output_format = structured_outputs_to_format(structured_outputs)
 
@@ -579,6 +580,10 @@ class DelegatingParser(Parser):
             )
         else:
             tools_structural_tag = None
+        if tools_structural_tag is not None and getattr(
+            tools_structural_tag, "_custom_tool_grammar_enforced", False
+        ):
+            request._custom_tool_grammar_enforced = True
 
         if tools_structural_tag is None:
             warn_custom_tool_grammar_fallback(request.tools)
