@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import copy_weight_, replace_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -595,6 +595,28 @@ def test_byte_containers_stay_direct(sent, held):
     plan = _plan(model, {name: ((256,), sent)})
     assert plan.get_dest(name) is not None
     _planned_reload(model, plan, {name: scales.view(sent)})
+    assert torch.equal(model.layer.weight.view(torch.uint8), scales)
+
+
+def test_e8m0_into_uint8_through_copy_weight_is_a_view():
+    """An E8M0 checkpoint into a uint8 scale parameter through
+    `copy_weight_` reaches the plan as a view, not a cast: the write keeps
+    the checkpoint dtype (no replayed conversion) and the parameter holds
+    the sent bytes, as at cold start."""
+    name = "layer.weight"
+    make, _ = _single(copy_weight_, shape=(8,), dtype=torch.uint8)
+    shapes = {name: ((8,), torch.float8_e8m0fnu)}
+    model, plan = _check_plan_equals_cold_start(make, shapes)
+    (write,) = plan.entries[name].writes
+    assert write.dtype is None
+    ((_, dest),) = plan.get_dest(name)
+    assert dest.dtype == torch.float8_e8m0fnu
+    scales = torch.arange(256).to(torch.uint8)
+    make, _ = _single(copy_weight_, shape=(256,), dtype=torch.uint8)
+    model = _cold_start(make, {name: scales.flip(0).view(torch.float8_e8m0fnu)})
+    start_reload(model)
+    plan = _plan(model, {name: ((256,), torch.float8_e8m0fnu)})
+    _planned_reload(model, plan, {name: scales.view(torch.float8_e8m0fnu)})
     assert torch.equal(model.layer.weight.view(torch.uint8), scales)
 
 
