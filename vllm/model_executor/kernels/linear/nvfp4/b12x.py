@@ -358,14 +358,9 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
     ) -> torch.Tensor:
         if x.dtype != torch.bfloat16:
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
-        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        # Rows beyond the planned capacity (e.g. an encoder batch) run in
-        # capacity-sized chunks; an unplanned call would prepare on first use.
-        capacity = layer.b12x_nvfp4_plan_query.num_tokens
-        if x_2d.shape[0] <= capacity:
-            output = self._mm(layer, x_2d)
-        else:
-            output = torch.cat([self._mm(layer, c) for c in x_2d.split(capacity)])
+        # The plan covers every row count the scheduler can send; b12x rejects
+        # a larger call instead of preparing a new plan on first use.
+        output = self._mm(layer, x.reshape(-1, x.shape[-1]).contiguous())
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])
