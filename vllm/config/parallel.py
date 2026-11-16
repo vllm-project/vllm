@@ -208,6 +208,11 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    load_collection_phase: Literal["all", "prefill", "decode"] = "all"
+    """Collect expert load from all batches, batches containing prefill, or
+    decode-only batches. Mixed batches count as prefill. Target and draft models
+    use the target batch's phase.
+    """
     use_async: bool = True
     """
     Whether to use non-blocking EPLB.
