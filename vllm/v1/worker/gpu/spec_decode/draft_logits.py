@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
 def draft_logits_row(req_state_idx, row_mapping_ptr):
     """Row of a request in this rank's draft logits cache, or -1 if no row.
 
-    ``row_mapping_ptr`` is None for a replicated cache, which is indexed by request
+    `row_mapping_ptr` is None for a replicated cache, which is indexed by request
     state. Otherwise it is `DraftLogitsCache.row_mapping`.
     """
     row = req_state_idx

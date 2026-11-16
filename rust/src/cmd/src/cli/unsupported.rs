@@ -189,17 +189,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
 
-    /// Skip initialization of tokenizer and detokenizer. Expects valid
-    /// `prompt_token_ids` and `None` for prompt from the input. The generated
-    /// output will contain token ids.
-    #[arg(
-        long,
-        visible_alias = "no-skip-tokenizer-init",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub skip_tokenizer_init: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
@@ -212,12 +201,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
-
-    /// The token to use as HTTP bearer authorization for remote files. If
-    /// `True`, will use the token generated when running `hf auth login`
-    /// (stored in `~/.cache/huggingface/token`).
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub hf_token: Option<Unsupported>,
 
     /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     /// used with `--generation-config auto`, the override parameters will be
@@ -321,10 +304,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_ipc_gpu_memory_gb: Option<Unsupported>,
 
-    /// Dictionary mapping specific modalities to LoRA model paths.
-    #[arg(long)]
-    pub default_mm_loras: Option<Unsupported>,
-
     /// Target URL to which OpenTelemetry traces will be sent.
     #[arg(long)]
     pub otlp_traces_endpoint: Option<Unsupported>,
@@ -418,25 +397,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log the stack trace of error responses
-    #[arg(
-        long,
-        // env = "VLLM_SERVER_DEV_MODE",
-        visible_alias = "no-log-error-stack",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub log_error_stack: Option<Unsupported>,
-
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
     #[arg(
@@ -446,15 +406,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub tokens_only: Option<Unsupported>,
-
-    /// Controls the `system_fingerprint` field on responses: `full`, `hash`,
-    /// `custom`, or `none`.
-    #[arg(long)]
-    pub fingerprint_mode: Option<Unsupported>,
-
-    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
-    #[arg(long)]
-    pub fingerprint_value: Option<Unsupported>,
 
     /// Log level for uvicorn.
     #[arg(long)]
