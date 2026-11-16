@@ -403,7 +403,7 @@ def bind_hisparse_kv_caches(
                 except RuntimeError as error:
                     raise ValueError(
                         "HiSparse sparse GQA requires unpadded, "
-                        "contiguous token rows in the host LBNHC layout."
+                        "contiguous token rows in the host KV cache."
                     ) from error
             for handle in (cache_handle, *readers):
                 handle.draft_layer = forward_context[layer_name].is_draft_layer
