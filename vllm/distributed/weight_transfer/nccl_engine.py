@@ -171,8 +171,8 @@ def _metadata_payload(
 
 
 def _pairs(ops, rows: tuple[int, int] | None, view: torch.Tensor):
-    """(destination, source) per planned write of a received piece; ``None``
-    when the tensor was split (``rows``: its dim-0 range here) and a write
+    """(destination, source) per planned write of a received piece; `None`
+    when the tensor was split (`rows`: its dim-0 range here) and a write
     does not map dim 0 onto dim 0, so the tensor is needed whole."""
     if rows is None:
         return [(dst, view[box]) for box, dst in ops]
@@ -196,7 +196,7 @@ def _coalesce(
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Merge copies with equal geometry whose destinations and sources are
     evenly spaced in one storage each (one weight of every expert in a chunk)
-    into one copy over a view with a leading count dim. ``roles`` (the name
+    into one copy over a view with a leading count dim. `roles` (the name
     without its indices) keeps apart copies that share a destination but
     interleave, e.g. w1 and w3 into each expert's fused w13. The plan's writes
     never overlap, so their order does not matter."""
@@ -547,7 +547,7 @@ class NCCLWeightTransferEngine(
         self, update_info: NCCLWeightTransferUpdateInfo, src: int, plan
     ) -> None:
         """Packed receive into reused buffers, then one batched copy per chunk;
-        fallback names still go through ``load_weights`` in arrival order."""
+        fallback names still go through `load_weights` in arrival order."""
         from vllm.distributed.weight_transfer.packed_tensor import _get_streams
 
         layout = self._planned_layout(update_info, src, plan)
