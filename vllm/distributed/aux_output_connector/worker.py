@@ -43,6 +43,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.worker.gpu.sample.prompt_logprob import CHUNK_SIZE, TOPK_MAX_ELEMENTS
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -787,10 +788,12 @@ def compute_topk_logprobs(
     hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor | None],
     k: int,
-    chunk_size: int = 1024,
+    chunk_size: int = CHUNK_SIZE,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Top-k next-token ids (int32) and log-probabilities (float32) of every
-    row, or None on ranks that do not receive the logits."""
+    row, or None on ranks that do not receive the logits. Chunks hold at most
+    `TOPK_MAX_ELEMENTS // (k + 1)` rows, as for prompt logprobs."""
+    chunk_size = min(chunk_size, max(1, TOPK_MAX_ELEMENTS // (k + 1)))
     token_ids, logprobs = [], []
     for start in range(0, len(hidden_states), chunk_size):
         logits = logits_fn(hidden_states[start : start + chunk_size])

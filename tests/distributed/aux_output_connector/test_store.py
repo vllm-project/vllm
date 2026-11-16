@@ -3192,6 +3192,24 @@ def test_session_object_with_incomplete_field_rows_is_rejected():
     writer.close()
 
 
+@pytest.mark.parametrize("k,calls", [(2, [2, 2, 1]), (5, [1] * 5)], ids=["k-2", "k-5"])
+def test_topk_logprob_chunks_are_bounded_by_k(monkeypatch, k, calls):
+    monkeypatch.setattr(
+        "vllm.distributed.aux_output_connector.worker.TOPK_MAX_ELEMENTS",
+        6,
+        raising=False,
+    )
+    weight = torch.randn(7, 3)
+    sizes = []
+
+    def logits_fn(rows):
+        sizes.append(len(rows))
+        return rows @ weight.T
+
+    compute_topk_logprobs(torch.randn(5, 3), logits_fn, k)
+    assert sizes == calls
+
+
 @pytest.mark.parametrize(
     "gathered", [True, False], ids=["logits-rank", "non-logits-rank"]
 )
