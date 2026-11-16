@@ -756,6 +756,10 @@ def test_mid_block_resume_run_past_keeps_resumed_block_unkeyed(retention_interva
     mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
     assert mamba_blocks[1].block_hash is None
     assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+    assert mamba_blocks[2].block_hash_num_tokens == 224
+    # The stale resumed block must not reach a connector either.
+    offloads = drain_boundary_state_offloads(manager).get(request.request_id, [])
+    assert offloads == [(1, mamba_blocks[2].block_id, 224)]
 
 
 def test_running_request_resuming_mid_block_exports_into_resumed_block():
