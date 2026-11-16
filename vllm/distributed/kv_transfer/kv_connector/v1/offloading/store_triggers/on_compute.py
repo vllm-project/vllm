@@ -151,17 +151,17 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
-            num_consumed_keys = store_output.num_consumed_keys
-            if num_consumed_keys is not None and num_consumed_keys < len(
-                new_offload_keys
-            ):
+            if store_output.unconsumed_keys:
                 # Each group's range ends at its first unconsumed chunk, which
                 # is offered again on the next step.
-                for group_pos, chunk_idx in reversed(
-                    candidates.key_chunks[num_consumed_keys:]
-                ):
-                    start_chunk_idx, _ = group_store_ranges[group_pos]
-                    group_store_ranges[group_pos] = (start_chunk_idx, chunk_idx)
+                key_chunks = dict(zip(new_offload_keys, candidates.key_chunks))
+                for key in store_output.unconsumed_keys:
+                    group_pos, chunk_idx = key_chunks[key]
+                    start_chunk_idx, end_chunk_idx = group_store_ranges[group_pos]
+                    group_store_ranges[group_pos] = (
+                        start_chunk_idx,
+                        min(end_chunk_idx, chunk_idx),
+                    )
                 if req.is_finished():
                     logger.warning("Request %s: cannot store chunks", req_id)
                     sink.record_allocation_failure()

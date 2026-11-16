@@ -983,11 +983,10 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 3: For request-level tiers, cascade chunks already in primary
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
         if request_level_tiers:
-            keys_to_store_set = set(primary_result.keys_to_store)
-            # Keys the primary tier did not consume are offered again.
-            consumed_keys = list(keys)[: primary_result.num_consumed_keys]
+            keys_not_in_primary = set(primary_result.keys_to_store)
+            keys_not_in_primary.update(primary_result.unconsumed_keys)
             keys_already_in_primary = tuple(
-                k for k in consumed_keys if k not in keys_to_store_set
+                k for k in keys if k not in keys_not_in_primary
             )
             if keys_already_in_primary:
                 self._cascade_existing_chunks_to_request_level_tiers(

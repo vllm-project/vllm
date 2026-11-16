@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -338,9 +339,7 @@ class CPUOffloadingManager(OffloadingManager):
                 evicted_keys=[],
             )
 
-        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
-
-        num_consumed_keys: int | None = None
+        unconsumed_keys: list[OffloadKey] = []
         if allow_partial:
             # Offered chunks are not evicted, so they are not room for the offer.
             num_storable_keys = (
@@ -349,16 +348,28 @@ class CPUOffloadingManager(OffloadingManager):
                 - len(evictable_existing_keys)
             )
             if len(keys_to_store) > num_storable_keys:
-                num_consumed_keys = keys.index(keys_to_store[num_storable_keys])
-                del keys_to_store[num_storable_keys:]
+                # Store the lowest positions, so that the groups stay aligned.
+                keys_by_position = sorted(
+                    keys_to_store,
+                    key=lambda key: (
+                        math.inf
+                        if (position := req_context.get_offload_key_position(key))
+                        is None
+                        else position
+                    ),
+                )
+                storable_keys = set(keys_by_position[:num_storable_keys])
+                unconsumed_keys = [k for k in keys_to_store if k not in storable_keys]
+                keys_to_store = [k for k in keys_to_store if k in storable_keys]
                 if not keys_to_store:
                     return PrepareStoreOutput(
                         keys_to_store=[],
                         store_spec=self._get_load_store_spec([], []),
                         evicted_keys=[],
-                        num_consumed_keys=num_consumed_keys,
+                        unconsumed_keys=unconsumed_keys,
                     )
 
+        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         num_chunks_to_evict = len(keys_to_store) - self._get_num_free_chunks()
 
         to_evict: list[OffloadKey] = []
@@ -410,7 +421,7 @@ class CPUOffloadingManager(OffloadingManager):
             keys_to_store=keys_to_store,
             store_spec=store_spec,
             evicted_keys=to_evict,
-            num_consumed_keys=num_consumed_keys,
+            unconsumed_keys=unconsumed_keys,
         )
 
     @override

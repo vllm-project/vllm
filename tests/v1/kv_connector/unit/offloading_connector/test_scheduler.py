@@ -2544,13 +2544,13 @@ def test_scheduler_reports_allocation_failure(request_runner):
 
 
 def _consume_at_most(capacities: Iterable[int]):
-    """A prepare_store that handles only as many leading keys as fit."""
+    """A prepare_store that stores only as many leading keys as fit."""
     capacities = iter(capacities)
 
     def prepare_store(keys, req_context, trigger):
-        num_consumed_keys = min(next(capacities), len(keys))
-        output = generate_store_output(keys[:num_consumed_keys])
-        output.num_consumed_keys = num_consumed_keys
+        capacity = next(capacities)
+        output = generate_store_output(keys[:capacity])
+        output.unconsumed_keys = list(keys[capacity:])
         return output
 
     return prepare_store

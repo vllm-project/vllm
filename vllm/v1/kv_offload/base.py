@@ -205,9 +205,8 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
-    # Number of leading offered keys the manager handled. The connector offers
-    # the rest again. None means all of them.
-    num_consumed_keys: int | None = None
+    # Offered keys the manager had no room for. The connector offers them again.
+    unconsumed_keys: list[OffloadKey] = field(default_factory=list)
 
 
 @dataclass
@@ -425,8 +424,8 @@ class OffloadingManager(ABC):
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result. A manager short on room may handle
-            only the leading keys and report it in num_consumed_keys.
+            were evicted as a result. A manager short on room may store
+            only some of the keys and report the rest in unconsumed_keys.
             None is returned if the blocks cannot be stored.
 
         """

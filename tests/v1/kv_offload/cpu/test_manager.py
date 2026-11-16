@@ -385,25 +385,22 @@ def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
 
 
 def nothing_stored(output: PrepareStoreOutput | None) -> bool:
-    """Whether a store offer was left for a later retry, from its first key."""
+    """Whether the manager had no room for any new key of a store offer."""
     return (
-        output is not None
-        and not output.keys_to_store
-        and output.num_consumed_keys == 0
+        output is not None and not output.keys_to_store and bool(output.unconsumed_keys)
     )
 
 
-def test_cpu_manager_reports_allocation_size_on_eviction_failure():
-    manager = make_cpu_manager(num_chunks=1, cache_policy="lru")
+def test_cpu_manager_reports_allocation_size_of_a_trimmed_store():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="lru")
 
     manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
     manager.get_stats()
 
-    assert nothing_stored(
+    for keys in ([2, 3], [3]):
         manager.prepare_store(
-            to_keys([2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            to_keys(keys), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
         )
-    )
 
     stats = manager.get_stats()
 
@@ -431,19 +428,35 @@ def test_cpu_manager_stores_the_leading_keys_that_fit():
     assert output is not None
     assert output.keys_to_store == to_keys([4, 5])
     assert output.evicted_keys == []
-    assert output.num_consumed_keys == 3
+    assert output.unconsumed_keys == to_keys([6])
 
     # Key 2 is no longer offered, so it is evicted for key 6.
     output = store(to_keys([6, 7]), _EMPTY_REQ_CTX)
     assert output is not None
     assert output.keys_to_store == to_keys([6])
     assert output.evicted_keys == to_keys([2])
-    assert output.num_consumed_keys == 1
+    assert output.unconsumed_keys == to_keys([7])
 
     output = store(to_keys([7]), _EMPTY_REQ_CTX)
     assert output is not None
     assert output.keys_to_store == []
-    assert output.num_consumed_keys == 0
+    assert output.unconsumed_keys == to_keys([7])
+
+
+def test_cpu_manager_trims_a_store_by_key_position():
+    """The keys of the lowest positions are stored, whatever the offer order,
+    so that a trimmed store covers the same tokens in every group."""
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
+    ctx = make_req_context("two-groups")
+    keys = to_keys(range(6))
+    for key, position in zip(keys, [16, 32, 48, 16, 32, 48]):
+        ctx.set_offload_key_position(key, position)
+
+    output = manager.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    assert output is not None
+    assert output.keys_to_store == to_keys([0, 1, 3, 4])
+    assert output.unconsumed_keys == to_keys([2, 5])
 
 
 def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
@@ -548,7 +561,7 @@ def test_cpu_manager():
     )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
-    assert prepare_store_output.num_consumed_keys == 1
+    assert prepare_store_output.unconsumed_keys == to_keys([6])
 
     # complete store [2, 3, 4, 5]
     cpu_manager.complete_store(
@@ -574,7 +587,7 @@ def test_cpu_manager():
     )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
-    assert prepare_store_output.num_consumed_keys == 2
+    assert prepare_store_output.unconsumed_keys == to_keys([6, 7, 8])
 
     # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
     cpu_manager.complete_load(to_keys([2, 3]), load_ctx)
@@ -857,7 +870,7 @@ class TestARCPolicy:
         )
         assert prepare_store_output is not None
         assert prepare_store_output.keys_to_store == to_keys([5, 6])
-        assert prepare_store_output.num_consumed_keys == 2
+        assert prepare_store_output.unconsumed_keys == to_keys([7])
 
         # complete load [2, 3]
         cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -1624,7 +1637,7 @@ def test_evictable_cache_chunk_count(monkeypatch):
     )
     assert output is not None
     assert output.keys_to_store == to_keys([14])
-    assert output.num_consumed_keys == 1
+    assert output.unconsumed_keys == to_keys([15])
     assert not evict_called, (
         "_num_evictable_cache_chunks==0 should short-circuit before evict()"
     )

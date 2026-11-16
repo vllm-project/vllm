@@ -999,7 +999,7 @@ class TestTieringOffloadingManager:
         assert len(result.keys_to_store) == 2
 
     def test_partial_primary_store_is_passed_through(self, manager_setup, monkeypatch):
-        """Only the keys the primary tier consumed are cascaded as existing."""
+        """Keys the primary tier left unconsumed are not cascaded as existing."""
         trigger = StoreTrigger.ON_COMPUTE
         self._start_request()
         self.manager.prepare_store(to_keys(range(3)), _CTX, trigger=trigger)
@@ -1014,8 +1014,8 @@ class TestTieringOffloadingManager:
 
         assert result is not None
         assert result.keys_to_store == to_keys([3, 4])
-        assert result.num_consumed_keys == 3
-        assert self._cascaded_keys_for("req_partial") == [set(to_keys([0]))]
+        assert result.unconsumed_keys == to_keys([5])
+        assert self._cascaded_keys_for("req_partial") == [set(to_keys(range(3)))]
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
