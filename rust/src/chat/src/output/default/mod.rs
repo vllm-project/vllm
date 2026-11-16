@@ -734,6 +734,26 @@ mod tests {
     }
 
     #[test]
+    fn mistral_reasoning_keeps_special_tokens() {
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            "mistralai/Mistral-Large-4-1T-A52B",
+            Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("[THINK]", 256)
+                    .with_special_token("[/THINK]", 257),
+            ),
+            &Err(HfTemplateError::Missing),
+            &ParserSelection::Auto,
+            &ParserSelection::Explicit("mistral".to_string()),
+            None,
+        )
+        .unwrap();
+        assert!(!request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
     fn hf_requires_matching_parser_selections() {
         let error = keeps_special_tokens(
             "other-model",

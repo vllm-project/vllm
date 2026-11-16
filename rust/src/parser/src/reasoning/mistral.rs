@@ -35,6 +35,12 @@ impl ReasoningParser for MistralReasoningParser {
         self.inner.initialize(prompt_token_ids)
     }
 
+    /// `[THINK]` and `[/THINK]` are control tokens, which skipping special
+    /// tokens would drop from the decoded text.
+    fn preserve_special_tokens(&self) -> bool {
+        true
+    }
+
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
