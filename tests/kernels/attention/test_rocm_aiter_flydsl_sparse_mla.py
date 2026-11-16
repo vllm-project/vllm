@@ -46,7 +46,6 @@ def flydsl_ops(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "1")
     # Exercise FlyDSL on small batches too; the gate has its own test.
     monkeypatch.setenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "1")
-    monkeypatch.setenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H", "1")
     # Keep aiter's own FlyDSL route off so the Triton reference is Gluon.
     monkeypatch.delenv("AITER_FLYDSL_SPARSE_MLA", raising=False)
     rocm_aiter_ops.refresh_env_variables()
@@ -530,8 +529,8 @@ def test_flydsl_96h_empty_rows(flydsl_ops) -> None:
 
 @torch.inference_mode()
 def test_flydsl_96h_routing(flydsl_ops) -> None:
-    """96-head calls need VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H and a stream
-    without has_invalid; the min-tokens gate (for <= 16 heads) does not apply."""
+    """96-head calls need a stream without has_invalid; the min-tokens gate (for
+    <= 16 heads) does not apply."""
     ops, launches = flydsl_ops
     gen = torch.Generator().manual_seed(5)
     cache = _fp8_ds_mla_cache(TOPK, gen)
@@ -551,11 +550,6 @@ def test_flydsl_96h_routing(flydsl_ops) -> None:
         ops, q, cache.unsqueeze(1), f_indptr, f_indices, True, True, 0.04
     )
     assert torch.equal(out, ref_out) and torch.equal(lse, ref_lse)
-    ops._FLYDSL_SPARSE_MLA = True
-
-    ops._FLYDSL_SPARSE_MLA_96H = False
-    _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
-    assert len(launches) == 1
 
 
 def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
@@ -566,10 +560,10 @@ def test_flydsl_96h_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
     for key in keys | {(MH, True, rl) for rl in (False, True)}:
         ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
 
-    ops._FLYDSL_SPARSE_MLA_96H = False
+    ops._FLYDSL_SPARSE_MLA = False
     ops.flydsl_sparse_mla_warmup(MH)
     assert not keys & ops._FLYDSL_SPARSE_MLA_COMPILED
-    ops._FLYDSL_SPARSE_MLA_96H = True
+    ops._FLYDSL_SPARSE_MLA = True
 
     ops.flydsl_sparse_mla_warmup(MH)
     assert keys <= ops._FLYDSL_SPARSE_MLA_COMPILED

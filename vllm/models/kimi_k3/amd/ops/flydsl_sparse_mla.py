@@ -19,8 +19,7 @@ a call is in that slice; ``rocm_aiter_ops`` routes it here when
 The 96 gathered heads of Kimi-K3.1's DCP branch (decode, and query-gather
 prefill once its index stream is packed, i.e. without has_invalid) run on the
 many-head kernel of ``flydsl_sparse_mla_gfx950``, which gathers each KV tile
-once for all heads; ``rocm_aiter_ops`` routes those only with
-``VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_96H=1``.
+once for all heads.
 """
 
 import functools
