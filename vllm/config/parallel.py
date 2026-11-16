@@ -213,6 +213,13 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
+    placement_export_path: str | None = None
+    """Export committed expert placement as versioned JSON after each cycle.
+    Requires EPLB, PP=1, elastic EP and fault tolerance disabled, and one EP
+    group covering all worker ranks. Each engine needs a distinct path.
+    Disabled when unset.
+    """
+
     policy: EPLBPolicyOption | str | None = None
     """Built-in or platform-defined policy name. None selects the platform default
     ("default" on built-in platforms). Validated by the platform.
@@ -237,6 +244,13 @@ class EPLBConfig:
     at most one peer. This reduces per-rank network contention at the cost of
     additional sequential communication steps. This option only applies to
     async EPLB and is disabled by default."""
+
+    @field_validator("placement_export_path")
+    @classmethod
+    def _validate_placement_export_path(cls, path: str | None) -> str | None:
+        if path is not None and not path.strip():
+            raise ValueError("placement_export_path must be a nonempty file path")
+        return path
 
     @property
     def migration_batching_enabled(self) -> bool:
@@ -680,6 +694,19 @@ class ParallelConfig:
 
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
+        if self.eplb_config.placement_export_path is not None:
+            if not self.enable_eplb:
+                raise ValueError("Placement export requires enable_eplb=True.")
+            if (
+                self.pipeline_parallel_size != 1
+                or self.enable_elastic_ep
+                or self.enable_fault_tolerance
+            ):
+                raise ValueError(
+                    "Placement export requires PP=1, elastic EP disabled, "
+                    "and fault tolerance disabled."
+                )
+
         if self._api_process_rank >= self._api_process_count:
             raise ValueError(
                 "Invalid value of `_api_process_rank`. "
