@@ -13,6 +13,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     _SchedulerHandle,
     _vllm_config,
     _WorkerHandle,
+    complete_store,
     make_request,
     make_scheduler_output,
 )
@@ -95,16 +96,6 @@ def _schedule_store(scheduler, block_hash=b"a"):
     )
     return scheduler.build_connector_meta(
         make_scheduler_output(new_reqs=[request], scheduled_tokens={request.req_id: 16})
-    )
-
-
-def _complete_store(scheduler, event_id, workers=1):
-    scheduler.update_connector_output(
-        SimpleNamespace(
-            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
-                store_events={event_id: StoreEventResult(workers)}
-            )
-        )
     )
 
 
@@ -237,33 +228,13 @@ def test_scheduler_emits_only_objects_stored_by_every_worker():
             0,
         )
         metadata = scheduler.build_connector_meta(
-            SimpleNamespace(
-                finished_req_ids=set(),
-                preempted_req_ids=set(),
-                scheduled_new_reqs=[request],
-                scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
-                num_scheduled_tokens={"r": 32},
-            )
+            make_scheduler_output(new_reqs=[request], scheduled_tokens={"r": 32})
         )
 
-        scheduler.update_connector_output(
-            SimpleNamespace(
-                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
-                    store_events={metadata.store_event: StoreEventResult(1)}
-                )
-            )
-        )
+        complete_store(scheduler, metadata.store_event)
         assert scheduler.take_events() == []
 
-        scheduler.update_connector_output(
-            SimpleNamespace(
-                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
-                    store_events={
-                        metadata.store_event: StoreEventResult(1, {(0, b"a")})
-                    }
-                )
-            )
-        )
+        complete_store(scheduler, metadata.store_event, failed={(0, b"a")})
         events = scheduler.take_events() + _finish_event_checks(scheduler)
         [event] = events
         assert event.block_hashes == [maybe_convert_block_hash(b"b")]
@@ -279,11 +250,11 @@ def test_store_quorum_rechecks_eviction_from_an_earlier_step():
         keys = scheduler.codec.keys_for_topology(b"a", scheduler.topology, (0,))
         handle.hits.update(dict.fromkeys(keys, True))
 
-        _complete_store(scheduler, metadata.store_event)
+        complete_store(scheduler, metadata.store_event)
         assert scheduler.take_events() == []
         assert scheduler._gpu_block_pool.blocks[1].ref_cnt == 1
         handle.hits[keys[0]] = False
-        _complete_store(scheduler, metadata.store_event)
+        complete_store(scheduler, metadata.store_event)
 
         assert scheduler._gpu_block_pool.blocks[1].ref_cnt == 0
         assert scheduler.take_events() + _finish_event_checks(scheduler) == []
@@ -304,9 +275,9 @@ def test_old_residency_result_cannot_invalidate_a_new_store(monkeypatch):
 
         monkeypatch.setattr(scheduler._lookup_executor, "submit", submit)
         first = _schedule_store(scheduler)
-        _complete_store(scheduler, first.store_event)
+        complete_store(scheduler, first.store_event)
         second = _schedule_store(scheduler)
-        _complete_store(scheduler, second.store_event)
+        complete_store(scheduler, second.store_event)
         futures[0].set_result([False])
         assert scheduler.take_events() == []
         futures[1].set_result([True])
@@ -337,7 +308,7 @@ def test_failed_or_reset_residency_check_cannot_publish_block_stored(
 
         monkeypatch.setattr(scheduler._lookup_executor, "submit", submit)
         metadata = _schedule_store(scheduler)
-        _complete_store(scheduler, metadata.store_event, workers=ranks)
+        complete_store(scheduler, metadata.store_event, workers=ranks)
 
         # Transfer pins are released when the store completes, before residency.
         assert scheduler._gpu_block_pool.blocks[1].ref_cnt == 0
@@ -364,7 +335,7 @@ def test_failed_or_reset_residency_check_cannot_publish_block_stored(
         if failure == "reset":
             # A store after reset publishes only from its own residency check.
             metadata = _schedule_store(scheduler)
-            _complete_store(scheduler, metadata.store_event, workers=ranks)
+            complete_store(scheduler, metadata.store_event, workers=ranks)
             futures[1].set_result([True] * ranks)
             [event] = scheduler.take_events()
             assert isinstance(event, BlockStored)
@@ -385,7 +356,7 @@ def test_worker_removal_invalidates_an_older_residency_success(monkeypatch):
 
         monkeypatch.setattr(scheduler._lookup_executor, "submit", submit)
         metadata = _schedule_store(scheduler)
-        _complete_store(scheduler, metadata.store_event)
+        complete_store(scheduler, metadata.store_event)
         futures[0].set_result([True])
         connector = object.__new__(UMBPStoreConnector)
         connector.connector_scheduler = scheduler
@@ -403,7 +374,7 @@ def test_worker_removal_invalidates_an_older_residency_success(monkeypatch):
 
         assert list(connector.take_events()) == [removed]
         new_store = _schedule_store(scheduler)
-        _complete_store(scheduler, new_store.store_event)
+        complete_store(scheduler, new_store.store_event)
         futures[1].set_result([True])
         assert len(scheduler.take_events()) == 1
     finally:
@@ -415,13 +386,13 @@ def test_published_objects_are_rechecked_while_new_stores_arrive():
     try:
         first = _schedule_store(scheduler)
         handle.hits[scheduler.codec.key(b"a")] = True
-        _complete_store(scheduler, first.store_event)
+        complete_store(scheduler, first.store_event)
         assert len(scheduler.take_events() + _finish_event_checks(scheduler)) == 1
         handle.hits.clear()
         handle.hits[scheduler.codec.key(b"b")] = True
         scheduler._next_event_reconcile = 0
         second = _schedule_store(scheduler, b"b")
-        _complete_store(scheduler, second.store_event)
+        complete_store(scheduler, second.store_event)
 
         events = scheduler.take_events() + _finish_event_checks(scheduler)
 
@@ -441,7 +412,7 @@ def test_kv_event_tracking_is_bounded_under_unique_stores(enabled):
             block_hash = bytes([index + 1])
             metadata = _schedule_store(scheduler, block_hash)
             handle.hits[scheduler.codec.key(block_hash)] = True
-            _complete_store(scheduler, metadata.store_event)
+            complete_store(scheduler, metadata.store_event)
             events.extend(scheduler.take_events() + _finish_event_checks(scheduler))
 
         assert len(scheduler._event_objects) == (2 if enabled else 0)
@@ -454,21 +425,35 @@ def test_kv_event_tracking_is_bounded_under_unique_stores(enabled):
         scheduler.close()
 
 
+def _recheck_published(scheduler, handle, resident):
+    """Publish `a`, then recheck it with the pool answering `resident`."""
+    metadata = _schedule_store(scheduler)
+    handle.hits[scheduler.codec.key(b"a")] = True
+    complete_store(scheduler, metadata.store_event)
+    assert len(scheduler.take_events() + _finish_event_checks(scheduler)) == 1
+    handle.hits[scheduler.codec.key(b"a")] = resident
+    scheduler._next_event_reconcile = 0
+    return scheduler.take_events() + _finish_event_checks(scheduler)
+
+
 def test_published_objects_are_removed_after_authoritative_miss():
     scheduler, handle = _event_scheduler()
     try:
-        metadata = _schedule_store(scheduler)
-        handle.hits[scheduler.codec.key(b"a")] = True
-        _complete_store(scheduler, metadata.store_event)
-        assert len(scheduler.take_events() + _finish_event_checks(scheduler)) == 1
-        handle.hits.clear()
-        scheduler._next_event_reconcile = 0
+        events = _recheck_published(scheduler, handle, False)
 
-        events = scheduler.take_events() + _finish_event_checks(scheduler)
-
-        assert len(events) == 1 and type(events[0]).__name__ == "BlockRemoved"
+        assert len(events) == 1 and isinstance(events[0], BlockRemoved)
         assert events[0].block_hashes == [maybe_convert_block_hash(b"a")]
         assert scheduler._event_objects == {}
+    finally:
+        scheduler.close()
+
+
+def test_published_objects_survive_an_unanswered_recheck():
+    """A recheck the pool cannot answer (`None`) keeps the published object."""
+    scheduler, handle = _event_scheduler()
+    try:
+        assert _recheck_published(scheduler, handle, None) == []
+        assert scheduler._event_objects[(0, b"a")].published
     finally:
         scheduler.close()
 

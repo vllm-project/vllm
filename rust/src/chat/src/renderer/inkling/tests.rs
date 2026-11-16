@@ -18,7 +18,7 @@ use super::{
     MESSAGE_TOOL, MESSAGE_USER,
 };
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode};
+use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
 struct FixtureTokenizer;
@@ -193,6 +193,31 @@ fn renders_reasoning_text_tool_call_and_tool_response() {
     assert_fixture(
         "tool_round_trip_input.json",
         expect_file!["fixtures/tool_round_trip_output.txt"],
+    );
+}
+
+#[test]
+fn renders_tool_response_media_and_coalesces_text_parts() {
+    assert_fixture(
+        "tool_media_input.json",
+        expect_file!["fixtures/tool_media_output.txt"],
+    );
+}
+
+#[test]
+fn rejects_tool_response_video() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::tool_response(
+            vec![ChatContentPart::video_url("data:video/mp4;base64,")],
+            "call_1",
+        )],
+        ..ChatRequest::for_test()
+    };
+    let error = renderer().render(&request).unwrap_err();
+    assert!(
+        matches!(error, Error::UnsupportedMultimodalContent("video_url")),
+        "{}",
+        error.as_report()
     );
 }
 
