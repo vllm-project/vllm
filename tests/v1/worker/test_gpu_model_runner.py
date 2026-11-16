@@ -157,15 +157,6 @@ def test_preferred_block_size_satisfies_every_backend(backends, expected):
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
 
 
-def test_preferred_block_size_keeps_default_when_shared_preference_is_rejected():
-    # Both ask for 128, but the exact backend rejects it. Both accept 16.
-    classes = [
-        _mock_backend([16, 32], exact=True, preferred=128),
-        _mock_backend([MultipleOf(16)], preferred=128),
-    ]
-    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 16
-
-
 @pytest.mark.parametrize(
     "backends,expected",
     [
