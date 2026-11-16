@@ -569,8 +569,8 @@ class DeepseekV32Attention(MLAAttention):
         ql_nope: torch.Tensor,
         mqa_q: torch.Tensor,
         output: torch.Tensor,
-        num_heads: int,
-        w_uv: torch.Tensor,
+        num_heads: int | None = None,
+        w_uv: torch.Tensor | None = None,
     ) -> None:
         if self.indexer is not None and not self.skip_topk:
             assert index_q_fp8 is not None
@@ -611,7 +611,7 @@ class DeepseekV32Attention(MLAAttention):
                 topk_backend=self.indexer.indexer_op.topk_backend,
                 logits_dtype=self.indexer.indexer_op.logits_dtype,
             )
-            if self.replicate and num_heads == self.num_local_heads:
+            if self.replicate and num_heads in (None, self.num_local_heads):
                 # Replicated step: no all-reduce resyncs ranks, and the top-k
                 # kernel returns the same set in a rank-dependent order.
                 self._sort_topk_indices(q_c.shape[0])
@@ -754,6 +754,12 @@ class DeepseekV32Attention(MLAAttention):
         # NOTE(woosuk): While the below does not need to be in the eager region,
         # we put it here to avoid copying the attention output. Move this back to the
         # captured region once forward_mqa supports `out` argument.
+        # Defaults: this rank's heads (plain TP or replicated); the routed
+        # head-sharded path passes its slice explicitly.
+        if num_heads is None:
+            num_heads = self.num_local_heads
+        if w_uv is None:
+            w_uv = self.W_UV
         x = attn_out.view(num_actual, num_heads, self.kv_lora_rank).transpose(0, 1)
         out = (
             output[:num_actual]
