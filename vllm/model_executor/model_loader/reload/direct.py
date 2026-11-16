@@ -93,9 +93,9 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
 
 
 def track_loaded_params(model: torch.nn.Module) -> None:
-    """Collect the parameter names ``model.load_weights`` returns until the
-    cold-start record or the reload's finish; ``None`` once a call returns
-    ``None`` (the model does not report them: nothing is checked)."""
+    """Collect the parameter names `model.load_weights` returns until the
+    cold-start record or the reload's finish; `None` once a call returns
+    `None` (the model does not report them: nothing is checked)."""
     load_weights = getattr(model, "load_weights", None)
     if load_weights is None:  # a bare module: nothing to check
         return
@@ -117,7 +117,7 @@ def track_loaded_params(model: torch.nn.Module) -> None:
 
 
 def mark_loaded(model: torch.nn.Module, name: str) -> None:
-    """Report parameter ``name`` loaded without ``load_weights`` (written in
+    """Report parameter `name` loaded without `load_weights` (written in
     place by a weight transfer engine)."""
     names = model.__dict__.get("_loaded_params")
     if names is not None:
@@ -127,7 +127,7 @@ def mark_loaded(model: torch.nn.Module, name: str) -> None:
 def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
     """Raise unless the update loaded every parameter cold start loaded, except
     those level 2 sleep preserves because the update does not rewrite them.
-    ``load_weights`` reports parameter names, whatever checkpoint names fed
+    `load_weights` reports parameter names, whatever checkpoint names fed
     them (fused or per-expert); a tied parameter counts under either name."""
     loaded = model.__dict__.pop("_loaded_params", None)
     required = model.__dict__.get("_required_params")
