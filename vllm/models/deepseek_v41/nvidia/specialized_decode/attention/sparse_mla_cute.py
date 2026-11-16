@@ -1499,6 +1499,19 @@ def _takes_launch(
     return 0 < tokens <= _max_tokens(query.device.index, chunks)
 
 
+def _takes_table(sparse_indices: torch.Tensor, sparse_topk_lens: torch.Tensor) -> bool:
+    """Int32 index rows of at most 640 columns and one int32 length a row."""
+    return (
+        sparse_indices.dtype == torch.int32
+        and sparse_indices.dim() == 2
+        and sparse_indices.stride(1) == 1
+        and 0 < sparse_indices.shape[1] <= MAX_CHUNKS * ROWS
+        and sparse_topk_lens.dtype == torch.int32
+        and sparse_topk_lens.is_contiguous()
+        and sparse_topk_lens.numel() == sparse_indices.shape[0]
+    )
+
+
 def supports_sparse_mla_cute(
     query: torch.Tensor,
     swa_kv_cache: torch.Tensor,
@@ -1515,19 +1528,9 @@ def supports_sparse_mla_cute(
     of 512 (BF16 and unroped with `q_rope`; BF16 output), FP8 pools, int32
     index rows of at most 640 columns, scalar scales, FP32 sinks, and a batch
     whose clusters are all resident."""
-    tokens = query.shape[0]
     if (
-        sparse_indices.dtype != torch.int32
-        or sparse_indices.dim() != 2
-        or sparse_indices.shape[0] != tokens
-        or sparse_indices.stride(1) != 1
-        or not 0 < sparse_indices.shape[1] <= MAX_CHUNKS * ROWS
-    ):
-        return False
-    if (
-        sparse_topk_lens.dtype != torch.int32
-        or not sparse_topk_lens.is_contiguous()
-        or sparse_topk_lens.numel() != tokens
+        not _takes_table(sparse_indices, sparse_topk_lens)
+        or sparse_indices.shape[0] != query.shape[0]
     ):
         return False
     chunks = (sparse_indices.shape[1] + ROWS - 1) // ROWS
@@ -1776,22 +1779,11 @@ def supports_sparse_mla_prefetch(
 ) -> bool:
     """Whether `sparse_mla_prefetch` takes these arguments: the pools and
     table `sparse_mla_decode` takes, for a batch it takes."""
-    if (
-        sparse_indices.dtype != torch.int32
-        or sparse_indices.dim() != 2
-        or sparse_indices.stride(1) != 1
-        or not 0 < sparse_indices.shape[1] <= MAX_CHUNKS * ROWS
-    ):
-        return False
-    tokens = sparse_indices.shape[0]
-    if (
-        sparse_topk_lens.dtype != torch.int32
-        or not sparse_topk_lens.is_contiguous()
-        or sparse_topk_lens.numel() != tokens
-    ):
+    if not _takes_table(sparse_indices, sparse_topk_lens):
         return False
     if not (_is_pool(swa_kv_cache) and _is_pool(compressed_kv_cache)):
         return False
+    tokens = sparse_indices.shape[0]
     chunks = (sparse_indices.shape[1] + ROWS - 1) // ROWS
     return 0 < tokens <= _max_tokens(sparse_indices.device.index, chunks)
 
