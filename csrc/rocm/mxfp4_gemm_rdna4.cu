@@ -93,13 +93,13 @@ __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
 // WM x WN waves per block, each wave owning one 16x16 WMMA tile, so the block
 // tile is (16*WM) x (16*WN). WM=WN=1 is the original single-wave kernel.
 template <typename T, int WM, int WN, bool KSPLIT>
-__global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
-                                          const float* __restrict__ ascale,
-                                          const uint32_t* __restrict__ b_q,
-                                          const uint8_t* __restrict__ b_scales,
-                                          T* __restrict__ c, int M, int N,
-                                          int K, float* __restrict__ c_f32,
-                                          int k_per_split) {
+__global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t* __restrict__ aq,
+                                           const float* __restrict__ ascale,
+                                           const uint32_t* __restrict__ b_q,
+                                           const uint8_t* __restrict__ b_scales,
+                                           T* __restrict__ c, int M, int N,
+                                           int K, float* __restrict__ c_f32,
+                                           int k_per_split) {
   const int wave = threadIdx.x >> 5;
   const int m_tile = blockIdx.y * (16 * WM) + 16 * (wave / WN);
   const int n_tile = blockIdx.x * (16 * WN) + 16 * (wave % WN);
@@ -170,12 +170,166 @@ __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
   }
 }
 
+template <typename T, int WM, int WN, bool KSPLIT>
+__global__ void __launch_bounds__(32 * WM * WN)
+    gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
+                              const float* __restrict__ ascale,
+                              const uint32_t* __restrict__ b_q,
+                              const uint8_t* __restrict__ b_scales,
+                              T* __restrict__ c, int M, int N, int K,
+                              float* __restrict__ c_f32, int k_per_split) {
+  // Block tile (16*WM) x (16*WN); each wave owns one 16x16 WMMA tile.
+  //
+  // The packed B words of one 32-wide E8M0 group (4 words per column) are
+  // loaded and decoded ONCE per block and staged in LDS, so the WM waves that
+  // share an N column no longer each re-decode it. LDS layout is
+  // [octet][n] -> 8 E4M3 bytes: the decode threads write consecutive n and the
+  // WMMA B-fragment reads (lane -> n, octet = 2*step + half) are 8-byte loads
+  // over consecutive n, so both sides are bank-conflict free without padding.
+  //
+  // Two LDS buffers: group g+1's global loads (B words, A fragments, E8M0)
+  // are issued before group g's WMMAs and decoded into the other buffer after
+  // them, with one __syncthreads per group covering both hazards.
+  constexpr int BN = 16 * WN;
+  constexpr int NT = 32 * WM * WN;
+  constexpr int WORDS = (BN * 4 + NT - 1) / NT;  // B words per thread / group
+
+  const int tid = threadIdx.x;
+  const int wave = tid >> 5;
+  const int lane = tid & 31;
+  const int lo = lane & 15;  // A: row | B: col | acc: N index
+  const int hi = lane >> 4;  // which half of the 16-wide K step
+  const int bn0 = blockIdx.x * BN;
+  const int m_tile = blockIdx.y * (16 * WM) + 16 * (wave / WN);
+  const int n_tile = bn0 + 16 * (wave % WN);
+  const int n_loc =
+      16 * (wave % WN) + lo;  // this lane's column inside the block
+  // No per-wave early return: every thread takes part in the block barriers
+  // and the shared decode. Out-of-range work is masked instead.
+  const bool tile_ok = (m_tile < M) && (n_tile < N);
+  const int n_col = n_tile + lo;
+  const int a_row = m_tile + lo;
+  const bool a_ok = tile_ok && a_row < M;
+  const bool n_ok = tile_ok && n_col < N;
+
+  __shared__ uint2 b_lds[2][4][BN];
+
+  const int k_begin = KSPLIT ? (int)blockIdx.z * k_per_split : 0;
+  const int k_end =
+      KSPLIT ? ((blockIdx.z == gridDim.z - 1) ? K : k_begin + k_per_split) : K;
+  const int ngroups = (k_end - k_begin) / kGroup;
+
+  uint32_t qa_nx[WORDS];
+  v2i32 a_nx[2];
+  float wsc_nx = 0.0f;
+
+  auto load_group = [&](int g) {
+    const int k_g = k_begin + g * kGroup;
+  #pragma unroll
+    for (int w = 0; w < WORDS; w++) {
+      const int idx = tid + w * NT;
+      uint32_t v = 0;
+      if (idx < BN * 4) {
+        const int cc = idx % BN, o = idx / BN;
+        const int n = bn0 + cc;
+        if (n < N) v = b_q[(size_t)((k_g >> 3) + o) * N + n];
+      }
+      qa_nx[w] = v;
+    }
+  #pragma unroll
+    for (int s = 0; s < 2; s++) {
+      v2i32 af = {0, 0};
+      if (a_ok)
+        __builtin_memcpy(&af, aq + (size_t)a_row * K + k_g + 16 * s + 8 * hi,
+                         8);
+      a_nx[s] = af;
+    }
+    wsc_nx =
+        n_ok ? mxfp4_e8m0_to_f32(b_scales[(size_t)(k_g / kGroup) * N + n_col])
+             : 0.0f;
+  };
+  auto store_group = [&](int buf) {
+  #pragma unroll
+    for (int w = 0; w < WORDS; w++) {
+      const int idx = tid + w * NT;
+      if (idx < BN * 4) {
+        const int cc = idx % BN, o = idx / BN;
+        uint32_t blo, bhi;
+        dequant_mxfp4_8_e4m3(qa_nx[w], blo, bhi);
+        b_lds[buf][o][cc] = make_uint2(blo, bhi);
+      }
+    }
+  };
+
+  v8f32 acc = {0, 0, 0, 0, 0, 0, 0, 0};
+  v2i32 a_cur[2] = {{0, 0}, {0, 0}};
+  float wsc_cur = 0.0f;
+
+  if (ngroups > 0) {
+    load_group(0);
+    store_group(0);
+    a_cur[0] = a_nx[0];
+    a_cur[1] = a_nx[1];
+    wsc_cur = wsc_nx;
+  }
+  __syncthreads();
+
+  for (int g = 0; g < ngroups; g++) {
+    const int buf = g & 1;
+    const bool has_next = (g + 1 < ngroups);
+    if (has_next) load_group(g + 1);  // in flight during this group's WMMAs
+
+    v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
+  #pragma unroll
+    for (int s = 0; s < 2; s++) {
+      const uint2 bw = b_lds[buf][2 * s + hi][n_loc];
+      v2i32 bf;
+      bf[0] = (int)bw.x;
+      bf[1] = (int)bw.y;
+      grp = wmma_fp8(a_cur[s], bf, grp);
+    }
+    // E8M0 is constant across the group and across this lane's 8 outputs,
+    // because the accumulator's N index is fixed per lane.
+  #pragma unroll
+    for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], wsc_cur, acc[i]);
+
+    if (has_next) {
+      store_group(buf ^ 1);
+      a_cur[0] = a_nx[0];
+      a_cur[1] = a_nx[1];
+      wsc_cur = wsc_nx;
+    }
+    __syncthreads();
+  }
+
+  if (!n_ok) return;  // past the last barrier, so returning here is safe
+  // gfx12 accumulator: lane -> n = lo, slot i -> m = 8*hi + i.
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    const int m_row = m_tile + 8 * hi + i;
+    if (m_row >= M) continue;
+    // Per-token scale distributes over the K sum, so apply it before the
+    // split reduction. gridDim.z > 1 reduces into a zeroed fp32 workspace via
+    // native global_atomic_add_f32 (no CAS).
+    const float v = acc[i] * ascale[m_row];
+    if constexpr (KSPLIT)
+      unsafeAtomicAdd(c_f32 + (size_t)m_row * N + n_col, v);
+    else
+      c[(size_t)m_row * N + n_col] = from_f<T>(v);
+  }
+}
+
 #else  // non-RDNA4 device pass: keep symbols so the TU links everywhere.
 
 template <typename T, int WM, int WN, bool KSPLIT>
 __global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
                                           const uint32_t*, const uint8_t*, T*,
                                           int, int, int, float*, int) {}
+
+template <typename T, int WM, int WN, bool KSPLIT>
+__global__ void gemm_mxfp4_wmma_fp8_direct(const uint8_t*, const float*,
+                                           const uint32_t*, const uint8_t*, T*,
+                                           int, int, int, float*, int) {}
 
 #endif  // __HIP__MXFP4_RDNA4__
 
@@ -265,6 +419,23 @@ inline int ksplit_override() {
 // adds the workspace zero, atomics and convert pass (M=32: 73 -> 93us). Kept
 // behind VLLM_MXFP4_RDNA4_KSPLIT for experiments; the non-split instantiation
 // is unchanged code.
+// VLLM_MXFP4_RDNA4_LDS=1 forces the LDS-staged/double-buffered kernel, =0 the
+// direct one. Unset picks by M: measured on gfx1201 (K=N=4096) the LDS
+// variant wins at M<=32 (M=16: 71 -> 48us) but with one 16x16 tile per wave
+// it has only two WMMAs per barrier and halves throughput from M=64 up
+// (M=2048: 48 -> 25 TF/s). Amortising that needs >1 tile per wave.
+inline int lds_override() {
+  static const int v = [] {
+    const char* e = std::getenv("VLLM_MXFP4_RDNA4_LDS");
+    return e ? atoi(e) : -1;
+  }();
+  return v;
+}
+inline bool use_lds_kernel(int M) {
+  const int ov = lds_override();
+  return ov < 0 ? (M <= 32) : (ov != 0);
+}
+
 inline int choose_ksplit(int M, int N, int K, int WM, int WN) {
   (void)M;
   (void)N;
@@ -310,6 +481,10 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
   const auto* bq = reinterpret_cast<const uint32_t*>(b_q.data_ptr());
   const auto* bs = reinterpret_cast<const uint8_t*>(b_scales.data_ptr());
 
+#define LAUNCH_ONE(KERN, TT, WM, WN, SPLIT)                      \
+  KERN<TT, WM, WN, SPLIT><<<grd, 32 * (WM) * (WN), 0, stream>>>( \
+      aqp, asp, bq, bs, cp, M, N, K, wsp, k_per)
+
 #define LAUNCH_TILED(TT, WM, WN)                                               \
   do {                                                                         \
     const int splits = choose_ksplit(M, N, K, WM, WN);                         \
@@ -322,14 +497,15 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
       ws = torch::zeros({M, N}, a.options().dtype(torch::kFloat32));           \
       wsp = ws.data_ptr<float>();                                              \
     }                                                                          \
-    if (splits > 1)                                                            \
-      gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN, true>                              \
-          <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N,   \
-                                                 K, wsp, k_per);               \
+    const bool lds = use_lds_kernel(M);                                        \
+    if (lds && splits > 1)                                                     \
+      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_tiled, TT, WM, WN, true);                 \
+    else if (lds)                                                              \
+      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_tiled, TT, WM, WN, false);                \
+    else if (splits > 1)                                                       \
+      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_direct, TT, WM, WN, true);                \
     else                                                                       \
-      gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN, false>                             \
-          <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N,   \
-                                                 K, wsp, k_per);               \
+      LAUNCH_ONE(gemm_mxfp4_wmma_fp8_direct, TT, WM, WN, false);               \
     if (splits > 1) {                                                          \
       const size_t n_el = (size_t)M * N;                                       \
       f32_to_t<TT>                                                             \
@@ -366,6 +542,7 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
   }
 #undef DISPATCH
 #undef LAUNCH_TILED
+#undef LAUNCH_ONE
 
   return c;
 }
