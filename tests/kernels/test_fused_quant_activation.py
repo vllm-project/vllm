@@ -142,21 +142,37 @@ def native_vllm_config():
     not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ),
-    reason="ReLU2 NVFP4 fusion is validated on SM10x",
+    reason="Act + NVFP4 fusion is tested on SM10x",
+)
+@pytest.mark.parametrize(
+    "act_cls, dtype",
+    [
+        (ReLUSquaredActivation, torch.bfloat16),
+        (GELU, torch.float16),
+        (GELU, torch.bfloat16),
+    ],
 )
 @pytest.mark.parametrize("shape", [(1, 16), (17, 80), (129, 1344), (256, 5376)])
 @pytest.mark.parametrize("scale_value", [0.0009765625, 17.125])
 @torch.inference_mode()
-def test_relu2_nvfp4_matches_unfused(native_vllm_config, shape, scale_value):
-    """Match unfused ReLU2 + NVFP4 bitwise and zero every padded scale."""
+def test_act_nvfp4_matches_unfused(
+    native_vllm_config, act_cls, dtype, shape, scale_value
+):
+    """Match unfused act + NVFP4 bitwise and zero every padded scale."""
     from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
 
-    x = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(shape, dtype=dtype, device="cuda")
+    # All-negative rows: GELU is negative there, so block scales must use |x|.
+    x[::2] = -x[::2].abs()
     scale = torch.tensor(scale_value, dtype=torch.float32, device=x.device)
     linear = MockLinearNvfp4(scale)
-    act = ReLUSquaredActivation(compile_native=False)
-    compiled_relu = torch.compile(act.forward_native, fullgraph=True)
-    expected = ops.scaled_fp4_quant(compiled_relu(x), scale)
+    act = (
+        ReLUSquaredActivation(compile_native=False)
+        if act_cls is ReLUSquaredActivation
+        else act_cls()
+    )
+    compiled_act = torch.compile(act.forward_native, fullgraph=True)
+    expected = ops.scaled_fp4_quant(compiled_act(x), scale)
     before = x.clone()
     actual = maybe_fused_act_quant(act, x, linear)
     assert isinstance(actual, QuantizedActivation)
@@ -170,42 +186,6 @@ def test_relu2_nvfp4_matches_unfused(native_vllm_config, shape, scale_value):
     )
     actual_scale[:m, : k // 16] = 0
     assert not torch.count_nonzero(actual_scale)
-
-
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
-    ),
-    reason="GELU NVFP4 fusion is validated on SM12x",
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape", [(1, 16), (17, 80), (129, 1344), (256, 4096)])
-@pytest.mark.parametrize("scale_value", [0.0009765625, 17.125])
-@torch.inference_mode()
-def test_gelu_nvfp4_matches_unfused(native_vllm_config, dtype, shape, scale_value):
-    """Match unfused GELU + NVFP4 bitwise and zero every padded scale."""
-    from tests.kernels.quantization.test_nvfp4_quant import recover_swizzled_scales
-
-    x = torch.randn(shape, dtype=dtype, device="cuda")
-    # In all-negative rows GELU is negative, so the block scales come from |x|.
-    x[::2] = -x[::2].abs()
-    scale = torch.tensor(scale_value, dtype=torch.float32, device=x.device)
-    linear = MockLinearNvfp4(scale)
-    act = GELU()
-    compiled_gelu = torch.compile(act.forward_native, fullgraph=True)
-    expected = ops.scaled_fp4_quant(compiled_gelu(x), scale)
-    actual = maybe_fused_act_quant(act, x, linear)
-    assert isinstance(actual, QuantizedActivation)
-    assert torch.equal(actual.data, expected[0])
-    m, k = shape
-    expected_scale = recover_swizzled_scales(expected[1], m, k)
-    actual_scale = recover_swizzled_scales(actual.scale, m, k, include_padding=True)
-    torch.testing.assert_close(
-        actual_scale[:m, : k // 16], expected_scale, rtol=0, atol=0
-    )
-    actual_scale[:m, : k // 16] = 0
-    assert not torch.count_nonzero(actual_scale)
-    opcheck(torch.ops.vllm.act_nvfp4_quant, (x, scale, True))
 
 
 @pytest.mark.skipif(
@@ -500,4 +480,4 @@ def test_relu2_nvfp4_single_specialization_per_width(
         assert torch.equal(
             actual.scale.view(torch.uint8), expected[1].view(torch.uint8)
         )
-    opcheck(torch.ops.vllm.act_nvfp4_quant, (x, linear.input_global_scale_inv, False))
+    opcheck(torch.ops.vllm.act_nvfp4_quant, (x, linear.input_global_scale_inv, "relu2"))

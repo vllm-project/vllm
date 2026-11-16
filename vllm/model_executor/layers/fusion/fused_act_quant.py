@@ -264,8 +264,11 @@ if current_platform.is_cuda() and current_platform.is_device_capability_family(1
     _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = relu_squared_nvfp4_quant
     _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported
 
-# The GELU + NVFP4 path is validated on SM12x.
-if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
+# Same Triton producer as ReLU2: tested on SM10x in CI and validated on SM12x.
+if current_platform.is_cuda() and (
+    current_platform.is_device_capability_family(100)
+    or current_platform.is_device_capability_family(120)
+):
     _GELU_NVFP4_KEY = (GELU, kNvfp4Dynamic)
     _FUSED_ACT_QUANT[_GELU_NVFP4_KEY] = gelu_nvfp4_quant
     _FUSED_ACT_QUANT_SUPPORT[_GELU_NVFP4_KEY] = _gelu_nvfp4_quant_supported

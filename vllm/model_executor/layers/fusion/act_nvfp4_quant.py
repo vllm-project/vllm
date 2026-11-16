@@ -67,7 +67,7 @@ def _act_nvfp4_quant_kernel(
     PADDED_SCALE_COLS: tl.constexpr,
     PADDED_SCALE_SIZE,
     GROUPS_PER_CTA: tl.constexpr,
-    GELU: tl.constexpr,
+    ACT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     groups = pid * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -87,11 +87,12 @@ def _act_nvfp4_quant_kernel(
         )
         lo, hi = tl.split(tl.reshape(values, (GROUPS_PER_CTA, 8, 2)))
         lo, hi = lo.to(tl.float32), hi.to(tl.float32)
-        if GELU:
+        if ACT == "gelu":
             # Exact (erf) GELU, as F.gelu(approximate="none").
             lo = 0.5 * lo * (1.0 + tldevice.erf(lo * 0.7071067811865476))
             hi = 0.5 * hi * (1.0 + tldevice.erf(hi * 0.7071067811865476))
         else:
+            tl.static_assert(ACT == "relu2")
             # ReLU propagates NaN; tl.maximum otherwise defaults to maxnum semantics.
             lo = tl.maximum(lo, 0.0, propagate_nan=tl.PropagateNan.ALL)
             hi = tl.maximum(hi, 0.0, propagate_nan=tl.PropagateNan.ALL)
@@ -144,7 +145,7 @@ def _act_nvfp4_quant_kernel(
 
 
 def _act_nvfp4_quant_fake(
-    x: torch.Tensor, global_scale: torch.Tensor, gelu: bool
+    x: torch.Tensor, global_scale: torch.Tensor, act: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     m, k = x.shape
     output = torch.empty((m, k // 2), dtype=torch.uint8, device=x.device)
@@ -157,12 +158,12 @@ def _act_nvfp4_quant_fake(
 
 
 def _act_nvfp4_quant(
-    x: torch.Tensor, global_scale: torch.Tensor, gelu: bool
+    x: torch.Tensor, global_scale: torch.Tensor, act: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     m, k = x.shape
     # vLLM can reuse compiled graphs without checking Dynamo's shape guards.
     assert m <= _act_nvfp4_max_rows(k), "NVFP4 row limit exceeded"
-    output, block_scale = _act_nvfp4_quant_fake(x, global_scale, gelu)
+    output, block_scale = _act_nvfp4_quant_fake(x, global_scale, act)
     if m == 0:
         return output, block_scale
     scale_cols, scale_size = block_scale.shape[1], block_scale.numel()
@@ -180,7 +181,7 @@ def _act_nvfp4_quant(
         PADDED_SCALE_COLS=scale_cols,
         PADDED_SCALE_SIZE=scale_size,
         GROUPS_PER_CTA=128,
-        GELU=gelu,
+        ACT=act,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -196,13 +197,13 @@ direct_register_custom_op(
 
 
 def _quantized_activation(
-    x: torch.Tensor, linear: LinearBase, gelu: bool
+    x: torch.Tensor, linear: LinearBase, act: str
 ) -> QuantizedActivation:
     from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 
     output, block_scale = torch.ops.vllm.act_nvfp4_quant(
-        x, linear.input_global_scale_inv, gelu
+        x, linear.input_global_scale_inv, act
     )
     return QuantizedActivation(
         data=output,
@@ -217,9 +218,9 @@ def relu_squared_nvfp4_quant(
     x: torch.Tensor, linear: LinearBase
 ) -> QuantizedActivation:
     """Fuse BF16 ReLU2 and block16 NVFP4 with 128x4 swizzled scales."""
-    return _quantized_activation(x, linear, gelu=False)
+    return _quantized_activation(x, linear, "relu2")
 
 
 def gelu_nvfp4_quant(x: torch.Tensor, linear: LinearBase) -> QuantizedActivation:
     """Fuse exact GELU and block16 NVFP4 with 128x4 swizzled scales."""
-    return _quantized_activation(x, linear, gelu=True)
+    return _quantized_activation(x, linear, "gelu")
