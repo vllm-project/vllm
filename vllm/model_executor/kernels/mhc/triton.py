@@ -214,7 +214,7 @@ def _mhc_post_collapse_rms_norm_kernel(
 class MHCPostCollapseRMSNormKernel(
     VllmTritonJitKernel["MHCPostCollapseRMSNormKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         hidden_size: int
         block_h: int
