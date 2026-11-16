@@ -40,7 +40,7 @@ def beam_output_gate(
     num_heads: int,
     head_dim: int,
 ) -> torch.Tensor:
-    """``attn_output * sigmoid(gate + gate_bias)`` with activation-dtype rounding
+    """`attn_output * sigmoid(gate + gate_bias)` with activation-dtype rounding
     after the bias add and the sigmoid."""
     output = torch.empty_like(attn_output)
     if output.numel():

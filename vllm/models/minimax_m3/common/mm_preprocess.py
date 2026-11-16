@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import numpy.typing as npt
 import torch
-from transformers import BatchFeature
+from transformers import BatchFeature, MiniMaxM3VLConfig
 from transformers.video_utils import VideoMetadata
 
 from vllm.config.multimodal import (
@@ -38,7 +38,6 @@ from vllm.multimodal.video import (
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 from vllm.transformers_utils.processors.minimax_m3 import (
     MiniMaxM3VLImageProcessor,
     MiniMaxM3VLVideoProcessor,
@@ -70,8 +69,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     VISION_START_TOKEN = "]<]start of image[>["
     VISION_END_TOKEN = "]<]end of image[>["
 
-    def get_hf_config(self) -> MiniMaxM3Config:
-        return self.ctx.get_hf_config(MiniMaxM3Config)
+    def get_hf_config(self) -> MiniMaxM3VLConfig:
+        return self.ctx.get_hf_config(MiniMaxM3VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> MiniMaxVLProcessor:
         # The released checkpoint only ships the processor as remote code
@@ -110,7 +109,7 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     ) -> tuple[ImageSize, int]:
         """Compute resized image size and number of vision tokens.
 
-        Mirrors the processor's ``compute_aligned_size`` so token counts
+        Mirrors the processor's `compute_aligned_size` so token counts
         match the actual processor output.
         """
         patch_size: int = image_processor.patch_size
@@ -243,13 +242,12 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), max_frames_per_video
+            max_total_frames // max(num_videos, 1), max_frames_per_video
         )
         return max(max_frames_per_video, 1)
 
@@ -263,7 +261,9 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=size.width,
             image_height=size.height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
             image_processor=video_processor,
             # Worst case (detail=high); see get_max_image_tokens.
             mm_kwargs={"max_long_side_pixel": _VIDEO_MAX_LONG_SIDE_PIXEL},
@@ -286,7 +286,9 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
-        num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.info.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return {
             "image": self._get_dummy_images(
                 width=size.width,

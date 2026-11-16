@@ -6,9 +6,9 @@ Exercises DelegatingParser in engine-adapter mode to verify that delegated
 routing produces correct output across chunk sizes.
 See test_replay.py for tests that target engine parsers directly.
 
-Parser discovery is automatic: any engine parser in ``registered_adapters``
+Parser discovery is automatic: any engine parser in `registered_adapters`
 that has both tool and reasoning adapters and a builder in
-``trace_builder._BUILDERS`` is picked up with zero manual wiring.
+`trace_builder._BUILDERS` is picked up with zero manual wiring.
 """
 
 from __future__ import annotations

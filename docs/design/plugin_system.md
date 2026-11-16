@@ -111,7 +111,7 @@ Every plugin has three parts:
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
+    - `get_kv_cache_layer_configs`: This function is called to collect each layer's KV cache manager, allocation policy, and cache layout.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.
@@ -143,7 +143,24 @@ Every plugin has three parts:
     - triton ops
       Custom way doesn't work for triton ops now.
 
+    Fused MoE routers, routed experts, and runners use `PluggableLayer` for whole-class replacement. Register a compatible subclass with, for example, `FusedTopKRouter.register_oot(MyFusedTopKRouter)` before model construction.
+
+    Registration matches the concrete class name. A registration for `MoERunner` or `RoutedExperts` does not replace model-specific subclasses or `SubstitutedRoutedExperts`; register those classes separately when supported. Without a matching registration, the selected class is used unchanged. A router instance explicitly supplied to `FusedMoEFactory` is used directly.
+
+    Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
+
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
+
+## Reusing Worker initialization
+
+Device plugins inheriting `vllm.v1.worker.gpu_worker.Worker` can override
+`_make_elastic_ep_executor` to avoid importing CUDA-only elastic EP dependencies
+during construction. The returned executor must implement `execute` and `shutdown`;
+unsupported execution should raise explicitly.
+
+`_validate_profiler_config` validates `self.profiler_config` during construction.
+Plugins can override it to validate their device's profiler configuration. The
+default implementations retain the GPU executor and profiler validation.
 
 ## Compatibility Guarantee
 
@@ -158,19 +175,3 @@ The interface for the model/module may change during vLLM's development. If you 
     - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
     - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.
     - `prompt` in `Platform.validate_request` is deprecated. It has been removed in v0.18.0.
-
-
-## Reusing Worker orchestration
-
-Device plugins inheriting `vllm.v1.worker.gpu_worker.Worker` can override
-`_make_elastic_ep_executor` to avoid importing CUDA-only elastic EP dependencies.
-The returned executor must implement `execute` and `shutdown`; unsupported
-execution should raise explicitly.
-
-`_before_execute_model` runs before waiting for previous pipeline sends, including
-empty batches. `_get_pp_all_gather_group` selects the group used for both receive
-and send. `_after_pp_send` handles platform-specific connector output after sends
-are enqueued. The default implementations preserve GPU behavior, including V2
-pooling. These hooks let plugins retain the parent execution loop and decorators;
-they do not make device initialization, ModelRunner contracts or CUDA features
-portable automatically.

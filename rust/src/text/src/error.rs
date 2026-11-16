@@ -13,6 +13,12 @@ pub use crate::lower::token_ids::TokenIdsError;
 pub enum Error {
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    /// No tokenizer is loaded (`--skip-tokenizer-init`), so the request's
+    /// text cannot be encoded or decoded.
+    #[error(
+        "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set"
+    )]
+    TokenizerUnavailable,
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
@@ -50,6 +56,8 @@ pub enum Error {
          got min_tokens={min_tokens}, max_tokens={max_tokens}"
     )]
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
+    #[error("n must be 1 when using greedy sampling, got {n}.")]
+    GreedyParallelSampling { n: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error(
@@ -82,11 +90,13 @@ impl Error {
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
             | Self::StopStringsRequireDetokenize { .. }
+            | Self::TokenizerUnavailable
             | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::GreedyParallelSampling { .. }
             | Self::InvalidThinkingTokenBudget
             | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
             | Self::InvalidTruncatePromptTokens { .. }
@@ -95,12 +105,20 @@ impl Error {
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::Unsupported { .. })
+            | Self::Llm(LlmError::RemoteInvalidRequest { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
             | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
         }
+    }
+
+    /// Whether the request could not be taken now, so retrying later may
+    /// succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Llm(LlmError::Unavailable { .. }))
     }
 
     /// The request parameter a validation error refers to, reported as the
@@ -115,6 +133,9 @@ impl Error {
 
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {
-        Self::Tokenizer(error.0)
+        match error {
+            vllm_tokenizer::TokenizerError::Backend { message } => Self::Tokenizer(message),
+            vllm_tokenizer::TokenizerError::Unavailable => Self::TokenizerUnavailable,
+        }
     }
 }
