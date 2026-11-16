@@ -186,10 +186,10 @@ def _stage_handshake(
     """Form one sub-communicator per pipeline stage, so stages receive only
     their own weights, in parallel.
 
-    Every group rank contributes ``row``: its PP rank (-1 on trainer ranks)
+    Every group rank contributes `row`: its PP rank (-1 on trainer ranks)
     followed by a 0/1 mask over the planned names of what it needs. Each stage
     needs the union of its workers' masks. Group rank 0 (a trainer rank) calls
-    ``owner_flags(need)`` for which trainer ranks own a name some stage needs;
+    `owner_flags(need)` for which trainer ranks own a name some stage needs;
     a stage's group is those trainer ranks plus its workers, so a trainer rank
     joins only the rings it sends or must relay on."""
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
