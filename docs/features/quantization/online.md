@@ -58,6 +58,18 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 | `lut_b_moe` | MoE only: 3-bit indices into an E4M3 codebook with an e8m0 scale per 8x64 tile | MoE only: fp8_e4m3 data, e8m0 per-1x32-block scale | Native on Rubin (SM 10.7) via the tensor core LUT decode. Other GPUs emulate the same numerics for accuracy checks with dequantized weights. Dense layers stay unquantized. |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
 
+## RL Weight Updates with Direct Reload
+
+Online-quantized models accept in-place weight updates (`reload_weights`, RL
+weight sync): the trainer sends BF16 weights under their checkpoint names.
+With the `VLLM_RELOAD_MODE` environment variable set to `direct`, each tensor
+is quantized as it is loaded;
+`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
+on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
+and `nvfp4_per_token` on MoE layers. See
+[Direct Weight Reload](../../training/direct_reload.md#online-quantization)
+for the refused schemes and the NVFP4 delivery rule.
+
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.
