@@ -740,32 +740,42 @@ class NanoNemotronVLMultiModalProcessor(
                     f"num_videos={len(videos)}"
                 )
             audio_items = audios.get_all()
-            if any(audio is None for audio in audio_items):
+            has_audio = [audio is not None for audio in audio_items]
+            if not all(has_audio):
                 # The renderer degrades a video without an audio track to a
-                # None audio entry. A None cannot be passed to the HF
-                # processor as real audio, so fall back to per-video
-                # extraction: it re-reads each video's bytes and records
-                # `has_audio=False` for the silent ones.
+                # None audio entry, which cannot be passed to the HF processor
+                # as real audio. Drop those entries together with their UUIDs
+                # so each remaining audio item keeps its own UUID.
+                audio_items = [audio for audio in audio_items if audio is not None]
+                audio_data = [
+                    item for item, keep in zip(audios.data, has_audio) if keep
+                ]
                 items_dict = dict(mm_items)
-                items_dict.pop("audio")
-                inputs.mm_data_items = MultiModalDataItems(items_dict)
-                mm_items, audio_items, has_audio = self._extract_audio_from_videos(
-                    inputs.mm_data_items
-                )
+                mm_uuid_items = dict(inputs.mm_uuid_items or {})
+                if audio_data:
+                    items_dict["audio"] = AudioProcessorItems(audio_data)
+                else:
+                    del items_dict["audio"]
+                if "audio" in mm_uuid_items:
+                    audio_uuids = [
+                        uuid
+                        for uuid, keep in zip(
+                            mm_uuid_items["audio"], has_audio, strict=True
+                        )
+                        if keep
+                    ]
+                    if audio_uuids:
+                        mm_uuid_items["audio"] = audio_uuids
+                    else:
+                        del mm_uuid_items["audio"]
+                mm_items = MultiModalDataItems(items_dict)
                 inputs.mm_data_items = mm_items
-                logger.info(
-                    "Silent video detected among pre-populated items; "
-                    "re-extracted audio from video bytes: %d audio(s), "
-                    "has_audio=%s.",
-                    len(audio_items),
-                    has_audio,
-                )
-            else:
-                has_audio = [True] * len(videos)
-                logger.info(
-                    "Using %d pre-populated audio item(s) from upstream.",
-                    len(audio_items),
-                )
+                inputs.mm_uuid_items = mm_uuid_items or None
+            logger.info(
+                "Using %d pre-populated audio item(s) from upstream, has_audio=%s.",
+                len(audio_items),
+                has_audio,
+            )
         else:
             # Extract audio from video bytes (library usage path).
             mm_items, audio_items, has_audio = self._extract_audio_from_videos(mm_items)

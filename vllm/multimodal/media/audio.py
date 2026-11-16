@@ -564,6 +564,12 @@ def load_audio(
         if torchcodec_error is not None:
             raise torchcodec_error from torchcodec_error.__cause__
         logger.error("Failed to load audio via soundfile: %r", exc)
+    except NoAudioStreamError:
+        # `load_audio_soundfile` reports any container libsndfile does not
+        # recognise this way; only an FFmpeg backend can tell whether the
+        # input really lacks an audio stream.
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
     except soundfile.LibsndfileError as exc:
         if torchcodec_error is not None:
             raise torchcodec_error from torchcodec_error.__cause__

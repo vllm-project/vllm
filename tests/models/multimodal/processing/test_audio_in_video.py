@@ -430,8 +430,8 @@ def test_nemotron_silent_video_degrades_per_video():
     The renderer degrades a video without an audio track to a None audio
     item (see `parse_chat_messages_silent_video_degrades_to_video_only`).
     NanoNemotronVLMultiModalProcessor.apply must not treat that None as a
-    real audio clip: it re-extracts audio from each video's original bytes
-    so only videos that actually carry audio get an AUDIO_CONTEXT injected.
+    real audio clip: it drops the None entries and their UUIDs so only videos
+    that actually carry audio get an AUDIO_CONTEXT injected.
 
     Runs the real registry processor on CPU with ffmpeg-generated videos.
     """
@@ -489,8 +489,9 @@ def test_nemotron_silent_video_degrades_per_video():
 
     def video_item(video_bytes: bytes) -> tuple:
         frames = decode_frames(video_bytes)
+        # No `original_video_bytes`: the renderer-provided audio must be used
+        # as is, without decoding the video a second time.
         metadata = {
-            "original_video_bytes": video_bytes,
             "fps": 2,
             "duration": 2.0,
             "total_num_frames": len(frames),
@@ -509,26 +510,35 @@ def test_nemotron_silent_video_degrades_per_video():
 
     audible_audio = load_audio_pyav(BytesIO(videos_bytes[1][1]), max_duration_s=None)
 
-    def run(mm_data, num_videos):
+    def run(mm_data, names):
         mm_items = processor.info.parse_mm_data(mm_data)
         out = processor(
-            tokenizer.encode("<video>" * num_videos, add_special_tokens=False),
+            tokenizer.encode("<video>" * len(names), add_special_tokens=False),
             mm_items=mm_items,
             mm_uuid_items={
-                "video": [f"v{i}" for i in range(num_videos)],
-                "audio": [f"a{i}" for i in range(num_videos)],
+                "video": [f"video-{name}" for name in names],
+                "audio": [f"audio-{name}" for name in names],
             },
         )
-        return tokenizer.decode(out["prompt_token_ids"], skip_special_tokens=False)
+        text = tokenizer.decode(out["prompt_token_ids"], skip_special_tokens=False)
+        return text, out["mm_hashes"]
 
     # A silent video degrades to video-only: no audio context is injected.
-    assert AUDIO_CONTEXT not in run({"video": [silent_item], "audio": [None]}, 1)
+    silent_text, _ = run({"video": [silent_item], "audio": [None]}, ["silent"])
+    assert AUDIO_CONTEXT not in silent_text
 
     # Mixed request: only the audible video contributes its audio context,
     # the silent video must not add a second one.
-    audible_text = run({"video": [audible_item], "audio": [audible_audio]}, 1)
-    mixed_text = run(
-        {"video": [silent_item, audible_item], "audio": [None, audible_audio]}, 2
+    audible_text, audible_hashes = run(
+        {"video": [audible_item], "audio": [audible_audio]}, ["audible"]
+    )
+    mixed_text, mixed_hashes = run(
+        {"video": [silent_item, audible_item], "audio": [None, audible_audio]},
+        ["silent", "audible"],
     )
     assert audible_text.count(AUDIO_CONTEXT) > 0
     assert mixed_text.count(AUDIO_CONTEXT) == audible_text.count(AUDIO_CONTEXT)
+
+    # The audible video's audio keeps its own UUID. Hashing it under the
+    # silent video's UUID could hit another request's cache entry.
+    assert mixed_hashes["audio"] == audible_hashes["audio"]

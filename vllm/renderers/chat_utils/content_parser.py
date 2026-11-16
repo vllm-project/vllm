@@ -71,6 +71,30 @@ def _loads_audio_from_video(
     return bool(get_load_audio_from_video(kwargs))
 
 
+_VIDEO_AUDIO_UUID_PREFIX: Final[str] = "vllm-audio-in-video:"
+
+
+def _video_audio_uuid(video_uuid: str | None) -> str | None:
+    """Return the UUID for the audio track extracted from a video.
+
+    The track must not reuse the video's UUID: without other hash factors both
+    items would get the same `uuid:` cache key despite holding different data.
+    The prefix keeps the derived UUID apart from client-chosen ones.
+    """
+    return None if video_uuid is None else _VIDEO_AUDIO_UUID_PREFIX + video_uuid
+
+
+def _warn_video_without_audio(video_url: str, video_uuid: str | None) -> None:
+    # A `data:` URL embeds the whole user-provided video, so log only its scheme.
+    scheme, sep, _ = video_url[:16].partition(":")
+    logger.warning(
+        "Video (uuid=%s, url scheme=%s) has no audio stream; "
+        "skipping audio extraction.",
+        video_uuid,
+        scheme if sep else "unknown",
+    )
+
+
 class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
@@ -306,6 +330,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if video_url and _loads_audio_from_video(
             self._tracker.model_config, self._mm_processor_kwargs
         ):
+            audio_uuid = _video_audio_uuid(uuid)
             try:
                 audio = self._connector.fetch_audio(video_url)
             except NoAudioStreamError:
@@ -313,14 +338,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 # video-only; keep mm_data/mm_uuids aligned with a sentinel
                 # UUID so the engine can match the pair. Corrupt or
                 # over-limit audio still raises.
-                logger.warning(
-                    "Video %s has no audio stream; skipping audio extraction.",
-                    video_url,
-                )
-                audio_uuid = uuid or random_uuid()
-                audio_placeholder = self._tracker.add("audio", (None, audio_uuid))
-            else:
-                audio_placeholder = self._tracker.add("audio", (audio, uuid))
+                _warn_video_without_audio(video_url, uuid)
+                audio = None
+                audio_uuid = audio_uuid or random_uuid()
+            audio_placeholder = self._tracker.add("audio", (audio, audio_uuid))
             self._add_placeholder("audio", audio_placeholder)
 
     def parse_video_embeds(
@@ -506,26 +527,19 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         return audio, uuid
 
-    async def _video_audio_with_uuid_async(
-        self, video_url: str | None, uuid: str | None
-    ):
-        # A video without an audio track degrades to video-only. The returned
-        # None carries a UUID so `_resolve_items` keeps the pair: a bare
-        # (None, None) entry would trip the empty-media validation.
-        uuid = uuid or random_uuid()
+    async def _video_audio_with_uuid_async(self, video_url: str, uuid: str | None):
+        audio_uuid = _video_audio_uuid(uuid)
         try:
-            audio = (
-                await self._connector.fetch_audio_async(video_url)
-                if video_url
-                else None
-            )
+            audio = await self._connector.fetch_audio_async(video_url)
         except NoAudioStreamError:
-            logger.warning(
-                "Video %s has no audio stream; skipping audio extraction.",
-                video_url,
-            )
+            # A video without an audio track degrades to video-only. The
+            # returned None carries a sentinel UUID so `_resolve_items` keeps
+            # the pair: a bare (None, None) entry would trip the empty-media
+            # validation.
+            _warn_video_without_audio(video_url, uuid)
             audio = None
-        return audio, uuid
+            audio_uuid = audio_uuid or random_uuid()
+        return audio, audio_uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
         placeholder = self._tracker.add(
