@@ -1109,7 +1109,9 @@ def _encoder_deferral_scheduler(
         **kwargs,
     )
     # The CPU platform turns async scheduling off. These tests overlap steps as
-    # async scheduling does, so keep it on in the config the scheduler reads.
+    # async scheduling does, so keep it on in the config that the hold reads.
+    # State set up at construction, such as deferred block freeing with a KV
+    # connector, still follows the platform. The assert guards the override.
     scheduler.scheduler_config.async_scheduling = async_scheduling
     assert (scheduler.vllm_config.max_concurrent_batches > 1) == async_scheduling
     return scheduler
@@ -1282,6 +1284,64 @@ def test_encoder_deferral_holds_only_requests_with_embeddings_in_window(
     assert scheduler.schedule().num_scheduled_tokens == expected
 
     # Once busy's step is processed, deferred is scheduled.
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == expected_next
+
+
+@pytest.mark.parametrize(
+    "deferred_image_length,expected,expected_next",
+    [(300, {}, {"deferred": 1000}), (400, {"small": 300}, {"small": 1})],
+    ids=["fits-cache", "never-fits-cache"],
+)
+def test_encoder_deferral_holds_only_behind_requests_fitting_the_encoder_cache(
+    deferred_image_length, expected, expected_next
+):
+    """With a configured encoder cache, a deferred request holds later ones only
+    if its images fit the cache together. One that never fits is never
+    scheduled with chunked prefill off, as on main since the cache size became
+    configurable, but it does not hold later requests."""
+    scheduler = _encoder_deferral_scheduler(encoder_cache_size=600)
+    (busy,) = create_requests(
+        num_requests=1,
+        num_tokens=400,
+        max_tokens=1,
+        req_ids=["busy"],
+        mm_positions=[[PlaceholderRange(offset=0, length=300)]],
+        mm_hashes_list=[["busy"]],
+    )
+    (deferred,) = create_requests(
+        num_requests=1,
+        num_tokens=1000,
+        req_ids=["deferred"],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=deferred_image_length),
+                PlaceholderRange(offset=500, length=deferred_image_length),
+            ]
+        ],
+        mm_hashes_list=[["first", "second"]],
+    )
+    (small,) = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        req_ids=["small"],
+        mm_positions=[[PlaceholderRange(offset=10, length=100)]],
+        mm_hashes_list=[["small"]],
+    )
+    scheduler.add_request(busy)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"busy": 400}
+
+    scheduler.add_request(deferred)
+    scheduler.add_request(small)
+    # 300 of the 600 slots are free. deferred needs 600 or 800 slots, and
+    # small's 100 would fit.
+    assert scheduler.schedule().num_scheduled_tokens == expected
+
+    # Once busy's step is processed, a deferred request that fits is scheduled.
     scheduler.update_from_output(
         first,
         ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),

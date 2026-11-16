@@ -1045,6 +1045,16 @@ class Scheduler(SchedulerInterface):
                 and not self.is_encoder_decoder
                 and self.vllm_config.max_concurrent_batches > 1
             )
+            # A deferred request holds later ones only if all its multimodal
+            # items fit the configured encoder cache at once. Otherwise it may
+            # never be scheduled, and the hold would never end. The check errs
+            # toward not holding: it counts repeated items and items inside the
+            # prefix hit, and the built-in manager may have more room than
+            # configured. A custom manager with less room is not covered.
+            configured_encoder_cache_size = (
+                self.scheduler_config.encoder_cache_size
+                or self.scheduler_config.max_num_batched_tokens
+            )
             encoder_deferred = False
 
             def skip_request(from_queue: RequestQueue) -> None:
@@ -1438,6 +1448,11 @@ class Scheduler(SchedulerInterface):
                             hold_after_encoder_deferral
                             and num_new_tokens < num_tokens_before_encoder
                             and request_id not in self.encoder_cache_mismatch_reqs
+                            and sum(
+                                feature.mm_position.get_num_embeds()
+                                for feature in request.mm_features
+                            )
+                            <= configured_encoder_cache_size
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
