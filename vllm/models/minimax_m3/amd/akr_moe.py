@@ -48,7 +48,7 @@ def unsupported_reason(moe: torch.nn.Module, config) -> str | None:
             "needs the unfused shared expert "
             "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0)"
         )
-    if moe.e_score_correction_bias is None or config.scoring_func != "sigmoid":
+    if moe.e_score_correction_bias is None:
         return "needs sigmoid routing with the correction bias"
     rx = moe.experts.routed_experts
     mc = rx.moe_config
@@ -73,7 +73,7 @@ def unsupported_reason(moe: torch.nn.Module, config) -> str | None:
         se.gate_up_proj.weight_scale,
         se.down_proj.weight,
         se.down_proj.weight_scale,
-        swiglu=(config.swiglu_alpha, config.swiglu_limit, config.swiglu_beta),
+        swiglu=(mc.swiglu_alpha, mc.swiglu_limit, mc.swiglu_beta),
     )
 
 
