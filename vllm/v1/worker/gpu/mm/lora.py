@@ -92,7 +92,7 @@ def set_active_mm_loras(
         return
 
     connector_token_mapping = np.repeat(
-        np.array(prompt_lora_mapping, dtype=np.int64),
+        np.array(prompt_lora_mapping, dtype=np.int32),
         np.array(connector_token_counts, dtype=np.int32),
     )
     lora_manager.set_active_adapters(

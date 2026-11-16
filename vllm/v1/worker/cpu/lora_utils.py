@@ -10,7 +10,7 @@ NO_LORA_ID = 0
 
 class LoraState:
     def __init__(self, max_num_reqs: int):
-        self.lora_ids = np.zeros(max_num_reqs, dtype=np.int64)
+        self.lora_ids = np.zeros(max_num_reqs, dtype=np.int32)
         self.lora_ids.fill(NO_LORA_ID)
         # req_id -> lora_request
         self.lora_requests: dict[str, LoRARequest] = {}
