@@ -871,6 +871,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
+            headers=extra_headers,
             trust_env=True,
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
@@ -1689,7 +1690,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         metavar="KEY=VALUE",
         nargs="*",
         help="Key-value pairs (e.g, --header x-additional-info=0.3.3) "
-        "for headers to be passed with each request. These headers override "
+        "for headers to be passed with inference, profiling, and metrics requests. "
+        "These headers override "
         "per backend constants and values set via environment variable, and "
         "will be overridden by other arguments (such as request ids).",
     )
