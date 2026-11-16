@@ -317,10 +317,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                     video_url,
                 )
                 audio_uuid = uuid or random_uuid()
-                self._tracker.add("audio", (None, audio_uuid))
+                audio_placeholder = self._tracker.add("audio", (None, audio_uuid))
             else:
                 audio_placeholder = self._tracker.add("audio", (audio, uuid))
-                self._add_placeholder("audio", audio_placeholder)
+            self._add_placeholder("audio", audio_placeholder)
 
     def parse_video_embeds(
         self,
