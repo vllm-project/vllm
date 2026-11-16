@@ -32,6 +32,7 @@ from vllm.model_executor.model_loader.reload import (
     plan_loads,
     start_reload,
 )
+from vllm.model_executor.model_loader.reload.direct import track_loaded_params
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -68,6 +69,7 @@ class _Toy(torch.nn.Module):
 
     def load_weights(self, weights):
         params = dict(self.named_parameters(remove_duplicate=False))
+        loaded = set()
         for name, weight in weights:
             if name in self.skipped:
                 continue
@@ -75,9 +77,12 @@ class _Toy(torch.nn.Module):
                 target, shard = self.stacked[name]
                 param = params[target]
                 param.weight_loader(param, weight, shard)
+                loaded.add(target)
                 continue
             param = params[name]
             getattr(param, "weight_loader", default_weight_loader)(param, weight)
+            loaded.add(name)
+        return loaded
 
 
 def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
@@ -317,6 +322,23 @@ def _toy_model():
     model.strided.weight = _param(4, 3, loader=_step_loader)
     model.skipped = frozenset({"lm_head.weight"})
     return model
+
+
+def test_planned_update_is_checked_for_completeness():
+    """Names the plan copies count as loaded; one left out fails at finish."""
+    model = _toy_model()
+    track_loaded_params(model)  # as a direct-mode cold start does
+    model.load_weights(_checkpoint(_TOY_SHAPES, seed=0).items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
+    start_reload(model)
+    plan = _plan(model, _TOY_SHAPES)
+    new = _checkpoint(_TOY_SHAPES, seed=1)
+    _planned_reload(model, plan, new)
+    assert plan.get_dest("proj.weight")  # a direct name
+    start_reload(model)
+    partial = {n: t for n, t in new.items() if n != "proj.weight"}
+    with pytest.raises(RuntimeError, match=r"did not load 1 .*proj\.weight"):
+        _planned_reload(model, plan, partial)
 
 
 def test_toy_loaders():
