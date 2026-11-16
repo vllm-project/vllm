@@ -506,16 +506,10 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        rope_parameters = config.rope_parameters or {}
-        if rope_parameters is not None and rope_parameters.get(
-            "mrope_interleaved", False
-        ):
-            rope_parameters["rope_type"] = "openpangu"
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
         )
 
