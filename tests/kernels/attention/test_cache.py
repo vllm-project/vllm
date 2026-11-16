@@ -51,6 +51,160 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
 
 
+@pytest.mark.parametrize("num_tokens", [0, 1, 7, 129])
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Batched context KV updates target CUDA"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("layout", ["HND", "NHD"])
+@pytest.mark.parametrize("per_layer", [False, True])
+@torch.inference_mode()
+def test_batched_context_kv_cache_matches_backend(
+    default_vllm_config, dist_init, num_tokens, dtype, layout, per_layer
+):
+    """Batching must preserve each layer's slots and native cache bytes in graphs."""
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionBackend,
+        FlashAttentionImpl,
+    )
+    from vllm.v1.attention.ops.batched_kv_cache import try_batched_kv_cache_update
+
+    torch.manual_seed(0)
+    layers, heads, dim, blocks = 3, 3, 80, 16
+    attns, caches, mappings = [], [], []
+    for i in range(layers):
+        attn = Attention(
+            2 * heads,
+            dim,
+            dim**-0.5,
+            num_kv_heads=heads,
+            cache_config=CacheConfig(cache_dtype="auto"),
+            attn_backend=FlashAttentionBackend,
+            prefix=f"batched_context.layers.{i}",
+        )
+        page = 16 * (i + 1) if per_layer else 16
+        shape = (blocks, heads, page, 2 * dim + 16)
+        if layout == "NHD":
+            shape = (blocks, page, heads, 2 * dim + 16)
+        cache = torch.zeros(shape, dtype=dtype, device="cuda")
+        if layout == "NHD":
+            cache = cache.transpose(1, 2)
+        cache = cache[..., : 2 * dim]
+        attn.bind_kv_cache(cache)
+        mapping = torch.arange(num_tokens + 1, device="cuda", dtype=torch.int64)[1:]
+        if per_layer:
+            mapping.add_(i * page)
+        mapping[1::3] = -1
+        attns.append(attn)
+        caches.append(cache)
+        mappings.append(None if per_layer and i == 1 else mapping)
+    slots = mappings if per_layer else mappings[0]
+    key = torch.randn(layers, num_tokens, heads, dim, dtype=dtype, device="cuda")
+    value = torch.randn_like(key)
+    references = [torch.zeros_like(c) for c in caches]
+
+    def reference():
+        for i, (attn, cache, mapping) in enumerate(zip(attns, references, mappings)):
+            if mapping is not None and num_tokens:
+                assert isinstance(attn.impl, FlashAttentionImpl)
+                attn.impl.do_kv_cache_update(attn, key[i], value[i], cache, mapping)
+
+    assert try_batched_kv_cache_update(attns, key, value, slots)
+    reference()
+    for cache, expected in zip(caches, references):
+        torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        assert try_batched_kv_cache_update(attns, key, value, slots)
+    key.normal_()
+    value.normal_()
+    for cache, expected in zip(caches, references):
+        cache.zero_()
+        expected.zero_()
+    graph.replay()
+    reference()
+    for cache, expected in zip(caches, references):
+        torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
+    rebound = [torch.zeros_like(c) for c in caches]
+    for attn, cache in zip(attns, rebound):
+        attn.bind_kv_cache(cache)
+    assert try_batched_kv_cache_update(attns, key, value, slots)
+    for cache, expected in zip(rebound, references):
+        torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Batched context KV updates target CUDA"
+)
+@pytest.mark.parametrize(
+    "cache_dtype,attn_type", [("fp8", "decoder"), ("auto", "encoder_only")]
+)
+def test_batched_context_kv_cache_preserves_backend_fallback(
+    default_vllm_config, dist_init, cache_dtype, attn_type
+):
+    """Keep quantization and encoder-only no-write semantics with the backend."""
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.attention.ops.batched_kv_cache import try_batched_kv_cache_update
+
+    attn = Attention(
+        2,
+        128,
+        128**-0.5,
+        num_kv_heads=1,
+        cache_config=CacheConfig(cache_dtype=cache_dtype),
+        attn_backend=FlashAttentionBackend,
+        attn_type=attn_type,
+        prefix="batched_context.quantized",
+    )
+    dtype = torch.uint8 if cache_dtype == "fp8" else torch.bfloat16
+    cache = torch.full((2, 1, 16, 256), 123, dtype=dtype, device="cuda")
+    attn.bind_kv_cache(cache)
+    key = torch.ones((1, 1, 1, 128), dtype=torch.bfloat16, device="cuda")
+    slots = torch.zeros(1, dtype=torch.int64, device="cuda")
+    assert not try_batched_kv_cache_update([attn], key, key, slots)
+    torch.testing.assert_close(cache, torch.full_like(cache, 123), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Batched context KV updates target CUDA"
+)
+def test_batched_context_kv_cache_uses_64bit_block_offsets(
+    default_vllm_config, dist_init
+):
+    """A packed cache's block stride can exceed the signed 32-bit element range."""
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.attention.ops.batched_kv_cache import try_batched_kv_cache_update
+
+    attn = Attention(
+        2,
+        128,
+        128**-0.5,
+        num_kv_heads=1,
+        cache_config=CacheConfig(cache_dtype="auto"),
+        attn_backend=FlashAttentionBackend,
+        prefix="batched_context.large_stride",
+    )
+    storage = torch.empty(2**31 + 4096, dtype=torch.bfloat16, device="cuda")
+    cache = storage.as_strided((2, 1, 16, 256), (2**31, 4096, 256, 1))
+    cache.zero_()
+    attn.bind_kv_cache(cache)
+    key = torch.ones((1, 1, 1, 128), dtype=torch.bfloat16, device="cuda")
+    value = torch.full_like(key, 2)
+    slots = torch.tensor([16], dtype=torch.int64, device="cuda")
+    assert try_batched_kv_cache_update([attn], key, value, slots)
+    torch.testing.assert_close(cache[1, 0, 0, :128], key[0, 0, 0], rtol=0, atol=0)
+    torch.testing.assert_close(cache[1, 0, 0, 128:], value[0, 0, 0], rtol=0, atol=0)
+    torch.testing.assert_close(cache[0], torch.zeros_like(cache[0]), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)

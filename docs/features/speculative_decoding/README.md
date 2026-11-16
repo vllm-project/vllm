@@ -40,6 +40,29 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## DFlash and DFlash2 context KV updates
+
+On CUDA, Qwen-based DFlash and DFlash2 draft models automatically batch native
+FP16 or BF16 context KV cache writes across layers when using FlashAttention or
+FlashInfer and the cache dtype matches the draft activations. No additional
+configuration is required. Each layer retains its own
+slot mapping, including mixed sliding-window and full-attention draft layers.
+The optimization applies to eager execution and CUDA graphs.
+
+The shared context write path also serves Qwen DSpark, Gemma4 DSpark, Laguna
+DFlash, LiLiCorr, XPress, and Ricursive DFlash2. Muse Spark DSpark uses it for
+its native fallback path. Beam DFlash2 and MiniMax DSpark continue to prefer
+their dedicated fused context kernels.
+
+Quantized KV caches, shared KV layers, draft decode context parallelism, other
+platforms, and unsupported attention backends keep their existing cache update
+path. The draft projections, normalization, RoPE, and acceptance algorithm are
+unchanged.
+
+Measure end-to-end gains with the [benchmark CLI](../../benchmarking/cli.md) on
+your target and draft model pair. Reducing the number of cache write kernels
+does not imply the same reduction in total generation latency.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method
