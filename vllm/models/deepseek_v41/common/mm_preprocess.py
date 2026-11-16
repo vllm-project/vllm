@@ -168,16 +168,16 @@ def load_image(
         image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
     assert do_rescale == do_normalize
     pixels = np.asarray(image, dtype=np.uint8)
-    if do_normalize:
-        x = torch.from_numpy(_NORMALIZE_LUT[pixels]).view(torch.bfloat16)
-    else:
-        x = torch.from_numpy(pixels)
-    patches = (
-        x.permute(2, 0, 1)
-        .reshape(3, n_vit_h, p, n_vit_w, p)
-        .permute(1, 3, 0, 2, 4)
+    patches_np = (
+        pixels.reshape(n_vit_h, p, n_vit_w, p, 3)
+        .transpose(0, 2, 4, 1, 3)
         .reshape(n_vit_h * n_vit_w, 3, p, p)
     )
+    if do_normalize:
+        patches = torch.from_numpy(_NORMALIZE_LUT[patches_np]).view(torch.bfloat16)
+    else:
+        # Single-row or single-column grids can remain read-only views.
+        patches = torch.from_numpy(np.require(patches_np, requirements=["W"]))
     return patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w
 
 
