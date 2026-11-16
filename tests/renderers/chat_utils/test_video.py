@@ -773,3 +773,61 @@ async def test_parse_chat_messages_video_audio_decode_errors_raise(
                     content_format="string",
                     mm_processor_kwargs={"use_audio_in_video": True},
                 )
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_sync_async_parity_for_silent_video(tmp_path):
+    """Sync and async must produce identical prompts and mm_data for a silent
+    video under `use_audio_in_video`, and the audio placeholder count in the
+    prompt must equal the number of audio items tracked (including the None
+    sentinel for a silent track).
+    """
+    config = ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        interleave_mm_strings=True,
+        limit_mm_per_prompt={"audio": 2, "video": 2},
+    )
+    silent = _make_video_data_url(with_audio=False, tmp_path=tmp_path)
+    with_audio = _make_video_data_url(with_audio=True, tmp_path=tmp_path)
+    kwargs = {"use_audio_in_video": True}
+
+    audio_token = "<|AUDIO|>"
+
+    cases = {
+        "silent only": _video_messages(silent),
+        "with audio": _video_messages(with_audio),
+        "mixed": _video_messages(silent, with_audio),
+    }
+    for name, messages in cases.items():
+        conv_s, data_s, _ = parse_chat_messages(
+            messages,
+            config,
+            content_format="string",
+            mm_processor_kwargs=kwargs,
+        )
+        conv_a, data_a, _ = await parse_chat_messages_async(
+            messages,
+            config,
+            content_format="string",
+            mm_processor_kwargs=kwargs,
+        )
+        prompt_s = conv_s[0]["content"]
+        prompt_a = conv_a[0]["content"]
+        assert isinstance(prompt_s, str) and isinstance(prompt_a, str)
+        assert prompt_s == prompt_a, f"{name}: sync/async prompt differ"
+
+        audio_items_s = (data_s or {}).get("audio", [])
+        audio_items_a = (data_a or {}).get("audio", [])
+        assert len(audio_items_s) == len(audio_items_a), (
+            f"{name}: audio item count differs sync={len(audio_items_s)} "
+            f"async={len(audio_items_a)}"
+        )
+
+        # Each audio item (including the None sentinel for a silent track)
+        # contributes exactly one audio placeholder token span to the prompt,
+        # so the processor sees a 1:1 mapping between prompt and mm_data.
+        assert prompt_s.count(audio_token) == len(audio_items_s), (
+            f"{name}: prompt has {prompt_s.count(audio_token)} audio "
+            f"placeholders but {len(audio_items_s)} audio items"
+        )
