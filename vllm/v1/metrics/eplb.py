@@ -51,13 +51,14 @@ class EplbProm:
         counter_tokens = self._counter_cls(
             name="vllm:eplb_expert_tokens_total",
             documentation=(
-                "Tokens routed to each physical expert, summed over the last "
-                "EPLB load window. Each source EP rank reports independently; "
-                "sum across engines for global load."
+                "Tokens routed to each physical expert over the last EPLB "
+                "sampling period, split by batch phase (prefill, decode, or "
+                "mixed). Each source EP rank reports independently; sum across "
+                "engines for global load."
             ),
-            labelnames=[*expert_labelnames, "logical_expert"],
+            labelnames=[*expert_labelnames, "logical_expert", "phase"],
         )
-        self.counter_tokens: dict[tuple[int, str, int, int, int, int], object] = {}
+        self.counter_tokens: dict[tuple[int, str, int, int, int, int, str], object] = {}
 
         gauge_topology = self._gauge_cls(
             name="vllm:eplb_expert_topology",
@@ -73,6 +74,36 @@ class EplbProm:
         self._counter_metric = counter_tokens
         self._gauge_metric = gauge_topology
 
+        model_labelnames = [*labelnames, "model"]
+        counter_rearrangements = self._counter_cls(
+            name="vllm:eplb_rearrangements_total",
+            documentation="Completed EPLB rearrangements.",
+            labelnames=model_labelnames,
+        )
+        gauge_rearrangement_timestamp = self._gauge_cls(
+            name="vllm:eplb_rearrangement_timestamp_seconds",
+            documentation=(
+                "Unix timestamp of the last completed EPLB rearrangement and "
+                "expert-load sample."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=model_labelnames,
+        )
+        gauge_topology_timestamp = self._gauge_cls(
+            name="vllm:eplb_expert_topology_timestamp_seconds",
+            documentation=(
+                "Unix timestamp of the last committed physical-expert topology update."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=model_labelnames,
+        )
+        self.counter_rearrangements: dict[tuple[int, str], object] = {}
+        self.gauge_rearrangement_timestamp: dict[tuple[int, str], object] = {}
+        self.gauge_topology_timestamp: dict[tuple[int, str], object] = {}
+        self._counter_rearrangements_metric = counter_rearrangements
+        self._gauge_rearrangement_timestamp_metric = gauge_rearrangement_timestamp
+        self._gauge_topology_timestamp_metric = gauge_topology_timestamp
+
     def _labels(
         self,
         engine_idx: int,
@@ -81,6 +112,7 @@ class EplbProm:
         ep_rank: int,
         physical_expert: int,
         logical_expert: int | None = None,
+        phase: str | None = None,
     ) -> list[object]:
         labels = [
             *self.per_engine_labelvalues[engine_idx],
@@ -91,13 +123,36 @@ class EplbProm:
         ]
         if logical_expert is not None:
             labels.append(str(logical_expert))
+        if phase is not None:
+            labels.append(phase)
         return labels
+
+    def _model_labels(self, engine_idx: int, model_name: str) -> list[object]:
+        return [*self.per_engine_labelvalues[engine_idx], model_name]
+
+    def _model_metric(
+        self,
+        cache: dict[tuple[int, str], object],
+        metric,
+        engine_idx: int,
+        model_name: str,
+    ):
+        key = (engine_idx, model_name)
+        child = cache.get(key)
+        if child is None:
+            child = metric.labels(*self._model_labels(engine_idx, model_name))
+            cache[key] = child
+        return child
 
     def observe(self, snapshot: EplbMetricsSnapshot, engine_idx: int = 0):
         if not self.enabled:
             return
 
+        rearranged_models: dict[str, float] = {}
         for model in snapshot.tokens:
+            rearranged_models[model.model_name] = max(
+                rearranged_models.get(model.model_name, 0.0), model.timestamp
+            )
             layout = model.physical_to_logical
             for layer, token_counts in enumerate(model.tokens):
                 for physical_expert, num_tokens in enumerate(token_counts):
@@ -114,6 +169,7 @@ class EplbProm:
                         ep_rank,
                         physical_expert,
                         logical_expert,
+                        model.phase,
                     )
                     metric = self.counter_tokens.get(key)
                     if metric is None:
@@ -125,10 +181,26 @@ class EplbProm:
                                 ep_rank,
                                 physical_expert,
                                 logical_expert,
+                                model.phase,
                             )
                         )
                         self.counter_tokens[key] = metric
                     metric.inc(num_tokens)
+
+        for model_name, timestamp in rearranged_models.items():
+            self._model_metric(
+                self.counter_rearrangements,
+                self._counter_rearrangements_metric,
+                engine_idx,
+                model_name,
+            ).inc()
+            if timestamp > 0:
+                self._model_metric(
+                    self.gauge_rearrangement_timestamp,
+                    self._gauge_rearrangement_timestamp_metric,
+                    engine_idx,
+                    model_name,
+                ).set(timestamp)
 
         for model in snapshot.topology:
             for layer, logical_experts in enumerate(model.physical_to_logical):
@@ -154,3 +226,10 @@ class EplbProm:
                         )
                         self.gauge_topology[key] = metric
                     metric.set(logical_expert)
+            if model.timestamp > 0:
+                self._model_metric(
+                    self.gauge_topology_timestamp,
+                    self._gauge_topology_timestamp_metric,
+                    engine_idx,
+                    model.model_name,
+                ).set(model.timestamp)

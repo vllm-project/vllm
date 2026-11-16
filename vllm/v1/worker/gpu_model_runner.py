@@ -40,7 +40,12 @@ from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
+from vllm.distributed.eplb.metrics import (
+    EPLB_PHASE_DECODE,
+    EPLB_PHASE_MIXED,
+    EPLB_PHASE_PREFILL,
+    EplbMetricsSnapshot,
+)
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
@@ -4130,10 +4135,21 @@ class GPUModelRunner(
         defer_kv_connector_finalize = self.speculative_config is not None
         # Update the EPLB meta.
         if self.eplb_state is not None:
+            is_prefilling = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                < self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+            if not is_prefilling.any():
+                phase = EPLB_PHASE_DECODE
+            elif is_prefilling.all():
+                phase = EPLB_PHASE_PREFILL
+            else:
+                phase = EPLB_PHASE_MIXED
             self.eplb_state.prepare_forward(
                 self.model_config,
                 num_tokens_unpadded,
                 ubatch_slices_padded,
+                phase=phase,
             )
         is_padding = self._prepare_padding_mask(num_tokens_unpadded, num_tokens_padded)
         with (

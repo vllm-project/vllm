@@ -4,6 +4,15 @@
 
 from dataclasses import dataclass, field
 
+EPLB_PHASE_PREFILL = "prefill"
+EPLB_PHASE_DECODE = "decode"
+EPLB_PHASE_MIXED = "mixed"
+EPLB_PHASES = (
+    EPLB_PHASE_PREFILL,
+    EPLB_PHASE_DECODE,
+    EPLB_PHASE_MIXED,
+)
+
 
 @dataclass
 class EplbExpertTokens:
@@ -21,6 +30,10 @@ class EplbExpertTokens:
     tokens: list[list[int]]
     physical_to_logical: list[list[int]] | None = None
     """Placement that was active while these tokens were routed."""
+    phase: str = EPLB_PHASE_MIXED
+    """Batch phase for this sample: prefill, decode, or mixed."""
+    timestamp: float = 0.0
+    """Unix timestamp when this load sample was taken."""
 
 
 @dataclass
@@ -37,6 +50,8 @@ class EplbExpertTopology:
     num_ep_ranks: int
     num_local_experts: int
     physical_to_logical: list[list[int]]
+    timestamp: float = 0.0
+    """Unix timestamp when this topology was committed."""
 
 
 @dataclass

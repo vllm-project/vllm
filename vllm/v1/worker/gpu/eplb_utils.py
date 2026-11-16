@@ -228,10 +228,16 @@ class EPLBController:
         model_config: ModelConfig,
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
+        phase: str | None = None,
     ) -> None:
         if self.state is None or not self.parallel_config.enable_eplb:
             return
-        self.state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+        self.state.prepare_forward(
+            model_config,
+            num_unpadded_tokens,
+            ubatch_slices,
+            phase=phase,
+        )
 
     def setup_from_mapping(
         self,

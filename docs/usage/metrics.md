@@ -48,13 +48,25 @@ series per MoE layer and physical expert:
   physical slot. Physical experts are assigned to EP ranks in contiguous
   blocks, so `physical_expert // num_local_experts` identifies the owning GPU.
 - `vllm:eplb_expert_tokens_total` counts tokens routed to each physical expert
-  over the load window. Each engine reports its own contribution; aggregate
-  across engines for global load.
+  since the previous rearrangement. The `phase` label is `prefill`, `decode`,
+  or `mixed` when a single step contains both. Each engine reports its own
+  contribution; aggregate across engines for global load.
+- `vllm:eplb_rearrangements_total` and
+  `vllm:eplb_rearrangement_timestamp_seconds` mark when the load sample was
+  taken.
+- `vllm:eplb_expert_topology_timestamp_seconds` marks when the current
+  placement was committed.
 
 ```promql
-# Global tokens per logical expert, aggregated across replicas and engines.
-sum by (model_name, layer, logical_expert) (
+# Global tokens per logical expert and phase, aggregated across replicas and
+# engines.
+sum by (model_name, layer, logical_expert, phase) (
   rate(vllm:eplb_expert_tokens_total[1m])
+)
+
+# Age of the last expert-load sample.
+time() - max by (model_name, engine, model) (
+  vllm:eplb_rearrangement_timestamp_seconds
 )
 
 # Current logical expert placement for layer 0 on EP rank 2.

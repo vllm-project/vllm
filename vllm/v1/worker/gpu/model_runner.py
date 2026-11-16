@@ -44,6 +44,11 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
+from vllm.distributed.eplb.metrics import (
+    EPLB_PHASE_DECODE,
+    EPLB_PHASE_MIXED,
+    EPLB_PHASE_PREFILL,
+)
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -2099,8 +2104,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the EPLB meta.
         ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
+        if not input_batch.has_prefill:
+            phase = EPLB_PHASE_DECODE
+        elif input_batch.is_prefilling_np.all():
+            phase = EPLB_PHASE_PREFILL
+        else:
+            phase = EPLB_PHASE_MIXED
         self.eplb.prepare_forward(
-            self.model_config, input_batch.num_tokens, ubatch_slices
+            self.model_config,
+            input_batch.num_tokens,
+            ubatch_slices,
+            phase=phase,
         )
 
         self.step_timing.record_batch(

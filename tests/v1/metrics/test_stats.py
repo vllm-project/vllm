@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.distributed.eplb.metrics import (
+    EPLB_PHASE_DECODE,
     EplbExpertTokens,
     EplbExpertTopology,
     EplbMetricsSnapshot,
@@ -65,6 +66,8 @@ def test_eplb_expert_metrics_serialization():
                 num_ep_ranks=2,
                 num_local_experts=2,
                 tokens=[[1, 2, 3, 4]],
+                phase=EPLB_PHASE_DECODE,
+                timestamp=123.5,
             )
         ],
         topology=[
@@ -74,6 +77,7 @@ def test_eplb_expert_metrics_serialization():
                 num_ep_ranks=2,
                 num_local_experts=2,
                 physical_to_logical=[[0, 1, 0, 1]],
+                timestamp=124.5,
             )
         ],
     )

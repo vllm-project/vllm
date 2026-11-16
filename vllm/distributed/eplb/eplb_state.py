@@ -55,6 +55,8 @@ from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
 from .metrics import (
+    EPLB_PHASE_MIXED,
+    EPLB_PHASES,
     EplbExpertTokens,
     EplbExpertTopology,
     EplbMetricsSnapshot,
@@ -113,6 +115,7 @@ class EplbModelMetricsState:
     num_ep_ranks: int
     num_local_experts: int
     topology_dirty: bool = True
+    phase: str = EPLB_PHASE_MIXED
 
 
 @dataclass
@@ -232,6 +235,12 @@ class EplbModelState:
     """
     metrics: EplbModelMetricsState
     """Per-expert Prometheus metrics bookkeeping."""
+    expert_load_pending: torch.Tensor | None = None
+    """Load accumulated since the last sliding-window write, when per-expert
+    metrics are enabled. Keeps ``expert_load_pass`` per-step so phase
+    accounting remains exact."""
+    phase_load_accum: dict[str, torch.Tensor] | None = None
+    """Per-phase token load accumulated since the last rearrangement."""
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -507,6 +516,15 @@ class EplbState:
             device=self.device,
         )
 
+        expert_load_pending = None
+        phase_load_accum = None
+        if self.parallel_config.eplb_config.enable_expert_metrics:
+            expert_load_pending = torch.zeros_like(expert_load_pass_buffer)
+            phase_load_accum = {
+                phase: torch.zeros_like(expert_load_pass_buffer)
+                for phase in EPLB_PHASES
+            }
+
         # Set the initial progress of rearrangement to 3/4
         eplb_step_interval = self.parallel_config.eplb_config.step_interval
         self.expert_rearrangement_step = max(
@@ -577,6 +595,19 @@ class EplbState:
                 num_ep_ranks=ep_group.size(),
                 num_local_experts=model.num_local_physical_experts,
             ),
+            expert_load_pending=(
+                expert_load_pending[:, : model.num_physical_experts]
+                if expert_load_pending is not None
+                else None
+            ),
+            phase_load_accum=(
+                {
+                    phase: tensor[:, : model.num_physical_experts]
+                    for phase, tensor in phase_load_accum.items()
+                }
+                if phase_load_accum is not None
+                else None
+            ),
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -586,6 +617,7 @@ class EplbState:
         model_config: ModelConfig,
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
+        phase: str | None = None,
     ) -> None:
         """Fill the per-[u]batch ``num_unpadded_tokens`` tensors before a
         forward pass.
@@ -597,10 +629,15 @@ class EplbState:
             ubatch_slices: When DBO is active, a list of
                 ``UBatchSlice`` objects describing each micro-batch's
                 token range.  When ``None``, only ``tensors[0]`` is filled.
+            phase: Batch phase for per-expert metrics: ``prefill``, ``decode``,
+                or ``mixed``. Ignored when per-expert metrics are disabled.
 
         """
         model_state = self.model_states.get(compute_hash_cached(model_config))
-        if model_state is None or model_state.num_unpadded_tokens_tensors is None:
+        if model_state is None:
+            return
+        model_state.metrics.phase = phase or EPLB_PHASE_MIXED
+        if model_state.num_unpadded_tokens_tensors is None:
             return
         tensors = model_state.num_unpadded_tokens_tensors
         if ubatch_slices is None:
@@ -646,8 +683,14 @@ class EplbState:
                 eplb_model_state.expert_load_pass.zero_()
 
         if is_profile:
+            self._reset_expert_metrics_accumulators()
             self.rearrange(is_profile=True)
             return None
+
+        metrics_enabled = self.parallel_config.eplb_config.enable_expert_metrics
+        if not is_dummy and metrics_enabled:
+            for eplb_model_state in self.model_states.values():
+                self._accumulate_expert_metrics(eplb_model_state)
 
         if log_stats:
             self._maybe_log_balancedness()
@@ -705,10 +748,16 @@ class EplbState:
             should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
                 if should_record:
+                    load_source = (
+                        eplb_model_state.expert_load_pending
+                        if metrics_enabled
+                        else eplb_model_state.expert_load_pass
+                    )
+                    assert load_source is not None
                     eplb_model_state.expert_load_window[
                         self.expert_load_window_step
-                    ].copy_(eplb_model_state.expert_load_pass)
-                    eplb_model_state.expert_load_pass.zero_()
+                    ].copy_(load_source)
+                    load_source.zero_()
 
             if should_record:
                 self.expert_load_window_step += 1
@@ -751,6 +800,28 @@ class EplbState:
         self._update_layer_should_record(log_stats=log_stats)
         return self._take_expert_metrics_snapshot()
 
+    def _accumulate_expert_metrics(self, model_state: EplbModelState) -> None:
+        """Move this step's load into the combined and phase accumulators."""
+        pending = model_state.expert_load_pending
+        phase_accum = model_state.phase_load_accum
+        if pending is None or phase_accum is None:
+            return
+        pass_load = model_state.expert_load_pass
+        pending.add_(pass_load)
+        phase_accum[model_state.metrics.phase].add_(pass_load)
+        pass_load.zero_()
+
+    def _reset_expert_metrics_accumulators(self) -> None:
+        if not self.parallel_config.eplb_config.enable_expert_metrics:
+            return
+        for model_state in self.model_states.values():
+            model_state.expert_load_pass.zero_()
+            if model_state.expert_load_pending is not None:
+                model_state.expert_load_pending.zero_()
+            if model_state.phase_load_accum is not None:
+                for tensor in model_state.phase_load_accum.values():
+                    tensor.zero_()
+
     def _take_expert_metrics_snapshot(self) -> EplbMetricsSnapshot | None:
         """Return pending per-expert metrics, if collection is enabled."""
         if not self.parallel_config.eplb_config.enable_expert_metrics:
@@ -770,6 +841,7 @@ class EplbState:
                     num_ep_ranks=metrics.num_ep_ranks,
                     num_local_experts=metrics.num_local_experts,
                     physical_to_logical=model_state.physical_to_logical_map.cpu().tolist(),
+                    timestamp=time.time(),
                 )
             )
             metrics.topology_dirty = False
@@ -935,28 +1007,35 @@ class EplbState:
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
 
         if self.parallel_config.eplb_config.enable_expert_metrics and not is_profile:
-            physical_expert_load_windows = self._allreduce_list(
-                [
-                    model_state.expert_load_window.sum(dim=0)
-                    for model_state in self.model_states.values()
-                ]
-            )
-            for model_state, expert_load in zip(
-                self.model_states.values(), physical_expert_load_windows
-            ):
-                metrics = model_state.metrics
-                self._pending_expert_tokens.append(
-                    EplbExpertTokens(
-                        model_name=metrics.model_name,
-                        ep_rank=metrics.ep_rank,
-                        num_ep_ranks=metrics.num_ep_ranks,
-                        num_local_experts=metrics.num_local_experts,
-                        tokens=expert_load.cpu().tolist(),
-                        physical_to_logical=(
-                            model_state.physical_to_logical_map.cpu().tolist()
-                        ),
-                    )
+            phase_loads = []
+            for model_state in self.model_states.values():
+                assert model_state.phase_load_accum is not None
+                phase_loads.extend(
+                    model_state.phase_load_accum[phase] for phase in EPLB_PHASES
                 )
+            global_phase_loads = self._allreduce_list(phase_loads)
+            timestamp = time.time()
+            load_idx = 0
+            for model_state in self.model_states.values():
+                assert model_state.phase_load_accum is not None
+                metrics = model_state.metrics
+                physical_to_logical = model_state.physical_to_logical_map.cpu().tolist()
+                for phase in EPLB_PHASES:
+                    expert_load = global_phase_loads[load_idx]
+                    load_idx += 1
+                    self._pending_expert_tokens.append(
+                        EplbExpertTokens(
+                            model_name=metrics.model_name,
+                            ep_rank=metrics.ep_rank,
+                            num_ep_ranks=metrics.num_ep_ranks,
+                            num_local_experts=metrics.num_local_experts,
+                            tokens=expert_load.cpu().tolist(),
+                            physical_to_logical=physical_to_logical,
+                            phase=phase,
+                            timestamp=timestamp,
+                        )
+                    )
+                    model_state.phase_load_accum[phase].zero_()
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -1210,8 +1289,15 @@ class EplbState:
         Doesn't update the expert load pass in eplb_model_state.
         """
         load_pass_list = []
+        metrics_enabled = self.parallel_config.eplb_config.enable_expert_metrics
         for eplb_model_state in self.model_states.values():
-            load_pass_list.append(eplb_model_state.expert_load_pass.clone())
+            load_source = (
+                eplb_model_state.expert_load_pending
+                if metrics_enabled
+                else eplb_model_state.expert_load_pass
+            )
+            assert load_source is not None
+            load_pass_list.append(load_source.clone())
         return self._allreduce_list(load_pass_list)
 
     @classmethod
@@ -1293,6 +1379,17 @@ class EplbState:
             :, :num_physical_experts
         ]
         model_state.expert_load_pass = expert_load_pass_buffer[:, :num_physical_experts]
+        if model_state.expert_load_pending is not None:
+            model_state.expert_load_pending = torch.zeros(
+                (model_state.expert_load_pass.shape[0], num_physical_experts),
+                dtype=model_state.expert_load_pass.dtype,
+                device=model_state.expert_load_pass.device,
+            )
+        if model_state.phase_load_accum is not None:
+            model_state.phase_load_accum = {
+                phase: torch.zeros_like(model_state.expert_load_pending)
+                for phase in EPLB_PHASES
+            }
         if (metrics := getattr(model_state, "metrics", None)) is not None:
             metrics.topology_dirty = True
 

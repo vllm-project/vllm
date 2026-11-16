@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import prometheus_client
 
 from vllm.distributed.eplb.metrics import (
+    EPLB_PHASE_PREFILL,
     EplbExpertTokens,
     EplbExpertTopology,
     EplbMetricsSnapshot,
@@ -50,6 +51,8 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
                 num_local_experts=2,
                 tokens=[[2, 0, 1, 3]],
                 physical_to_logical=[[0, 1, 0, 1]],
+                phase=EPLB_PHASE_PREFILL,
+                timestamp=123.0,
             )
         ],
         topology=[
@@ -59,6 +62,7 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
                 num_ep_ranks=2,
                 num_local_experts=2,
                 physical_to_logical=[[0, 1, 0, 1]],
+                timestamp=124.0,
             )
         ],
     )
@@ -76,6 +80,7 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
         }
         if include_logical:
             labels["logical_expert"] = str(physical_expert % 2)
+            labels["phase"] = EPLB_PHASE_PREFILL
         return labels
 
     assert registry.get_sample_value("vllm:eplb_expert_tokens_total", labels(0)) == 2.0
@@ -94,6 +99,23 @@ def test_eplb_prom_exports_topology_and_tokens(monkeypatch):
     assert (
         registry.get_sample_value("vllm:eplb_expert_topology", topology_labels(3))
         == 1.0
+    )
+
+    model_labels = {"model_name": "served", "engine": "0", "model": "served"}
+    assert (
+        registry.get_sample_value("vllm:eplb_rearrangements_total", model_labels) == 1.0
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_rearrangement_timestamp_seconds", model_labels
+        )
+        == 123.0
+    )
+    assert (
+        registry.get_sample_value(
+            "vllm:eplb_expert_topology_timestamp_seconds", model_labels
+        )
+        == 124.0
     )
 
 
