@@ -156,7 +156,7 @@ MODELS = [
         id="offloading-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="OffloadingConnector",
-        # Baseline ~0.49 on 200 questions (measured on GB200).
+        # Baseline ~0.49 on 200 questions (measured on GB200; ~0.42 on H200).
         accuracy_threshold=0.39,
         cpu_offload_gib=1,
     ),
@@ -217,7 +217,10 @@ MODELS = [
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
+        # Same model and score distribution as offloading-nemotron-h-8b: on H200
+        # both connectors and both runs score ~0.42 (0.39-0.455 over 112 runs),
+        # so the old 0.45 - 0.05 floor sat <2 sigma below the mean.
+        accuracy_threshold=0.39,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",
