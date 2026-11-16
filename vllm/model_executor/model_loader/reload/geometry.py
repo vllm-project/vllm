@@ -32,6 +32,9 @@ class Write:
     module: str  # target tensor, by name
     tensor: str
     dst: Region
+    # the destination dtype when the loader casts at copy_ (None: the
+    # checkpoint dtype, a byte copy)
+    dtype: object = None
 
 
 def box_and_region(
@@ -133,7 +136,7 @@ def _merge(a: Write, b: Write) -> Write | None:
     """`a` and `b` as one write if `b` continues `a` along exactly one
     box dim, into the same target, with an equal destination stride there."""
     rank = len(a.src)
-    if (a.module, a.tensor) != (b.module, b.tensor) or not (
+    if (a.module, a.tensor, a.dtype) != (b.module, b.tensor, b.dtype) or not (
         len(a.dst.shape) == len(b.dst.shape) == rank
     ):
         return None  # other target, or a split dim
@@ -156,7 +159,7 @@ def _merge(a: Write, b: Write) -> Write | None:
     src = tuple((a.src[j][0], b.src[j][1]) if j == k else a.src[j] for j in range(rank))
     shape = tuple(na + nb if j == k else n for j, n in enumerate(a.dst.shape))
     stride = tuple(stride_a if j == k else s for j, s in enumerate(a.dst.stride))
-    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride))
+    return Write(src, a.module, a.tensor, Region(a.dst.offset, shape, stride), a.dtype)
 
 
 _MAX_RUNS = 1 << 16

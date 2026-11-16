@@ -298,7 +298,7 @@ _TOY_SHAPES = {
     "embed.weight": ((10, 4), BF16),
     "lm_head.weight": ((10, 4), BF16),  # tied: the loader skips it
     "proj.weight": ((4, 6), BF16),  # transposing loader, transposing PWAL
-    "router.bias": ((5,), BF16),  # FP32 parameter: a cast
+    "router.bias": ((5,), BF16),  # FP32 parameter: a cast (direct)
     "strided.weight": ((8, 3), BF16),  # every other row
 }
 
@@ -334,9 +334,10 @@ def test_toy_loaders():
     assert plan.get_boxes("lm_head.weight") is None
     assert plan.get_dest("lm_head.weight") == []
 
-    assert plan.get_dest("router.bias") is None
-    assert "casts torch.bfloat16 to torch.float32" in entries["router.bias"].reason
-    assert plan.get_boxes("router.bias") == (((0, 5),),)
+    # a cast is a direct write: the copy converts the received bf16
+    ((box, dest),) = plan.get_dest("router.bias")
+    assert box == ((0, 5),)
+    assert dest.dtype == torch.float32
 
     assert plan.get_dest("strided.weight") is None
     assert "step" in entries["strided.weight"].reason
