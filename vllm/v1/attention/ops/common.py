@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 
 
 class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         pad_value: float | int
@@ -232,7 +232,7 @@ def pack_seq_triton(
 
 
 class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         block_t: int

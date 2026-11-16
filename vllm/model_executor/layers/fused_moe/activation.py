@@ -162,7 +162,7 @@ def apply_moe_activation_masked_supported(activation: MoEActivation) -> bool:
     return activation in _MASKED_MOE_ACTIVATION_NAMES
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ApplyMoEActivationConfig:
     """Configuration forwarded to `apply_moe_activation`."""
 
