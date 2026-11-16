@@ -260,7 +260,8 @@ class OfflineScoringInputsContext(OfflineInputsContext):
         inputs_seq: Sequence[PoolingInput],
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
     ) -> "OfflineEncodeInputsContext":
-        return super().to_encode_context(
+        return OfflineInputsContext.to_encode_context(
+            self,
             inputs_seq=inputs_seq,
             pooling_params=(
                 self.pooling_params if pooling_params is None else pooling_params

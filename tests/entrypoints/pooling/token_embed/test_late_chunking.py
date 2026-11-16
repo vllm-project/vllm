@@ -64,6 +64,7 @@ def late_chunk_processor():
         is_matryoshka=False,
         hf_config=SimpleNamespace(),
         pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+        multimodal_config=None,
     )
     processor.vllm_config = SimpleNamespace(
         model_config=processor.model_config,
@@ -81,6 +82,8 @@ def late_chunk_processor():
         }
     ]
     processor.chat_template = None
+    processor.template_kwargs = None
+    processor.tool_dicts = None
     cast(Any, processor).chat_template_content_format = "auto"
     processor.trust_request_chat_template = True
     return processor

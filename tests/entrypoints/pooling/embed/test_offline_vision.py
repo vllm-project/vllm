@@ -1,32 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
+
 import pytest
 
-from tests.entrypoints.pooling.basic.test_encode_vision import (
-    EMBED_DIM,
-    _conversation,
-)
-from vllm import LLM
+from vllm import LLM, EmbeddingOutput
+
+from ..basic.test_encode_vision import EMBED_DIM, _conversation
+
+MODEL_NAME = "Qwen/Qwen3-VL-Embedding-2B"
 
 
-@pytest.mark.skip_global_cleanup
+@pytest.fixture(scope="module")
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        runner="pooling",
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+        enforce_eager=True,
+        seed=0,
+        trust_request_chat_template=True,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
+
+
+# More tests are now covered in basic/test_encode_vision.py.
 def test_chat_vision(llm: LLM):
-    """`LLM.embed()` convenience-wrapper smoke test.
-
-    The full parameter matrix (`chat_template`, `chat_template_kwargs`,
-    `media_io_kwargs`, `mm_processor_kwargs`, `cache_salt`,
-    `add_special_tokens`, `add_generation_prompt`, `continue_final_message`,
-    plus their combinations and mutual-exclusion validation) is exercised
-    in `pooling/basic/test_encode_vision.py` against
-    `llm.encode(..., pooling_task="embed")`, which is the underlying path
-    that `llm.embed` wraps.
-
-    This test only proves that the `LLM.embed()` convenience method accepts
-    the same chat + multimodal input shape and that its returned
-    `EmbeddingRequestOutput.outputs.embedding` has the expected dimension.
-    """
     outputs = llm.embed(_conversation(), use_tqdm=False)
 
     assert len(outputs) == 1
     assert outputs[0].finished
+    assert isinstance(outputs[0], EmbeddingOutput)
     assert len(outputs[0].outputs.embedding) == EMBED_DIM

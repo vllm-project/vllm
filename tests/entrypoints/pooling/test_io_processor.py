@@ -377,7 +377,9 @@ class TestOfflineFactoryDefaults:
         ctx = _make_encode_ctx()
         fake_chat_params = MagicMock(name="ChatParams")
         monkeypatch.setattr(
-            ctx, "build_chat_params", MagicMock(return_value=fake_chat_params)
+            OfflineEncodeInputsContext,
+            "build_chat_params",
+            MagicMock(return_value=fake_chat_params),
         )
 
         proc.get_request_factory_offline(ctx)
@@ -407,7 +409,9 @@ class TestOfflineFactoryDefaults:
         ctx = _make_encode_ctx()
         fake_chat_params = MagicMock(name="ChatParams")
         monkeypatch.setattr(
-            ctx, "build_chat_params", MagicMock(return_value=fake_chat_params)
+            OfflineEncodeInputsContext,
+            "build_chat_params",
+            MagicMock(return_value=fake_chat_params),
         )
 
         proc.get_request_factory_offline(ctx)
@@ -430,7 +434,9 @@ class TestOfflineFactoryDefaults:
         ctx = _make_encode_ctx()
         fake_chat_params = MagicMock(name="ChatParams")
         monkeypatch.setattr(
-            ctx, "build_chat_params", MagicMock(return_value=fake_chat_params)
+            OfflineEncodeInputsContext,
+            "build_chat_params",
+            MagicMock(return_value=fake_chat_params),
         )
 
         proc.get_request_factory_offline(ctx)
@@ -449,7 +455,7 @@ class TestOfflineFactoryDefaults:
         ctx = _make_encode_ctx(chat_template="user_jinja")
         build_calls: list[str] = []
         monkeypatch.setattr(
-            ctx,
+            OfflineEncodeInputsContext,
             "build_chat_params",
             MagicMock(side_effect=lambda *a, **kw: build_calls.append("called")),
         )
