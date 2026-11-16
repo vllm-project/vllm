@@ -579,7 +579,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        if not self._dst_pairs[engine_id].groups_match:
+        if not self._single_remote_stage(engine_id).pairs.groups_match:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -594,7 +594,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         replicate_attn = self.use_mla and tp_ratio < 0
         if replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+            write_ranks = sorted(self._single_remote_stage(engine_id).xfer_side_handles)
         else:
             write_ranks = list(plan.all_source_ranks)
 
@@ -641,9 +641,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
-            ]
+            remote_xfer_side_handle = self._single_remote_stage(
+                meta.remote.engine_id
+            ).xfer_side_handles[spec.remote_rank]
 
             handle = self._xfer_blocks(
                 read_spec=spec,
@@ -715,13 +715,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Get descs ids. Pair k writes local region pairs.local[k] into remote
         # region pairs.remote[k] at its cache group's blocks.
-        pairs = self._dst_pairs[dst_engine_id]
+        stage = self._single_remote_stage(dst_engine_id)
+        pairs = stage.pairs
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
+            region_num_blocks=stage.region_num_blocks,
             pairs=(pairs.remote, pairs.group),
             ssm_regions=pairs.remote_ssm_regions,
         )
@@ -730,7 +731,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
+            region_num_blocks=self.region_num_blocks,
             pairs=(pairs.local, pairs.group),
         )
 
