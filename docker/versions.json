@@ -64,9 +64,6 @@
     "vllm_target_device": {
       "default": "cuda"
     },
-    "DEEPEP_COMMIT_HASH": {
-      "default": "a56d6156febcd9976e55adc85b5155bfac9f28f8"
-    },
     "GIT_REPO_CHECK": {
       "default": "0"
     },
@@ -75,6 +72,9 @@
     },
     "RUN_WHEEL_CHECK": {
       "default": "true"
+    },
+    "DEEPEP_COMMIT_HASH": {
+      "default": "a56d6156febcd9976e55adc85b5155bfac9f28f8"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
