@@ -285,29 +285,25 @@ class AuxOutputWorkerConnector:
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        rows = session_rows(request_ids, query_start_loc, self._session_request_ids)
         topk = None
-        if self._topk_logprobs and hidden_states is not None and logits_fn is not None:
-            topk_rows = session_rows(
-                request_ids, query_start_loc, self._session_request_ids
+        if (
+            self._topk_logprobs
+            and len(rows)
+            and hidden_states is not None
+            and logits_fn is not None
+        ):
+            index = async_tensor_h2d(rows, hidden_states.device)
+            topk = compute_topk_logprobs(
+                hidden_states.index_select(0, index),
+                logits_fn,
+                self._topk_logprobs,
             )
-            if len(topk_rows):
-                index = async_tensor_h2d(topk_rows, hidden_states.device)
-                topk = compute_topk_logprobs(
-                    hidden_states.index_select(0, index),
-                    logits_fn,
-                    self._topk_logprobs,
-                )
         if self._buffer is None:
             return None
 
         snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
         fields: dict[str, torch.Tensor] = {}
-        sessions = {
-            request_id
-            for request_id, state in self._requests.items()
-            if state.session is not None
-        }
-        rows = session_rows(request_ids, query_start_loc, sessions)
         if len(rows) and self._return_hidden_states and hidden_states is not None:
             index = async_tensor_h2d(rows, hidden_states.device)
             hidden = hidden_states.index_select(0, index)
@@ -648,7 +644,7 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
-        if self._topk_logprobs and metadata is not None:
+        if (self._topk_logprobs or self._return_hidden_states) and metadata is not None:
             if metadata.generation != self._session_generation:
                 self._session_request_ids.clear()
                 self._session_generation = metadata.generation

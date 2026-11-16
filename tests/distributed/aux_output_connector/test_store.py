@@ -3346,3 +3346,54 @@ def test_session_objects_without_capture_hold_only_the_other_fields():
     np.testing.assert_array_equal(
         read_aux_rows(store, keys, "hidden_states"), hidden.numpy()
     )
+
+
+class _RequestsTornDownWhileIterated(dict):
+    def __init__(self, requests, teardown):
+        super().__init__(requests)
+        self._teardown = teardown
+
+    def items(self):
+        items = iter(super().items())
+        yield next(items)
+        self._teardown()
+        yield from items
+
+
+def test_step_preparation_survives_a_concurrent_teardown():
+    worker = _make_worker(2)
+    first = _prepare_output(
+        worker,
+        _metadata(
+            0,
+            [
+                _request_metadata("finished", 0, 2, 0, []),
+                _request_metadata("running", 0, 2, 0, []),
+            ],
+            {},
+        ),
+        _position_rows(0, 4),
+        ["finished", "running"],
+        np.array([0, 0]),
+    )
+    torn_down = threading.Event()
+
+    def teardown():
+        thread = threading.Thread(target=worker.process_output, args=(first,))
+        thread.start()
+        thread.join()
+        torn_down.set()
+
+    worker._requests = _RequestsTornDownWhileIterated(worker._requests, teardown)
+    second = _prepare_output(
+        worker,
+        _metadata(0, [_request_metadata("running", 2, 1, 0, [])], {"finished": []}),
+        _position_rows(2, 3),
+        ["running"],
+        np.array([0]),
+    )
+    if not torn_down.is_set():
+        worker.process_output(first)
+    worker.process_output(second)
+    assert list(worker._requests) == ["running"]
+    worker.close()
