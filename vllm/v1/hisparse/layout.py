@@ -381,7 +381,7 @@ def create_hisparse_layout(
         host_budget / GiB_bytes,
         host_num_blocks * gpu_block_size,
         host_num_blocks * host_block_stride / GiB_bytes,
-        "per node, shared by its TP ranks" if shared_host_pool else "per rank",
+        "per replica, shared by its TP ranks" if shared_host_pool else "per rank",
     )
 
     return HiSparseLayout(
