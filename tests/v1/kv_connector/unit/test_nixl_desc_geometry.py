@@ -9,6 +9,9 @@ The invariant under test: every LOCAL byte range a request's READ transfers
 into must lie within that request's own blocks. A violation means an
 incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
+
+PP lifecycle tests also check request-level block retention until every P
+worker completes or expires, and D-side retention while sibling READs drain.
 """
 
 import contextlib
@@ -27,9 +30,12 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group,
     make_kv_cache_group_from_specs,
 )
+from vllm.config import ParallelConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+    NixlConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
     NixlPullConnectorWorker,
@@ -49,6 +55,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
@@ -56,8 +63,15 @@ from vllm.v1.kv_cache_interface import (
     SparseCacheRole,
     create_kv_cache_views,
 )
+from vllm.v1.request import RequestStatus
 
-from .utils import create_vllm_config, expand_strided_descs
+from .utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    expand_strided_descs,
+)
 
 
 class _RecordingNixl:
@@ -307,13 +321,14 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
         assert metadata.region_num_blocks == [d_num_blocks] * 3
         assert metadata.region_names == ["L2", "L2.swa", "L3"]
-        pairs = producer._dst_pairs[consumer.engine_id]
+        stage = producer._single_remote_stage(consumer.engine_id)
+        pairs = stage.pairs
         local_ids = producer._compute_desc_ids(
             [[1], [2], [3]],
             producer.num_blocks,
             None,
             1,
-            region_num_blocks=producer.dst_region_num_blocks[producer.engine_id],
+            region_num_blocks=producer.region_num_blocks,
             pairs=(pairs.local, pairs.group),
         )
         local_descs = expand_strided_descs(producer.src_blocks_data)
@@ -327,10 +342,10 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             metadata.num_blocks,
             None,
             1,
-            region_num_blocks=producer.dst_region_num_blocks[consumer.engine_id],
+            region_num_blocks=stage.region_num_blocks,
             pairs=(pairs.remote, pairs.group),
         )
-        handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
+        handle = stage.xfer_side_handles[rank]
         remote_descs = producer.nixl_wrapper.dlists[handle]
         assert len(remote_descs) == 3 * d_num_blocks
         assert remote_descs[remote_ids].tolist() == [
@@ -427,10 +442,7 @@ def _register_overlaid_mla_worker(
     worker.nixl_wrapper = _RecordingNixl()
     worker._registered_descs = []
     worker.dst_num_blocks = {}
-    worker.dst_region_num_blocks = {}
-    worker.dst_region_group_ids = {}
-    worker._dst_pairs = {}
-    worker.dst_region_mem_types = {}
+    worker._remote_stages = {}
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
     worker._dram_src_handles_by_block_size = {}
@@ -517,7 +529,7 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     local_descs = expand_strided_descs(worker.src_blocks_data)
     assert local_descs[:, 0].tolist() == expected_addrs
     assert worker.num_descs == num_blocks
-    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks]
+    assert worker.region_num_blocks == [num_blocks]
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -2110,7 +2122,7 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
         transfer_groups=[make_kv_cache_group(["draft"], spec)]
     )
 
-    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+    backends, specs, _ = kv_utils.get_current_attn_backends_and_specs(
         vllm_config, kv_cache_config, [_DraftBackend]
     )
 
@@ -2500,3 +2512,691 @@ def test_real_model_layout_pull_copies_every_page(model, p_layout, d_layout):
     for t in storages.values():
         raw = torch.empty(0, dtype=torch.uint8).set_(t.untyped_storage())
         assert not raw.any(), "D bytes outside the request's pages changed"
+
+
+_PP_TARGET_LAYERS = [f"model.layers.{i}.self_attn.attn" for i in range(4)]
+# A speculative draft's layer, held by the last prefill PP stage.
+_PP_DRAFT_LAYER = "model.layers.4.self_attn.attn"
+
+
+class _NotifyingNixl(_RecordingNixl):
+    """Deliver completion notifications between simulated NIXL peers."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.peers = {}
+        self.notifications = []
+        self.sent_notifications = []
+        self.reads = {}
+        self.states = {}
+        self.default_state = "PROC"
+        self.drop_notifications = set()
+        self.notified = set()
+        self.released = set()
+
+    def make_prepped_xfer(
+        self, op, local_handle, local_ids, remote_handle, remote_ids, notif_msg=None
+    ):
+        handle = super().make_prepped_xfer(
+            op, local_handle, local_ids, remote_handle, remote_ids, notif_msg
+        )
+        self.reads[handle] = (remote_handle, notif_msg)
+        return handle
+
+    def check_xfer_state(self, handle):
+        remote, message = self.reads[handle]
+        state = self.states.get(remote, self.default_state)
+        if state == "DONE" and handle not in self.notified:
+            self.notified.add(handle)
+            if remote not in self.drop_notifications:
+                self.peers[remote].notifications.append(message)
+        return state
+
+    def release_xfer_handle(self, handle):
+        self.released.add(handle)
+
+    def send_notif(self, agent, notif_msg=None):
+        self.sent_notifications.append(agent)
+        self.peers[agent].notifications.append(notif_msg)
+
+    def get_new_notifs(self):
+        notifications, self.notifications = self.notifications, []
+        return {"peer": notifications}
+
+    def check_remote_metadata(self, agent):
+        return agent in self.peers
+
+
+def _make_pp_attn_worker(
+    engine_id,
+    layer_names,
+    *,
+    hma=True,
+    shared=False,
+    pp_stage=None,
+    num_blocks=8,
+    block_size=4,
+    kernel_block_size=4,
+    nixl_wrapper=_RecordingNixl,
+    layout=KVCacheLayout.LBHNC,
+):
+    """Pull worker holding `layer_names` of a model with full-attention
+    `_PP_TARGET_LAYERS` and a draft's `_PP_DRAFT_LAYER`.
+
+    With `hma` the draft layer is sliding-window, in a cache group of its own
+    that a PP stage keeps without layers. Each group's layers get their own
+    allocation, unless `shared` overlays the groups on one, as one block pool
+    does: the draft layer then aliases the first target layer the worker holds.
+    `pp_stage=(pp_rank, pp_size)` makes the worker that prefill PP stage.
+    """
+    kwargs = dict(
+        block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    target = [name for name in _PP_TARGET_LAYERS if name in layer_names]
+    draft = [_PP_DRAFT_LAYER] if _PP_DRAFT_LAYER in layer_names else []
+    spec = AttentionSpec(**kwargs)
+    full = FullAttentionManager.config()
+
+    def make_group(names, manager_config):
+        # As projected onto a PP stage: it keeps the whole group's specs, so a
+        # stage holding none of the group's layers still knows its cache kind.
+        return KVCacheGroup(
+            dict.fromkeys(names, spec),
+            manager_config,
+            block_size,
+            unprojected_specs=(spec,),
+        )
+
+    if hma:
+        groups = [
+            make_group(target, full),
+            make_group(draft, SlidingWindowManager.config(sliding_window=8)),
+        ]
+    else:
+        groups = [make_group(target + draft, full)]
+    page = spec.page_size_bytes
+    raw: torch.Tensor | None = None
+    tensors: list[KVCacheTensor] = []
+    caches: dict[str, torch.Tensor] = {}
+    for group in groups:
+        if not group.layer_names:
+            continue
+        if raw is None or not shared:
+            raw = torch.zeros(
+                num_blocks * page * len(group.layer_names), dtype=torch.int8
+            )
+        tensor = KVCacheTensor(
+            size=raw.nbytes,
+            layers=list(group.layer_names),
+            layer_stride=page if layout.is_block_outermost else num_blocks * page,
+            block_stride=page * len(group.layer_names)
+            if layout.is_block_outermost
+            else page,
+        )
+        tensors.append(tensor)
+        views = create_kv_cache_views(
+            raw,
+            spec,
+            num_blocks,
+            layout,
+            tensor,
+            kernel_block_size,
+        )
+        caches.update(zip(group.layer_names, views))
+
+    config = create_vllm_config(
+        block_size=block_size, kv_role="kv_producer" if pp_stage else "kv_consumer"
+    )
+    config.cache_config.kv_cache_layout = layout.name
+    config.scheduler_config.disable_hybrid_kv_cache_manager = not hma
+    config.kv_transfer_config.kv_buffer_device = "cuda"
+    if pp_stage:
+        config.parallel_config.pipeline_parallel_size = pp_stage[1]
+    backend = MagicMock()
+    backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
+    backend.get_name.return_value = "TEST_ATTN"
+    backend.full_cls_name.return_value = "fake.TEST_ATTN"
+    platform = MagicMock(device_type="cuda")
+    platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", nixl_wrapper),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "current_platform", platform),
+        patch("threading.Thread"),
+    ):
+        worker = NixlPullConnectorWorker(
+            config, engine_id, KVCacheConfig(num_blocks, tensors, groups)
+        )
+        worker.register_kv_caches(caches)
+    return worker
+
+
+def _pp_stage_metadata(stage, pp_rank):
+    """The handshake metadata a prefill PP stage advertises."""
+    metadata = msgspec.msgpack.decode(
+        stage.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    metadata.agent_metadata = f"prefill-pp{pp_rank}".encode()
+    return metadata
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
+@pytest.mark.parametrize("hma", [False, True])
+def test_pull_pp_rejects_packed_layout_before_registering(layout, hma):
+    """Reject packed PP before cache registration, independently of HMA."""
+    wrapper = _RecordingNixl()
+    with pytest.raises(NotImplementedError, match="pull.*packed.*" + layout.name):
+        _make_pp_attn_worker(
+            "prefill",
+            _PP_TARGET_LAYERS[:2],
+            pp_stage=(0, 2),
+            hma=hma,
+            layout=layout,
+            nixl_wrapper=lambda *args, **kwargs: wrapper,
+        )
+
+    assert wrapper.registered == []
+    assert wrapper.dlists == {}
+    assert wrapper.xfers == []
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
+@pytest.mark.parametrize("packed_endpoint", ["local", "remote", "both"])
+def test_pull_pp_rejects_packed_peer_before_pairing(layout, packed_endpoint):
+    """A packed PP peer fails capability checks before descriptor setup.
+
+    PP1 construction supplies real packed rows for a peer running older code;
+    the advertised PP topology is a separate handshake argument.
+    """
+    decode = _make_pp_attn_worker(
+        "decode",
+        _PP_TARGET_LAYERS,
+        hma=False,
+        layout=layout if packed_endpoint in ("local", "both") else KVCacheLayout.LBHNC,
+    )
+    peer = _make_pp_attn_worker(
+        "prefill",
+        _PP_TARGET_LAYERS[:2],
+        hma=False,
+        layout=layout if packed_endpoint in ("remote", "both") else KVCacheLayout.LBHNC,
+    )
+    wrapper = decode.nixl_wrapper
+    registrations = list(wrapper.registered)
+    handles = set(wrapper.dlists)
+
+    with pytest.raises(NotImplementedError, match="pull.*packed.*" + layout.name):
+        decode.add_remote_agent(_pp_stage_metadata(peer, 0), remote_pp_size=2)
+
+    assert wrapper.registered == registrations
+    assert set(wrapper.dlists) == handles
+    assert wrapper.xfers == []
+    assert "prefill" not in decode._remote_stages
+
+
+def _add_prefill_stages(decode, stages):
+    """Register prefill `stages` (PP ranks in order; one stage is a PP=1
+    prefill) with `decode`, as a handshake does."""
+    decode.nixl_wrapper.add_remote_agent = bytes.decode
+    decode._remote_agents["prefill"] = {
+        (pp_rank, 0): decode.add_remote_agent(
+            _pp_stage_metadata(stage, pp_rank),
+            remote_pp_rank=pp_rank,
+            remote_pp_size=len(stages),
+        )
+        for pp_rank, stage in enumerate(stages)
+    }
+
+
+def _pull_page_pairs(
+    decode, stages, local_block_ids, remote_block_ids, *, remote_num_tokens=None
+):
+    """Pull one request, its blocks given per cache group, from prefill
+    `stages` and resolve each READ descriptor pair to `(pp_rank, local page
+    address, remote page address)`."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    _add_prefill_stages(decode, stages)
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": "prefill",
+            "remote_request_id": "prefill-req",
+            "remote_host": "prefill-host",
+            "remote_port": 1234,
+            "tp_size": 1,
+            "pp_size": len(stages),
+            "remote_num_tokens": remote_num_tokens,
+        },
+    )
+    decode.start_load_kv(metadata)
+
+    nixl = decode.nixl_wrapper
+    handles = [
+        decode._remote_stages["prefill"][pp_rank].xfer_side_handles[0]
+        for pp_rank in range(len(stages))
+    ]
+    pairs = set()
+    for _, local_handle, local_descs, remote_handle, remote_descs in nixl.xfers:
+        pp_rank = handles.index(remote_handle)
+        for local_desc, remote_desc in zip(local_descs, remote_descs, strict=True):
+            local_addr, length = nixl.dlists[local_handle][local_desc, :2].tolist()
+            remote_addr, remote_length = nixl.dlists[remote_handle][
+                remote_desc, :2
+            ].tolist()
+            assert length == remote_length
+            pairs.add((pp_rank, local_addr, remote_addr))
+    return pairs
+
+
+def _page_addr(worker, name, block):
+    """Address of `block` of layer `name`; layers sharing an allocation
+    alias."""
+    return worker.device_kv_caches[name][block].data_ptr()
+
+
+def _expected_page_pairs(decode, stages, local_block_ids, remote_block_ids):
+    """Each layer's pages, read from the stage holding it at the layer's own
+    cache group's blocks."""
+    group_of = decode.kv_cache_config.transfer_group_index_by_layer
+    return {
+        (
+            pp_rank,
+            _page_addr(decode, name, local_block),
+            _page_addr(stage, name, remote_block),
+        )
+        for pp_rank, stage in enumerate(stages)
+        for name in stage.device_kv_caches
+        for local_block, remote_block in zip(
+            local_block_ids[group_of[name]],
+            remote_block_ids[group_of[name]],
+            strict=True,
+        )
+    }
+
+
+@pytest.mark.cpu_test
+def test_pull_from_pp_stages_reads_each_layer_from_its_stage():
+    """A PP=1 decoder reads each layer, the draft's included, from the prefill
+    PP stage holding it into the same local layer and blocks."""
+    decode = _make_pp_attn_worker(
+        "decode", [*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER], hma=False
+    )
+    stages = [
+        _make_pp_attn_worker(
+            "prefill", _PP_TARGET_LAYERS[:2], hma=False, pp_stage=(0, 2)
+        ),
+        _make_pp_attn_worker(
+            "prefill",
+            [*_PP_TARGET_LAYERS[2:], _PP_DRAFT_LAYER],
+            hma=False,
+            pp_stage=(1, 2),
+        ),
+    ]
+    local_block_ids, remote_block_ids = ([1, 5],), ([2, 6],)
+    pairs = _pull_page_pairs(decode, stages, local_block_ids, remote_block_ids)
+    assert pairs == _expected_page_pairs(
+        decode, stages, local_block_ids, remote_block_ids
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("shared", ["none", "decode", "prefill", "both"])
+def test_pull_from_hma_pp_stages_reads_each_group_from_its_stage(shared, pp_size):
+    """With HMA on both sides, a PP=1 decoder reads each layer from the prefill
+    stage holding it, at that layer's cache-group blocks, into the local pages
+    holding the layer. The draft's sliding-window group lives on the last
+    stage only, so the first stage reads none of its blocks. Overlaying the
+    groups, as one block pool does, makes the draft share a region with a
+    different target layer on each side."""
+    decode = _make_pp_attn_worker(
+        "decode",
+        [*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER],
+        shared=shared in ("decode", "both"),
+    )
+    stage_layers = (
+        [[*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER]]
+        if pp_size == 1
+        else [_PP_TARGET_LAYERS[:2], [*_PP_TARGET_LAYERS[2:], _PP_DRAFT_LAYER]]
+    )
+    stages = [
+        _make_pp_attn_worker(
+            "prefill",
+            layers,
+            shared=shared in ("prefill", "both"),
+            pp_stage=(pp_rank, pp_size) if pp_size > 1 else None,
+        )
+        for pp_rank, layers in enumerate(stage_layers)
+    ]
+    # Requests carry the draft group's blocks on a stage without its layers.
+    assert all(stage._is_hma_required for stage in stages)
+    local_block_ids, remote_block_ids = ([1, 2], [3, 4]), ([6, 5], [7, 3])
+    pairs = _pull_page_pairs(decode, stages, local_block_ids, remote_block_ids)
+    assert pairs == _expected_page_pairs(
+        decode, stages, local_block_ids, remote_block_ids
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "failure,policy",
+    [
+        pytest.param("notification", "fail", id="lost-notification"),
+        pytest.param("read", "fail", id="read-error"),
+        pytest.param("read", "recompute", id="read-error-recompute"),
+        pytest.param("abort", "fail", id="abort-pending-read"),
+    ],
+)
+def test_pull_pp_failure_releases_blocks_after_all_workers_finish(
+    failure, policy, monkeypatch
+):
+    """Partial PP completion retains P blocks until the missing worker expires.
+
+    D keeps destination blocks and renews P leases until sibling READs drain,
+    or stops renewal on abort. Recompute consumes no second P transfer.
+    """
+    p_config = create_vllm_config(block_size=16, kv_role="kv_producer")
+    p_config.parallel_config = ParallelConfig(pipeline_parallel_size=2)
+    p_config.kv_transfer_config.engine_id = "prefill"
+    prefill = create_scheduler(p_config, num_blocks=16)
+    decode = create_scheduler(
+        create_vllm_config(block_size=16, kv_load_failure_policy=policy),
+        num_blocks=16,
+    )
+    stages = [
+        _make_pp_attn_worker(
+            "prefill",
+            layers,
+            hma=False,
+            pp_stage=(rank, 2),
+            block_size=16,
+            kernel_block_size=16,
+            num_blocks=16,
+            nixl_wrapper=_NotifyingNixl,
+        )
+        for rank, layers in enumerate([_PP_TARGET_LAYERS[:2], _PP_TARGET_LAYERS[2:]])
+    ]
+    worker = _make_pp_attn_worker(
+        "decode",
+        _PP_TARGET_LAYERS,
+        hma=False,
+        block_size=16,
+        kernel_block_size=16,
+        num_blocks=16,
+        nixl_wrapper=_NotifyingNixl,
+    )
+    now = 100.0
+    monkeypatch.setattr(bw.time, "perf_counter", lambda: now)
+    p_pool = prefill.kv_cache_manager.block_pool
+    d_pool = decode.kv_cache_manager.block_pool
+    p_free, d_free = p_pool.get_num_free_blocks(), d_pool.get_num_free_blocks()
+    p_req = create_request(request_id=1, num_tokens=32, do_remote_decode=True)
+    prefill.add_request(p_req)
+    step = prefill.schedule()
+    for stage in stages:
+        stage.start_load_kv(step.kv_connector_metadata)
+    output = prefill.update_from_output(step, create_model_runner_output([p_req]))
+    params = output[0].outputs[0].kv_transfer_params
+    p_reserved = p_pool.get_num_free_blocks()
+    assert p_reserved < p_free
+    aggregator = KVOutputAggregator.from_connector(
+        prefill.connector, p_config.parallel_config.world_size
+    )
+
+    def poll_prefill():
+        step = prefill.schedule()
+        reports = []
+        for stage in stages:
+            stage.start_load_kv(step.kv_connector_metadata)
+            results = stage.get_transfer_results()
+            reports.append(
+                create_model_runner_output(
+                    [], finished_sending=results.finished_sending
+                )
+            )
+        output = aggregator.aggregate(reports)
+        prefill.update_from_output(step, output)
+        return output.kv_connector_output
+
+    assert not poll_prefill().finished_sending
+    _add_prefill_stages(worker, stages)
+    nixl = worker.nixl_wrapper
+    remote_handles = [
+        worker._remote_stages["prefill"][rank].xfer_side_handles[0] for rank in range(2)
+    ]
+    for rank, (stage, handle) in enumerate(zip(stages, remote_handles)):
+        nixl.peers[handle] = nixl.peers[f"prefill-pp{rank}"] = stage.nixl_wrapper
+    nixl.states[remote_handles[0]] = "ERR" if failure == "read" else "DONE"
+    if failure == "notification":
+        nixl.drop_notifications.add(remote_handles[1])
+    d_req = create_request(request_id=2, num_tokens=32, do_remote_prefill=True)
+    d_req.kv_transfer_params = params
+    decode.add_request(d_req)
+    d_step = decode.schedule()
+    worker.start_load_kv(d_step.kv_connector_metadata)
+    d_reserved = d_pool.get_num_free_blocks()
+    assert d_reserved < d_free
+    assert len(nixl.reads) == 2
+    results = worker.get_transfer_results()
+    assert not results.finished_recving
+    assert not results.failed_recving
+    assert d_pool.get_num_free_blocks() == d_reserved
+    assert not poll_prefill().finished_sending
+    assert p_req.request_id in prefill.requests
+    assert p_pool.get_num_free_blocks() == p_reserved
+
+    # Even an observed error must keep renewing P while its sibling is in flight.
+    decode.update_from_output(d_step, create_model_runner_output([]))
+    now = 121.0
+    d_step = decode.schedule()
+    assert d_step.kv_connector_metadata.heartbeat_by_engine["prefill"].req_ids == {
+        p_req.request_id
+    }
+    worker.start_load_kv(d_step.kv_connector_metadata)
+    assert not poll_prefill().finished_sending
+    if failure == "abort":
+        decode.finish_requests(d_req.request_id, RequestStatus.FINISHED_ABORTED)
+        now = 127.0
+        d_step = decode.schedule()
+        assert not d_step.kv_connector_metadata.heartbeat_by_engine
+        assert d_req.request_id in decode.requests
+        assert d_pool.get_num_free_blocks() == d_reserved
+    nixl.states[remote_handles[1]] = "ERR" if failure == "abort" else "DONE"
+    results = worker.get_transfer_results()
+    assert results.finished_recving == {d_req.request_id}
+    assert results.failed_recving == (
+        set() if failure == "notification" else {d_req.request_id}
+    )
+    assert nixl.released == set(nixl.reads)
+    assert not poll_prefill().finished_sending
+    assert p_pool.get_num_free_blocks() == p_reserved
+    decode.update_from_output(
+        d_step,
+        create_model_runner_output(
+            [],
+            finished_recving=results.finished_recving,
+            failed_recving=results.failed_recving,
+        ),
+    )
+
+    # Past the initial lease, but before the last heartbeat's extended deadline.
+    now = 132.0
+    d_step = decode.schedule()
+    assert not d_step.kv_connector_metadata.heartbeat_by_engine
+    assert not d_step.kv_connector_metadata.reqs_to_recv
+    worker.start_load_kv(d_step.kv_connector_metadata)
+    assert len(nixl.reads) == 2
+    if policy == "recompute":
+        assert not d_req.is_finished()
+        assert not d_req.kv_transfer_params["do_remote_prefill"]
+        assert d_step.num_scheduled_tokens[d_req.request_id] > 0
+    elif failure != "notification":
+        assert d_req.request_id not in decode.requests
+        assert d_pool.get_num_free_blocks() == d_free
+    assert not poll_prefill().finished_sending
+    assert p_req.request_id in prefill.requests
+    assert prefill.has_requests()
+    assert p_pool.get_num_free_blocks() == p_reserved
+    now = 142.0
+    assert poll_prefill().finished_sending == {p_req.request_id}
+    assert p_req.request_id not in prefill.requests
+    assert p_pool.get_num_free_blocks() == p_free
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("full_hit", [False, True])
+def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read(
+    full_hit, monkeypatch
+):
+    """Notify a stage without reading groups it holds no requested layers of.
+
+    The notification completes that P worker's consumer count. The P scheduler
+    frees the request's blocks after completion reports from all TP×PP workers,
+    including reports from workers whose send leases expired. A full prefix
+    hit notifies both stages without reading either.
+    """
+    decode = _make_pp_attn_worker(
+        "decode", [*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER], nixl_wrapper=_NotifyingNixl
+    )
+    stages = [
+        _make_pp_attn_worker(
+            "prefill",
+            _PP_TARGET_LAYERS[:2],
+            pp_stage=(0, 2),
+            nixl_wrapper=_NotifyingNixl,
+        ),
+        _make_pp_attn_worker(
+            "prefill",
+            [*_PP_TARGET_LAYERS[2:], _PP_DRAFT_LAYER],
+            pp_stage=(1, 2),
+            nixl_wrapper=_NotifyingNixl,
+        ),
+    ]
+    now = 100.0
+    monkeypatch.setattr(bw.time, "perf_counter", lambda: now)
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {"prefill-req"}
+    metadata.reqs_to_send = {"prefill-req": now + 30}
+    for rank, stage in enumerate(stages):
+        stage.start_load_kv(metadata)
+        decode.nixl_wrapper.peers[f"prefill-pp{rank}"] = stage.nixl_wrapper
+    local_block_ids: tuple[list[int], ...] = ([], []) if full_hit else ([], [3, 4])
+    remote_block_ids: tuple[list[int], ...] = ([], [7, 6])
+    pairs = _pull_page_pairs(decode, stages, local_block_ids, remote_block_ids)
+    assert decode.nixl_wrapper.sent_notifications == (
+        ["prefill-pp0", "prefill-pp1"] if full_hit else ["prefill-pp0"]
+    )
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    reports = [stage.get_transfer_results() for stage in stages]
+    assert reports[0].finished_sending == {"prefill-req"}
+    assert reports[1].finished_sending == ({"prefill-req"} if full_hit else set())
+    output = aggregator.aggregate(
+        [
+            create_model_runner_output([], finished_sending=report.finished_sending)
+            for report in reports
+        ]
+    )
+    assert output.kv_connector_output.finished_sending == (
+        {"prefill-req"} if full_hit else None
+    )
+    if full_hit:
+        assert not decode.nixl_wrapper.xfers
+        assert not pairs
+        return
+    assert pairs == {
+        (
+            1,
+            _page_addr(decode, _PP_DRAFT_LAYER, local),
+            _page_addr(stages[1], _PP_DRAFT_LAYER, remote),
+        )
+        for local, remote in [(3, 7), (4, 6)]
+    }
+    assert not decode.get_transfer_results().finished_recving
+    decode.nixl_wrapper.default_state = "ERR"
+    results = decode.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"req"}
+    now = 131.0
+    output = aggregator.aggregate(
+        [
+            create_model_runner_output(
+                [], finished_sending=stage.get_transfer_results().finished_sending
+            )
+            for stage in stages
+        ]
+    )
+    assert output.kv_connector_output.finished_sending == {"prefill-req"}
+
+
+@pytest.mark.cpu_test
+def test_pull_from_hma_pp_stages_pairs_unequal_blocks_after_prefix_hit():
+    """PP stages pair the uncached token suffix and leave no stale padding.
+
+    D's 8-token manager blocks split into two 4-token kernel pages; P's
+    manager blocks are 4 tokens. With 9 tokens and an 8-token D prefix hit,
+    only the last P page belongs in the first half of D's uncached block.
+    Its second half is allocation padding and must be zeroed on completion.
+    """
+    decode = _make_pp_attn_worker(
+        "decode", [*_PP_TARGET_LAYERS, _PP_DRAFT_LAYER], block_size=8
+    )
+    stages = [
+        _make_pp_attn_worker("prefill", _PP_TARGET_LAYERS[:2], pp_stage=(0, 2)),
+        _make_pp_attn_worker(
+            "prefill", [*_PP_TARGET_LAYERS[2:], _PP_DRAFT_LAYER], pp_stage=(1, 2)
+        ),
+    ]
+    for cache in decode.device_kv_caches.values():
+        cache.fill_(0.125)
+
+    pairs = _pull_page_pairs(
+        decode,
+        stages,
+        ([5], [3]),
+        ([2, 4, 6], [1, 7]),
+        remote_num_tokens=9,
+    )
+    assert pairs == _expected_page_pairs(decode, stages, ([10], [6]), ([6], [7]))
+    assert decode._recving_metadata["req"].covered_sub_blocks == [range(1), range(1)]
+
+    group_of = decode.kv_cache_config.transfer_group_index_by_layer
+    for name, cache in decode.device_kv_caches.items():
+        block = 10 if group_of[name] == 0 else 6
+        cache[block].fill_(0.75)  # Simulate the recorded NIXL write.
+    _, recved = decode.get_finished()
+    assert recved == {"req"}
+    for name, cache in decode.device_kv_caches.items():
+        block = 10 if group_of[name] == 0 else 6
+        expected = torch.full_like(cache, 0.125)
+        expected[block].fill_(0.75)
+        expected[block + 1].zero_()
+        assert torch.equal(cache, expected), name
+
+
+@pytest.mark.cpu_test
+def test_pull_from_pp_stages_rejects_a_layer_no_stage_holds():
+    """A local layer no prefill PP stage holds would keep stale KV."""
+    decode = _make_pp_attn_worker("decode", _PP_TARGET_LAYERS, hma=False)
+    stages = [
+        _make_pp_attn_worker(
+            "prefill", _PP_TARGET_LAYERS[:1], hma=False, pp_stage=(0, 2)
+        ),
+        _make_pp_attn_worker(
+            "prefill", _PP_TARGET_LAYERS[2:], hma=False, pp_stage=(1, 2)
+        ),
+    ]
+    decode.add_remote_agent(
+        _pp_stage_metadata(stages[0], 0), remote_pp_rank=0, remote_pp_size=2
+    )
+    with pytest.raises(RuntimeError, match="exactly once"):
+        decode.add_remote_agent(
+            _pp_stage_metadata(stages[1], 1), remote_pp_rank=1, remote_pp_size=2
+        )
