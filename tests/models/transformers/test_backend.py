@@ -33,6 +33,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers import causal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import (
     probe_output_head,
@@ -192,6 +193,44 @@ def test_output_head_moe(vllm_runner: type[VllmRunner]) -> None:
             lambda model: hasattr(model, "compute_logits_local")
         )
         assert has_local == [False]
+
+
+GRANITE_KWARGS = dict(
+    model_impl="transformers",
+    load_format="dummy",
+    hf_overrides={"num_hidden_layers": 1},
+    max_model_len=512,
+    gpu_memory_utilization=0.5,
+)
+"""Granite keeps its head (`logits_scaling`) and its vocab (49155) is padded."""
+
+
+@multi_gpu_test(num_gpus=2)
+def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
+    """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
+    must see as `[n, h]` to reorder the TP-sharded vocab."""
+    model = "ibm-granite/granite-3.0-2b-instruct"
+    kwargs = GRANITE_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
+    with vllm_runner(model, **kwargs) as model_test:
+        model_test.generate_greedy(["Hello"], max_tokens=4)
+
+
+@create_new_process_for_each_test("spawn")
+def test_output_head_fallback(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A head that cannot run without its base model falls back to `lm_head`."""
+    # Disable multiprocessing so that the patch applies to the engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def probe_output_head(model, hidden_size):
+        raise AttributeError("'_OutputEmbeddings' object has no attribute 'weight'")
+
+    monkeypatch.setattr(causal, "probe_output_head", probe_output_head)
+    model = "ibm-granite/granite-3.0-2b-instruct"
+    with vllm_runner(model, **GRANITE_KWARGS) as model_test:
+        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        assert has_head == [False]
 
 
 @create_new_process_for_each_test("spawn")

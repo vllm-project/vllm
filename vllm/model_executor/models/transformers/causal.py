@@ -16,7 +16,8 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +25,8 @@ from torch import nn
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
+from vllm.compilation.decorators import IGNORE_COMPILE_KEY
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -42,6 +45,7 @@ from .base import Base
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+logger = init_logger(__name__)
 
 OUTPUT_HEAD_ATTR = "output_head"
 """Attribute in which to store the output head."""
@@ -146,6 +150,21 @@ def to_output_head(
     return embeddings, renames
 
 
+@contextmanager
+def ignore_torch_compile(model: nn.Module) -> Iterator[None]:
+    """Stop new instances of the compiled classes in `model` from being set up for
+    compilation (e.g. counted by `compilation_counter`)."""
+    module_classes = {type(m) for m in model.modules()}
+    classes = {c for c in module_classes if c.__dict__.get(IGNORE_COMPILE_KEY) is False}
+    for cls in classes:
+        setattr(cls, IGNORE_COMPILE_KEY, True)
+    try:
+        yield
+    finally:
+        for cls in classes:
+            setattr(cls, IGNORE_COMPILE_KEY, False)
+
+
 def output_head_kwargs(model: PreTrainedModel) -> dict[str, bool]:
     """The `_FORWARD_KWARGS` which `model.forward` takes."""
     parameters = forward_parameters(type(model))
@@ -191,7 +210,18 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         """Arguments for the output head's forward, from `_FORWARD_KWARGS`."""
 
         if self.pp_group.is_last_rank:
-            found = self._create_output_head()
+            try:
+                found = self._create_output_head()
+            except Exception as e:
+                logger.warning(
+                    "Could not run the output head of %s, so `lm_head` and the "
+                    "config's logit scaling are assumed: %r",
+                    type(self.model).__name__,
+                    e,
+                )
+                found = None
+                self.output_head_renames = {}
+                self.output_head_kwargs = {}
             output_head, in_features = found or (None, self.text_config.hidden_size)
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
@@ -235,7 +265,8 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 break
         else:
             return None
-        with init_on_device_without_buffers("meta"):
+        ignore_compile = ignore_torch_compile(self.model)
+        with init_on_device_without_buffers("meta"), ignore_compile:
             model = model_cls._from_config(self.config, dtype=self.model_config.dtype)
         output_head = to_output_head(model, type(self.model), self._project)
         if output_head is None:
@@ -251,7 +282,9 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """The output embeddings, which give the logits on every TP rank."""
-        return self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
+        flat = hidden_states.flatten(0, -2)
+        logits = self.logits_processor(self.lm_head, flat, self.lm_head.bias)
+        return logits.unflatten(0, hidden_states.shape[:-1])
 
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the output head."""
@@ -291,7 +324,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
         output_head = getattr(self, OUTPUT_HEAD_ATTR, None)
         if output_head is None:
-            return self._project(hidden_states)
+            return self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         output = output_head(
             inputs_embeds=hidden_states.unsqueeze(0), **self.output_head_kwargs
         )
