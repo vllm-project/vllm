@@ -315,6 +315,43 @@ def test_invalid_locality_raises_at_construction(locality):
         _make_tier(locality=locality)
 
 
+@pytest.mark.parametrize("mode", ["both", "ro", ""])
+def test_invalid_mode_raises_at_construction(mode):
+    with pytest.raises(ValueError, match="Invalid mode"):
+        _make_tier(mode=mode)
+
+
+@pytest.mark.parametrize(
+    "mode, can_read, can_write",
+    [
+        (None, True, True),
+        ("readwrite", True, True),
+        ("read", True, False),
+        ("write", False, True),
+    ],
+)
+def test_mode_sets_can_read_and_can_write(mode, can_read, can_write):
+    kwargs = {} if mode is None else {"mode": mode}
+    tier, _ = _make_tier(**kwargs)
+    assert tier.mode.can_read is can_read
+    assert tier.mode.can_write is can_write
+
+
+def test_write_mode_stores_but_never_reports_a_hit():
+    tier, agent = _make_tier(mode="write")
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    # The object was written, but a write-only tier still reports a miss.
+    assert tier._file_mapper.get_file_name(key(1)) in agent._stored_obj_keys
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
+
+
+def test_read_mode_reports_a_hit_without_storing():
+    tier, agent = _make_tier(mode="read")
+    agent._stored_obj_keys.add(tier._file_mapper.get_file_name(key(1)))
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
+
+
 class TestMockObjTierBasic:
     def setup_method(self):
         self.tier, self.agent = _make_tier(num_blocks=4)

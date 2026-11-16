@@ -674,6 +674,11 @@ class TieringOffloadingManager(OffloadingManager):
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
     ) -> bool:
+        # A read-only tier never accepts stores; skipping the job here (rather
+        # than in the tier) avoids pinning primary chunks for a job that would
+        # never complete.
+        if not tier.mode.can_write:
+            return False
         detector = tier.bp_detector
         if detector is None:
             return True

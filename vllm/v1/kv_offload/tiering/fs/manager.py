@@ -37,6 +37,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
+from vllm.v1.kv_offload.config import OffloadMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
@@ -116,6 +117,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        mode: OffloadMode | str = OffloadMode.READWRITE,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -131,10 +133,16 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        mode: `read` serves loads but never writes blocks, `write` writes
+            blocks but never serves loads, and `readwrite` (default) does both.
 
         """
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            mode=mode,
         )
         self.locality = Locality(locality) if locality is not None else None
 
@@ -180,14 +188,17 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file
+        # Write config file. A read-only tier must not write anything, and may
+        # be backed by a read-only mount (where even mkdir fails), so only a
+        # writable tier touches the directory or creates the file.
         config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+        if self.mode.can_write:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    json.dump(
+                        self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                    )
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
@@ -215,6 +226,9 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if not self.mode.can_read:
+            # A write-only tier never serves loads.
+            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY

@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import OffloadMode
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering import spec as tiering_spec_module
@@ -483,6 +484,32 @@ class TestTieringOffloadingManager:
         assert all(
             self.secondary_tier2.lookup(c, _CTX) is LookupResult.HIT for c in chunks
         )
+
+    def test_read_only_tier_is_never_stored_to(self, manager_setup, monkeypatch):
+        """A tier that cannot write gets no store job, so no primary chunk is
+        pinned for a transfer that would never complete."""
+        self.secondary_tier1.mode = OffloadMode.READ
+        tier1_submit_store = MagicMock(wraps=self.secondary_tier1.submit_store)
+        monkeypatch.setattr(self.secondary_tier1, "submit_store", tier1_submit_store)
+        chunks = to_keys(range(3))
+
+        self._start_request()
+        result = self.manager.prepare_store(
+            chunks, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        assert result is not None
+        self.manager.complete_store(
+            chunks, _CTX, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
+
+        tier1_submit_store.assert_not_called()
+        assert self.secondary_tier1.get_num_chunks() == 0
+        assert self.secondary_tier2.get_num_chunks() == 3
+        # Only the writable tier pins the chunks.
+        for key in chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 1
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects chunks during cascade."""
