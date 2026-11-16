@@ -1708,6 +1708,18 @@ def run_attention_backend(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
+        decode = getattr(attn_metadata, "decode", None)
+        if (
+            backend == AttentionBackendEnum.ROCM_AITER_MLA
+            and decode is not None
+            and decode.use_gluon_decode
+        ):
+            from vllm import envs
+
+            # Gluon decode takes the split rebalance, so the comparison below
+            # checks the rebalanced output.
+            if not envs.VLLM_BATCH_INVARIANT:
+                assert decode.gluon_kv_split_info is not None
 
         # Create output buffer
         num_tokens = query.shape[0]

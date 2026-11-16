@@ -936,6 +936,9 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     mla_num_kv_splits: int = 0
     # Small-head decode uses Gluon (avoids padding to 16).
     use_gluon_decode: bool = False
+    # Gluon decode's split rebalance (work_info, split_meta) for this batch's KV
+    # lengths; None keeps the same split count for every request.
+    gluon_kv_split_info: tuple[torch.Tensor, torch.Tensor] | None = None
     # Small-head non-DCP multi-token verify uses Gluon's native MTP entry.
     use_gluon_verify: bool = False
     # Nonzero when this batch takes the Triton verify kernel: its KV split cap.
@@ -1294,6 +1297,39 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._gluon_fp8_decode_max_batch = getattr(
             getattr(layer, "impl", None), "_gluon_fp8_decode_max_batch", 0
         )
+        # Gluon decode reads fp8 KV only through the fp8 batch limit above, and
+        # bf16 KV only below 16 heads.
+        self._gluon_kv_dtype = (
+            torch.float8_e4m3fn
+            if self._gluon_fp8_decode_max_batch
+            else kv_cache_spec.dtype
+        )
+        # Split rebalance buffers, sized for the largest batch and refilled for
+        # each decode step. The split depends on the whole batch, so batch
+        # invariance keeps the default split.
+        self._gluon_kv_split_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            and _gluon_mla_decode_supported()
+            and (
+                self._gluon_fp8_decode_max_batch
+                or (
+                    self._gluon_kv_dtype == torch.bfloat16
+                    and self._decode_num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+                )
+            )
+        ):
+            from aiter.ops.triton.gluon.mla_gluon import mla_gluon_split_metadata_info
+
+            buffer_specs = mla_gluon_split_metadata_info(
+                max_num_reqs, self._decode_num_heads, self._gluon_kv_dtype
+            )
+            if buffer_specs is not None:
+                (work_shape, work_dtype), (meta_shape, meta_dtype) = buffer_specs
+                self._gluon_kv_split_buffers = (
+                    torch.empty(work_shape, dtype=work_dtype, device=device),
+                    torch.empty(meta_shape, dtype=meta_dtype, device=device),
+                )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
@@ -2044,6 +2080,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             num_reqs=num_reqs,
             max_batch=self._gluon_fp8_decode_max_batch,
         )
+        gluon_kv_split_info = None
+        if use_gluon_decode and self._gluon_kv_split_buffers is not None:
+            from aiter.ops.triton.gluon.mla_gluon import mla_gluon_split_metadata
+
+            work_info, split_meta = self._gluon_kv_split_buffers
+            # None when the batch has as many requests as work items.
+            gluon_kv_split_info = mla_gluon_split_metadata(
+                paged_kv_indptr,
+                self._decode_num_heads,
+                self._gluon_kv_dtype,
+                use_2d_view=False,
+                out=(work_info, split_meta[: paged_kv_indptr.numel()]),
+            )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
             int(max_qo_len),
@@ -2328,6 +2377,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 else 0
             ),
             use_gluon_decode=use_gluon_decode,
+            gluon_kv_split_info=gluon_kv_split_info,
             use_gluon_verify=use_gluon_verify,
             triton_verify_num_kv_splits=triton_verify_num_kv_splits,
             triton_verify_qlens=self._triton_verify_qlens,
@@ -3809,6 +3859,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                     else 1.0
                 ),
                 min_kv_seq_len=decode.min_kv_seq_len,
+                kv_split_info=decode.gluon_kv_split_info,
             )
             return o, None
 
