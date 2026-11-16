@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -39,6 +40,10 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     sequence_parallel_chunk,
+)
+from vllm.models.amd.muse_spark.fused_allreduce_norm_residual_norm import (
+    fused_allreduce_norm_residual_then_norm,
+    o_proj_skips_reduce,
 )
 from vllm.models.muse_spark.common.layers import (
     MulTanhSoftCap,
@@ -845,6 +850,15 @@ class MuseSparkDecoderLayer(nn.Module):
             )
         assert stream.dtype == self.residual_dtype
 
+        # Skip o_proj's all-reduce when FlyDSL QuickReduce would take the
+        # partial, so the boundary epilogue can sum it. Otherwise o_proj
+        # reduces exactly as before.
+        self.self_attn.o_proj.reduce_results = not o_proj_skips_reduce(
+            stream.numel() // self.hidden_size,
+            self.hidden_size,
+            stream_dtype=stream.dtype,
+            out_dtype=self.default_dtype,
+        )
         attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
         return self.after_attention(stream, attn_out)
 
@@ -852,16 +866,37 @@ class MuseSparkDecoderLayer(nn.Module):
         self, stream: torch.Tensor, attn_out: torch.Tensor
     ) -> MuseSparkResidualStream:
         """Attention boundary and FFN; the FFN boundary is returned unblended."""
-        ffn_in, stream = norm_residual_then_norm(
-            MuseSparkResidualStream(
-                stream=stream,
-                branch=attn_out,
-                post_norm=self.post_attn_norm,
-                connection=self.add_attn,
-            ),
-            self.pre_ffn_norm,
-            out_dtype=self.default_dtype,
-        )
+        branch = attn_out
+        fused = None
+        if (
+            not self.self_attn.o_proj.reduce_results
+            and self.self_attn.o_proj.tp_size > 1
+        ):
+            fused = fused_allreduce_norm_residual_then_norm(
+                MuseSparkResidualStream(
+                    stream=stream,
+                    branch=attn_out,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+            )
+            if fused is None:
+                branch = tensor_model_parallel_all_reduce(attn_out)
+        if fused is None:
+            ffn_in, stream = norm_residual_then_norm(
+                MuseSparkResidualStream(
+                    stream=stream,
+                    branch=branch,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+            )
+        else:
+            ffn_in, stream = fused
         branch = self.feed_forward(ffn_in)
         return MuseSparkResidualStream(
             stream=stream,
