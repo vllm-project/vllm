@@ -1623,6 +1623,7 @@ def wait_for_gpu_memory_to_clear(
                 stable_duration_s=stable_duration_s,
                 stable_tolerance_bytes=stable_tolerance_bytes,
                 poll_interval_s=poll_interval_s,
+                idle_bytes=idle_bytes,
             ).result()
         return
     # HIP already applies device visibility; keep logical IDs and threshold keys.
