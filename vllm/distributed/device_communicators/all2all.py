@@ -1055,17 +1055,8 @@ class MoriAll2AllManager(All2AllManagerBase):
                     "mori currently only support arch gfx942 and gfx950"
                 )
 
-        # mori's combine transports the expert outputs as BF16. Opt in to its
-        # packed-FP4 (E2M1) blockwise codec instead: the sending rank quantizes
-        # each token to FP4 with one float scale per MORI_FP8_COMBINE_SCALE_DIM
-        # element block, and the receiving rank dequantizes back to BF16 while
-        # it reduces, so combine moves a quarter of the token bytes. This is a
-        # lossy combine on the MoE residual path, hence off by default.
-        #
-        # Checked here rather than left to mori: it rejects a non-gfx950 arch at
-        # handle construction but only rejects a non-IntraNode kernel type at the
-        # first combine, i.e. several minutes into a run. Both fail here, before
-        # any weights are loaded.
+        # Lossy packed-FP4 combine, so opt-in. Validated here because mori only
+        # rejects a non-IntraNode kernel type at the first combine.
         fp4_combine = envs.VLLM_MORI_FP4_COMBINE
         if fp4_combine and (self.internode or not on_gfx950()):
             raise ValueError(
