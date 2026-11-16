@@ -519,14 +519,11 @@ class LLMEngine:
     @staticmethod
     def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
-        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+        from vllm.compilation.wrapper import remove_bytecode_hooks
 
         model = model_ref()
-        if model is None:
-            return
-        for module in model.modules():
-            if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                module.cleanup()
+        if model is not None:
+            remove_bytecode_hooks(model)
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
