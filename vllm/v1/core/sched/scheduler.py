@@ -1406,19 +1406,20 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        if encoder_deferred:
-                            lo, hi = get_mm_features_in_window(
-                                request.mm_features,
-                                start=num_computed_tokens,
-                                end=num_computed_tokens
-                                + num_new_tokens
-                                + self.num_prefill_lookahead,
-                            )
-                            if lo < hi:
-                                # Leave the encoder cache and budget to the
-                                # earlier request deferred in this step.
-                                skip_request(request_queue)
-                                continue
+                        if encoder_deferred and self._has_encoder_embeds_in_window(
+                            request,
+                            num_computed_tokens,
+                            num_computed_tokens
+                            + num_new_tokens
+                            + self.num_prefill_lookahead,
+                        ):
+                            # Leave the encoder cache and budget to the
+                            # earlier request deferred in this step. A request
+                            # needing no embeddings goes on, and as on main it
+                            # can still take a reference to a cached image,
+                            # which keeps the deferred request from evicting it.
+                            skip_request(request_queue)
+                            continue
                         num_tokens_before_encoder = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
@@ -2056,6 +2057,21 @@ class Scheduler(SchedulerInterface):
 
         for input_id in duplicate_input_ids:
             self.encoder_cache_manager.check_and_update_cache(request, input_id)
+
+    @staticmethod
+    def _has_encoder_embeds_in_window(request: Request, start: int, end: int) -> bool:
+        """Whether a multimodal item of the request has embeddings at token
+        positions in [start, end), counted as in `_try_schedule_encoder_inputs`."""
+        lo, hi = get_mm_features_in_window(request.mm_features, start=start, end=end)
+        for mm_feature in request.mm_features[lo:hi]:
+            mm_position = mm_feature.mm_position
+            embeds_start, embeds_end = mm_position.get_embeds_indices_in_range(
+                max(0, start - mm_position.offset),
+                min(mm_position.length, end - mm_position.offset),
+            )
+            if embeds_end > embeds_start:
+                return True
+        return False
 
     def _try_schedule_encoder_inputs(
         self,

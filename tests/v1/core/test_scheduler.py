@@ -1228,6 +1228,67 @@ def test_encoder_deferral_holds_only_later_requests_needing_the_encoder():
     assert scheduler.schedule().num_scheduled_tokens == {"cached_mm": 16, "text": 100}
 
 
+@pytest.mark.parametrize(
+    "tail_offset,tail_is_embed,expected,expected_next",
+    [
+        (0, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
+        (40, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
+        (0, [False] * 200 + [True] * 400, {}, {"deferred": 288, "tail": 288}),
+        (200, [True] * 400 + [False] * 200, {}, {"deferred": 288, "tail": 288}),
+    ],
+    ids=[
+        "no-embeds-in-window",
+        "no-embeds-in-window-offset",
+        "embeds-in-window",
+        "embeds-in-window-offset",
+    ],
+)
+def test_encoder_deferral_holds_only_requests_with_embeddings_in_window(
+    tail_offset, tail_is_embed, expected, expected_next
+):
+    """Behind a request deferred for encoder cache space, a later request whose
+    tokens this step overlap an image only at positions without embeddings is
+    scheduled, and one whose tokens include embeddings waits."""
+    scheduler = _encoder_deferral_scheduler(
+        use_kv_connector=mock_kv(512, is_async=False)
+    )
+    busy, deferred, tail = create_requests(
+        num_requests=3,
+        num_tokens=800,
+        max_tokens=1,
+        req_ids=["busy", "deferred", "tail"],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=600)],
+            [PlaceholderRange(offset=100, length=600)],
+            [
+                PlaceholderRange(
+                    offset=tail_offset,
+                    length=600,
+                    is_embed=torch.tensor(tail_is_embed),
+                )
+            ],
+        ],
+        mm_hashes_list=[["busy"], ["deferred"], ["tail"]],
+    )
+    # Each request has 512 tokens from the KV connector and schedules the
+    # other 288.
+    scheduler.add_request(busy)
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens == {"busy": 288}
+
+    scheduler.add_request(deferred)
+    scheduler.add_request(tail)
+    # deferred needs 600 slots, and 424 are free.
+    assert scheduler.schedule().num_scheduled_tokens == expected
+
+    # Once busy's step is processed, deferred is scheduled.
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == expected_next
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
