@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.async_utils import merge_async_iterators
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LabelRead:
     result: RequestOutput
     logprobs: list[float]
