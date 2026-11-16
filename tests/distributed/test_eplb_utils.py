@@ -64,6 +64,22 @@ def test_phase_filter_survives_nested_warmup_suppression():
         torch.testing.assert_close(record, torch.tensor(has_prefill))
 
 
+def test_matching_phase_does_not_start_sampling_early():
+    """A matching phase still respects the existing sampling window."""
+    config = ParallelConfig(
+        eplb_config=EPLBConfig(
+            window_size=1, step_interval=10, load_collection_phase="prefill"
+        )
+    )
+    state = EplbState(config, torch.device("cpu"))
+    state.expert_load_window_size = config.eplb_config.window_size
+    state.expert_rearrangement_step_interval = config.eplb_config.step_interval
+    record = torch.zeros((), dtype=torch.bool)
+    state.should_record_tensor = record
+    state.set_batch_phase(True)
+    torch.testing.assert_close(record, torch.tensor(False))
+
+
 def test_load_collection_phase_rejects_unknown_phase():
     with pytest.raises(ValueError, match="load_collection_phase"):
         EPLBConfig(load_collection_phase="mixed")
