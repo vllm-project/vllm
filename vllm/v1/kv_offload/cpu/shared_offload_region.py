@@ -114,6 +114,15 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+@functools.cache
+def _libc_madvise() -> Callable[[int, int, int], int]:
+    # Called through ctypes, so the GIL is released while pages fault in.
+    madvise_fn = ctypes.CDLL(None, use_errno=True).madvise
+    madvise_fn.argtypes = [c_void_p, c_size_t, c_int]
+    madvise_fn.restype = c_int
+    return madvise_fn
+
+
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
@@ -136,7 +145,7 @@ class SharedOffloadRegion:
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
     `populate=False` skips pre-faulting, for a mapper whose peers pre-fault
-    every page.
+    every page or that calls prefault() later.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -342,6 +351,35 @@ class SharedOffloadRegion:
         for path, _, _ in self._segments:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
+
+    def prefault_ranges(
+        self, shard: tuple[int, int] | None = None
+    ) -> list[tuple[int, int]]:
+        """Ranges a deferred pre-fault covers: this rank's slots, or the whole
+        region, which `shard=(index, count)` walks from that share onwards."""
+        if shard is not None:
+            # Workers that share every byte each pin the whole region, so each
+            # maps all of it first: a page pinned before it is mapped is faulted
+            # inside the registration call. Starting on its own share spreads
+            # the first allocation of the pages across the files.
+            index, count = shard
+            share = round_up(cdiv(self.total_size_bytes, count), self.page_size)
+            start = min(index * share, self.total_size_bytes)
+            return [(start, self.total_size_bytes - start), (0, start)]
+        if self.rank is not None:
+            return list(self.iter_worker_slot_ranges())
+        return [(0, self.total_size_bytes)]
+
+    def prefault(self, offset: int, length: int) -> None:
+        """Pre-fault a range without holding the GIL."""
+        addr = self._base.data_ptr() + offset
+        if _libc_madvise()(addr, length, _MADV_POPULATE_WRITE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err != errno.EINVAL:
+            raise OSError(err, os.strerror(err))
+        assert self.mmap_obj is not None
+        _fallback_populate_write(self.mmap_obj, offset, length)
 
     def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
         """Yield this worker's slots as page-aligned (offset, length) ranges."""
