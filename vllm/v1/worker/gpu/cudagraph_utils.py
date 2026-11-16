@@ -18,7 +18,11 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cuda_graph import (
+    CUDAGraphStat,
+    CUDAGraphWrapper,
+    disable_cudagraph_wrappers,
+)
 from vllm.compilation.cudagraph_pool import (
     capture_outside_cumem_pool,
     capture_pool,
@@ -539,12 +543,13 @@ class CudaGraphManager:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
                         with (
+                            disable_cudagraph_wrappers(),
                             capture_pool(self.pool, self.vllm_config) as pool,
                             torch.cuda.graph(
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):
-                            forward_fn(CUDAGraphMode.NONE)
+                            forward_fn(CUDAGraphMode.FULL)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
                             # forks copy_stream, but wait_prefetch only happens in
@@ -802,6 +807,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
+                    for context in ubatch_state.forward_contexts:
+                        context.cudagraph_runtime_mode = cg_mode
                     store_capture_output(num_tokens, finish())
 
                 return ubatch_forward_fn
