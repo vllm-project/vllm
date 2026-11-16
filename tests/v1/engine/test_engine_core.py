@@ -1103,6 +1103,9 @@ def test_other_pauses_wait_for_the_ledger(mode, clear_cache):
     core._maybe_finish_pause()
     assert result.result(timeout=0) is None
     assert core._pending_pause is None
+    # A clearing keep pause retracts again what appeared while it was pending.
+    expected_retracts = 2 if mode == "keep" else 0
+    assert core.scheduler.retract_kv_transfers.call_count == expected_retracts
 
 
 def test_pending_pause_waits_for_in_flight_compute_but_not_connector_batches():

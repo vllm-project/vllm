@@ -3424,10 +3424,15 @@ class Scheduler(SchedulerInterface):
         load not started is cancelled, and a load in flight is waited for and
         then discarded, as its blocks may still be written. The requests stay
         queued and prefill with the new weights after the pause.
+
+        Called again until the pause completes, for the exports of prefills
+        that were in flight and the imports of requests added since.
         """
         self.drop_retained_exports()
         retracted: list[Request] = []
         for entry in self.ledger.live_imports():
+            if entry.retracted:
+                continue
             request = entry.request
             request_id = request.request_id
             retracted.append(request)

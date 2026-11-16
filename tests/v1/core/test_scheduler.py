@@ -6808,6 +6808,50 @@ def test_abort_all_frees_dropped_exports_when_connector_reports(monkeypatch):
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
 
 
+def test_retract_again_drops_late_exports_and_skips_retracted_loads(monkeypatch):
+    """A clearing keep pause retracts until it completes: a prefill in flight
+    at the pause opens its export later, and that export is dropped too. A
+    load already retracted is not withdrawn twice."""
+    scheduler = create_scheduler(use_kv_connector=True)
+    prefill, decode = create_requests(num_requests=2, req_ids=["prefill", "decode"])
+    for request in (prefill, decode):
+        scheduler.add_request(request)
+    scheduler.schedule()
+
+    for name in ("request_finished", "request_finished_all_groups"):
+        monkeypatch.setattr(
+            scheduler.connector, name, lambda *a, **k: (True, None), raising=False
+        )
+    monkeypatch.setattr(
+        scheduler.connector, "holds_blocks_only_for_remote_readers", lambda: True
+    )
+    dropped: list[Request] = []
+    withdrawn: list[Request] = []
+    monkeypatch.setattr(
+        scheduler.connector,
+        "drop_exports",
+        lambda requests: dropped.extend(requests) or False,
+    )
+    monkeypatch.setattr(scheduler.connector, "withdraw_imports", withdrawn.extend)
+    # The decode's remote load is in flight.
+    scheduler.ledger.import_started(decode)
+
+    scheduler.retract_kv_transfers()
+    assert dropped == [] and withdrawn == [decode]
+    assert scheduler.ledger.is_retracted(decode.request_id)
+
+    # The prefill in flight at the pause finishes; its KV is kept for a reader.
+    scheduler.finish_requests(
+        (prefill.request_id,), RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+    assert scheduler.ledger.is_referenced(prefill.request_id)
+
+    scheduler.retract_kv_transfers()
+    assert dropped == [prefill] and withdrawn == [decode]
+    assert not scheduler.ledger.is_referenced(prefill.request_id)
+    assert prefill.request_id not in scheduler.requests
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(

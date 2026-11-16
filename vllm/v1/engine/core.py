@@ -1068,6 +1068,8 @@ class EngineCore:
             # discards. Step until they finish, as EngineCoreProc does before
             # it completes a pause.
             while self.scheduler.has_requests() or self.batch_queue:
+                if mode == "keep":
+                    self.scheduler.retract_kv_transfers()
                 _, model_executed = self.step_fn()
                 self.post_step(model_executed)
                 if not model_executed:
@@ -2582,6 +2584,10 @@ class EngineCoreProc(EngineCore):
         if self._pending_pause is None:
             return
         future, mode, clear_cache, reset_connector = self._pending_pause
+        if mode == "keep" and clear_cache:
+            # Prefills in flight at the pause have finished since, and
+            # requests may have been added: retract their transfers too.
+            self.scheduler.retract_kv_transfers()
         if not self._pause_ready(mode, clear_cache):
             return
         self._pending_pause = None
