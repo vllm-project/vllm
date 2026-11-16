@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Deterministic policy experiment. NOT a GPU or vLLM engine benchmark."""
+
 import json
 import math
 from dataclasses import dataclass, field
@@ -32,8 +33,7 @@ def run(adaptive, scenario="mixed"):
     if scenario != "short_only":
         requests += [Request(f"long-{i}", i * 0.05, 16384, 8) for i in range(4)]
     if scenario != "long_only":
-        requests += [Request(f"short-{i}", 0.1 + i * 0.02, 16, 64)
-                     for i in range(32)]
+        requests += [Request(f"short-{i}", 0.1 + i * 0.02, 16, 64) for i in range(32)]
     now = 0.0
     steps = 0
     while any(r.emitted < r.output for r in requests):
@@ -48,8 +48,7 @@ def run(adaptive, scenario="mixed"):
         prefill = [r for r in active if r.computed < r.prompt]
         b = None
         if controller:
-            b = controller.begin(now, len(decode), 8192,
-                                 {r.name for r in prefill})
+            b = controller.begin(now, len(decode), 8192, {r.name for r in prefill})
             prefill.sort(key=lambda r: controller.last_progress[r.name])
         actual = {r.name: 1 for r in decode}
         contexts = {}
@@ -81,22 +80,50 @@ def run(adaptive, scenario="mixed"):
             r.times.append(now)
         if controller:
             controller.complete(steps, device_ms)
-    gaps = [(b - a) * 1000 for r in requests if r.name.startswith("short")
-            for a, b in zip(r.times, r.times[1:])]
-    return {"scenario": scenario, "policy": "adaptive" if adaptive else "baseline",
-            "evidence": "synthetic_policy_simulation_not_gpu",
-            "synthetic_cost": "0.5 + 0.18*decode_reqs + 0.006*context_weighted_prefill_tokens ms",
-            "decode_gap_p99_ms": percentile(gaps, .99),
-            "short_ttft_p95_ms": percentile([(r.times[0] - r.arrival) * 1000
-                for r in requests if r.name.startswith("short")], .95),
-            "long_ttft_max_ms": max(((r.times[0] - r.arrival) * 1000
-                for r in requests if r.name.startswith("long")), default=None),
-            "output_tokens_per_s": sum(r.emitted for r in requests) / now,
-            "all_prefills_completed": all(r.computed == r.prompt for r in requests),
-            "steps": steps}
+    gaps = [
+        (b - a) * 1000
+        for r in requests
+        if r.name.startswith("short")
+        for a, b in zip(r.times, r.times[1:])
+    ]
+    return {
+        "scenario": scenario,
+        "policy": "adaptive" if adaptive else "baseline",
+        "evidence": "synthetic_policy_simulation_not_gpu",
+        "synthetic_cost": (
+            "0.5 + 0.18*decode_reqs + 0.006*context_weighted_prefill_tokens ms"
+        ),
+        "decode_gap_p99_ms": percentile(gaps, 0.99),
+        "short_ttft_p95_ms": percentile(
+            [
+                (r.times[0] - r.arrival) * 1000
+                for r in requests
+                if r.name.startswith("short")
+            ],
+            0.95,
+        ),
+        "long_ttft_max_ms": max(
+            (
+                (r.times[0] - r.arrival) * 1000
+                for r in requests
+                if r.name.startswith("long")
+            ),
+            default=None,
+        ),
+        "output_tokens_per_s": sum(r.emitted for r in requests) / now,
+        "all_prefills_completed": all(r.computed == r.prompt for r in requests),
+        "steps": steps,
+    }
 
 
 if __name__ == "__main__":
-    print(json.dumps([run(policy, scenario)
-                      for scenario in ("short_only", "long_only", "mixed")
-                      for policy in (False, True)], indent=2))
+    print(
+        json.dumps(
+            [
+                run(policy, scenario)
+                for scenario in ("short_only", "long_only", "mixed")
+                for policy in (False, True)
+            ],
+            indent=2,
+        )
+    )

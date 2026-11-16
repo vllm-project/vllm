@@ -40,7 +40,8 @@ class PrefillBudget:
 
     def admit(self, request_id: str, tokens: int, context: int) -> None:
         self.costs[request_id] = (
-            tokens * self.token_ms * (1.0 + context / 8192), tokens
+            tokens * self.token_ms * (1.0 + context / 8192),
+            tokens,
         )
 
     def refund(self, request_id: str) -> None:
@@ -62,10 +63,17 @@ class AdaptivePrefillController:
     progress; it never overrides the engine's allocation/alignment rules.
     """
 
-    def __init__(self, target_ms: float = 40, token_ms: float = 0.02,
-                 min_share: float = 0.1, max_wait_ms: float = 250):
-        if not all(math.isfinite(x) and x > 0 for x in
-                   (target_ms, token_ms, min_share, max_wait_ms)):
+    def __init__(
+        self,
+        target_ms: float = 40,
+        token_ms: float = 0.02,
+        min_share: float = 0.1,
+        max_wait_ms: float = 250,
+    ):
+        if not all(
+            math.isfinite(x) and x > 0
+            for x in (target_ms, token_ms, min_share, max_wait_ms)
+        ):
             raise ValueError("Adaptive prefill parameters must be finite and positive")
         if min_share >= 1:
             raise ValueError("min_share must be less than one")
@@ -79,35 +87,47 @@ class AdaptivePrefillController:
         self.last_progress: dict[str, float] = {}
         self.pending: dict[int, PendingStep] = {}
 
-    def begin(self, now: float, decode_reqs: int, max_tokens: int,
-              prefill_ids: set[str]) -> PrefillBudget:
+    def begin(
+        self, now: float, decode_reqs: int, max_tokens: int, prefill_ids: set[str]
+    ) -> PrefillBudget:
         self.last_progress = {
             rid: self.last_progress.get(rid, now) for rid in prefill_ids
         }
         if not prefill_ids:
             self.credit_ms = 0
         else:
-            self.credit_ms = min(self.target_ms, self.credit_ms +
-                                 self.target_ms * self.min_share)
+            self.credit_ms = min(
+                self.target_ms, self.credit_ms + self.target_ms * self.min_share
+            )
         inflight = sum(step.reserved_ms for step in self.pending.values())
-        allowance = max(0.0, self.target_ms * self.scale -
-                        self.decode_ms * decode_reqs - inflight)
-        aged = any((now - t) * 1000 >= self.max_wait_ms
-                   for t in self.last_progress.values())
+        allowance = max(
+            0.0, self.target_ms * self.scale - self.decode_ms * decode_reqs - inflight
+        )
+        aged = any(
+            (now - t) * 1000 >= self.max_wait_ms for t in self.last_progress.values()
+        )
         if aged or decode_reqs == 0:
             # Already-issued work must finish before spending the same reserve.
             allowance = max(allowance, max(0, self.credit_ms - inflight))
         if decode_reqs == 0 and not self.pending:
             allowance = max(allowance, self.target_ms)
         return PrefillBudget(
-            allowance, self.token_ms, max_tokens,
+            allowance,
+            self.token_ms,
+            max_tokens,
             allowance / max(1, len(prefill_ids)),
             force_progress=aged and not self.pending,
         )
 
-    def commit(self, step_id: int, budget: PrefillBudget,
-               actual: dict[str, int], contexts: dict[str, int],
-               decode_reqs: int, now: float) -> None:
+    def commit(
+        self,
+        step_id: int,
+        budget: PrefillBudget,
+        actual: dict[str, int],
+        contexts: dict[str, int],
+        decode_reqs: int,
+        now: float,
+    ) -> None:
         units = 0.0
         for rid, count in actual.items():
             if rid in contexts:
@@ -128,13 +148,10 @@ class AdaptivePrefillController:
         elif device_ms < self.target_ms * 0.8:
             self.scale = min(1.0, self.scale + 0.02)
         if step.units:
-            residual = max(0.001, device_ms -
-                           self.decode_ms * step.decode_reqs)
+            residual = max(0.001, device_ms - self.decode_ms * step.decode_reqs)
             measured = residual / step.units
             # React quickly to underestimation; decay estimates slowly.
             weight = 0.5 if measured > self.token_ms else 0.05
-            self.token_ms = max(1e-6, (1 - weight) * self.token_ms +
-                                weight * measured)
+            self.token_ms = max(1e-6, (1 - weight) * self.token_ms + weight * measured)
         elif step.decode_reqs:
-            self.decode_ms = (0.9 * self.decode_ms +
-                              0.1 * device_ms / step.decode_reqs)
+            self.decode_ms = 0.9 * self.decode_ms + 0.1 * device_ms / step.decode_reqs

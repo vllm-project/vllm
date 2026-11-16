@@ -256,7 +256,9 @@ class SchedulerConfig:
     adaptive_prefill_min_share: float = Field(default=0.1, gt=0, lt=1)
     """Share of target time accrued as bounded prefill progress credit."""
 
-    adaptive_prefill_max_wait_ms: float = Field(default=250.0, gt=0, allow_inf_nan=False)
+    adaptive_prefill_max_wait_ms: float = Field(
+        default=250.0, gt=0, allow_inf_nan=False
+    )
     """Age after which a prefill may spend progress credit under contention."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)

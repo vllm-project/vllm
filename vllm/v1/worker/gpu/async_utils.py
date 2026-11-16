@@ -126,7 +126,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
-        adaptive_prefill_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None,
+        adaptive_prefill_events: tuple[torch.cuda.Event, torch.cuda.Event]
+        | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than

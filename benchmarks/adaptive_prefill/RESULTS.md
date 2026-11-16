@@ -1,7 +1,8 @@
-# Validation on November 15, 2026
+# Validation on November 16, 2026
 
-Base source: vLLM `919d45f`. This is an experimental local patch, not an accepted
-upstream fix for #62574.
+Current upstream base: vLLM `71c3541492cf`. The initial simulation used
+`919d45f`; it was repeated after rebasing without changing the results below.
+This is an experimental patch, not an accepted upstream fix for #62574.
 
 ## Hardware and blocked work
 
@@ -10,10 +11,30 @@ The Windows host reports AMD Radeon integrated graphics. WSL PyTorch
 No live vLLM GPU server or GB10/DeepSeek reproduction was run. Real GPU decode
 p99, TTFT and throughput are **not available**.
 
-Full engine scheduler pytest cases were added for sync/async and enabled/disabled
-operation, but could not execute: this checkout lacks pytest and the complete
-vLLM test environment (configuration import also requires missing pydantic).
-No GPU result may be inferred from syntax validation or the tests below.
+The CPU scheduler test environment now runs the real scheduler and KV managers
+with synthetic worker outputs. The complete `test_scheduler.py` and
+`test_async_scheduler.py` run passed: **319 passed** in 228.06 seconds, including
+the four new enabled/disabled and sync/async controller cases. Two existing
+structured-output tests bypass scheduler construction; their fixtures now
+explicitly initialize the optional controller to its disabled default.
+
+Environment: Python 3.12.16, PyTorch 2.15.0+cpu, Triton CPU 3.8.0,
+Transformers 5.23.0 and pytest 9.2.0. PyTorch differs from the checkout's 2.14.0
+pin, so this is local CPU integration evidence, not a matching upstream CI image.
+Source CPU package metadata was generated with `VLLM_TARGET_DEVICE=cpu` and
+`python setup.py egg_info`; this does not build model-execution kernels. An
+optional editable install was stopped after it started compiling the unrelated
+Rust frontend; no successful complete wheel build is claimed.
+
+Reproduction after installing CPU test dependencies and caching model configs:
+
+```bash
+VLLM_TARGET_DEVICE=cpu CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 python -m pytest \
+  tests/v1/core/test_scheduler.py tests/v1/core/test_async_scheduler.py -q
+```
+
+`test_scheduler_e2e.py` requires model execution and is not part of this CPU-only
+run. No GPU result may be inferred from any of the tests below.
 
 ## Executed checks
 
@@ -21,7 +42,7 @@ No GPU result may be inferred from syntax validation or the tests below.
   context cost, pending reservations, rollback refunds, invalid feedback,
   bounded state, aged minimum progress, fair shares, and local HTTP protocol
   handling (including truncated and multi-token streams).
-- Modified Python files compile; `git diff --check` passes.
+- Modified Python files pass Ruff lint/format checks; `git diff --check` passes.
 - The streaming fixture is only a protocol test, not inference evidence.
 
 ## Synthetic policy experiment only

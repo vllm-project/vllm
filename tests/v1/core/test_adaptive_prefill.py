@@ -72,8 +72,12 @@ class TestAdaptivePrefill(unittest.TestCase):
             self.assertEqual(c.token_ms, 0.02)
 
     def test_invalid_configuration(self):
-        for kwargs in ({"target_ms": 0}, {"token_ms": float("nan")},
-                       {"min_share": 1}, {"max_wait_ms": -1}):
+        for kwargs in (
+            {"target_ms": 0},
+            {"token_ms": float("nan")},
+            {"min_share": 1},
+            {"max_wait_ms": -1},
+        ):
             with self.assertRaises(ValueError):
                 AdaptivePrefillController(**kwargs)
 
@@ -98,15 +102,15 @@ class TestAdaptivePrefill(unittest.TestCase):
     def test_aged_expensive_token_makes_soft_slo_progress(self):
         c = AdaptivePrefillController(target_ms=1, token_ms=10, max_wait_ms=1)
         c.begin(0, 1, 100, {"a"})
-        b = c.begin(.01, 1, 100, {"a"})
+        b = c.begin(0.01, 1, 100, {"a"})
         self.assertEqual(b.limit("a", 100, 100000), 1)
         b.admit("a", 1, 100000)
         self.assertEqual(b.limit("b", 100, 100000), 0)
-        c.commit(1, b, {"a": 1}, {"a": 100000}, 1, .01)
+        c.commit(1, b, {"a": 1}, {"a": 100000}, 1, 0.01)
         self.assertEqual(c.begin(1, 1, 100, {"a"}).limit("a", 100, 100000), 0)
 
     def test_fair_share_leaves_room_for_waiting_prompt(self):
-        c = AdaptivePrefillController(target_ms=10, token_ms=.1)
+        c = AdaptivePrefillController(target_ms=10, token_ms=0.1)
         b = c.begin(0, 0, 1000, {"long", "short"})
         n = b.limit("long", 1000, 0)
         b.admit("long", n, 0)

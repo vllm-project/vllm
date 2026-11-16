@@ -77,9 +77,25 @@ of progress for that workload, not a proof of starvation freedom for all traffic
 ```bash
 python -m unittest discover -s tests/v1/core -p 'test_adaptive_prefill*.py' -v
 PYTHONPATH=. python benchmarks/adaptive_prefill/simulate.py
-# With the full vLLM test environment installed:
-pytest tests/v1/core/test_scheduler.py -k adaptive_prefill
+# With the vLLM CPU test dependencies and Triton CPU installed:
+VLLM_TARGET_DEVICE=cpu CUDA_VISIBLE_DEVICES= python -m pytest \
+  tests/v1/core/test_scheduler.py tests/v1/core/test_async_scheduler.py -q
+# Extended randomized priority/preemption coverage (can take several minutes):
+VLLM_TARGET_DEVICE=cpu CUDA_VISIBLE_DEVICES= python -m pytest \
+  tests/v1/core/test_priority_scheduler_random.py -q
 ```
+
+Use Python 3.11 or newer for this source snapshot. CPU scheduler tests instantiate
+the real scheduler and KV managers with synthetic worker outputs, not a live
+model runner. They need model configuration metadata but not model weights.
+After the metadata is cached, `HF_HUB_OFFLINE=1` avoids repeated network lookups.
+The four `adaptive_prefill` cases cover enabled/disabled policy and sync/async
+scheduling. The remaining scheduler cases exercise the default disabled policy;
+their success is not evidence that every existing mode supports the controller.
+
+No CUDA kernels, event timing, model inference, tensor-parallel collectives or
+GPU latency/throughput are validated by these CPU commands. In particular,
+`test_scheduler_e2e.py` launches a model and is not included in this CPU-only gate.
 
 `simulate.py` executes a declared synthetic cost model and no GPU kernels. Its
 numbers MUST NOT be described as vLLM GPU benchmark results. It exposes the

@@ -1850,8 +1850,10 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         for name in (
-            "adaptive_prefill", "adaptive_prefill_target_ms",
-            "adaptive_prefill_token_ms", "adaptive_prefill_min_share",
+            "adaptive_prefill",
+            "adaptive_prefill_target_ms",
+            "adaptive_prefill_token_ms",
+            "adaptive_prefill_min_share",
             "adaptive_prefill_max_wait_ms",
         ):
             scheduler_group.add_argument(

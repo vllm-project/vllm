@@ -103,8 +103,10 @@ def test_adaptive_prefill_preserves_decode_and_caps_new_prompt(
     async_scheduling, enabled
 ):
     scheduler = create_scheduler(
-        max_num_batched_tokens=128, max_model_len=128,
-        async_scheduling=async_scheduling, adaptive_prefill=enabled,
+        max_num_batched_tokens=128,
+        max_model_len=128,
+        async_scheduling=async_scheduling,
+        adaptive_prefill=enabled,
         adaptive_prefill_token_ms=10,
     )
     (decode,) = create_requests(
@@ -112,10 +114,14 @@ def test_adaptive_prefill_preserves_decode_and_caps_new_prompt(
     )
     scheduler.add_request(decode)
     first = scheduler.schedule()
-    scheduler.update_from_output(first, ModelRunnerOutput(
-        req_ids=["decode"], sampled_token_ids=[[1]],
-        adaptive_prefill_device_ms=2,
-    ))
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=["decode"],
+            sampled_token_ids=[[1]],
+            adaptive_prefill_device_ms=2,
+        ),
+    )
     (prefill,) = create_requests(
         num_requests=1, num_tokens=64, max_tokens=8, req_ids=["prefill"]
     )
@@ -5210,6 +5216,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.num_computed_tokens = request.num_tokens
 
     scheduler.perf_metrics = None
+    scheduler.adaptive_prefill = None
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
