@@ -515,8 +515,13 @@ class Base(
         )
         return embeddings
 
-    def recursive_replace(self, root: nn.Module | None = None, prefix: str = "model"):
-        """Recursively replace modules in `root` (default `self.model`) as needed.
+    def recursive_replace(self):
+        """Recursively replace modules in `self.model` as needed (see
+        `replace_modules`)."""
+        self.replace_modules(self.model, prefix="model")
+
+    def replace_modules(self, root: nn.Module, prefix: str):
+        """Recursively replace modules in `root`, at `prefix`, as needed.
 
         Currently, this replaces:
 
@@ -528,7 +533,6 @@ class Base(
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
-        root = self.model if root is None else root
         tp_plan = self._tp_plan()
 
         if not tp_plan and self.tp_group.world_size > 1:
