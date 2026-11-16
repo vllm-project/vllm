@@ -46,6 +46,7 @@ class Segment:
 
 class Engine:
     instances: list["Engine"] = []
+    next_available = True
 
     def __init__(self, config_path: str) -> None:
         self.config = json.loads(Path(config_path).read_text())
@@ -56,7 +57,7 @@ class Engine:
         self.batches: list[tuple[np.ndarray, np.ndarray, np.ndarray, str, int]] = []
         self.statuses: list[int] = []
         self.failure: Exception | None = None
-        self._available = True
+        self._available = Engine.next_available
         Engine.instances.append(self)
 
     def available(self) -> bool:
@@ -224,10 +225,12 @@ def test_empty_ranges_skip_the_engine(engine) -> None:
 
 
 def test_unavailable_engine_is_rejected(engine) -> None:
-    backend = make_backend()
-    backend._engine._available = False
-    with pytest.raises(RuntimeError, match="not available"):
-        make_backend()
+    Engine.next_available = False
+    try:
+        with pytest.raises(RuntimeError, match="not available"):
+            make_backend()
+    finally:
+        Engine.next_available = True
 
 
 def test_factory_defaults_to_te(engine) -> None:
