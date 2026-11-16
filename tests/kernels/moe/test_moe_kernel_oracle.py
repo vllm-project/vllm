@@ -59,6 +59,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    _ALWAYS_BF16_BOUND,
     Mxfp4MoeBackend,
     Mxfp4MoEKernelOracle,
     _filter_by_activation,
@@ -759,7 +760,14 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
 
 
-_NO_ACTIVATION_BOUND = str(2**31 - 1)
+_NO_ACTIVATION_BOUND = _ALWAYS_BF16_BOUND
+
+
+@pytest.fixture(autouse=True)
+def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
+    """The oracle sets AITER_BF16_FP8_MOE_BOUND, a process-wide variable, at backend
+    selection: start every test from AITER's default and restore it afterwards."""
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
 
 _MXFP8_MOE = {"moe": {"weight": "mxfp4", "activation": "mxfp8"}}
@@ -806,8 +814,6 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.model_config.quantization_config = quant_config_args(**config)
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
-    # Restores the env var after the test.
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
     with layer_target_spec_scope(layer_spec):
         _set_aiter_bf16_fp8_moe_bound()
     assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
@@ -817,7 +823,6 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
 def test_aiter_activation_bound_keeps_a_bf16_request(monkeypatch) -> None:
     """The bound is process-wide: a layer with `activation: null` is not overridden
     by a layer built later."""
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
     for activation, expected_bound in (
         (None, _NO_ACTIVATION_BOUND),
         (kMxfp8Dynamic, _NO_ACTIVATION_BOUND),
@@ -846,7 +851,6 @@ def test_deepseek_v4_selection_sets_the_aiter_activation_bound(
         "_select_deepseek_v4_mxfp4_moe_backend",
         lambda config: (backend, None),
     )
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
     mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(None)
     assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 

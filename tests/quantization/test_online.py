@@ -60,6 +60,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    _ALWAYS_BF16_BOUND,
     Mxfp4MoeBackend,
     _backend_activation_key,
 )
@@ -214,6 +215,15 @@ else:
 
 DEVICE = current_platform.device_type
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
+    """The oracle sets AITER_BF16_FP8_MOE_BOUND, a process-wide variable, at backend
+    selection: start every test from AITER's default and restore it afterwards."""
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+
+
 # The interleaved AITER_MXFP4_BF16 kernels have no config for this tiny MoE with
 # bf16 activations (`activation: null`).
 _ROCM_BF16_ACTIVATION_MOE_KWARGS = (
@@ -950,8 +960,6 @@ def test_online_quantization_configures_prequantized_moe(
     if isinstance(moe, dict):
         # MXFP8 or bf16 activations with MXFP4 weights need the AITER backend.
         _enable_aiter_mxfp4_moe(monkeypatch)
-        # The oracle sets this process-wide variable at backend selection.
-        monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
     if checkpoint == "block_fp8":
         quant_config = Fp8Config(weight_block_size=[128, 128])
         expected_source_cls = Fp8MoEMethod
@@ -987,7 +995,7 @@ def test_online_quantization_configures_prequantized_moe(
         # selected by AITER_BF16_FP8_MOE_BOUND.
         assert method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
         assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
-            "0" if expected_activation == kMxfp8Dynamic else str(2**31 - 1)
+            "0" if expected_activation == kMxfp8Dynamic else _ALWAYS_BF16_BOUND
         )
 
 
@@ -2288,8 +2296,6 @@ def test_online_quantization(
 
     if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
-        # The oracle sets this process-wide variable at backend selection.
-        monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
         rocm_aiter_ops.refresh_env_variables()
         if not use_rocm_aiter and "activation" in str(online_quant_args):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
@@ -3428,7 +3434,6 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
     default_vllm_config.model_config.quantization_config = quant_config_args(
         moe={"weight": "mxfp4", "activation": activation_key}
     )
-    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
     num_experts, hidden_size, intermediate_size = 4, 256, 256
     block = [128, 128]
@@ -3529,7 +3534,7 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         # count) and bf16 activations (very high bound).
         assert online_method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
         assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
-            "0" if activation_key == kMxfp8Dynamic else str(2**31 - 1)
+            "0" if activation_key == kMxfp8Dynamic else _ALWAYS_BF16_BOUND
         )
     assert_quantized_weights_equal(
         reference_layer,
