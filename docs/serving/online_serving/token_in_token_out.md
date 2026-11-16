@@ -24,7 +24,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | Field | Notes |
 | --- | --- |
 | `token_ids` | Required `list[int]`: the already-templated prompt. Non-empty, no negative IDs. |
-| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. |
+| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. `bad_words` needs a tokenizer: a server without one (`--tokens-only` or `--skip-tokenizer-init`) rejects it with a 400. |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
@@ -49,7 +49,7 @@ Send the header `X-data-parallel-rank: <int>` to pin a request to one data-paral
 
 ## Request priority (`X-Vllm-Priority`)
 
-Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`). The Rust frontend does not read the header on this endpoint and uses only the body `priority`.
+Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`).
 
 ## Output modes
 
