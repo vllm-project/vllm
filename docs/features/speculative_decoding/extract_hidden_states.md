@@ -51,6 +51,27 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 A complete example is available at [`examples/features/speculative_decoding/extract_hidden_states_offline.py`](../../../examples/features/speculative_decoding/extract_hidden_states_offline.py).
 
+## Custom KV Connector Hooks
+
+A custom KV connector can receive hidden states after sampling by overriding
+`KVConnectorBase_V1.get_required_hidden_states` to return a `HiddenStatesRequest`
+and implementing `save_hidden_states(StepHiddenStates)`. The default request is
+`None`, which disables the hook.
+
+`HiddenStatesRequest(layers=())` requests only the final hidden states.
+For auxiliary states, explicit layer IDs are sorted and deduplicated, and
+`StepHiddenStates.layers` identifies the tensors in their returned order.
+`layers=None` selects the active drafter's auxiliary layers, or the model's
+EAGLE-3 defaults when the drafter does not use auxiliary states. Explicit layers
+must match the active drafter's layers when it consumes auxiliary states.
+Connector-only auxiliary states are not passed to EAGLE or MTP drafters that
+consume only final hidden states.
+
+Auxiliary requests require a model implementing `SupportsEagle3` with a decoder
+discoverable as an `EagleModelMixin`. Models such as `DeepseekV2ForCausalLM` whose
+decoders lack that interface are rejected during model loading; they can still
+use `layers=()` for final hidden states. Pipeline parallelism is unsupported.
+
 ## Online Example
 
 For improved performance, it is recommended to use a RAM-mounted file system such as `/dev/shm/` for online usage in which the client cleans up the files soon after they are generated.

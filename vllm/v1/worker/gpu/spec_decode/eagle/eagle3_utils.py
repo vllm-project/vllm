@@ -45,7 +45,13 @@ def set_eagle3_aux_hidden_state_layers(
 def get_aux_hidden_state_layers(model: nn.Module) -> tuple[int, ...]:
     """The auxiliary hidden state layers set on ``model``, in output order."""
     decoder = get_eagle_decoder(model)
-    return () if decoder is None else tuple(decoder.aux_hidden_state_layers)
+    if decoder is None:
+        raise ValueError(
+            f"The KV connector cannot retrieve auxiliary hidden state layers from "
+            f"{type(model).__name__}: its decoder does not implement EagleModelMixin. "
+            "Request HiddenStatesRequest(layers=()) for final hidden states only."
+        )
+    return tuple(sorted(set(decoder.aux_hidden_state_layers)))
 
 
 def set_connector_aux_hidden_state_layers(
@@ -74,11 +80,14 @@ def set_connector_aux_hidden_state_layers(
             "SupportsEagle3)."
         )
     eagle3_model = cast(SupportsEagle3, model)
-    eagle3_model.set_aux_hidden_state_layers(
+    # Reject unsupported decoders before changing their auxiliary outputs.
+    get_aux_hidden_state_layers(model)
+    layers = (
         request.layers
         if request.layers is not None
         else eagle3_model.get_eagle3_default_aux_hidden_state_layers()
     )
+    eagle3_model.set_aux_hidden_state_layers(tuple(sorted(set(layers))))
     reserve_aux_intermediate_tensor_slots(model)
     return get_aux_hidden_state_layers(model)
 

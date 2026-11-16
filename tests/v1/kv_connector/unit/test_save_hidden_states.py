@@ -128,6 +128,83 @@ def test_multi_connector_merges_one_request_and_refuses_two(monkeypatch):
         )
 
 
+def test_deepseek_connector_aux_layers_are_rejected(vllm_runner):
+    """An Eagle3-capable decoder without layer introspection must fail explicitly."""
+
+    def check_requests(model):
+        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+            set_connector_aux_hidden_state_layers,
+        )
+
+        for uses_aux in (False, True):
+            for layers in (None, (2,)):
+                with pytest.raises(
+                    ValueError, match="does not implement EagleModelMixin"
+                ):
+                    set_connector_aux_hidden_state_layers(
+                        model, HiddenStatesRequest(layers), uses_aux
+                    )
+            assert (
+                set_connector_aux_hidden_state_layers(
+                    model, HiddenStatesRequest(()), uses_aux
+                )
+                == ()
+            )
+        assert model.model.aux_hidden_state_layers == ()
+
+    with vllm_runner(
+        "vllm-project/deepseek-v3-random",
+        enforce_eager=True,
+        max_model_len=128,
+    ) as runner:
+        runner.apply_model(check_requests)
+
+
+@pytest.mark.parametrize("speculative", [False, True], ids=["no-drafter", "mtp"])
+def test_custom_aux_layers_with_mtp(vllm_runner, tmp_path, speculative):
+    """Qwen3.5 emits ordered unique taps without feeding them to its MTP drafter."""
+    from vllm import SamplingParams
+
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B-Base",
+        block_size=None,
+        enable_chunked_prefill=None,
+        max_model_len=256,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        disable_hybrid_kv_cache_manager=True,
+        speculative_config=(
+            {"method": "mtp", "num_speculative_tokens": 1} if speculative else None
+        ),
+        kv_transfer_config={
+            "kv_connector": "RecordingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_module_path": MODULE,
+            "kv_connector_extra_config": {
+                "dump_dir": str(tmp_path),
+                "layers": [14, 2, 14],
+            },
+        },
+    ) as runner:
+        (output,) = runner.llm.generate(
+            ["Write the numbers 1, 2, 3, 4, 5 and continue:"],
+            SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
+        )
+
+    sampled = []
+    paths = sorted(tmp_path.glob("*.pt"), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
+    assert len(paths) > 1
+    for path in paths:
+        step = torch.load(path)
+        assert step["layers"] == (2, 14)
+        assert len(step["aux"]) == 2
+        assert all(h.shape == step["final"].shape for h in step["aux"])
+        (num_sampled,) = step["num_sampled"].tolist()
+        sampled.extend(step["sampled"][0, :num_sampled].tolist())
+    generated = list(output.outputs[0].token_ids)
+    assert len(generated) == 8
+    assert sampled[: len(generated)] == generated
+
+
 def _lm_head():
     from huggingface_hub import snapshot_download
     from safetensors import safe_open

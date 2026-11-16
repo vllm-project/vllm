@@ -2483,7 +2483,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     slot_mappings_by_layer,
                     spec_hidden_states,
-                    aux_hidden_states,
+                    aux_hidden_states
+                    if self.speculator_uses_aux_hidden_states
+                    else None,
                     num_sampled,
                     num_rejected,
                     self.req_states.last_sampled_tokens,

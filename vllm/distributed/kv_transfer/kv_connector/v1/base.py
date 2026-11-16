@@ -114,7 +114,8 @@ class HiddenStatesRequest:
     decoder layers, as for EAGLE-3 auxiliary hidden states. ``None`` takes the
     layers of a running drafter that uses auxiliary hidden states, or else the
     model's default EAGLE-3 layers. ``()`` asks for the final hidden state
-    only."""
+    only. Explicit layers are sorted and deduplicated before configuring the
+    model."""
 
 
 @dataclass
