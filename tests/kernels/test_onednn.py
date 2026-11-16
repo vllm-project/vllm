@@ -26,16 +26,6 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
-# On Arm, oneDNN's ACL GEMM with a bf16 output acts as if it rounds partial
-# sums to bf16 every ~256 of k: its error grows with k, ~1.6-2% at k=4096, past
-# assert_close's bf16 default rtol of 1.6%. bf16 x bf16 -> fp32 then one cast
-# (what create_onednn_mm does for N >= 64000) stays under 0.4%. Restore the
-# default once the bf16 output goes through fp32 for every N.
-BF16_GEMM_TOL = (
-    {"rtol": 3e-2, "atol": 1e-5}
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    else {}
-)
 
 
 @pytest.fixture(autouse=True)
@@ -160,7 +150,7 @@ def onednn_gemm_test_helper(
         dtype=a.dtype
     )
 
-    torch.testing.assert_close(out, baseline, **BF16_GEMM_TOL)
+    torch.testing.assert_close(out, baseline)
 
     if use_bias:
         # To test runtime bias setting
@@ -169,7 +159,7 @@ def onednn_gemm_test_helper(
             dtype=a.dtype
         )
 
-        torch.testing.assert_close(out, baseline, **BF16_GEMM_TOL)
+        torch.testing.assert_close(out, baseline)
 
 
 @pytest.mark.parametrize("n,k", NK_FACTORS)
@@ -219,7 +209,21 @@ def test_onednn_gemm(
     use_stride: bool,
     dtype: torch.dtype,
     primitive_cache_size: int,
+    request: pytest.FixtureRequest,
 ):
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and (
+        n,
+        k,
+        use_bias,
+        use_stride,
+    ) == (16384, 4096, True, False):
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                reason="ACL bf16-output GEMM loses precision as k grows: "
+                "https://github.com/vllm-project/vllm/issues/67996",
+            )
+        )
     for m in m_list:
         onednn_gemm_test_helper(
             primitive_cache_size=primitive_cache_size,
