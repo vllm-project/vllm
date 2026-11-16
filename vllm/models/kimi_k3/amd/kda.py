@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -68,38 +66,8 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
-
-
-class _PaddedKimiGDNMergedColumnParallelLinear(_KimiGDNMergedColumnParallelLinear):
-    """Merged projection with `padding_size` zero rows appended per rank."""
-
-    def __init__(self, *args, padding_size: int = 0, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.padding_size = padding_size
-        if padding_size:
-            assert isinstance(self.weight, torch.Tensor)
-            # Exclude padding rows from the load-completion count.
-            set_weight_attrs(
-                self.weight,
-                {"weight_loader_numel": self.weight[:-padding_size].numel()},
-            )
-            self.weight.data[-padding_size:].zero_()
-
-    def weight_loader(self, param, loaded_weight, loaded_shard_id=None) -> None:
-        super().weight_loader(param, loaded_weight, loaded_shard_id)
-        self._zero_padding(param)
-
-    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None) -> None:
-        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._zero_padding(param)
-
-    def _zero_padding(self, param: torch.Tensor) -> None:
-        # Online processing materializes the weight after __init__ zeroing.
-        if self.padding_size and param is self.weight:
-            param.data[-self.padding_size :].zero_()
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
@@ -124,9 +92,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # Only the fused path exports the checkpoint snapshots. AITER's
         # chunk_kda cannot, so the gluon backend hands the steps that carry a
         # checkpoint to the fused kernel when the build has it.
@@ -143,13 +109,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(can_checkpoint),
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
-            ),
-        )
+        return KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
 
     def __init__(
         self,
@@ -193,10 +153,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
         self.in_proj_padding = -local_output_size % 16
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
 
-        self.in_proj_qkvgfab = _PaddedKimiGDNMergedColumnParallelLinear(
+        self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
             replicated_shard_id=4,
