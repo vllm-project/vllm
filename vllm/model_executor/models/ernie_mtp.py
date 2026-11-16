@@ -30,7 +30,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.llama import LlamaDecoderLayer
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -38,6 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
+from .llama import LlamaDecoderLayer
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 

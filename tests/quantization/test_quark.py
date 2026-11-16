@@ -46,7 +46,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.llama import LlamaForCausalLM
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
@@ -106,6 +105,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api

@@ -26,14 +26,9 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.llama import (
-    LlamaAttention,
-    LlamaDecoderLayer,
-    LlamaForCausalLM,
-    LlamaMLP,
-    LlamaModel,
-)
+from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 
+from .llama import LlamaAttention, LlamaDecoderLayer, LlamaMLP
 from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper
 
 
