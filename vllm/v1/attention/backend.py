@@ -46,7 +46,7 @@ class AttentionType(StrEnum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultipleOf:
     base: int
 
@@ -75,6 +75,16 @@ class AttentionBackend(ABC):
         kv_cache_spec: "KVCacheSpec | None" = None,
     ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(
+        cls,
+        kv_cache_spec: "KVCacheSpec | None",
+        layer_names: list[str],
+    ) -> list[int | MultipleOf]:
+        """Kernel block sizes for the named layers. Override when the sizes depend
+        on layer geometry that the cache spec does not hold, such as query heads."""
+        return cls.get_supported_kernel_block_sizes(kv_cache_spec)
 
     @staticmethod
     @abstractmethod
@@ -396,7 +406,7 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class CommonAttentionMetadata:
     """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.

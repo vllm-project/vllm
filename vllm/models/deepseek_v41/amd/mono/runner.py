@@ -75,7 +75,7 @@ def _check_tensors(owner, tag: str, want: dict) -> None:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class AttnWeights:
     """One layer's attention tensors on this rank, in vLLM's loaded layout."""
 
@@ -129,7 +129,7 @@ class AttnWeights:
             )
 
 
-@dataclass
+@dataclass(slots=True)
 class MonoLayerWeights:
     """One layer's tensors on this rank, in vLLM's loaded layout (`attn`:
     None for a layer whose attention vLLM runs)."""

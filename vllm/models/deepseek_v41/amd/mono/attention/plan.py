@@ -87,7 +87,7 @@ def round_up(a, b):
     return cdiv(a, b) * b
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dims:
     tp: int
 
