@@ -740,9 +740,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             top_k=top_k,
             max_tokens_per_rank=max_num_tokens,
             hidden_size=hidden_size,
-            # Received rows past a source rank's token count keep expert id
-            # num_experts, which no rank owns.
-            invalid_expert_id=num_experts,
+            invalid_expert_id=-1,
         )
         config = NVLinkTwoSidedConfig(comm_backend=CustomCommunicator(self.cpu_group))
         # Bootstrap metadata must stay on the CPU even when model layers are

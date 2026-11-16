@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -18,6 +19,7 @@ from vllm.config.kernel import (
 )
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -33,6 +35,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
+logger = init_logger(__name__)
+
 FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm"]
 FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4", "fp8_block"]
 _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
@@ -41,15 +45,17 @@ _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
     kFp8Static128BlockSym: "fp8_block",
 }
 
-# FP4 weights run on the Blackwell megakernels, block FP8 weights on the
-# Hopper FP8 pull-style CuTeDSL megakernel.
+# FP4 weights run on the Blackwell megakernels (NVFP4 also on SM107), block FP8
+# weights on the Hopper FP8 pull-style CuTeDSL megakernel.
 _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
+_SM107_CAPABILITY = (10, 7)
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
-    "nvfp4": _BLACKWELL_CAPABILITIES,
+    "nvfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
     "mxfp4": _BLACKWELL_CAPABILITIES,
     "fp8_block": frozenset({(9, 0)}),
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
+_SM107_ROUTE_CHECK_ENV = "FLASHINFER_SM107_MEGA_CHECK_ROUTES"
 
 
 def _current_capability() -> tuple[int, int] | None:
@@ -61,6 +67,10 @@ def _current_capability() -> tuple[int, int] | None:
 
 def supports_current_device() -> bool:
     return _current_capability() in _SUPPORTED_CAPABILITIES
+
+
+def is_sm107_device() -> bool:
+    return _current_capability() == _SM107_CAPABILITY
 
 
 _E2M1_LUT = (
@@ -179,6 +189,8 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append("dual batch overlap")
     if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
         unsupported.append("EPLB")
+    elif is_sm107_device() and vllm_config.parallel_config.enable_eplb:
+        unsupported.append("EPLB on SM107")
     return tuple(unsupported)
 
 
@@ -324,11 +336,12 @@ class _FlashInferMoeEpApi:
                 MoEWeightPack,
                 Nvfp4CutedslMegaMoeConfig,
                 Sm90PullFp8MegaMoeConfig,
+                Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig,
             )
         except ImportError as err:
             raise RuntimeError(
                 "FlashInfer MoE-EP requires the public API shipped with "
-                "FlashInfer 0.7.2 or newer"
+                "FlashInfer 0.7.3 or newer"
             ) from err
 
         self.BootstrapConfig = BootstrapConfig
@@ -340,6 +353,7 @@ class _FlashInferMoeEpApi:
         self.MoEWeightPack = MoEWeightPack
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
         self.Sm90PullFp8MegaMoeConfig = Sm90PullFp8MegaMoeConfig
+        self.Sm107Nvfp4MegaMoeConfig = Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
 
 
 def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
@@ -383,6 +397,11 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
+        sm107 = is_sm107_device()
+        if sm107 and moe.routing_method is RoutingMethodType.DeepseekV4:
+            # The DeepSeek-V4 router can return non-finite scores on valid routes,
+            # which FlashInfer 0.7.3's SM107 route check turns into a device assert.
+            os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
         if block_fp8:
             megakernel = api.Sm90PullFp8MegaMoeConfig(
                 intermediate_size=moe.intermediate_size,
@@ -391,14 +410,16 @@ class FlashInferMoeEp:
                 gate_up_clamp=moe.swiglu_limit,
             )
         elif spec.kernel == "cutedsl":
-            # In-kernel fc2 reduce keeps its default (off); FlashInfer 0.7.1rc1
-            # renamed in_kernel_fc2_reduce to enable_in_kernel_fc2_reduce.
-            megakernel = api.Nvfp4CutedslMegaMoeConfig(
+            config_cls = (
+                api.Sm107Nvfp4MegaMoeConfig if sm107 else api.Nvfp4CutedslMegaMoeConfig
+            )
+            # In-kernel fc2 reduce keeps its default (off).
+            megakernel = config_cls(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,
                 gate_up_clamp=moe.swiglu_limit,
                 fast_math=True,
-                apply_topk_in_fc1=apply_topk_in_fc1,
+                apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
                 input_norm_const=epilogue.input_norm_const,
                 fc1_alpha=None,
@@ -462,8 +483,12 @@ class FlashInferMoeEp:
         self._num_experts = moe.num_experts
         self._top_k = moe.experts_per_token
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
-        self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
+        # SM107 uses FlashInfer's owned output, which reduces only the live rows.
+        self._return_workspace_view = (
+            moe.routing_method is RoutingMethodType.DeepseekV4 and not sm107
+        )
         self._block_fp8 = block_fp8
+        logger.info_once("FlashInfer MoE-EP megakernel: %s", type(megakernel).__name__)
 
     @property
     def can_overlap_shared_experts(self) -> bool:
