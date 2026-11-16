@@ -8,7 +8,7 @@ import queue
 import socket
 import threading
 import time
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -823,6 +823,8 @@ class MoRIIOConnectorScheduler:
         self._write_recv_armed_at: dict[ReqId, float] = {}
         # The prefill notify socket each receive's allocation was sent to.
         self._write_recv_peer: dict[ReqId, tuple[str, int]] = {}
+        # Timed receives per prefill socket; its probe goes with the last one.
+        self._write_recv_peer_count: Counter[tuple[str, int]] = Counter()
         self._write_recv_probes: dict[tuple[str, int], Future[bool]] = {}
         self._write_recv_prober: ThreadPoolExecutor | None = None
         self._write_recv_timer_enabled = False
@@ -1448,8 +1450,12 @@ class MoRIIOConnectorScheduler:
                     # Every rank holding the request, notifying or not, probes
                     # the same prefill socket.
                     peer = self._write_notify_peer(request, remote_dp_rank, _dp_local)
-                    if peer is not None:
+                    if (
+                        peer is not None
+                        and request.request_id not in self._write_recv_peer
+                    ):
                         self._write_recv_peer[request.request_id] = peer
+                        self._write_recv_peer_count[peer] += 1
 
             # Only trigger 1 KV transfer per request.
 
@@ -1726,7 +1732,12 @@ class MoRIIOConnectorScheduler:
         """Stop timing a WRITE receive."""
         self._write_recv_deadline.pop(req_id, None)
         self._write_recv_armed_at.pop(req_id, None)
-        self._write_recv_peer.pop(req_id, None)
+        peer = self._write_recv_peer.pop(req_id, None)
+        if peer is not None:
+            self._write_recv_peer_count[peer] -= 1
+            if self._write_recv_peer_count[peer] <= 0:
+                del self._write_recv_peer_count[peer]
+                self._write_recv_probes.pop(peer, None)
 
     def shutdown(self):
         for path, sock in self.paths.items():

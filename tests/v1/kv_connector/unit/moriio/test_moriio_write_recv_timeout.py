@@ -92,6 +92,16 @@ class _InlineExecutor:
         pass
 
 
+class _PendingExecutor:
+    """A probe that has not answered yet."""
+
+    def submit(self, fn, *args):
+        return Future()
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
 class _Clock:
     def __init__(self):
         self.now = time.monotonic()
@@ -336,6 +346,22 @@ def test_alive_prefill_still_fails_at_the_max_timeout(engine):
     engine.step()
     assert request.status == RequestStatus.FINISHED_ERROR
     assert engine.pool.get_num_free_blocks() == held
+
+
+def test_probe_is_dropped_when_its_last_request_finishes(engine):
+    """A probe is only consumed at a deadline. Once no request on its prefill is
+    timed any more it is dropped, not kept until the process exits."""
+    connector = engine.scheduler.connector.connector_scheduler
+    connector._write_recv_prober = _PendingExecutor()
+    request = engine.add_waiting_request()
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert len(connector._write_recv_probes) == 1
+
+    engine.step(write_done=frozenset({request.request_id}))
+    engine.step()
+    assert request.status == RequestStatus.RUNNING
+    assert not connector._write_recv_probes
 
 
 def test_peer_listening_tells_a_listening_socket_from_a_closed_port():
