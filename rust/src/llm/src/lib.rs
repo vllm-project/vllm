@@ -283,6 +283,21 @@ impl EngineCoreLlm {
         Ok(())
     }
 
+    /// Reject a prompt longer than one scheduling step when an engine does not
+    /// chunk prefills; the engine would never schedule it, and it would block
+    /// every request queued behind it.
+    fn check_prompt_schedulable(&self, prompt_token_ids: &[u32]) -> Result<()> {
+        match self.client.max_unchunked_prompt_len() {
+            Some(max_prompt_len) if prompt_token_ids.len() > max_prompt_len as usize => {
+                Err(Error::PromptExceedsUnchunkedLimit {
+                    prompt_len: prompt_token_ids.len(),
+                    max_prompt_len,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Submit one request as `n` parallel samples, returning one output stream
     /// per sample in index order.
     ///
@@ -301,6 +316,7 @@ impl EngineCoreLlm {
     ) -> Result<Vec<GenerateOutputStream>> {
         self.check_prompt_logprobs_supported(&req.sampling_params)?;
         self.check_mm_embeds_fit(req.mm_features.as_ref())?;
+        self.check_prompt_schedulable(&req.prompt_token_ids)?;
 
         // Clamp the request's stream interval to the frontend-level one, like
         // Python. Engine-core ignores it; the client batches deliveries by it.

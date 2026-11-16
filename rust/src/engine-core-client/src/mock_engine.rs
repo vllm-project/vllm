@@ -84,6 +84,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         supports_prompt_logprobs: true,
         allow_missing_mm_embeddings: false,
         max_mm_embeds_per_request: None,
+        enable_chunked_prefill: true,
     }
 }
 

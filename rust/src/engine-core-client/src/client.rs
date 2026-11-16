@@ -605,6 +605,23 @@ impl EngineCoreClient {
             .min()
     }
 
+    /// Return the longest prompt an engine can schedule when it does not
+    /// chunk prefills, or `None` when every engine chunks them. A request may
+    /// go to any engine, so the smallest limit applies to all.
+    ///
+    /// Without chunked prefill, a longer prompt can never be scheduled and
+    /// would block the engine's waiting queue.
+    // TODO: Python's `SchedulerConfig.max_unchunked_prompt_len` also applies
+    // `max_num_scheduled_tokens` and the draft slots of speculative decoding,
+    // which the ready response does not report.
+    pub fn max_unchunked_prompt_len(&self) -> Option<u32> {
+        (self.engines.iter())
+            .map(|engine| &engine.ready_response)
+            .filter(|ready| !ready.enable_chunked_prefill)
+            .map(|ready| u32::try_from(ready.max_num_batched_tokens).unwrap_or(u32::MAX))
+            .min()
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
