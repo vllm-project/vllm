@@ -2757,6 +2757,598 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
+def test_mxfp8_e4m3_is_ocp_scheme_and_bare_mxfp8_is_not():
+    """Quark's MXFP8 activation spelling must not collide with bare "mxfp8".
+
+    Quark records dynamic MXFP8 activations as "mxfp8_e4m3". The non-OCP MXFP8
+    backends (b12x, flashinfer) already use bare "mxfp8" and require
+    `ocp_mx_scheme is None`; mapping that name would make their batched
+    experts assert.
+    """
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEQuantConfig,
+        ocp_mx_moe_quant_config,
+    )
+
+    assert (
+        OCP_MX_Scheme.from_quant_dtype("mxfp8_e4m3", "mxfp4")
+        == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    )
+    assert OCP_MX_Scheme.from_quant_dtype("mxfp8", "mxfp4") is None
+
+    scale = torch.empty(1, dtype=torch.uint8)
+    quark = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=scale,
+        w2_scale=scale,
+    )
+    assert quark.quant_dtype == "mxfp8_e4m3"
+    assert quark.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+
+    bare = FusedMoEQuantConfig.make(
+        quant_dtype="mxfp8",
+        weight_dtype="mxfp4",
+        w1_scale=scale,
+        w2_scale=scale,
+    )
+    assert bare.quant_dtype == "mxfp8"
+    assert bare.ocp_mx_scheme is None
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+def test_quark_mxfp4_mxfp8_selects_emulation():
+    """SILU stays on emulation. The fused kernel only implements SwiGLU-OAI."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.model import ModelConfig
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+        kMxfp8Dynamic,
+    )
+
+    moe_config = FusedMoEConfig(
+        num_experts=4,
+        experts_per_token=1,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=4,
+        num_logical_experts=4,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda:0",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    vllm_config = VllmConfig()
+    vllm_config.model_config = ModelConfig()
+    with set_current_vllm_config(vllm_config):
+        method = QuarkOCP_MX_MoEMethod(moe_config, kMxfp4Static, kMxfp8Dynamic)
+
+    assert method.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    assert method.input_dtype == "mxfp8_e4m3"
+    assert method.mxfp4_backend is Mxfp4MoeBackend.EMULATION
+    assert method.experts_cls is OCP_MXQuantizationEmulationTritonExperts
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@torch.inference_mode()
+def test_emulation_a_mxfp8_moe_forward():
+    """MXFP4 weights with fake-quantized MXFP8 activations.
+
+    The reference is the weight-only emulation on the same packed weights, so
+    the gap is the activation quantization. MXFP8 should land much closer to
+    that reference than MXFP4 activations do.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+        ocp_mx_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        mxfp4_quantize,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+
+    num_experts, topk = 8, 2
+    hidden_size, intermediate_size, num_tokens = 256, 256, 64
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13, w13_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w13, w2 = w13.contiguous(), w2.contiguous()
+    w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
+
+    torch.manual_seed(1)
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_weights, topk_ids = torch.topk(
+        torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device),
+        k=topk,
+        dim=-1,
+    )
+    topk_weights = torch.softmax(topk_weights, dim=-1).to(dtype)
+    topk_ids = topk_ids.to(torch.int32)
+
+    def run(quant_config):
+        moe_config = FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=num_experts,
+            num_logical_experts=num_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=dtype,
+            device=device,
+            routing_method=RoutingMethodType.Renormalize,
+        )
+        with set_current_vllm_config(VllmConfig()):
+            kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=moe_config,
+                mxfp4_backend=Mxfp4MoeBackend.EMULATION,
+                experts_cls=OCP_MXQuantizationEmulationTritonExperts,
+                routing_tables=None,
+            )
+            return kernel.apply(
+                hidden_states=hidden_states,
+                w1=w13,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+    def rel(a, b):
+        return (a.float() - b.float()).norm() / b.float().norm()
+
+    # A fresh quant config per run: the experts null the weight scales on it.
+    a_mxfp8 = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+    assert a_mxfp8.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp8
+    out_a_mxfp8 = run(a_mxfp8)
+
+    a_mxfp4 = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp4",
+        weight_dtype="mxfp4",
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+    out_a_mxfp4 = run(a_mxfp4)
+
+    weight_only = mxfp4_w4a16_moe_quant_config(w1_scale=w13_scale, w2_scale=w2_scale)
+    out_weight_only = run(weight_only)
+
+    assert torch.isfinite(out_a_mxfp8).all()
+    rel_mxfp8 = rel(out_a_mxfp8, out_weight_only).item()
+    rel_mxfp4 = rel(out_a_mxfp4, out_weight_only).item()
+    assert rel_mxfp8 > 0.0, "MXFP8 fake-quant left the activation unchanged"
+    # Group-32 E4M3 is far finer than MXFP4. 0.04 was measured on this shape.
+    assert rel_mxfp8 < 0.12, rel_mxfp8
+    assert rel_mxfp8 < rel_mxfp4, (rel_mxfp8, rel_mxfp4)
+
+
+def _mxfp8_moe_config(
+    activation,
+    num_experts=4,
+    topk=1,
+    hidden=256,
+    intermediate=256,
+    swiglu_beta=None,
+    routing_method=None,
+):
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+
+    return FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation,
+        in_dtype=torch.bfloat16,
+        device="cuda:0",
+        routing_method=routing_method or RoutingMethodType.Renormalize,
+        swiglu_beta=swiglu_beta,
+    )
+
+
+def _rocm_aiter(enabled: bool):
+    import importlib
+    import os
+    from contextlib import contextmanager
+
+    import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    @contextmanager
+    def _enabled():
+        previous = os.environ.get("VLLM_ROCM_USE_AITER")
+        os.environ["VLLM_ROCM_USE_AITER"] = "1" if enabled else "0"
+        importlib.reload(envs)
+        rocm_aiter_ops.refresh_env_variables()
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("VLLM_ROCM_USE_AITER", None)
+            else:
+                os.environ["VLLM_ROCM_USE_AITER"] = previous
+            importlib.reload(envs)
+            rocm_aiter_ops.refresh_env_variables()
+
+    return _enabled()
+
+
+def _select_mxfp8_backend(
+    activation, use_aiter: bool, swiglu_beta=None, routing_method=None
+):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.model import ModelConfig
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+        kMxfp8Dynamic,
+    )
+
+    with _rocm_aiter(use_aiter):
+        vllm_config = VllmConfig()
+        vllm_config.model_config = ModelConfig()
+        with set_current_vllm_config(vllm_config):
+            return QuarkOCP_MX_MoEMethod(
+                _mxfp8_moe_config(
+                    activation,
+                    swiglu_beta=swiglu_beta,
+                    routing_method=routing_method,
+                ),
+                kMxfp4Static,
+                kMxfp8Dynamic,
+            )
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+@pytest.mark.parametrize(
+    "activation",
+    ["swigluoai", "swigluoai_uninterleave"],
+)
+def test_quark_mxfp4_mxfp8_selects_aiter_when_enabled(activation: str):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+        AiterMxfp4Mxfp8ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    method = _select_mxfp8_backend(MoEActivation(activation), use_aiter=True)
+    assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP8
+    assert method.experts_cls is AiterMxfp4Mxfp8ExpertsMonolithic
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+def test_quark_mxfp4_mxfp8_minimax2_routing_selects_aiter():
+    """MiniMax routes with sigmoid + correction bias; that must not fall back."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+        AiterMxfp4Mxfp8ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    method = _select_mxfp8_backend(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        use_aiter=True,
+        swiglu_beta=1.0,
+        routing_method=RoutingMethodType.MiniMax2,
+    )
+    assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP8
+    assert method.experts_cls is AiterMxfp4Mxfp8ExpertsMonolithic
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+def test_quark_mxfp4_mxfp8_silu_stays_on_emulation_with_aiter():
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    method = _select_mxfp8_backend(MoEActivation.SILU, use_aiter=True)
+    assert method.mxfp4_backend is Mxfp4MoeBackend.EMULATION
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+def test_uninterleave_other_beta_stays_on_emulation():
+    """The fused SwiGLU can add 0 or 1. Any other beta stays on emulation."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    method = _select_mxfp8_backend(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE, use_aiter=True, swiglu_beta=0.5
+    )
+    assert method.mxfp4_backend is Mxfp4MoeBackend.EMULATION
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP8 backend targets ROCm")
+@pytest.mark.parametrize(
+    "activation,beta,minimax2",
+    [
+        ("swigluoai", 1.0, False),
+        ("swigluoai_uninterleave", 1.0, False),
+        ("swigluoai_uninterleave", 0.0, False),
+        # MiniMax: sigmoid scores, correction bias, routed scaling factor.
+        ("swigluoai_uninterleave", 1.0, True),
+    ],
+)
+@torch.inference_mode()
+def test_aiter_mxfp4_mxfp8_matches_emulation(
+    activation: str, beta: float, minimax2: bool
+):
+    """The fused GEMMs consume the checkpoint MXFP4 bytes, layout only."""
+    from aiter.ops.triton.moe.moe_routing.routing import routing
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        ocp_mx_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_mxfp8_moe import (
+        AiterMxfp4Mxfp8ExpertsMonolithic,
+        aiter_mxfp4_mxfp8_moe_forward,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_kernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        mxfp4_quantize,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+
+    activation_enum = MoEActivation(activation)
+    num_experts, topk = 8, 2
+    hidden_size, intermediate_size, num_tokens = 256, 256, 32
+    alpha, limit = 1.702, 7.0
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13, w13_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+        )
+        / 8
+    )
+    w13, w2 = w13.contiguous(), w2.contiguous()
+    w13_scale, w2_scale = w13_scale.contiguous(), w2_scale.contiguous()
+
+    class _Layer:
+        pass
+
+    layer = _Layer()
+    layer.activation = activation_enum
+    w1_k, w2_k, w1_s, w2_s, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+        layer=layer,
+        w13_weight=w13,
+        w2_weight=w2,
+        w13_weight_scale=w13_scale,
+        w2_weight_scale=w2_scale,
+        w13_bias=None,
+        w2_bias=None,
+    )
+    assert w1_k.stride(-2) == 1
+    assert w1_s.stride(1) == 1
+
+    torch.manual_seed(1)
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    logits = torch.randn(num_tokens, num_experts, dtype=torch.float16, device=device)
+    if minimax2:
+        # Older AITER wheels only accept softmax/sqrtsoftplus in routing().
+        try:
+            routing(
+                torch.randn(2, num_experts, dtype=torch.float16, device=device),
+                topk,
+                score_mode="sigmoid",
+                bias=torch.zeros(num_experts, dtype=torch.float32, device=device),
+            )
+        except AssertionError:
+            pytest.skip("installed AITER routing() lacks score_mode='sigmoid'")
+        routing_method = RoutingMethodType.MiniMax2
+        score_mode = "sigmoid"
+        bias = torch.randn(num_experts, dtype=torch.float32, device=device)
+        scaling = 2.0
+    else:
+        routing_method = RoutingMethodType.Renormalize
+        score_mode = None
+        bias = None
+        scaling = None
+    quant = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        gemm1_alpha=alpha,
+        gemm1_beta=beta,
+        gemm1_clamp_limit=limit,
+    )
+    aiter_out = aiter_mxfp4_mxfp8_moe_forward(
+        hidden_states=hidden_states,
+        w1=w1_k,
+        w2=w2_k,
+        gating_output=logits,
+        topk=topk,
+        renormalize=True,
+        quant_config=quant,
+        apply_router_weight_on_input=False,
+        activation=activation_enum,
+        score_mode=score_mode,
+        e_score_correction_bias=bias,
+        routed_scaling_factor=scaling,
+    )
+
+    if minimax2:
+        routing_data, gather_idx, _ = routing(
+            logits,
+            topk,
+            score_mode=score_mode,
+            bias=bias,
+            renorm=True,
+            routed_scaling_factor=scaling,
+        )
+    else:
+        routing_data, gather_idx, _ = routing(logits, topk, sm_first=False)
+    ids = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
+    weights = torch.zeros(num_tokens, topk, dtype=dtype, device=device)
+    slot = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    offset = 0
+    for expert, count in enumerate(routing_data.expt_hist.tolist()):
+        if count == 0:
+            continue
+        rows = gather_idx[offset : offset + count].to(torch.int64) // topk
+        pos = slot[rows]
+        ids[rows, pos] = expert
+        weights[rows, pos] = routing_data.gate_scal[offset : offset + count].to(dtype)
+        slot[rows] = pos + 1
+        offset += count
+    assert torch.equal(slot, torch.full_like(slot, topk))
+
+    emu_quant = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp8_e4m3",
+        weight_dtype="mxfp4",
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        gemm1_alpha=alpha,
+        gemm1_beta=beta,
+        gemm1_clamp_limit=limit,
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation_enum,
+        in_dtype=dtype,
+        device=device,
+        routing_method=routing_method,
+        swiglu_limit=limit,
+        swiglu_alpha=alpha,
+        swiglu_beta=beta,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        kernel = make_mxfp4_moe_kernel(
+            emu_quant,
+            moe_config,
+            OCP_MXQuantizationEmulationTritonExperts,
+            Mxfp4MoeBackend.EMULATION,
+        )
+        emu_out = kernel.apply(
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            topk_weights=weights,
+            topk_ids=ids,
+            activation=activation_enum,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    with _rocm_aiter(True), set_current_vllm_config(VllmConfig()):
+        aiter_kernel = make_mxfp4_moe_kernel(
+            quant,
+            moe_config,
+            AiterMxfp4Mxfp8ExpertsMonolithic,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+        )
+        assert aiter_kernel.is_monolithic
+        mono_out = aiter_kernel.apply_monolithic(
+            hidden_states=hidden_states,
+            w1=w1_k,
+            w2=w2_k,
+            router_logits=logits,
+            activation=activation_enum,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            e_score_correction_bias=bias,
+            routed_scaling_factor=scaling,
+            routing_sink=None,
+        )
+    mono_rel = (mono_out.float() - aiter_out.float()).norm() / aiter_out.float().norm()
+    assert mono_rel.item() < 1e-5, mono_rel.item()
+
+    assert torch.isfinite(aiter_out).all()
+    rel = (aiter_out.float() - emu_out.float()).norm() / emu_out.float().norm()
+    # Emulation's own fake-quant sits near 0.015 on this shape. The fused
+    # kernel on the same MXFP4 bytes lands in that band.
+    assert rel.item() < 0.05, rel.item()
+
+
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
 #
 # The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
@@ -2788,6 +3380,9 @@ ROCM_MXFP4_ROUNDUP_CASES = [
     ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
     # Backends that stay on the generic ROCm 256/256 round-up.
     ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
+    # Dynamic MXFP8 only needs the MX block, so 384 stays 384.
+    ("AITER_MXFP4_MXFP8", "SWIGLUOAI", 384, 384, 384, 384),
+    ("AITER_MXFP4_MXFP8", "SWIGLUOAI", 100, 100, 128, 128),
     ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
     ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
 ]
