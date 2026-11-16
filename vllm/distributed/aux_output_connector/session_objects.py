@@ -190,6 +190,7 @@ class SessionObjectWriter:
                 self._error = error
             finally:
                 self._queue.task_done()
+        self._queue.task_done()
 
     def check(self) -> None:
         """Raise `BlockObjectStoreError` if a write failed."""

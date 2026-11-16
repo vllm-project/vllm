@@ -2991,6 +2991,15 @@ def test_session_object_writer_drain_raises(code, blocked, match):
     writer.close()
 
 
+def test_session_object_writer_drain_returns_after_close():
+    release = threading.Event()
+    release.set()
+    client, writer = _writer_with_a_queued_write(0, release)
+    writer.close()
+    writer.drain(timeout_s=0.05)
+    assert list(client.objects) == ["job/s/tail/0"]
+
+
 def test_session_objects_hold_each_field_per_pipeline_stage():
     client, store = fake_store()
     routed = np.arange(_BLOCK_SIZE * 12, dtype=_DTYPE).reshape(_BLOCK_SIZE, 4, 3)
