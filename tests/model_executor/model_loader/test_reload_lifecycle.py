@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``weight_update_active`` tells a model's ``load_weights`` whether it runs in
+"""`weight_update_active` tells a model's `load_weights` whether it runs in
 a weight update, where one call may hold only part of the checkpoint, or in a
 cold start, where completeness checks must run."""
 
@@ -25,7 +25,7 @@ _DEVICE = torch.device("cpu")
 
 
 class _TinyModel(torch.nn.Module):
-    """Records ``weight_update_active`` at every weight it loads."""
+    """Records `weight_update_active` at every weight it loads."""
 
     def __init__(self):
         super().__init__()

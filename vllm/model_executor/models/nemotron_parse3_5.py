@@ -812,7 +812,7 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load Parse 3.5 weights and report loaded destination parameters.
 
-        Returning fully-prefixed destinations lets ``DefaultModelLoader`` detect
+        Returning fully-prefixed destinations lets `DefaultModelLoader` detect
         missing parameters. Individual source shards of fused parameters are
         not independently tracked, matching the common vLLM loader convention.
         """

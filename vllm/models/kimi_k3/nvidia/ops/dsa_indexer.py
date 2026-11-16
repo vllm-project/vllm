@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused Triton prologues for the Kimi K3.1 DSA layer, replacing the small
-launch-bound kernels between the projection GEMMs and ``sparse_attn_indexer``.
+launch-bound kernels between the projection GEMMs and `sparse_attn_indexer`.
 
-The quant helpers and ``dsa_fused_prologue`` follow ``fused_norm_rope`` in
-``deepseek_v32/common/kernels.py`` (without RoPE); they are copied so this
+The quant helpers and `dsa_fused_prologue` follow `fused_norm_rope` in
+`deepseek_v32/common/kernels.py` (without RoPE); they are copied so this
 model does not depend on another model's private kernels.
 """
 
@@ -136,10 +136,10 @@ def indexer_k_norm_quant_insert(
     num_tokens: int,
 ) -> None:
     """LayerNorm + FP8 quant + cache insert of the indexer key, and the -1
-    fill of the top-k rows ``[:num_tokens]``.
+    fill of the top-k rows `[:num_tokens]`.
 
-    ``kv_cache`` is ``[num_blocks, block_size, head_dim + 4]`` uint8, possibly
-    a strided page view of a packed cache. Rows past ``slot_mapping`` or with
+    `kv_cache` is `[num_blocks, block_size, head_dim + 4]` uint8, possibly
+    a strided page view of a packed cache. Rows past `slot_mapping` or with
     a negative slot are not inserted.
     """
     if num_tokens == 0:
@@ -211,12 +211,12 @@ def indexer_q_quant_fold_weights(
     weight_scale: float,
     padded_num_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize ``index_q`` ``[T, H, D]`` to FP8 per head (ue8m0 scales) and
-    fold each head's scale into ``index_weights`` ``[T, H]`` together with
-    ``weight_scale``.
+    """Quantize `index_q` `[T, H, D]` to FP8 per head (ue8m0 scales) and
+    fold each head's scale into `index_weights` `[T, H]` together with
+    `weight_scale`.
 
-    Returns ``(q_fp8 [T, P, D], weights [T, P] fp32)`` where ``P =
-    padded_num_heads``; heads ``[H, P)`` are zero.
+    Returns `(q_fp8 [T, P, D], weights [T, P] fp32)` where `P =
+    padded_num_heads`; heads `[H, P)` are zero.
     """
     num_tokens, num_heads, head_dim = index_q.shape
     assert index_q.stride(-1) == 1
@@ -394,16 +394,16 @@ def dsa_fused_prologue(
     index_cache: torch.Tensor | None,
     index_slot_mapping: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``fused_norm_rope`` for the NoPE Kimi K3.1 DSA layer: the q_a / kv_a
-    RMSNorms, the fp8_ds_mla insert of ``[kv_c_normed | k_pe]``, the indexer key
+    """`fused_norm_rope` for the NoPE Kimi K3.1 DSA layer: the q_a / kv_a
+    RMSNorms, the fp8_ds_mla insert of `[kv_c_normed | k_pe]`, the indexer key
     LayerNorm + FP8 insert and the -1 fill of the top-k rows, in one launch.
 
-    ``mla_cache`` (``[num_blocks, block_size, 656]``) and ``index_cache``
-    (``[num_blocks, block_size, head_dim + 4]``) are uint8, possibly strided
-    page views of a packed cache; ``None`` (profile runs) skips the insert. Rows
+    `mla_cache` (`[num_blocks, block_size, 656]`) and `index_cache`
+    (`[num_blocks, block_size, head_dim + 4]`) are uint8, possibly strided
+    page views of a packed cache; `None` (profile runs) skips the insert. Rows
     past a slot mapping or with a negative slot are not inserted.
 
-    Returns ``(q_c_normed, kv_c_normed)``.
+    Returns `(q_c_normed, kv_c_normed)`.
     """
     num_tokens, q_dim = q_c.shape
     kv_dim, rope_dim, index_dim = kv_c.shape[1], k_pe.shape[1], index_k.shape[1]

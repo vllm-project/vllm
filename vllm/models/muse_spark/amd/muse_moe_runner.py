@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm MoE implementation for MuseSpark1x checkpoints."""
+"""ROCm MoE implementation for Muse Spark checkpoints."""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, fields
@@ -56,10 +56,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
-from vllm.models.muse_spark.common.layers import MuseSpark1xRMSNorm
+from vllm.models.muse_spark.common.layers import MuseSparkRMSNorm
 from vllm.models.muse_spark.common.moe import (
-    MuseSpark1xRouter,
     MuseSparkConsolidatedRoutedExperts,
+    MuseSparkRouter,
     needs_pre_norm_all_reduce,
 )
 from vllm.models.muse_spark.common.ops.fused_finalize import (
@@ -77,23 +77,23 @@ def _validate_tp_post_norm_deployment(
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
-            f"MuseSpark1x {precision} on ROCm currently requires DP1 and PCP1."
+            f"Muse Spark {precision} on ROCm currently requires DP1 and PCP1."
         )
     if parallel_config.is_sequence_parallel:
         raise NotImplementedError(
-            f"MuseSpark1x {precision} on ROCm does not support sequence-parallel MoE."
+            f"Muse Spark {precision} on ROCm does not support sequence-parallel MoE."
         )
     if parallel_config.enable_eplb:
         raise NotImplementedError(
-            f"MuseSpark1x {precision} on ROCm does not support EPLB."
+            f"Muse Spark {precision} on ROCm does not support EPLB."
         )
     if moe_config.is_lora_enabled:
         raise NotImplementedError(
-            f"MuseSpark1x {precision} on ROCm does not support MoE LoRA."
+            f"Muse Spark {precision} on ROCm does not support MoE LoRA."
         )
     if moe_config.skip_final_all_reduce:
         raise NotImplementedError(
-            f"MuseSpark1x {precision} performs the TP reduction before its post-expert "
+            f"Muse Spark {precision} performs the TP reduction before its post-expert "
             "norm and cannot return an unreduced MoE output."
         )
 
@@ -103,7 +103,7 @@ def validate_bf16_deployment(moe_config: FusedMoEConfig) -> None:
     _validate_tp_post_norm_deployment(moe_config, "BF16")
     if moe_config.moe_backend not in ("auto", "triton"):
         raise NotImplementedError(
-            "MuseSpark1x BF16 on ROCm requires the Triton MoE backend; got "
+            "Muse Spark BF16 on ROCm requires the Triton MoE backend; got "
             f"{moe_config.moe_backend!r}."
         )
 
@@ -118,7 +118,7 @@ def validate_fp8_deployment(moe_config: FusedMoEConfig) -> None:
     _validate_tp_post_norm_deployment(moe_config, "FP8")
     if moe_config.moe_backend != "triton":
         raise NotImplementedError(
-            "MuseSpark1x FP8 on ROCm requires the Triton MoE backend; got "
+            "Muse Spark FP8 on ROCm requires the Triton MoE backend; got "
             f"{moe_config.moe_backend!r}."
         )
 
@@ -162,7 +162,7 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         norm = getattr(post_expert_norm_fn, "__self__", None)
         self.fused_norm = (
             norm
-            if isinstance(norm, MuseSpark1xRMSNorm)
+            if isinstance(norm, MuseSparkRMSNorm)
             and norm.variance_size_override is None
             else None
         )
@@ -182,7 +182,7 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
     ) -> torch.Tensor:
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "MuseSpark1x requires router weights after the post-expert norm."
+                "Muse Spark requires router weights after the post-expert norm."
             )
 
         if self.take_route_output is not None:
@@ -206,7 +206,7 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             )
         if output.shape != (num_tokens, hidden_dim):
             raise ValueError(
-                "MuseSpark1x MoE output has shape "
+                "Muse Spark MoE output has shape "
                 f"{tuple(output.shape)}, expected {(num_tokens, hidden_dim)}."
             )
         if expert_map is not None and (
@@ -329,7 +329,7 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
                 "MuseSparkTritonExperts requires a MuseSpark Triton quant config."
             )
         if quant_config.post_expert_norm_fn is None:
-            raise ValueError("MuseSpark1x post-expert norm is not configured.")
+            raise ValueError("Muse Spark post-expert norm is not configured.")
 
     def workspace_shapes(
         self,
@@ -357,7 +357,7 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
     def _apply_router_weight_in_gemm2(self, apply_router_weight_on_input: bool) -> bool:
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "MuseSpark1x requires router weights after the post-expert norm."
+                "Muse Spark requires router weights after the post-expert norm."
             )
         return False
 
@@ -400,7 +400,7 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         base_config = super().get_fused_moe_quant_config(layer)
         post_expert_norm_fn = getattr(layer, "post_expert_norm_fn", None)
         if post_expert_norm_fn is None:
-            raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
+            raise RuntimeError("Muse Spark post-expert norm is not configured.")
         return MuseSparkUnquantizedMoEQuantConfig(
             **{
                 f.name: getattr(base_config, f.name)
@@ -425,13 +425,13 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
                 "MuseSparkAiterExperts requires MuseSparkQuarkOCPMXMoEQuantConfig."
             )
         if quant_config.post_expert_norm_fn is None:
-            raise ValueError("MuseSpark1x post-expert norm is not configured.")
+            raise ValueError("Muse Spark post-expert norm is not configured.")
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
     ) -> torch.Tensor:
-        """A cached ``[num_routes, width]`` fp32 ones buffer (grown on demand)."""
+        """A cached `[num_routes, width]` fp32 ones buffer (grown on demand)."""
         buf = self._unit_weights_bufs.get(width)
         if buf is None or buf.shape[0] < num_routes or buf.device != device:
             buf = torch.ones(
@@ -483,7 +483,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
     ) -> None:
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "MuseSpark1x requires router weights after the post-expert norm."
+                "Muse Spark requires router weights after the post-expert norm."
             )
 
         num_tokens, top_k = topk_ids.shape
@@ -491,7 +491,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         expected_output_shape = (num_tokens, top_k, hidden_dim)
         if output.shape != expected_output_shape:
             raise ValueError(
-                "MuseSpark1x AITER output has shape "
+                "Muse Spark AITER output has shape "
                 f"{tuple(output.shape)}, expected {expected_output_shape}."
             )
 
@@ -566,7 +566,7 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
         super().__init__(moe, weight_quant_key, activation_quant_key)
         if self.fp8_backend is not Fp8MoeBackend.TRITON:
             raise NotImplementedError(
-                "MuseSpark1x FP8 on ROCm requires the Triton FP8 MoE backend; "
+                "Muse Spark FP8 on ROCm requires the Triton FP8 MoE backend; "
                 f"got {self.fp8_backend.value}."
             )
         self.experts_cls = MuseSparkTritonExperts
@@ -577,7 +577,7 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
         base_config = super().get_fused_moe_quant_config(layer)
         post_expert_norm_fn = getattr(layer, "post_expert_norm_fn", None)
         if post_expert_norm_fn is None:
-            raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
+            raise RuntimeError("Muse Spark post-expert norm is not configured.")
         return MuseSparkQuarkFp8MoEQuantConfig(
             **{
                 f.name: getattr(base_config, f.name)
@@ -601,12 +601,12 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
         super().__init__(moe, weight_quant_key, activation_quant_key)
         if self.ocp_mx_scheme != "w_mxfp4_a_mxfp4":
             raise NotImplementedError(
-                "MuseSpark1x MXFP4 on ROCm requires Quark OCP W4A4 with "
+                "Muse Spark MXFP4 on ROCm requires Quark OCP W4A4 with "
                 f"dynamic MXFP4 activations; got {self.ocp_mx_scheme!r}."
             )
         if self.mxfp4_backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
             raise NotImplementedError(
-                "MuseSpark1x MXFP4 on ROCm requires the "
+                "Muse Spark MXFP4 on ROCm requires the "
                 "AITER_MXFP4_MXFP4 backend; got "
                 f"{self.mxfp4_backend.value}."
             )
@@ -617,10 +617,10 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
     ) -> MuseSparkQuarkOCPMXMoEQuantConfig:
         base_config = super().get_fused_moe_quant_config(layer)
         if base_config is None:
-            raise RuntimeError("MuseSpark1x MXFP4 quant config is not initialized.")
+            raise RuntimeError("Muse Spark MXFP4 quant config is not initialized.")
         post_expert_norm_fn = getattr(layer, "post_expert_norm_fn", None)
         if post_expert_norm_fn is None:
-            raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
+            raise RuntimeError("Muse Spark post-expert norm is not configured.")
         return MuseSparkQuarkOCPMXMoEQuantConfig(
             **{
                 f.name: getattr(base_config, f.name)
@@ -634,7 +634,7 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
 def _quantize_experts_to_mxfp4(
     weight: torch.Tensor, experts_per_chunk: int = 32
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round ``[experts, rows, cols]`` weights to packed OCP MXFP4."""
+    """Round `[experts, rows, cols]` weights to packed OCP MXFP4."""
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     num_experts, rows, cols = weight.shape
@@ -754,7 +754,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             return MuseSparkUnquantizedFusedMoE(moe_config)
         if not isinstance(quant_config, QuarkConfig):
             raise NotImplementedError(
-                "MuseSpark1x on ROCm supports BF16, Quark FP8, or Quark OCP-MXFP4 "
+                "Muse Spark on ROCm supports BF16, Quark FP8, or Quark OCP-MXFP4 "
                 f"checkpoints; got {quant_config.get_name()!r}."
             )
 
@@ -769,7 +769,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             )
         if not isinstance(quant_method, QuarkOCP_MX_MoEMethod):
             raise NotImplementedError(
-                "MuseSpark1x on ROCm requires Quark W8A8 FP8 or OCP-MXFP4 for routed "
+                "Muse Spark on ROCm requires Quark W8A8 FP8 or OCP-MXFP4 for routed "
                 f"experts; got {type(quant_method).__name__}."
             )
         return MuseSparkQuarkOCPMXFusedMoE(
@@ -827,7 +827,7 @@ class MuseMoERunner(MoERunner):
 
 __all__ = [
     "MuseMoERunner",
-    "MuseSpark1xRouter",
+    "MuseSparkRouter",
     "MuseSparkAiterExperts",
     "MuseSparkQuarkFp8MoEQuantConfig",
     "MuseSparkQuarkOCPMXFusedMoE",

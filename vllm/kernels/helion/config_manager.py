@@ -18,8 +18,8 @@ Platform files store config entries as a JSON array::
         ...,
     ]
 
-Config keys are ``CaseKey`` instances mapping parameter names to
-values.  The default config uses ``CaseKey.default()``.
+Config keys are `CaseKey` instances mapping parameter names to
+values.  The default config uses `CaseKey.default()`.
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ logger = init_logger(__name__)
 class ConfigSet:
     """In-memory collection of Helion configs with lookup/query capabilities.
 
-    Configs are stored keyed by ``CaseKey``.  The default config
-    uses ``CaseKey.default()`` as its key.
+    Configs are stored keyed by `CaseKey`.  The default config
+    uses `CaseKey.default()` as its key.
     """
 
     _ConfigDict = dict[str, dict[CaseKey, "helion.Config"]]

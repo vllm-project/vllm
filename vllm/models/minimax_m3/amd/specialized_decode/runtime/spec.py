@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from vllm.config import CompilationMode, VllmConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
@@ -55,8 +55,6 @@ class DecodeConfig:
         transfer = getattr(config, "kv_transfer_config", None)
         if transfer is not None and transfer.kv_connector is not None:
             reasons.append("does not support a KV connector")
-        if not getattr(config, "use_v2_model_runner", False):
-            reasons.append("requires Model Runner V2")
         speculative = config.speculative_config
         if speculative is not None and speculative.method != "eagle3":
             reasons.append("supports only EAGLE3 speculative decoding")
