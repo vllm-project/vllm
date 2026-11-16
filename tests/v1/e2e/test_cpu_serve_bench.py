@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Serve a small model on CPU and run a short `vllm bench serve` against it."""
 
+import json
 import subprocess
 
 import pytest
@@ -16,7 +17,7 @@ if not current_platform.is_cpu():
 
 
 @pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"])
-def test_serve_and_bench(model: str):
+def test_serve_and_bench(model: str, tmp_path):
     with RemoteOpenAIServer(
         model, ["--max-model-len", "2048"], max_wait_seconds=600
     ) as server:
@@ -39,6 +40,14 @@ def test_serve_and_bench(model: str):
                 server.host,
                 "--port",
                 str(server.port),
+                "--save-result",
+                "--result-dir",
+                str(tmp_path),
+                "--result-filename",
+                "result.json",
             ],
             check=True,
         )
+    # vllm bench serve exits 0 even when requests fail.
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert (result["completed"], result["failed"]) == (20, 0)
