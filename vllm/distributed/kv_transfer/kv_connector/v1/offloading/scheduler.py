@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Generator, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -42,10 +42,8 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    MambaSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
@@ -128,7 +126,7 @@ class _RequestTokens(NamedTuple):
     num_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _VllmReqContext(ReqContext):
     _scheduler: "OffloadingConnectorScheduler" = field(
         kw_only=True, repr=False, compare=False
@@ -364,7 +362,7 @@ class OffloadingConnectorScheduler:
         region.close()
 
     @contextmanager
-    def _manager_locked(self) -> Iterator[None]:
+    def _manager_locked(self) -> Generator[None]:
         """Hold the manager for the duration of one hook outside schedule().
 
         None of these hooks can legitimately run inside the step-scoped region:
@@ -1149,7 +1147,7 @@ class OffloadingConnectorScheduler:
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
-                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                if issubclass(group_config.manager_cls, MambaManager):
                     req_status.load_key_ranges.extend(
                         (num_locally_computed_tokens, num_cached_tokens, key)
                         for key in group_keys_to_load

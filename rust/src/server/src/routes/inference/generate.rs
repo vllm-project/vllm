@@ -7,7 +7,6 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -16,7 +15,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use futures::{StreamExt as _, pin_mut};
+use futures::{StreamExt as _, TryStreamExt as _, future, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info};
 use tracing_futures::Instrument as _;
@@ -30,20 +29,23 @@ use vllm_text::{
 use self::convert::{ResponseOptions, prepare_generate_request};
 pub(crate) use self::features::{MmPayload, MultiModalFeatures};
 use self::types::{
-    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob,
-    GenerateOutputMode, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
+    GenerateChoiceLogProbs, GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent,
+    GenerateLogprob, GenerateOutputMode, GenerateResponse, GenerateResponseChoice,
+    GenerateResponseStreamChoice, GenerateStreamResponse, MultiModalPlaceholders,
+    PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::routes::openai::utils::logprobs::clamp_logprob;
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::logprobs::{clamp_logprob, decoded_logprobs_to_openai_chat};
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
-use crate::routes::openai::utils::types::Usage;
+use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
 use crate::routes::openai::utils::usage::ContinuousUsage;
+use crate::routes::openai::utils::validate_n_limit;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
@@ -125,20 +127,36 @@ pub async fn generate(
         engine_request_id = tracing::field::Empty,
     );
 
+    if prepared.options.output_mode == GenerateOutputMode::Text
+        && !state.chat.text().has_tokenizer()
+    {
+        return ApiError::invalid_request(
+            "output_mode='text' requires a tokenizer, but this server does not load one \
+             (--skip-tokenizer-init). Send the request to a server that loads a tokenizer, \
+             or use output_mode='tokens'.",
+            Some("output_mode"),
+        )
+        .into_response();
+    }
+
     let api_server_options = state.api_server_options;
+    if let Err(error) = validate_n_limit(prepared.n.get(), api_server_options.max_n_sequences) {
+        return error.into_response();
+    }
+
     let stream = prepared.stream;
     let created = unix_timestamp();
     // Like Python's token-in-token-out route, record no render duration: lower
     // and submit directly rather than through `TextLlm::generate`.
     let text = state.chat.text();
-    let text_stream = match async {
+    let text_streams = match async {
         let text_request = text.request_processor().prepare(prepared.text_request)?;
-        text.generate_prepared_n(text_request, NonZeroU32::MIN).await
+        text.generate_prepared_n(text_request, prepared.n).await
     }
     .instrument(request_span.clone())
     .await
     {
-        Ok(mut streams) => streams.pop().expect("one output stream per sample"),
+        Ok(streams) => streams,
         Err(error) => {
             return text_submit_error("failed to submit raw generate request", error)
                 .into_response();
@@ -146,19 +164,39 @@ pub async fn generate(
     };
 
     if stream {
-        let chunk_stream = generate_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            api_server_options,
-            prepared.options,
-            mm_placeholders,
-        );
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                generate_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    api_server_options,
+                    prepared.options,
+                    mm_placeholders.clone(),
+                )
+            })
+            .collect();
+        // Like Python, the prompt metadata goes out once, on the first chunk.
+        let mut prompt_sent = false;
+        let chunk_stream = merge_choice_chunk_streams(chunk_streams).map_ok(move |mut chunk| {
+            if prompt_sent {
+                chunk.prompt_token_ids = None;
+                chunk.mm_placeholders = None;
+            }
+            prompt_sent |= chunk.prompt_token_ids.is_some();
+            chunk
+        });
         let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
 
-    let collected = match text_stream.collect_output().instrument(request_span.clone()).await {
+    let collected = match future::try_join_all(
+        text_streams.into_iter().map(|text_stream| text_stream.collect_output()),
+    )
+    .instrument(request_span.clone())
+    .await
+    {
         Ok(collected) => collected,
         Err(error) => {
             return server_error!(
@@ -170,22 +208,60 @@ pub async fn generate(
     };
 
     // Inside the request span, so the logs it emits carry the request ID.
-    let response = match request_span.in_scope(|| {
-        collect_generate(
-            collected,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-            mm_placeholders,
-        )
-    }) {
-        Ok(response) => response,
-        Err(error) => return error.into_response(),
-    };
+    let responses = request_span.in_scope(|| {
+        collected
+            .into_iter()
+            .map(|collected| {
+                collect_generate(
+                    collected,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options,
+                    mm_placeholders.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+    });
+    match responses {
+        Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
 
-    Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<GenerateResponse>) -> GenerateResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        merged.usage.add_choice(&response.usage);
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for GenerateStreamResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        self.choices.is_empty().then_some(self.usage.as_mut()).flatten()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
 }
 
 #[try_stream]
@@ -195,6 +271,7 @@ async fn generate_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -204,6 +281,7 @@ async fn generate_chunk_stream(
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
         return_token_ids,
+        output_mode,
     }: ResponseOptions,
     mut mm_placeholders: Option<MultiModalPlaceholders>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
@@ -217,7 +295,7 @@ async fn generate_chunk_stream(
     let mut spec_decode_metrics = None;
 
     while let Some(next) = stream.next().await {
-        let (sampled, finished) = match next {
+        let (text, sampled, finished) = match next {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: start_prompt_token_ids,
                 ..
@@ -228,13 +306,16 @@ async fn generate_chunk_stream(
                 }
                 continue;
             }
-            // Only token IDs are returned; the decoded text is only matched
-            // against stop strings.
             Ok(DecodedTextEvent::TextDelta {
-                decoded: _,
+                decoded,
                 sampled,
                 finished,
-            }) => (sampled, finished),
+            }) => {
+                // At the `tokens` level, the decoded text is only matched
+                // against stop strings.
+                let text = (output_mode == GenerateOutputMode::Text).then_some(decoded.text);
+                (text, sampled, finished)
+            }
             Err(error) => {
                 error!(
                     error = %error.as_report(),
@@ -265,15 +346,19 @@ async fn generate_chunk_stream(
             }
         }
 
-        if token_ids.is_empty() && finished.is_none() {
+        // Text held back for stop-string matching can arrive without token
+        // IDs.
+        if token_ids.is_empty() && finished.is_none() && text.as_ref().is_none_or(String::is_empty)
+        {
             continue;
         }
 
         let logprobs = if include_logprobs && !token_ids.is_empty() {
-            let logprobs = logprobs.as_ref().ok_or_else(|| {
-                server_error!("raw generate stream requested logprobs but generation returned none")
-            })?;
-            Some(raw_logprobs_to_generate(logprobs)?)
+            Some(choice_logprobs(
+                logprobs.as_ref(),
+                output_mode,
+                default_return_tokens_as_token_ids,
+            )?)
         } else {
             None
         };
@@ -301,9 +386,10 @@ async fn generate_chunk_stream(
         let prompt_token_ids = prompt_token_ids.take();
         y.yield_ok(GenerateStreamResponse {
             request_id: request_id.clone(),
-            output_mode: GenerateOutputMode::Tokens,
+            output_mode,
             choices: vec![GenerateResponseStreamChoice {
                 index: 0,
+                text,
                 logprobs,
                 finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                 stop_reason,
@@ -323,7 +409,7 @@ async fn generate_chunk_stream(
     if include_usage && let Some(usage) = usage {
         y.yield_ok(GenerateStreamResponse {
             request_id,
-            output_mode: GenerateOutputMode::Tokens,
+            output_mode,
             choices: Vec::new(),
             usage: Some(Usage::from_token_usage(
                 usage,
@@ -353,6 +439,7 @@ fn collect_generate(
         enable_log_requests,
         enable_prompt_tokens_details,
         log_outputs,
+        default_return_tokens_as_token_ids,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -363,6 +450,7 @@ fn collect_generate(
         include_logprobs,
         include_prompt_logprobs,
         return_token_ids,
+        output_mode,
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
@@ -372,12 +460,11 @@ fn collect_generate(
         return Err(engine_error(Some(error)));
     }
     let logprobs = if include_logprobs {
-        let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
-            ApiError::server_error(
-                "raw generate response requested logprobs but generation returned none".to_string(),
-            )
-        })?;
-        Some(raw_logprobs_to_generate(logprobs)?)
+        Some(choice_logprobs(
+            collected.logprobs.as_ref(),
+            output_mode,
+            default_return_tokens_as_token_ids,
+        )?)
     } else {
         None
     };
@@ -426,9 +513,10 @@ fn collect_generate(
         model: response_model,
         created,
         usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
-        output_mode: GenerateOutputMode::Tokens,
+        output_mode,
         choices: vec![GenerateResponseChoice {
             index: 0,
+            text: (output_mode == GenerateOutputMode::Text).then_some(collected.text),
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
@@ -475,6 +563,44 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
         ranges.sort_by_key(|range| range.offset);
     }
     Some(placeholders)
+}
+
+/// The choice's output logprobs at its response level: decoded token strings at
+/// the `text` level, token IDs at the `tokens` level.
+fn choice_logprobs(
+    logprobs: Option<&DecodedLogprobs>,
+    output_mode: GenerateOutputMode,
+    return_tokens_as_token_ids: bool,
+) -> Result<GenerateChoiceLogProbs, ApiError> {
+    let logprobs = logprobs.ok_or_else(|| {
+        server_error!("raw generate response requested logprobs but generation returned none")
+    })?;
+    Ok(match output_mode {
+        GenerateOutputMode::Tokens => {
+            GenerateChoiceLogProbs::Tokens(raw_logprobs_to_generate(logprobs)?)
+        }
+        GenerateOutputMode::Text => {
+            GenerateChoiceLogProbs::Text(text_logprobs(logprobs, return_tokens_as_token_ids)?)
+        }
+    })
+}
+
+/// Like Python's generate `text` level: every candidate the engine returned,
+/// with no cut, and no `bytes` for `token_id:N` placeholders.
+fn text_logprobs(
+    logprobs: &DecodedLogprobs,
+    return_tokens_as_token_ids: bool,
+) -> Result<ChatLogProbs, ApiError> {
+    let mut logprobs = decoded_logprobs_to_openai_chat(logprobs, -1, return_tokens_as_token_ids)?;
+    if return_tokens_as_token_ids {
+        for content in logprobs.content.iter_mut().flatten() {
+            content.bytes = None;
+            for top in &mut content.top_logprobs {
+                top.bytes = None;
+            }
+        }
+    }
+    Ok(logprobs)
 }
 
 fn raw_logprobs_to_generate(logprobs: &DecodedLogprobs) -> Result<GenerateLogProbs, ApiError> {
@@ -661,6 +787,54 @@ mod tests {
         assert_eq!(content.rank, None);
         assert_eq!(content.logprob, -9999.0);
         assert_eq!(top(&pos), vec![(7, None), (8, Some(1))]);
+    }
+
+    /// Like Python's text level: every engine candidate with `bytes`, and
+    /// under `--return-tokens-as-token-ids` `token_id:N` placeholders without
+    /// `bytes`.
+    #[test]
+    fn text_logprobs_keep_candidates_and_drop_bytes_for_placeholders() {
+        let entry = |token_id: u32, token: &str, logprob: f32| DecodedTokenLogprob {
+            token_id,
+            token: token.to_string(),
+            logprob,
+            rank: 1,
+        };
+        let logprobs = DecodedLogprobs {
+            positions: vec![DecodedPositionLogprobs {
+                entries: vec![
+                    entry(7, "a", -0.5),
+                    entry(8, "b", -1.0),
+                    entry(9, "c", -2.0),
+                ],
+            }],
+        };
+        let json = |as_token_ids| {
+            serde_json::to_value(text_logprobs(&logprobs, as_token_ids).unwrap()).unwrap()
+        };
+
+        assert_eq!(
+            json(false),
+            serde_json::json!({"content": [{
+                "token": "a", "logprob": -0.5, "bytes": [b'a'],
+                "top_logprobs": [
+                    {"token": "a", "logprob": -0.5, "bytes": [b'a']},
+                    {"token": "b", "logprob": -1.0, "bytes": [b'b']},
+                    {"token": "c", "logprob": -2.0, "bytes": [b'c']},
+                ],
+            }]})
+        );
+        assert_eq!(
+            json(true),
+            serde_json::json!({"content": [{
+                "token": "token_id:7", "logprob": -0.5, "bytes": null,
+                "top_logprobs": [
+                    {"token": "token_id:7", "logprob": -0.5, "bytes": null},
+                    {"token": "token_id:8", "logprob": -1.0, "bytes": null},
+                    {"token": "token_id:9", "logprob": -2.0, "bytes": null},
+                ],
+            }]})
+        );
     }
 
     /// Like Python, continuous usage counts tokens only, and the final usage
@@ -900,6 +1074,7 @@ mod tests {
             num_spec_tokens: 3,
             histogram: vec![0, 1, 1, 0],
             num_draft_tokens: 6,
+            num_verified_tokens: 5,
             ..Default::default()
         };
         let mut output = stream_output(Some(&[11]), Vec::new(), Some(FinishReason::stop_eos()));
@@ -933,8 +1108,9 @@ mod tests {
                 );
                 let json = serde_json::to_value(&chunks[1]).expect("serialize chunk");
                 let stats = &json["metrics"]["speculative_decoding"];
-                assert_eq!(stats.as_object().expect("metrics object").len(), 7);
+                assert_eq!(stats.as_object().expect("metrics object").len(), 8);
                 assert_eq!(stats["num_draft_tokens"], 6);
+                assert_eq!(stats["num_verified_draft_tokens"], 5);
                 assert_eq!(stats["num_accepted_draft_tokens"], 3);
                 assert_eq!(stats["mean_acceptance_length"], 2.5);
                 assert_eq!(
@@ -963,9 +1139,13 @@ mod tests {
             num_draft_tokens: 4,
             per_step_accepted: vec![1, 2],
             per_step_drafted: vec![2, 2],
+            num_verified_tokens: 3,
+            per_step_verified: vec![2, 1],
         });
         assert_eq!(detailed.per_step_accepted, Some(vec![1, 2]));
         assert_eq!(detailed.per_step_drafted, Some(vec![2, 2]));
+        assert_eq!(detailed.num_verified_draft_tokens, 3);
+        assert_eq!(detailed.per_step_verified, Some(vec![2, 1]));
     }
 
     #[test]
@@ -1053,9 +1233,10 @@ mod tests {
         );
         let json = serde_json::to_value(&response).expect("serialize response");
         let stats = &json["metrics"]["speculative_decoding"];
-        assert_eq!(stats.as_object().expect("metrics object").len(), 9);
+        assert_eq!(stats.as_object().expect("metrics object").len(), 11);
         assert!(stats["per_step_accepted"].is_null());
         assert!(stats["per_step_drafted"].is_null());
+        assert!(stats["per_step_verified"].is_null());
     }
 
     #[test]

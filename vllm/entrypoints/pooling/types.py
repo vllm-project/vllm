@@ -98,19 +98,20 @@ PoolingInput: TypeAlias = PromptType | ChatType
 
 
 @dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class ChunkedEmbeddingMetadata:
     prompt_index: int
     chunk_index: int
 
 
-@dataclass
+@dataclass(slots=True)
 class LateChunkingSlot:
     """Per-document source ranges shared by frontend rendering and output contexts."""
 
     metadata: LateChunkingMetadata | None = None
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -150,6 +151,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 
 @dataclass(kw_only=True)
+@dataclass(slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
@@ -243,13 +245,13 @@ class OfflineInputsContext:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineEncodeInputsContext(OfflineInputsContext):
     inputs_seq: Sequence[PoolingInput]
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     pooling_params: PoolingParams
@@ -268,7 +270,7 @@ class OfflineScoringInputsContext(OfflineInputsContext):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflinePluginInputsContext(OfflineInputsContext):
     prompts: DataPrompt
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
@@ -281,7 +283,7 @@ AnyOfflineInputsContext: TypeAlias = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineOutputsContext:
     outputs: list[PoolingRequestOutput]
 

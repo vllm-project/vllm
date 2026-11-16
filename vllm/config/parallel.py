@@ -34,11 +34,18 @@ else:
 logger = init_logger(__name__)
 _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
+
+def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int:
+    """Return the minimum R that makes the expert count divisible by EP size."""
+    return (-num_logical_experts) % ep_size
+
+
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
@@ -84,6 +91,14 @@ class EPLBConfig:
     based on the number of logical experts and the expert parallel size.
     The value will be rounded up to the nearest multiple of the expert parallel
     size.
+    """
+
+    draft_num_redundant_experts: int | None = Field(default=None, ge=0)
+    """Redundant expert count for an EPLB-backed MoE draft. If unset, the
+    target count is inherited when target and draft routed expert counts match
+    and the target count is valid for the draft; otherwise, the draft's minimum
+    valid count is computed. Explicit values are validated and rejected if they
+    do not satisfy EP divisibility for every draft routed expert count.
     """
 
     log_balancedness: bool = False
@@ -293,6 +308,13 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+
+    dbo_schedule: DBOSchedule | None = None
+    """What one microbatch overlaps with the other's compute:
+    `dispatch-combine-overlap` its expert all-to-all, `all-reduce-overlap` its
+    TP all-reduces. `all-reduce-overlap` needs tensor parallelism on one DP rank
+    without expert parallelism and is the default there; everywhere else the
+    default is `dispatch-combine-overlap`."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
@@ -677,7 +699,7 @@ class ParallelConfig:
             )
             # Ensure (num_logical_experts + num_redundant_experts) is
             # divisible by ep_size, supporting non-standard ep_size values
-            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            min_redundant = get_min_num_redundant_experts(num_logical_experts, ep_size)
             self.eplb_config.num_redundant_experts = min_redundant
             logger.info_once(
                 "EPLB num_redundant_experts not specified, "
@@ -1284,6 +1306,21 @@ class ParallelConfig:
             raise ValueError(
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
+            )
+
+        pure_tp = (
+            self.tensor_parallel_size > 1
+            and self.data_parallel_size == 1
+            and not self.enable_expert_parallel
+        )
+        if self.dbo_schedule is None:
+            self.dbo_schedule = (
+                "all-reduce-overlap" if pure_tp else "dispatch-combine-overlap"
+            )
+        elif self.dbo_schedule == "all-reduce-overlap" and not pure_tp:
+            raise ValueError(
+                "dbo_schedule=all-reduce-overlap needs tensor parallelism on one "
+                "DP rank without expert parallelism."
             )
 
         return self

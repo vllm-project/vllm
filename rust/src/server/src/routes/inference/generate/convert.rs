@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
-use super::types::GenerateRequest;
+use super::types::{GenerateOutputMode, GenerateRequest};
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::resolve_n;
 use crate::routes::openai::utils::types::StringOrArray;
 use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
@@ -18,6 +21,8 @@ pub(super) struct PreparedRequest {
     /// The `model` reported in non-streaming responses.
     pub response_model: String,
     pub text_request: TextRequest,
+    /// Number of parallel samples to generate.
+    pub n: NonZeroU32,
     pub stream: bool,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
@@ -35,6 +40,8 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether the caller requested final prompt token metadata.
     pub return_token_ids: bool,
+    /// The response level.
+    pub output_mode: GenerateOutputMode,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -47,6 +54,7 @@ pub(super) fn prepare_generate_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
+    let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
     let include_usage = request
         .stream_options
@@ -62,11 +70,13 @@ pub(super) fn prepare_generate_request(
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
+    let output_mode = request.output_mode.unwrap_or_default();
     let stop_strings = request.sampling_params.stop.map(StringOrArray::into_vec);
-    // Only token IDs are returned, so the output is decoded just to match stop
-    // strings. Python decodes it regardless, with the same response.
+    // The `tokens` level returns no text, so its output is decoded just to
+    // match stop strings. Python decodes it regardless, with the same response.
     let detokenize = request.sampling_params.detokenize.unwrap_or(true)
-        && stop_strings.as_ref().is_some_and(|stops| !stops.is_empty());
+        && (output_mode == GenerateOutputMode::Text
+            || stop_strings.as_ref().is_some_and(|stops| !stops.is_empty()));
     let decode_options = TextDecodeOptions {
         skip_special_tokens: request.sampling_params.skip_special_tokens.unwrap_or(true),
         include_stop_str_in_output: request
@@ -111,6 +121,7 @@ pub(super) fn prepare_generate_request(
         request_id: ctx.request_id,
         response_model: lora_resolution.response_model(),
         text_request,
+        n,
         stream,
         options: ResponseOptions {
             include_usage,
@@ -118,6 +129,7 @@ pub(super) fn prepare_generate_request(
             include_logprobs,
             include_prompt_logprobs,
             return_token_ids,
+            output_mode,
         },
     })
 }
@@ -197,9 +209,11 @@ mod tests {
 
     #[test]
     fn prepare_generate_request_maps_stop_options_to_decode_options() {
-        let decode_options = |sampling_params: serde_json::Value| {
+        let decode_options = |output_mode: serde_json::Value,
+                              sampling_params: serde_json::Value| {
             let request: GenerateRequest = serde_json::from_value(json!({
                 "token_ids": [11, 22],
+                "output_mode": output_mode,
                 "sampling_params": sampling_params,
             }))
             .expect("parse request");
@@ -216,14 +230,19 @@ mod tests {
 
         // Without stop strings there is nothing to decode for.
         assert_eq!(
-            decode_options(json!({})),
+            decode_options(json!(null), json!({})),
             TextDecodeOptions {
                 detokenize: false,
                 ..TextDecodeOptions::default()
             }
         );
+        // The `text` level returns the decoded output.
         assert_eq!(
-            decode_options(json!({"stop": ["\n"]})),
+            decode_options(json!("text"), json!({})),
+            TextDecodeOptions::default()
+        );
+        assert_eq!(
+            decode_options(json!(null), json!({"stop": ["\n"]})),
             TextDecodeOptions {
                 stop_strings: Some(vec!["\n".to_string()]),
                 ..TextDecodeOptions::default()
@@ -231,13 +250,16 @@ mod tests {
         );
         // `detokenize: false` is kept, so the stop strings fail validation.
         assert_eq!(
-            decode_options(json!({
-                "stop": "\n",
-                "include_stop_str_in_output": true,
-                "skip_special_tokens": false,
-                "min_tokens": 2,
-                "detokenize": false,
-            })),
+            decode_options(
+                json!(null),
+                json!({
+                    "stop": "\n",
+                    "include_stop_str_in_output": true,
+                    "skip_special_tokens": false,
+                    "min_tokens": 2,
+                    "detokenize": false,
+                }),
+            ),
             TextDecodeOptions {
                 skip_special_tokens: false,
                 include_stop_str_in_output: true,
