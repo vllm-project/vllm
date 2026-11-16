@@ -13,7 +13,7 @@ use vllm_server::{
     Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
-use vllm_text::backend::hf::ModelSource;
+use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
@@ -268,6 +268,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2273,6 +2274,7 @@ fn frontend_args_accept_json() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2508,6 +2510,72 @@ fn frontend_args_json_resolve_tokenizer_revision_against_model() {
         )
     "#]]
     .assert_debug_eq(&(config.tokenizer, config.hf_config));
+}
+
+#[test]
+fn hf_token_reaches_model_files_and_managed_engine() {
+    let serve = |hf_token: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "org/model"].iter().chain(hf_token).copied())
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args")
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
+        let python_args = args.to_managed_engine_config(1234, &topology(&args), None).python_args;
+        (config, python_args)
+    };
+
+    // A bare flag keeps `HF_TOKEN` and the stored login token; the engine gets the flag too.
+    let (config, python_args) = serve(&["--hf-token"]);
+    assert_eq!(config.hf_token, None);
+    assert_eq!(python_args, ["--hf-token"]);
+
+    let (config, python_args) = serve(&["--hf-token", "hf_secret"]);
+    assert_eq!(config.hf_token, Some(HfToken("hf_secret".to_string())));
+    assert_eq!(python_args, ["--hf-token", "hf_secret"]);
+    assert!(!format!("{config:?}").contains("hf_secret"));
+    // `/server_info` serializes the config.
+    assert!(!serde_json::to_string(&config).unwrap().contains("hf_secret"));
+
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "render", "org/model", "--hf-token", "hf_secret"]).unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    assert_eq!(
+        args.into_config().hf_token,
+        Some(HfToken("hf_secret".to_string()))
+    );
+
+    let frontend = |hf_token: &str| {
+        let payload = format!(r#"{{"model_tag":"org/model","hf_token":{hf_token}}}"#);
+        Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            &payload,
+        ])
+        .map(|cli| {
+            let Command::Frontend(args) = cli.command else {
+                panic!("expected frontend args");
+            };
+            args.into_config().hf_token
+        })
+    };
+    // Python sends `True` for a bare flag and the string otherwise.
+    assert_eq!(frontend("true").unwrap(), None);
+    assert_eq!(
+        frontend(r#""hf_secret""#).unwrap(),
+        Some(HfToken("hf_secret".to_string()))
+    );
+    assert!(frontend("false").is_err());
 }
 
 #[test]
@@ -3232,6 +3300,7 @@ fn serve_args_accept_handshake_aliases() {
                             tokenizer_revision: None,
                             hf_config_path: None,
                             skip_tokenizer_init: false,
+                            hf_token: None,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -3537,6 +3606,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3671,6 +3741,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3919,6 +3990,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init: false,
+            hf_token: None,
             hf_overrides: HfOverrides(
                 {},
             ),
