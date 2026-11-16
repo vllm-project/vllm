@@ -100,6 +100,60 @@ def test_dummy_image_follows_size_hint(
 
 
 @pytest.mark.parametrize(
+    ("modality", "hint", "size"),
+    [
+        ("image", {"width": 403, "height": 601}, (392, 588)),
+        ("video", {"width": 364}, (336, 336)),
+        ("video", {"width": 622, "height": 1083}, (336, 336)),
+    ],
+)
+def test_dummy_without_resize_follows_size_hint(
+    modality: str, hint: dict[str, int], size: tuple[int, int]
+):
+    num_frames = 2
+    other = "video" if modality == "image" else "image"
+    options = {"count": 1, **hint}
+    if modality == "video":
+        options["num_frames"] = num_frames
+    ctx = build_model_context(
+        MODEL_ID,
+        mm_processor_kwargs={"do_resize": False},
+        limit_mm_per_prompt={modality: options, other: 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    width, height = size
+    if modality == "image":
+        item: object = Image.new("RGB", size)
+    else:
+        item = (
+            np.zeros((num_frames, height, width, 3), dtype=np.uint8),
+            {
+                "fps": 1.0,
+                "duration": float(num_frames),
+                "total_num_frames": num_frames,
+                "frames_indices": list(range(num_frames)),
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            },
+        )
+    processed = processor(
+        processor.dummy_inputs.get_dummy_text({modality: 1}),
+        mm_items=processor.info.parse_mm_data({modality: [item]}),
+        hf_processor_mm_kwargs={},
+    )
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={modality: 1}
+    )
+    assert tokens is not None
+
+    dummy = processor.get_dummy_mm_inputs({modality: 1})
+
+    num_embeds = dummy["mm_placeholders"][modality][0].get_num_embeds()
+    assert num_embeds >= processed["mm_placeholders"][modality][0].get_num_embeds()
+    assert num_embeds <= tokens[modality]
+
+
+@pytest.mark.parametrize(
     ("loader_frames", "num_frames"),
     [(None, 96), (97, 97), (128, 128), (129, 129), (-1, 200)],
 )

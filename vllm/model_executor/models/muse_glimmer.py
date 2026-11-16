@@ -130,6 +130,7 @@ def _get_canvas_with_most_tokens(
     max_tokens: int,
     factor: int,
     overrides: ImageDummyOptions | VideoDummyOptions | None = None,
+    do_resize: bool = True,
 ) -> ImageSize:
     if overrides is None or not (overrides.width or overrides.height):
         height, width = max(
@@ -140,6 +141,16 @@ def _get_canvas_with_most_tokens(
 
     max_width = overrides.width or factor * max_tokens
     max_height = overrides.height or factor * max_tokens
+    if not do_resize:
+        ph, pw = max(
+            (
+                (ph, min(max_tokens // ph, max_width // factor))
+                for ph in range(1, min(max_tokens, max_height // factor) + 1)
+            ),
+            key=lambda grid: grid[0] * grid[1],
+            default=(1, 1),
+        )
+        return ImageSize(width=factor * max(pw, 1), height=factor * ph)
 
     def num_tokens(width: int, height: int) -> int:
         height, width = smart_resize(height, width, factor, max_tokens)
@@ -291,11 +302,13 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             int(image_kwargs["max_image_tokens"]),
             int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
             mm_options.get("image"),
+            image_kwargs.get("do_resize") is not False,
         )
         video_size = _get_canvas_with_most_tokens(
             int(video_kwargs["max_video_frame_tokens"]),
             int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
             mm_options.get("video"),
+            video_kwargs.get("do_resize") is not False,
         )
         return {
             "image": self._get_dummy_images(
