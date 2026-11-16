@@ -40,7 +40,8 @@ def capture_server():
     "endpoint", ["v1/completions", "v1/chat/completions", "inference/v1/generate"]
 )
 @pytest.mark.parametrize("stream", [False, True])
-def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
+@pytest.mark.parametrize("name", ["hidden_states", "prompt_hidden_states"])
+def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream, name):
     common = dict(
         temperature=0.8,
         seed=42,
@@ -56,7 +57,7 @@ def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
             model=MODEL_NAME,
             token_ids=[100, 200],
             stream=stream,
-            sampling_params={**common, "aux_outputs": ["hidden_states"]},
+            sampling_params={**common, "aux_outputs": [name]},
         )
     else:
         prompt = (
@@ -67,7 +68,7 @@ def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
         body = dict(
             model=MODEL_NAME,
             stream=stream,
-            aux_outputs=["hidden_states"],
+            aux_outputs=[name],
             **prompt,
             **common,
         )
@@ -86,20 +87,38 @@ def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
         for message in messages:
             for choice in message["choices"]:
                 if choice.get("finish_reason") is None:
-                    assert "hidden_states" not in choice
+                    assert name not in choice
                 else:
                     final[choice["index"]] = choice
         assert set(final) == {0, 1}
         for choice in final.values():
             rows = np.load(
-                io.BytesIO(base64.b64decode(choice["hidden_states"])),
+                io.BytesIO(base64.b64decode(choice[name])),
                 allow_pickle=False,
             )
-            assert rows.shape[0] == 4
-            assert choice["hidden_states_dtype"] == "bfloat16"
+            if name == "hidden_states":
+                assert rows.shape[0] == 4
+                assert choice[name + "_start"] >= 1
+            else:
+                assert choice[name + "_start"] == 0
+                if "chat" not in endpoint:
+                    assert rows.shape[0] == 1
+                elif not stream:
+                    assert (
+                        rows.shape[0] == response.json()["usage"]["prompt_tokens"] - 1
+                    )
+                else:
+                    assert rows.shape[0] > 0
+            assert choice[name + "_dtype"] == "bfloat16"
             assert rows.dtype == np.uint16
-            assert choice["hidden_states_start"] >= 1
-            assert choice["weight_versions"]
+            if name == "prompt_hidden_states":
+                assert choice["prompt_hidden_states_weight_versions"]
+                assert (
+                    choice["prompt_hidden_states_weight_versions"][-1]["end"]
+                    == rows.shape[0]
+                )
+            if name == "hidden_states":
+                assert choice["weight_versions"]
         if not stream:
             if endpoint.endswith("generate"):
                 body["sampling_params"].pop("aux_outputs")
@@ -108,9 +127,9 @@ def test_hidden_inline_http_roundtrip(capture_server, endpoint, stream):
             plain = client.post(capture_server.url_for(endpoint), json=body)
             assert plain.status_code == 200, plain.text
             for choice in plain.json()["choices"]:
-                assert "hidden_states" not in choice
-                assert "hidden_states_start" not in choice
-                assert "hidden_states_dtype" not in choice
+                assert name not in choice
+                assert name + "_start" not in choice
+                assert name + "_dtype" not in choice
 
 
 def test_hidden_http_admission_and_metadata(capture_server):

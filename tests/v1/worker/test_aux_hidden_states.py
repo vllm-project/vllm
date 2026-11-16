@@ -18,7 +18,7 @@ class HiddenCaptureReferenceExtension:
     model_runner: "GPUModelRunner"
 
     @torch.no_grad()
-    def check_reference_logits(self, states, token_ids):
+    def check_reference_logits(self, states, token_ids=None):
         runner = self.model_runner
         states = torch.tensor(states, device="cuda", dtype=runner.dtype)
         model = runner.model
@@ -33,10 +33,11 @@ class HiddenCaptureReferenceExtension:
             rebuilt = cap * torch.tanh(rebuilt / cap)
         rebuilt *= metadata["logit_scale"]
         torch.testing.assert_close(rebuilt, logits, atol=0, rtol=0)
-        torch.testing.assert_close(
-            logits.argmax(-1),
-            torch.tensor(token_ids, device=logits.device),
-        )
+        if token_ids is not None:
+            torch.testing.assert_close(
+                logits.argmax(-1),
+                torch.tensor(token_ids, device=logits.device),
+            )
         return True
 
 
@@ -179,7 +180,7 @@ def test_hidden_rows_survive_kv_pressure_preemption(vllm_runner, monkeypatch):
             max_tokens=128,
             min_tokens=128,
             ignore_eos=True,
-            aux_outputs=("hidden_states",),
+            aux_outputs=("hidden_states", "prompt_hidden_states"),
         )
         reference = runner.llm.generate(prompt, params, use_tqdm=False)[0].outputs[0]
         outputs = runner.llm.generate([prompt, prompt], params, use_tqdm=False)
@@ -195,6 +196,76 @@ def test_hidden_rows_survive_kv_pressure_preemption(vllm_runner, monkeypatch):
             assert output.outputs[0].token_ids == reference.token_ids
             torch.testing.assert_close(
                 output.outputs[0].hidden_states, reference.hidden_states, atol=0, rtol=0
+            )
+            torch.testing.assert_close(
+                output.outputs[0].prompt_hidden_states,
+                reference.prompt_hidden_states,
+                atol=0,
+                rtol=0,
+            )
+
+
+def test_prompt_hidden_scoring_matches_chunked_prefill_and_bounded_cache(
+    vllm_runner, monkeypatch
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    prompt = {"prompt_token_ids": list(range(100, 228))}
+    reference = None
+    for budget in (256, 32):
+        with vllm_runner(
+            os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=192,
+            max_num_seqs=2,
+            max_num_batched_tokens=budget,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            async_scheduling=False,
+            enable_return_hidden_states=True,
+            worker_extension_cls=f"{__name__}.HiddenCaptureReferenceExtension",
+        ) as runner:
+            full = runner.llm.generate(
+                prompt,
+                capture_params(
+                    aux_outputs=("prompt_hidden_states",), max_tokens=1, min_tokens=1
+                ),
+                use_tqdm=False,
+            )[0].outputs[0]
+            assert full.hidden_states is None
+            assert full.prompt_hidden_states.shape == (
+                127,
+                runner.llm.llm_engine.model_config.get_hidden_size(),
+            )
+            if reference is None:
+                reference = full.prompt_hidden_states.clone()
+            torch.testing.assert_close(
+                full.prompt_hidden_states, reference, atol=0, rtol=0
+            )
+            scored = runner.llm.generate(
+                prompt,
+                capture_params(
+                    64,
+                    112,
+                    aux_outputs=("prompt_hidden_states",),
+                    max_tokens=1,
+                    min_tokens=1,
+                    skip_reading_prefix_cache=False,
+                ),
+                use_tqdm=False,
+            )[0]
+            assert 0 < scored.num_cached_tokens <= 64
+            window = scored.outputs[0]
+            assert window.prompt_hidden_states_start == 64
+            torch.testing.assert_close(
+                window.prompt_hidden_states, reference[64:112], atol=0, rtol=0
+            )
+            assert all(
+                runner.llm.collective_rpc(
+                    "check_reference_logits",
+                    args=(window.prompt_hidden_states.tolist(),),
+                )
             )
 
 

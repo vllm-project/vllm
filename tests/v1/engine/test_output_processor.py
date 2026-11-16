@@ -63,6 +63,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     state = RequestState.__new__(RequestState)
     state.hidden_states_chunks = None
+    state.prompt_hidden_chunks = None
     state.hidden_states_start = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
@@ -84,6 +85,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 def test_completion_output_preserves_each_sampling_mask_position() -> None:
     state = RequestState.__new__(RequestState)
     state.hidden_states_chunks = None
+    state.prompt_hidden_chunks = None
     state.hidden_states_start = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
@@ -1905,6 +1907,7 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
 def test_sampling_masks_follow_output_kind(output_kind):
     state = RequestState.__new__(RequestState)
     state.hidden_states_chunks = None
+    state.prompt_hidden_chunks = None
     state.hidden_states_start = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""

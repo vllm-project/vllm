@@ -98,9 +98,59 @@ metadata once. No reconstruction contract is repeated per completion.
 responses include the existing version spans automatically. Weight updates must
 use vLLM's pause/update/version/resume workflow.
 
+## OPD teacher prompt scoring
+
+Request `prompt_hidden_states` to score input positions for full-vocabulary
+distillation. This explicit extension is separate from the sampling-following
+`hidden_states` output. Both use `hidden_states_start/end` as absolute bounds:
+prompt rows cover `[0, P - 1)`, generated rows cover `[P - 1, P + O - 1)`.
+Request either output or both; each returns its own intersection with the bounds.
+
+For a context `x` and target tokens `y`, prefill `x + y` once:
+
+```python
+teacher = llm.generate(
+    {"prompt_token_ids": x + y},
+    SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        aux_outputs=("prompt_hidden_states",),
+        hidden_states_start=len(x) - 1,
+        hidden_states_end=len(x) + len(y) - 1,
+    ),
+)[0].outputs[0]
+rows = teacher.prompt_hidden_states  # [len(y), hidden_size], original dtype
+start = teacher.prompt_hidden_states_start
+versions = teacher.prompt_hidden_states_weight_versions
+```
+
+The extra generated token is not part of the prompt payload. Apply the matching
+checkpoint's output head and the model-level metadata to reconstruct raw logits;
+no top-k truncation is introduced. Token IDs remain available in the input `y`.
+Use `prompt_logprob_token_ids` when only scores for chosen candidate IDs are needed.
+
+Each prefill chunk delivers its selected rows through engine IPC to the frontend.
+The final completion returns one complete tensor. Preemption replay preserves
+the first received rows, missing rows fail the request, and cancellation releases
+the request's accumulated chunks. No worker carry or scheduler payload buffer is
+required. Stop strings trim generated rows without trimming scored prompt rows.
+
+Prompt scoring defaults to `skip_reading_prefix_cache=True`. Set it explicitly
+to `False` to reuse only the prefix before the first selected row; external KV
+reads are disabled for this bounded request. `kv_sharing_fast_prefill` is rejected.
+The per-completion byte limit includes both requested output ranges.
+
+HTTP completions, chat and `/inference/v1/generate` accept the same auxiliary
+output name and bounds. Terminal choices include `prompt_hidden_states`
+(base64 `.npy`), `prompt_hidden_states_dtype`, `prompt_hidden_states_start`, and
+`prompt_hidden_states_weight_versions`. Fields are omitted when not requested.
+The prompt version spans index rows of the returned prompt tensor, independently
+of the generated-token `weight_versions` spans. The same BF16 uint16 decoding
+shown above applies.
+
 ## Scope
 
-Prompt teacher scoring, auxiliary drafter layers, top-k tensor delivery, store
-mode and async scheduling are separate follow-ups. This API returns final
-generated-position hidden states only. Earlier benchmarks of the combined
-prompt/auxiliary producer do not measure this implementation.
+Auxiliary drafter layers, top-k tensor delivery, store mode and async scheduling
+are separate follow-ups. Prompt scoring is an explicit extension; generated
+`hidden_states` retains its sampling-following meaning. Earlier benchmarks of
+the combined prompt/auxiliary producer must be rerun for this implementation.

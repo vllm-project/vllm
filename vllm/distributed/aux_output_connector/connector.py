@@ -54,6 +54,7 @@ class AuxRequestOutput:
     rows: np.ndarray | None = None
     hidden_start: int = 0
     hidden_states: torch.Tensor | None = None
+    prompt_hidden_states: tuple[int, torch.Tensor] | None = None
 
 
 class AuxOutputSchedulerConnector:
@@ -102,15 +103,26 @@ class AuxOutputSchedulerConnector:
                 params is not None
                 and params.aux_outputs
                 and (
-                    request.num_output_tokens == 0
-                    or params.hidden_states_end is None
-                    or request.num_tokens - 1 < params.hidden_states_end
+                    (
+                        "hidden_states" in params.aux_outputs
+                        and (
+                            request.num_output_tokens == 0
+                            or params.hidden_states_end is None
+                            or request.num_tokens - 1 < params.hidden_states_end
+                        )
+                    )
+                    or (
+                        "prompt_hidden_states" in params.aux_outputs
+                        and request.num_computed_tokens < request.num_prompt_tokens - 1
+                    )
                 )
             ):
                 hidden_plans[request_id] = HiddenStatePlan(
                     request.num_prompt_tokens,
                     params.hidden_states_start,
                     params.hidden_states_end,
+                    generated="hidden_states" in params.aux_outputs,
+                    prompt="prompt_hidden_states" in params.aux_outputs,
                 )
         if not self._routing:
             return AuxOutputConnectorMetadata(

@@ -94,6 +94,10 @@ class PendingAuxOutput:
             for request_id, (start, rows) in self.hidden.process_output().items():
                 output = outputs.setdefault(request_id, AuxRequestOutput())
                 output.hidden_start, output.hidden_states = start, rows
+            for request_id, chunk in self.hidden.process_prompt_output().items():
+                outputs.setdefault(
+                    request_id, AuxRequestOutput()
+                ).prompt_hidden_states = chunk
         return outputs
 
 
@@ -167,9 +171,10 @@ class AuxOutputWorkerConnector:
         self,
         input_batch: InputBatch,
         sample_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> None:
         if self._hidden is not None and get_tp_group().is_first_rank:
-            self._hidden.prepare(input_batch, sample_hidden_states)
+            self._hidden.prepare(input_batch, sample_hidden_states, hidden_states)
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""

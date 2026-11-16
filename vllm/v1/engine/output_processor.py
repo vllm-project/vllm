@@ -246,6 +246,11 @@ class RequestState:
         self.hidden_states_start: int | None = None
         self.hidden_states_end: int | None = None
         self.hidden_states_empty: torch.Tensor | None = None
+        self.prompt_hidden_chunks: list[torch.Tensor] | None = None
+        self.prompt_hidden_start = 0
+        self.prompt_hidden_end = 0
+        self.prompt_hidden_cursor = 0
+        self.prompt_hidden_versions: list[WeightVersionSpan] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
@@ -358,13 +363,32 @@ class RequestState:
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
             state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
-        if sampling_params is not None and sampling_params.aux_outputs:
+        if (
+            sampling_params is not None
+            and sampling_params.aux_outputs
+            and "hidden_states" in sampling_params.aux_outputs
+        ):
             state.hidden_states_chunks = []
             state.hidden_states_start = max(
                 sampling_params.hidden_states_start,
                 state.prompt_len - 1,
             )
             state.hidden_states_end = sampling_params.hidden_states_end
+        if (
+            sampling_params is not None
+            and sampling_params.aux_outputs
+            and "prompt_hidden_states" in sampling_params.aux_outputs
+        ):
+            state.prompt_hidden_chunks = []
+            state.prompt_hidden_start = sampling_params.hidden_states_start
+            state.prompt_hidden_end = max(
+                state.prompt_hidden_start,
+                min(
+                    sampling_params.hidden_states_end or state.prompt_len - 1,
+                    state.prompt_len - 1,
+                ),
+            )
+            state.prompt_hidden_cursor = state.prompt_hidden_start
         return state
 
     def make_request_output(
@@ -552,6 +576,24 @@ class RequestState:
                     )
                 assert hidden_states is not None
 
+        prompt_hidden_states = None
+        if finished and self.prompt_hidden_chunks is not None:
+            chunks = self.prompt_hidden_chunks
+            prompt_hidden_states = (
+                torch.cat(chunks)
+                if len(chunks) > 1
+                else chunks[0]
+                if chunks
+                else self.hidden_states_empty
+            )
+            expected = self.prompt_hidden_end - self.prompt_hidden_start
+            if (
+                prompt_hidden_states is None or len(prompt_hidden_states) != expected
+            ) and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR):
+                raise GenerationError(
+                    "Requested prompt hidden-state rows were not delivered"
+                )
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -566,7 +608,39 @@ class RequestState:
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
             weight_versions=self._weight_version_spans() if finished else None,
+            prompt_hidden_states=prompt_hidden_states,
+            prompt_hidden_states_start=(
+                self.prompt_hidden_start
+                if finished and self.prompt_hidden_chunks is not None
+                else None
+            ),
+            prompt_hidden_states_weight_versions=(
+                self.prompt_hidden_versions
+                if finished and self.prompt_hidden_chunks is not None
+                else None
+            ),
         )
+
+    def add_prompt_hidden_rows(
+        self, start: int, rows: torch.Tensor, weight_version: str | None
+    ) -> None:
+        assert self.prompt_hidden_chunks is not None
+        # Replayed prefill rows do not replace the first computation.
+        offset = max(0, self.prompt_hidden_cursor - start)
+        rows = rows[offset:]
+        if not len(rows):
+            return
+        self.prompt_hidden_chunks.append(rows)
+        self.prompt_hidden_cursor = start + offset + len(rows)
+        if weight_version is not None:
+            begin = start + offset - self.prompt_hidden_start
+            spans = self.prompt_hidden_versions
+            if spans and spans[-1].version == weight_version and spans[-1].end == begin:
+                spans[-1].end += len(rows)
+            else:
+                spans.append(
+                    WeightVersionSpan(weight_version, begin, begin + len(rows))
+                )
 
     def track_weight_version(self, weight_version: str) -> None:
         """Start a span when the weight version changes."""
@@ -734,7 +808,10 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
-        if req_state.hidden_states_chunks is not None:
+        if (
+            req_state.hidden_states_chunks is not None
+            or req_state.prompt_hidden_chunks is not None
+        ):
             req_state.hidden_states_empty = self.hidden_states_empty
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
@@ -821,6 +898,15 @@ class OutputProcessor:
                     # Input chunks sent since may re-create the session.
                     reqs_to_abort.append(req_id)
                 continue
+
+            if engine_core_output.prompt_hidden_states is not None:
+                start, rows = engine_core_output.prompt_hidden_states
+                req_state.add_prompt_hidden_rows(start, rows, weight_version)
+                if (
+                    not engine_core_output.new_token_ids
+                    and not engine_core_output.finished
+                ):
+                    continue
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(

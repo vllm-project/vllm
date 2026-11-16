@@ -48,7 +48,7 @@ class SamplingMask:
 
 @dataclass
 class WeightVersionSpan:
-    """Output tokens `[start, end)` were sampled by weights labelled `version`."""
+    """A version span over output tokens, or over rows of a prompt tensor."""
 
     version: str
     start: int
@@ -98,6 +98,9 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    prompt_hidden_states: torch.Tensor | None = None
+    prompt_hidden_states_start: int | None = None
+    prompt_hidden_states_weight_versions: list[WeightVersionSpan] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -247,6 +250,16 @@ class RequestOutput:
                             completion.routed_experts = next_completion.routed_experts
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
+                        if next_completion.prompt_hidden_states is not None:
+                            completion.prompt_hidden_states = (
+                                next_completion.prompt_hidden_states
+                            )
+                            completion.prompt_hidden_states_start = (
+                                next_completion.prompt_hidden_states_start
+                            )
+                            completion.prompt_hidden_states_weight_versions = (
+                                next_completion.prompt_hidden_states_weight_versions
+                            )
                         if next_completion.hidden_states is not None:
                             completion.hidden_states = next_completion.hidden_states
                             completion.hidden_states_start = (

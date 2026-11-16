@@ -2525,6 +2525,12 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = hidden_states = None
+            aux_output = (model_runner_output.aux_output_connector_output or {}).get(
+                req_id
+            )
+            prompt_hidden_states = (
+                aux_output.prompt_hidden_states if aux_output is not None else None
+            )
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
@@ -2597,8 +2603,8 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
-            if should_emit_output:
-                # Add EngineCoreOutput for this Request.
+            if should_emit_output or prompt_hidden_states is not None:
+                # Add sampled output or an explicit prompt-scoring chunk.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -2610,7 +2616,7 @@ class Scheduler(SchedulerInterface):
                         prompt_token_id_logprobs=prompt_token_id_logprobs,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
+                        events=request.take_events() if should_emit_output else None,
                         prefill_stats=prefill_stats,
                         spec_decode_metrics=(
                             request.spec_decode_metrics
@@ -2622,6 +2628,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         hidden_states=hidden_states,
+                        prompt_hidden_states=prompt_hidden_states,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
                     )

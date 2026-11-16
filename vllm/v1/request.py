@@ -370,6 +370,18 @@ class Request:
         if params is not None and params.skip_reading_prefix_cache:
             return 0
         sp = self.sampling_params
+        if (
+            sp is not None
+            and sp.aux_outputs
+            and "prompt_hidden_states" in sp.aux_outputs
+        ):
+            start = sp.hidden_states_start
+            if (
+                sp.prompt_logprobs is not None
+                or sp.prompt_logprob_token_ids is not None
+            ):
+                start = min(start, sp.prompt_logprob_start or 0)
+            return start
         if sp is not None and (
             sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None
         ):

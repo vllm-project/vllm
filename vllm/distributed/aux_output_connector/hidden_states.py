@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inline, sampling-following lm_head inputs at generated positions."""
+"""Inline lm_head inputs for generated positions and explicit prompt scoring."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ class HiddenStatePlan:
     prompt_len: int
     start: int
     end: int | None
+    generated: bool = True
+    prompt: bool = False
 
     def select(self, step_start: int, step_end: int) -> tuple[int, int]:
         start = max(step_start, self.prompt_len - 1, self.start)
@@ -69,8 +71,11 @@ def validate_capture_request(
 ) -> None:
     if not params.aux_outputs:
         return
-    if tuple(params.aux_outputs) != ("hidden_states",):
-        raise VLLMValidationError("aux_outputs supports only ('hidden_states',)")
+    names = set(params.aux_outputs)
+    if names - {"hidden_states", "prompt_hidden_states"} or len(names) != len(
+        params.aux_outputs
+    ):
+        raise VLLMValidationError("Unsupported or repeated auxiliary output")
     if not config.aux_output_config.enable_return_hidden_states:
         raise VLLMValidationError("Hidden states require --enable-return-hidden-states")
     start, end = params.hidden_states_start, params.hidden_states_end
@@ -85,6 +90,8 @@ def validate_capture_request(
         )
     if resumable:
         raise VLLMValidationError("Hidden states do not support streaming input")
+    if "prompt_hidden_states" in names and config.cache_config.kv_sharing_fast_prefill:
+        raise VLLMValidationError("Prompt hidden states do not support fast prefill")
     if (
         params.presence_penalty != 0
         or params.frequency_penalty != 0
@@ -108,7 +115,11 @@ def validate_capture_request(
     maximum = min(prompt_len - 1 + (params.max_tokens or limit), limit - 1)
     if end is not None:
         maximum = min(maximum, end)
-    rows = max(0, maximum - max(start, prompt_len - 1))
+    rows = (
+        max(0, maximum - max(start, prompt_len - 1)) if "hidden_states" in names else 0
+    )
+    if "prompt_hidden_states" in names:
+        rows += max(0, min(end or prompt_len - 1, prompt_len - 1) - start)
     size = torch.empty((), dtype=config.model_config.dtype).element_size()
     nbytes = rows * config.model_config.get_hidden_size() * size
     if nbytes > config.aux_output_config.max_hidden_capture_bytes:
@@ -161,6 +172,8 @@ class PendingHiddenOutput:
     # request id -> (selected absolute start, full step end, owned GPU rows)
     snapshots: dict[str, tuple[int, int, torch.Tensor]]
     empty: torch.Tensor
+    prompt_snapshots: dict[str, tuple[int, torch.Tensor]] = field(default_factory=dict)
+    prompt_rows: dict[str, torch.Tensor] = field(default_factory=dict)
     rows: dict[str, torch.Tensor] = field(default_factory=dict)
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
@@ -176,6 +189,16 @@ class PendingHiddenOutput:
             cpu = torch.empty_like(rows, device="cpu", pin_memory=True)
             cpu.copy_(rows, non_blocking=True)
             self.rows[request_id] = cpu
+        for request_id, (_, rows) in self.prompt_snapshots.items():
+            cpu = torch.empty_like(rows, device="cpu", pin_memory=True)
+            cpu.copy_(rows, non_blocking=True)
+            self.prompt_rows[request_id] = cpu
+
+    def process_prompt_output(self) -> dict[str, tuple[int, torch.Tensor]]:
+        return {
+            request_id: (start, self.prompt_rows[request_id])
+            for request_id, (start, _) in self.prompt_snapshots.items()
+        }
 
     def process_output(self) -> dict[str, tuple[int, torch.Tensor]]:
         assert self.num_sampled is not None and self.num_rejected is not None
@@ -203,11 +226,17 @@ class HiddenStateCapturer:
             (0, self.metadata["hidden_size"]), dtype=config.model_config.dtype
         )
 
-    def prepare(self, batch: InputBatch, sample_hidden_states: torch.Tensor) -> None:
+    def prepare(
+        self,
+        batch: InputBatch,
+        sample_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> None:
         if not self.plans:
             self.pending = None
             return
         snapshots = {}
+        prompt_snapshots = {}
         for index, request_id in enumerate(batch.req_ids):
             plan = self.plans.get(request_id)
             if plan is None:
@@ -216,13 +245,29 @@ class HiddenStateCapturer:
             step_end = int(
                 batch.num_computed_tokens_np[index] + batch.num_scheduled_tokens[index]
             )
+            if plan.prompt:
+                computed = int(batch.num_computed_tokens_np[index])
+                lo = max(computed, plan.start)
+                hi = min(step_end, plan.prompt_len - 1, plan.end or step_end)
+                if lo < hi:
+                    offset = int(batch.query_start_loc_np[index]) + lo - computed
+                    prompt_snapshots[request_id] = (
+                        lo,
+                        hidden_states[offset : offset + hi - lo].clone(),
+                    )
+            if not plan.generated:
+                continue
             start, end = plan.select(step_end - int(last - first), step_end)
+            if end <= start:
+                continue
             offset = int(first) + start - (step_end - int(last - first))
             rows = sample_hidden_states[offset : offset + end - start].clone()
             snapshots[request_id] = (start, step_end, rows)
         self.pending = (
-            PendingHiddenOutput(list(batch.req_ids), snapshots, self.empty)
-            if snapshots
+            PendingHiddenOutput(
+                list(batch.req_ids), snapshots, self.empty, prompt_snapshots
+            )
+            if snapshots or prompt_snapshots
             else None
         )
 

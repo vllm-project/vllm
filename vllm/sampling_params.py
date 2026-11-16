@@ -440,8 +440,10 @@ class SamplingParams(
     and terminate early, saving time and tokens."""
 
     # Debugging / RL-specific parameters. Not intended for production serving.
-    aux_outputs: tuple[Literal["hidden_states"], ...] | None = None
-    """Requested sampling-following auxiliary outputs."""
+    aux_outputs: tuple[Literal["hidden_states", "prompt_hidden_states"], ...] | None = (
+        None
+    )
+    """Requested generated-position or prompt-scoring auxiliary outputs."""
     hidden_states_start: int = 0
     """Inclusive absolute input position; generated positions begin at P - 1."""
     hidden_states_end: int | None = None
@@ -495,7 +497,8 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
-        aux_outputs: tuple[Literal["hidden_states"], ...] | None = None,
+        aux_outputs: tuple[Literal["hidden_states", "prompt_hidden_states"], ...]
+        | None = None,
         hidden_states_start: int = 0,
         hidden_states_end: int | None = None,
         routed_experts_prompt_start: int = 0,
@@ -646,6 +649,7 @@ class SamplingParams(
             self.skip_reading_prefix_cache = (
                 self.prompt_logprobs is not None
                 or self.prompt_logprob_token_ids is not None
+                or bool(self.aux_outputs and "prompt_hidden_states" in self.aux_outputs)
             )
 
     def _verify_args(self) -> None:

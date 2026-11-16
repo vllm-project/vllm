@@ -1731,6 +1731,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.prepare_hidden_output(
                 global_input_batch,
                 sample_hidden_states,
+                hidden_states,
             )
 
         # A diffusion prefill has no logit rows even when a bitmask row

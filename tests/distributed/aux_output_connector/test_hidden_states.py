@@ -15,6 +15,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.cpu_test
@@ -50,9 +51,97 @@ def test_rejected_suffix_is_relative_to_full_step_not_selected_window():
 
 def test_hidden_tensor_roundtrips_through_engine_ipc():
     rows = torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)
-    output = EngineCoreOutput(request_id="r", new_token_ids=[8, 9], hidden_states=rows)
+    output = EngineCoreOutput(
+        request_id="r",
+        new_token_ids=[8, 9],
+        hidden_states=rows,
+        prompt_hidden_states=(3, rows),
+    )
     decoded = MsgpackDecoder(EngineCoreOutput).decode(MsgpackEncoder().encode(output))
     torch.testing.assert_close(decoded.hidden_states, rows, rtol=0, atol=0)
+    assert decoded.prompt_hidden_states[0] == 3
+    torch.testing.assert_close(decoded.prompt_hidden_states[1], rows, rtol=0, atol=0)
+
+
+def test_prompt_rows_cross_chunks_keep_first_versions_and_reject_missing_rows():
+    processor = OutputProcessor(None, log_stats=True)
+    params = SamplingParams(
+        detokenize=False,
+        max_tokens=1,
+        aux_outputs=("prompt_hidden_states",),
+        hidden_states_start=1,
+        hidden_states_end=3,
+    )
+    assert params.skip_reading_prefix_cache
+    request = EngineCoreRequest(
+        request_id="p",
+        external_req_id="p",
+        prompt_token_ids=[1, 2, 3, 4],
+        sampling_params=params,
+        pooling_params=None,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    rows = torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)
+    processor.add_request(request, prompt=None)
+    for version in ("first", "recomputed"):
+        stats = IterationStats()
+        partial = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="p", new_token_ids=[], prompt_hidden_states=(1, rows[:1])
+                )
+            ],
+            weight_version=version,
+            engine_core_timestamp=1.0,
+            iteration_stats=stats,
+        )
+        assert not partial.request_outputs
+        assert not stats.time_to_first_tokens_iter
+    stats = IterationStats()
+    result = (
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="p",
+                    new_token_ids=[5],
+                    prompt_hidden_states=(2, rows[1:]),
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ],
+            weight_version="second",
+            engine_core_timestamp=2.0,
+            iteration_stats=stats,
+        )
+        .request_outputs[0]
+        .outputs[0]
+    )
+    assert len(stats.time_to_first_tokens_iter) == 1
+    assert result.hidden_states is None
+    assert result.prompt_hidden_states_start == 1
+    torch.testing.assert_close(result.prompt_hidden_states, rows, atol=0, rtol=0)
+    assert [
+        (s.version, s.start, s.end) for s in result.prompt_hidden_states_weight_versions
+    ] == [
+        ("first", 0, 1),
+        ("second", 1, 2),
+    ]
+    processor.add_request(request, prompt=None)
+    with pytest.raises(GenerationError, match="prompt hidden-state rows"):
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="p",
+                    new_token_ids=[5],
+                    prompt_hidden_states=(1, rows[:1]),
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ]
+        )
+    assert processor.get_num_unfinished_requests() == 0
 
 
 def test_frontend_delivers_window_only_at_completion_and_rejects_missing_rows():
@@ -77,11 +166,7 @@ def test_frontend_delivers_window_only_at_completion_and_rejects_missing_rows():
     )
     processor.add_request(request, prompt=None)
     first = processor.process_outputs(
-        [
-            EngineCoreOutput(
-                request_id="r", new_token_ids=[4], hidden_states=torch.empty(0, 2)
-            ),
-        ]
+        [EngineCoreOutput(request_id="r", new_token_ids=[4])]
     ).request_outputs[0]
     assert first.outputs[0].hidden_states is None
     rows = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
