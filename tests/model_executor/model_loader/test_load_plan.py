@@ -620,6 +620,21 @@ def test_e8m0_into_uint8_through_copy_weight_is_a_view():
     assert torch.equal(model.layer.weight.view(torch.uint8), scales)
 
 
+@pytest.mark.parametrize(
+    "sent,held", [(torch.int8, torch.uint8), (torch.uint8, torch.int8)], ids=str
+)
+def test_same_width_integer_copy_is_a_byte_copy(sent, held):
+    """A raw `param.copy_` (not `copy_weight_`) between int8 and uint8 is a
+    cast that keeps every bit, so the plan writes it as a byte copy."""
+    name = "layer.weight"
+    make, _ = _single(lambda p, w: p.copy_(w), shape=(8,), dtype=held)
+    _, plan = _check_plan_equals_cold_start(make, {name: ((8,), sent)})
+    (write,) = plan.entries[name].writes
+    assert write.dtype is None
+    ((_, dest),) = plan.get_dest(name)
+    assert dest.dtype == sent
+
+
 def test_tensors_sharing_one_storage():
     """Two checkpoint tensors on one storage: each write lands in its own
     tensor, whichever tensor names the storage."""
