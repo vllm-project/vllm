@@ -811,7 +811,6 @@ class Base(
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
-        dtype = dtype or self.model_config.dtype
         device = self.device_config.device
 
         def _init_parameters(module: nn.Module):
@@ -822,8 +821,10 @@ class Base(
                 # Already a vLLM parameter, nothing to do
                 if hasattr(param, "weight_loader"):
                     continue
-                data = torch.empty_like(param.data, dtype=dtype, device=device)
-                setattr(module, name, nn.Parameter(data=data))
+                param_dtype = dtype or param.dtype
+                data = torch.empty_like(param.data, dtype=param_dtype, device=device)
+                param = nn.Parameter(data, requires_grad=param.requires_grad)
+                setattr(module, name, param)
             for child in module.children():
                 _init_parameters(child)
 

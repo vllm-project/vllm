@@ -318,7 +318,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         cos_sin_dtype: type[cutlass.Numeric],
@@ -604,7 +604,7 @@ class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         cos_sin_dtype: type[cutlass.Numeric],

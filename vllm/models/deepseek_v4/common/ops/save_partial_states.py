@@ -88,7 +88,7 @@ class SavePartialStatesKernel(
             mask=mask,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         head_size: int,

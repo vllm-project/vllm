@@ -43,6 +43,102 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("row_bytes", [584, 528, 288, 132, 68])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize(
+    "num_tokens,use_graph", [(1, False), (17, False), (1025, True)]
+)
+def test_pipeline_cache_relay_matches_direct_insert(
+    row_bytes, compress_ratio, num_tokens, use_graph
+):
+    """Relayed rows equal the cache writer's own insert at the receiver's slots.
+
+    The relay copies packed rows without decoding them, so the writers define the
+    expected bytes, including the skipped slots, open groups and page padding.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        copy_pipeline_cache_rows,
+        rope_quant_insert,
+    )
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
+        indexer_k_norm_rope_store,
+    )
+
+    indexer = row_bytes in (132, 68)
+    if row_bytes in (288, 68) and not current_platform.is_device_capability_family(100):
+        pytest.skip("FP4 cache writer test requires an SM100-family GPU")
+    torch.manual_seed(0)
+    block_size = 32
+    num_blocks = math.ceil(num_tokens / block_size) + 1
+    stride = block_size * row_bytes + 256
+    backings = [
+        torch.full((num_blocks, stride), 165, dtype=torch.uint8, device="cuda")
+        for _ in range(3)
+    ]
+    source, target, expected = (
+        b.as_strided((num_blocks, block_size, row_bytes), (stride, row_bytes, 1))
+        for b in backings
+    )
+    # Offset views exercise the alignment variants used by sliced PP batches.
+    positions = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots[2::5] = -1
+    # Valid rows land at another physical location on the receiver.
+    target_slots = torch.where(source_slots >= 0, source_slots + block_size, -1)
+    angles = torch.randn(num_tokens + 2, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    norm_weight = torch.randn(128, dtype=torch.bfloat16, device="cuda")
+    inputs = torch.empty(
+        num_tokens, 128 if indexer else 512, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.empty((num_tokens + 1, row_bytes), device="cuda", dtype=torch.uint8)[
+        1:
+    ]
+
+    def insert(cache, slots):
+        if indexer:
+            indexer_k_norm_rope_store(
+                inputs,
+                positions,
+                cos_sin,
+                norm_weight,
+                1e-6,
+                cache,
+                slots,
+                compress_ratio,
+                row_bytes == 68,
+            )
+        else:
+            rope_quant_insert(inputs, positions, cos_sin, cache, slots, compress_ratio)
+
+    def relay():
+        copy_pipeline_cache_rows(
+            source, rows, positions, source_slots, compress_ratio, scatter=False
+        )
+        copy_pipeline_cache_rows(
+            target, rows, positions, target_slots, compress_ratio, scatter=True
+        )
+
+    def write_inputs():
+        inputs.normal_()
+        for backing in backings:
+            backing.fill_(165)
+        insert(source, source_slots)
+        insert(expected, target_slots)
+
+    write_inputs()
+    relay()
+    torch.testing.assert_close(backings[1], backings[2])
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            relay()
+        write_inputs()
+        graph.replay()
+        torch.testing.assert_close(backings[1], backings[2])
+
+
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
@@ -1107,13 +1203,13 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     capacity = 8
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_batched_tokens = 16
     vllm_config.parallel_config.prefill_context_parallel_size = 1
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,
@@ -1495,7 +1591,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
     )
     from vllm.models.deepseek_v41.compressor import DeepseekCompressor
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
     torch.manual_seed(42)
@@ -1514,7 +1610,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
         if num_speculative_tokens
         else None,
     )
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,

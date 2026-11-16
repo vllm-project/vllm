@@ -14,9 +14,9 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -317,9 +317,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+                if getattr(builder, "aot_schedule", False) and issubclass(
+                    kv_group.manager_cls, SlidingWindowManager
+                ):
                     # `aot_schedule` belongs to FlashAttention's builder, not
                     # to the base class this loop is typed against.
                     builder.aot_schedule = False  # type: ignore[attr-defined]

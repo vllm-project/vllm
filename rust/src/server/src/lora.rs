@@ -197,6 +197,26 @@ pub(crate) enum UnloadLoraError {
     NotRemoved { lora_name: String, lora_int_id: u64 },
 }
 
+/// Check an adapter's name and path, and that its name does not shadow a
+/// served base model.
+pub(crate) fn check_lora_module(
+    base_model_names: &[String],
+    module: &LoraModulePath,
+) -> Result<(), LoadLoraError> {
+    if module.name.trim().is_empty() {
+        bail_invalid_adapter!("lora_name must not be empty");
+    }
+    if module.path.trim().is_empty() {
+        bail_invalid_adapter!("lora_path must not be empty");
+    }
+    if base_model_names.contains(&module.name) {
+        return Err(LoadLoraError::BaseModelName {
+            lora_name: module.name.clone(),
+        });
+    }
+    Ok(())
+}
+
 impl LoraManager {
     pub fn new() -> Self {
         Self {
@@ -265,22 +285,14 @@ impl LoraManager {
         module: LoraModulePath,
         load_inplace: bool,
     ) -> Result<LoadedLora, LoadLoraError> {
+        check_lora_module(base_model_names, &module)?;
         let LoraModulePath {
             name: lora_name,
             path: lora_path,
             base_model_name,
             is_3d_lora_weight,
         } = module;
-        if lora_name.trim().is_empty() {
-            bail_invalid_adapter!("lora_name must not be empty");
-        }
-        if lora_path.trim().is_empty() {
-            bail_invalid_adapter!("lora_path must not be empty");
-        }
         let _guard = self.update_lock.lock().await;
-        if base_model_names.iter().any(|name| name == &lora_name) {
-            return Err(LoadLoraError::BaseModelName { lora_name });
-        }
         let adapters = self.adapters.read().await;
         let existing_lora_int_id = adapters.get(&lora_name).map(|adapter| adapter.lora_int_id);
         if !load_inplace && existing_lora_int_id.is_some() {

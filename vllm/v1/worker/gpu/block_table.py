@@ -52,10 +52,9 @@ class BlockTables:
         assert len(dcp_sharded) == self.num_kv_cache_groups
         self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
         # Per group, how many tokens below a request's first scheduled position
-        # attention can still read (SlidingWindowSpec.num_retained_tokens);
-        # 0 disables it for the group. Under context parallelism a
-        # block-table column does not map to a contiguous token range, so the
-        # masking in gather_block_tables is disabled.
+        # attention can still read; 0 disables it for the group. Under context
+        # parallelism a block-table column does not map to a contiguous token
+        # range, so the masking in gather_block_tables is disabled.
         if sliding_window_reach is None or cp_size > 1:
             sliding_window_reach = [0] * self.num_kv_cache_groups
         assert len(sliding_window_reach) == self.num_kv_cache_groups
