@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Collection, Generator, Iterable, Sequence
+from collections.abc import Collection, Generator, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -66,6 +66,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+_Block = TypeVar("_Block")
 
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
@@ -230,6 +231,9 @@ class OffloadingConnectorScheduler:
         self.config = SchedulerOffloadConfig.from_spec(
             spec, vllm_config, kv_cache_config
         )
+        self._group_configs_by_id = {
+            config.group_idx: config for config in self.config.kv_group_configs
+        }
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
@@ -1058,43 +1062,14 @@ class OffloadingConnectorScheduler:
             position = boundary
         return sources
 
-    def _track_allocated_block_ids(
+    def _iter_allocation_candidate_blocks(
         self,
-        groups: Iterable[tuple[int, Sequence[int]]],
-        req_status: RequestOffloadState,
-        *,
-        is_full_table: bool = False,
-        computed_tokens_finalized: bool = False,
-    ) -> None:
-        """Add newly allocated candidates from a core block table to the step set.
-
-        `groups` contains the group IDs selected by the caller. A complete
-        table includes existing prefix hits; an incremental table contains
-        only blocks added in this step. The allocation callback can run before
-        core finalizes replay-adjusted computed tokens.
-        """
-        group_configs = {
-            config.group_idx: config for config in self.config.kv_group_configs
-        }
-        # A nonzero replay_start retains the full FA hit behind the replay
-        # frontier. With a zero start, the final computed boundary distinguishes
-        # a wholly replayed short hit from no replay.
-        if (
-            is_full_table
-            and computed_tokens_finalized
-            and not req_status.req.replay_start
-        ):
-            local_prefix_tokens = min(
-                req_status.num_locally_computed_tokens,
-                req_status.req.num_computed_tokens,
-            )
-        elif is_full_table:
-            local_prefix_tokens = req_status.num_locally_computed_tokens
-        else:
-            local_prefix_tokens = 0
-
-        for group_idx, block_ids in groups:
-            group_config = group_configs.get(group_idx)
+        groups: Iterable[tuple[int, Sequence[_Block]]],
+        local_prefix_tokens: int,
+    ) -> Iterator[Sequence[_Block]]:
+        """Yield block table suffixes after shared full-attention prefixes."""
+        for group_idx, group_blocks in groups:
+            group_config = self._group_configs_by_id.get(group_idx)
             if (
                 group_config is None
                 or group_config.sliding_window_size_in_chunks is not None
@@ -1102,9 +1077,7 @@ class OffloadingConnectorScheduler:
                 start = 0
             else:
                 start = local_prefix_tokens // group_config.tokens_per_block
-            for block_id in block_ids[start:]:
-                if block_id != 0:
-                    self._current_batch_allocated_block_ids.add(block_id)
+            yield group_blocks[start:]
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
@@ -1113,14 +1086,13 @@ class OffloadingConnectorScheduler:
         # Include allocations made by other connectors in a MultiConnector.
         # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
-        self._track_allocated_block_ids(
-            (
-                (group_idx, tuple(block.block_id for block in group_blocks))
-                for group_idx, group_blocks in enumerate(blocks.blocks)
-            ),
-            req_status,
-            is_full_table=True,
-        )
+        for group_blocks in self._iter_allocation_candidate_blocks(
+            enumerate(blocks.blocks),
+            num_locally_computed_tokens,
+        ):
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks if block.block_id != 0
+            )
         if num_external_tokens == 0:
             return
 
@@ -1274,18 +1246,22 @@ class OffloadingConnectorScheduler:
                         for grp_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(block_id_groups)
-                self._track_allocated_block_ids(
-                    (
-                        (
-                            group_config.group_idx,
-                            block_id_groups[group_config.group_idx],
+                local_prefix_tokens = 0
+                if is_full_table:
+                    local_prefix_tokens = req_status.num_locally_computed_tokens
+                    # Core can shorten or discard the hit after connector lookup.
+                    # Replay instead moves the execution start without dropping FA.
+                    if not req_status.req.replay_start:
+                        local_prefix_tokens = min(
+                            local_prefix_tokens, req_status.req.num_computed_tokens
                         )
-                        for group_config in self.config.kv_group_configs
-                    ),
-                    req_status,
-                    is_full_table=is_full_table,
-                    computed_tokens_finalized=True,
-                )
+                for new_blocks in self._iter_allocation_candidate_blocks(
+                    enumerate(block_id_groups),
+                    local_prefix_tokens,
+                ):
+                    self._current_batch_allocated_block_ids.update(
+                        bid for bid in new_blocks if bid != 0
+                    )
 
         for copy in scheduler_output.kv_cache_block_copies or ():
             self._current_batch_allocated_block_ids.add(copy.dst_block_id)
