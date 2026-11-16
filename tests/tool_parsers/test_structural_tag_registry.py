@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural
 from xgrammar.testing import _is_grammar_accept_string
 
 import vllm.envs as envs
+import vllm.logger as vllm_logger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -101,6 +103,47 @@ def sample_tools_strict() -> list[ChatCompletionToolsParam]:
             },
         )
     ]
+
+
+@pytest.fixture()
+def reset_warning_once(monkeypatch):
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
+    vllm_logger._print_warning_once.cache_clear()
+    yield
+    vllm_logger._print_warning_once.cache_clear()
+
+
+@pytest.mark.parametrize("model", ["qwen_3_coder"])
+def test_custom_tool_grammar_fallback_is_explicit(
+    model, caplog, reset_warning_once
+) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": 'start: "apply_patch"',
+                    },
+                }
+            ],
+        }
+    )
+
+    tag = get_model_structural_tag(
+        model,
+        request.tools,
+        request.tool_choice,
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "best-effort" in caplog.text
+    assert "not enforced" in caplog.text
 
 
 def test_supported_structural_tag_models_include_vllm_builtins():
