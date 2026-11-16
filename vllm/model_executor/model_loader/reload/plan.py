@@ -155,7 +155,11 @@ def load_planned(
     """Load full checkpoint tensors as `plan` says: copy each direct name's
     boxes into its destinations, skip names this rank needs nothing of, and
     pass fallbacks to `model.load_weights`. Call between `start_reload`
-    and `finish_reload`."""
+    and `finish_reload`.
+
+    Copies run in batches, so every tensor `weights` yields must stay valid
+    and unchanged until this call returns: do not reuse one buffer for
+    several items."""
     fallbacks = []
     names: list[str] = []
     dsts: list[torch.Tensor] = []
@@ -209,11 +213,13 @@ def _dest_key(tensor: torch.Tensor) -> tuple:
 def _copy_all(
     names: list[str], dsts: list[torch.Tensor], srcs: list[torch.Tensor]
 ) -> None:
-    """One `_foreach_copy_` over the batch; if it fails, copy pair by pair to
-    name the checkpoint tensor that failed."""
+    """One `_foreach_copy_` over the batch; if it fails, copy pair by pair,
+    which either completes the batch or names the checkpoint tensor that
+    failed."""
     try:
         torch._foreach_copy_(dsts, srcs)
-    except Exception:
+    except Exception as batched:
+        logger.debug("load_planned: _foreach_copy_ failed (%s); copying each", batched)
         for name, dst, src in zip(names, dsts, srcs):
             try:
                 dst.copy_(src)
@@ -221,7 +227,6 @@ def _copy_all(
                 raise RuntimeError(
                     f"load_planned: copying {name!r} into its destination failed: {e}"
                 ) from e
-        raise
 
 
 def check_plannable(model: torch.nn.Module) -> None:

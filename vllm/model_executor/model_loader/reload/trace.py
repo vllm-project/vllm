@@ -64,7 +64,7 @@ def _is_basic_index(index: object) -> bool:
         if isinstance(x, slice):
             if not all(v is None or type(v) is int for v in (x.start, x.stop, x.step)):
                 return False
-        elif not (x is None or x is Ellipsis or isinstance(x, int)):
+        elif not (x is None or x is Ellipsis or type(x) is int):
             return False
     return True
 

@@ -479,15 +479,20 @@ def test_setitem_with_a_traced_index_falls_back():
     assert "index_put_" in (plan.entries["layer.weight"].reason or "")
 
 
-def test_setitem_with_an_advanced_index_falls_back():
-    """`param[[0, 2]] = weight` writes through a copy of the index: it is
-    dispatched, not planned as a direct write."""
+@pytest.mark.parametrize(
+    "index,shape,reason",
+    [([0, 2], (2,), "index_put_"), (True, (4,), "applies view")],
+    ids=["list", "bool"],
+)
+def test_setitem_with_an_advanced_index_falls_back(index, shape, reason):
+    """`param[[0, 2]] = weight` writes through a copy of the index, and a
+    bool index is not a plain int: both are dispatched, not taken as a view."""
     make, shapes = _single(
-        lambda p, w: p.__setitem__([0, 2], w), shape=(2,), param_shape=(4,)
+        lambda p, w: p.__setitem__(index, w), shape=shape, param_shape=(4,)
     )
     _, plan = _check_plan_equals_cold_start(make, shapes)
     assert plan.get_dest("layer.weight") is None
-    assert "index_put_" in (plan.entries["layer.weight"].reason or "")
+    assert reason in (plan.entries["layer.weight"].reason or "")
 
 
 def test_noop_to_and_constant_fill_stay_direct():
@@ -859,6 +864,21 @@ def test_load_planned_last_write_of_a_name_wins(monkeypatch):
     assert sizes == [2, 1]
     assert torch.equal(model.p0, second["p0"])
     assert torch.equal(model.p1, first["p1"])
+
+
+def test_load_planned_completes_when_only_the_batch_fails(monkeypatch):
+    """A failed `_foreach_copy_` is retried pair by pair; if every pair
+    copies, the load completes."""
+    model, plan, shapes = _planned_params(3)
+
+    def fail(dsts, srcs):
+        raise RuntimeError("batched copy failed")
+
+    monkeypatch.setattr(torch, "_foreach_copy_", fail)
+    new = _checkpoint(shapes, 1)
+    load_planned(model, plan, new.items())
+    for name, weight in new.items():
+        assert torch.equal(getattr(model, name), weight), name
 
 
 def test_load_planned_names_a_failed_copy():
