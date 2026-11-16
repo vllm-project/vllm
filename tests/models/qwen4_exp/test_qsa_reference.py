@@ -1698,6 +1698,9 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
         ):
             actual = owner(positions, hidden)
         torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        assert metadata.prefill is not None
+        staging_plan_built = "host_staging_plan" in vars(metadata.prefill)
+        assert staging_plan_built != all_context_pages_resident
         stored_rows = cache.view.cache[slots // block_size, slots % block_size]
         stored_rows = stored_rows.view(new_rows.dtype).reshape_as(new_rows)
         if fp8:

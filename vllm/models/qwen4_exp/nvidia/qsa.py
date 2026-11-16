@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import ClassVar, cast
 
 import torch
@@ -77,7 +78,19 @@ from .qsa_indexer import QSAIndexer
 
 @dataclass
 class Qwen4ExpQSAHiSparsePrefillMetadata:
-    host_staging_plan: HiSparsePrefillStagingPlan
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+    block_size: int
+    staging_block_capacity: int
+
+    @cached_property
+    def host_staging_plan(self) -> HiSparsePrefillStagingPlan:
+        return build_hisparse_prefill_staging_plan(
+            self.block_table,
+            self.seq_lens,
+            self.block_size,
+            self.staging_block_capacity,
+        )
 
 
 @dataclass(kw_only=True)
@@ -193,14 +206,12 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill = Qwen4ExpQSAHiSparsePrefillMetadata(
-                build_hisparse_prefill_staging_plan(
-                    common_attn_metadata.block_table_tensor[num_decodes:],
-                    common_attn_metadata.seq_lens[num_decodes:],
-                    block_size,
-                    hisparse_staging_block_capacity(
-                        seq_lens_cpu[num_decodes:], block_size
-                    ),
-                )
+                block_table=common_attn_metadata.block_table_tensor[num_decodes:],
+                seq_lens=common_attn_metadata.seq_lens[num_decodes:],
+                block_size=block_size,
+                staging_block_capacity=hisparse_staging_block_capacity(
+                    seq_lens_cpu[num_decodes:], block_size
+                ),
             )
         return Qwen4ExpQSAHiSparseMetadata(
             **vars(metadata),
