@@ -106,9 +106,11 @@ class TestCUDAGraphWrapper:
             ),
             patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
         ):
-            output1 = wrapper(self.input_tensor)
-            # capturing phase should generate a zero output
-            assert torch.allclose(output1, torch.zeros_like(output1))
+            # Capture does not run the kernels, so the output's contents are
+            # undefined, not zero: torch.cuda.graph empties the cache first and
+            # the graph pool's fresh allocation can reuse the warmup output's
+            # memory (seen on MI250). The replayed output is checked below.
+            wrapper(self.input_tensor)
             mock_cuda_graph.assert_called_once()
 
         assert batch_descriptor in wrapper.concrete_cudagraph_entries
