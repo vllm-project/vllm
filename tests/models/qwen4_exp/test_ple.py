@@ -99,6 +99,7 @@ def test_ple_metadata_preserves_request_and_token_order(
         pytest.skip("CUDA required")
     device = torch.device(device)
     config = VllmConfig()
+    config.cache_config.enable_prefix_caching = False
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=3
     )
