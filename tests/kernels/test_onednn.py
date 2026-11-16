@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.utils import to_int8
 from vllm import _cpu_ops as ops
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.is_cpu():
@@ -26,6 +26,13 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
+# On Arm, oneDNN's bf16 GEMM lands up to ~2.1% from the bf16 reference at
+# k=4096, past assert_close's bf16 default rtol of 1.6%.
+BF16_GEMM_TOL = (
+    {"rtol": 3e-2, "atol": 1e-5}
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    else {}
+)
 
 
 @pytest.fixture(autouse=True)
@@ -150,9 +157,7 @@ def onednn_gemm_test_helper(
         dtype=a.dtype
     )
 
-    # On Arm, oneDNN's bf16 GEMM lands up to ~2% from the fp32 reference at
-    # k=4096, past assert_close's bf16 default of 1.6%.
-    torch.testing.assert_close(out, baseline, rtol=3e-2, atol=1e-2)
+    torch.testing.assert_close(out, baseline, **BF16_GEMM_TOL)
 
     if use_bias:
         # To test runtime bias setting
@@ -161,7 +166,7 @@ def onednn_gemm_test_helper(
             dtype=a.dtype
         )
 
-        torch.testing.assert_close(out, baseline, rtol=3e-2, atol=1e-2)
+        torch.testing.assert_close(out, baseline, **BF16_GEMM_TOL)
 
 
 @pytest.mark.parametrize("n,k", NK_FACTORS)
