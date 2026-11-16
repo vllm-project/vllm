@@ -7,7 +7,6 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -16,10 +15,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use futures::{StreamExt as _, pin_mut};
+use futures::{StreamExt as _, TryStreamExt as _, future, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info};
 use tracing_futures::Instrument as _;
+use vllm_chat::multimodal::MultimodalInput;
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::FinishReason;
 use vllm_text::{
@@ -39,12 +39,14 @@ pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::logprobs::{clamp_logprob, decoded_logprobs_to_openai_chat};
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
 use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
 use crate::routes::openai::utils::usage::ContinuousUsage;
+use crate::routes::openai::utils::validate_n_limit;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
@@ -57,69 +59,36 @@ pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
-) -> Response {
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+) -> Result<Response, ApiError> {
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
-    if body.content_parts.is_some() && body.features.is_some() {
-        return ApiError::invalid_request(
-            "content_parts and features are mutually exclusive.",
-            Some("features"),
-        )
-        .into_response();
+    let mut media = MultimodalInput::default();
+    if let Some(features) = body.features.take() {
+        media.preprocessed = features.into_prepared()?;
     }
-    let mm_features = if let Some(parts) = body.content_parts.take() {
-        match state
-            .chat
-            .prepare_media(parts, &mut body.token_ids)
-            .instrument(vllm_chat::mm_request_span(&request_context.request_id))
-            .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
-                    format!("failed to resolve content_parts: {}", e.as_report()),
-                    Some("content_parts"),
-                )
-                .into_response();
-            }
-        }
-    } else if let Some(features) = body.features.take() {
-        let features = match features.into_prepared() {
-            Ok(features) => features,
-            Err(error) => return error.into_response(),
-        };
-        match state
-            .chat
-            .prepare_media(
-                vllm_chat::multimodal::MultimodalInput::Preprocessed(features),
-                &mut body.token_ids,
-            )
-            .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
-                    format!("invalid features: {}", e.as_report()),
-                    Some("features"),
-                )
-                .into_response();
-            }
-        }
-    } else {
-        None
-    };
+    media.raw = body.content_parts.take().unwrap_or_default();
+    let has_content_parts = !media.raw.is_empty();
+    let mm_features = state
+        .chat
+        .prepare_media(media, &mut body.token_ids)
+        .instrument(vllm_chat::mm_request_span(&request_context.request_id))
+        .await
+        .map_err(|e| {
+            let (context, param) = if has_content_parts {
+                ("failed to resolve content_parts", "content_parts")
+            } else {
+                ("invalid features", "features")
+            };
+            ApiError::invalid_request(format!("{context}: {}", e.as_report()), Some(param))
+        })?;
     let mm_placeholders = body
         .return_token_ids
         .unwrap_or(false)
         .then(|| extract_mm_placeholders(mm_features.as_deref()))
         .flatten();
 
-    let prepared =
-        match prepare_generate_request(body, &lora_resolution, request_context, mm_features) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+    let prepared = prepare_generate_request(body, &lora_resolution, request_context, mm_features)?;
     let request_span = tracing::info_span!(
         "generate",
         request_id = %prepared.request_id,
@@ -129,76 +98,125 @@ pub async fn generate(
     if prepared.options.output_mode == GenerateOutputMode::Text
         && !state.chat.text().has_tokenizer()
     {
-        return ApiError::invalid_request(
+        return Err(ApiError::invalid_request(
             "output_mode='text' requires a tokenizer, but this server does not load one \
              (--skip-tokenizer-init). Send the request to a server that loads a tokenizer, \
              or use output_mode='tokens'.",
             Some("output_mode"),
-        )
-        .into_response();
+        ));
     }
 
     let api_server_options = state.api_server_options;
+    validate_n_limit(prepared.n.get(), api_server_options.max_n_sequences)?;
+
     let stream = prepared.stream;
     let created = unix_timestamp();
     // Like Python's token-in-token-out route, record no render duration: lower
     // and submit directly rather than through `TextLlm::generate`.
     let text = state.chat.text();
-    let text_stream = match async {
+    let text_streams = async {
         let text_request = text.request_processor().prepare(prepared.text_request)?;
-        text.generate_prepared_n(text_request, NonZeroU32::MIN).await
+        text.generate_prepared_n(text_request, prepared.n).await
     }
     .instrument(request_span.clone())
     .await
-    {
-        Ok(mut streams) => streams.pop().expect("one output stream per sample"),
-        Err(error) => {
-            return text_submit_error("failed to submit raw generate request", error)
-                .into_response();
-        }
-    };
+    .map_err(|error| text_submit_error("failed to submit raw generate request", error))?;
 
     if stream {
-        let chunk_stream = generate_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            api_server_options,
-            prepared.options,
-            mm_placeholders,
-        );
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                generate_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    api_server_options,
+                    prepared.options,
+                    mm_placeholders.clone(),
+                )
+            })
+            .collect();
+        // Like Python, the prompt metadata goes out once, on the first chunk.
+        let mut prompt_sent = false;
+        let chunk_stream = merge_choice_chunk_streams(chunk_streams).map_ok(move |mut chunk| {
+            if prompt_sent {
+                chunk.prompt_token_ids = None;
+                chunk.mm_placeholders = None;
+            }
+            prompt_sent |= chunk.prompt_token_ids.is_some();
+            chunk
+        });
         let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
-        return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
+        return Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ));
     }
 
-    let collected = match text_stream.collect_output().instrument(request_span.clone()).await {
-        Ok(collected) => collected,
-        Err(error) => {
-            return server_error!(
-                "failed to collect raw generate response: {}",
-                error.to_report_string()
-            )
-            .into_response();
-        }
-    };
+    let collected = future::try_join_all(
+        text_streams.into_iter().map(|text_stream| text_stream.collect_output()),
+    )
+    .instrument(request_span.clone())
+    .await
+    .map_err(|error| {
+        server_error!(
+            "failed to collect raw generate response: {}",
+            error.to_report_string()
+        )
+    })?;
 
     // Inside the request span, so the logs it emits carry the request ID.
-    let response = match request_span.in_scope(|| {
-        collect_generate(
-            collected,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-            mm_placeholders,
-        )
-    }) {
-        Ok(response) => response,
-        Err(error) => return error.into_response(),
-    };
+    let responses = request_span.in_scope(|| {
+        collected
+            .into_iter()
+            .map(|collected| {
+                collect_generate(
+                    collected,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options,
+                    mm_placeholders.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    Ok(Json(merge_choice_responses(responses)).into_response())
+}
 
-    Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<GenerateResponse>) -> GenerateResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        merged.usage.add_choice(&response.usage);
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for GenerateStreamResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        self.choices.is_empty().then_some(self.usage.as_mut()).flatten()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
 }
 
 #[try_stream]
@@ -391,10 +409,10 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    // Like Python, which raises every engine-typed error, a typed error fails
-    // the request; an untyped one is reported as finish reason `error`.
-    if let FinishReason::Error(Some(error)) = &collected.finish_reason {
-        return Err(engine_error(Some(error)));
+    // Like Python, an engine error fails the request instead of returning a
+    // choice with finish reason `error`; an untyped one is a 500.
+    if let FinishReason::Error(error) = &collected.finish_reason {
+        return Err(engine_error(error.as_deref()));
     }
     let logprobs = if include_logprobs {
         Some(choice_logprobs(
