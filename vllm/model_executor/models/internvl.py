@@ -393,17 +393,13 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
         processor = self.get_hf_processor()
         num_image_token = processor.image_seq_length
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
+        max_total_frames = seq_len // num_image_token
+        max_frames_per_video = max_total_frames // max(num_videos, 1)
 
         return max(max_frames_per_video, 1)
 
@@ -428,10 +424,10 @@ class InternVLDummyInputsBuilder(
         if self.info.ctx_video_token:
             config = self.info.get_hf_config()
             image_size: int = config.vision_config.image_size
-            target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
-            )
             num_videos = mm_counts.get("video", 0)
+            target_num_frames = self.info.get_num_frames_with_most_features(
+                seq_len, num_videos
+            )
             video_overrides = mm_options.get("video")
             dummy_video = {
                 "video": self._get_dummy_videos(
