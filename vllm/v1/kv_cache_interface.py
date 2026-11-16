@@ -839,6 +839,16 @@ def prefix_lookup_groups(
     return list(lookups.values())
 
 
+@dataclass(frozen=True, slots=True)
+class KVCacheStage:
+    """The KV cache layers of one pipeline stage."""
+
+    kv_cache_groups: tuple[KVCacheGroup, ...]
+    """The global KV cache groups projected onto the stage, by group ID, each
+    holding the stage's layers of the group in model order. A group holding
+    no layer of the stage is kept with no layers."""
+
+
 @dataclass
 class KVCacheConfig:
     """The KV cache configuration of a model."""
@@ -874,6 +884,11 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
+
+    pipeline_stages: tuple[KVCacheStage, ...] = field(default=(), compare=False)
+    """The KV cache layers of every pipeline stage, by PP rank, resolved by the
+    engine core so that both halves of a KV connector see every stage. Empty
+    when the stages are unknown."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
@@ -926,6 +941,19 @@ class KVCacheConfig:
             layer_name: group_index
             for group_index, group in enumerate(self.transfer_groups)
             for layer_name in group.layer_names
+        }
+
+    def pipeline_layer_specs(self, group_id: int) -> dict[str, KVCacheSpec]:
+        """The specs of a group's layers on every pipeline stage, in model
+        order, or of this worker's layers when the stages are unknown."""
+        if not self.pipeline_stages:
+            return dict(self.kv_cache_groups[group_id].kv_cache_specs)
+        return {
+            layer_name: spec
+            for stage in self.pipeline_stages
+            for layer_name, spec in stage.kv_cache_groups[
+                group_id
+            ].kv_cache_specs.items()
         }
 
     def select_transfer_block_ids(

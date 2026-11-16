@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheStage,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -1430,6 +1431,51 @@ def _project_kv_cache_groups_to_worker(
             )
         )
     return projected_groups
+
+
+def get_pipeline_stages(
+    kv_cache_configs: list[KVCacheConfig],
+    pipeline_parallel_size: int,
+) -> tuple[KVCacheStage, ...]:
+    """The KV cache layers of every pipeline stage.
+
+    Workers are ordered by PP rank, then by PCP and TP rank, and every worker
+    of a stage holds the same layers, so the first worker of each stage
+    describes it.
+
+    Args:
+        kv_cache_configs: The KV cache config of each worker.
+        pipeline_parallel_size: The number of pipeline stages.
+
+    Returns:
+        One `KVCacheStage` per PP rank, or an empty tuple when the workers do
+        not split evenly into the stages.
+
+    """
+    num_workers = len(kv_cache_configs)
+    if num_workers == 0 or num_workers % pipeline_parallel_size:
+        return ()
+    workers_per_stage = num_workers // pipeline_parallel_size
+    stages: list[KVCacheStage] = []
+    for first in range(0, num_workers, workers_per_stage):
+        groups = kv_cache_configs[first].kv_cache_groups
+        assert all(
+            [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
+            == [g.layer_names for g in groups]
+            for worker in range(first, first + workers_per_stage)
+        ), "Workers of one pipeline stage must hold the same KV cache layers."
+        # A model runner adds KV-sharing layers to the groups of its own copy
+        # of the config in place; the stage keeps groups of its own, so every
+        # worker and the scheduler see the same stages.
+        stages.append(
+            KVCacheStage(
+                kv_cache_groups=tuple(
+                    replace(group, kv_cache_specs=dict(group.kv_cache_specs))
+                    for group in groups
+                )
+            )
+        )
+    return tuple(stages)
 
 
 def get_kv_cache_configs(
