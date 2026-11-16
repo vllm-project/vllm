@@ -158,6 +158,11 @@ exit 0
     (fake / "buildkite-agent").write_text(
         """#!/bin/bash
 [[ $1 == meta-data && $2 == set ]] && echo "meta $3 $4" >> "$CALLS"
+if [[ $1 == meta-data && $2 == exists ]]; then  # the base step records at META_AFTER
+  n=$(( $(cat "$CALLS.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$CALLS.n"
+  exit $(( n < ${META_AFTER:-1} ? 100 : 0 ))
+fi
+[[ $1 == step ]] && { echo "${BASE_STATE:-finished}"; exit 0; }
 [[ $1 == meta-data ]] && { echo "ref@sha256:$(printf '0%.0s' {1..64})"; exit 0; }
 echo "upload ${PWD##*/}/$3" >> "$CALLS"
 [[ $FAILURE == upload && $3 == kernel_symbol_map.rocm.json.gz ]] && exit 1
@@ -318,6 +323,22 @@ def test_ci_build_skips_the_kernel_symbol_map_by_default(tmp_path):
     status, stderr, calls = run_ci_build(tmp_path)
     assert status == 0, stderr
     assert "bake kernel-symbol-map" not in calls
+
+
+@pytest.mark.parametrize(
+    "base, expected", [("running", 0), ("failed", 1), ("hung", 75)]
+)
+def test_the_image_build_waits_for_the_base_step(tmp_path, base, expected):
+    # The steps start together: build once the base step records the images, fail
+    # if it finished without them, and leave a long one (a stack rebuild) to a retry.
+    status, stderr, calls = run_ci_build(
+        tmp_path,
+        BASE_STATE="finished" if base == "failed" else "running",
+        META_AFTER="3" if base == "running" else "99",
+        ROCM_BASE_WAIT_MINUTES="0" if base == "hung" else "120",
+    )
+    assert status == expected, stderr
+    assert ("bake ci" in calls) == (expected == 0)
 
 
 @pytest.mark.parametrize("failure", ["bake", "missing", "upload"])
