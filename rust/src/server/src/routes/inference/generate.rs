@@ -454,10 +454,10 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    // Like Python, which raises every engine-typed error, a typed error fails
-    // the request; an untyped one is reported as finish reason `error`.
-    if let FinishReason::Error(Some(error)) = &collected.finish_reason {
-        return Err(engine_error(Some(error)));
+    // Like Python, an engine error fails the request instead of returning a
+    // choice with finish reason `error`; an untyped one is a 500.
+    if let FinishReason::Error(error) = &collected.finish_reason {
+        return Err(engine_error(error.as_deref()));
     }
     let logprobs = if include_logprobs {
         Some(choice_logprobs(
