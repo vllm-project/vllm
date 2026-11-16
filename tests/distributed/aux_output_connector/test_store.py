@@ -2961,6 +2961,36 @@ def test_worker_step_fails_after_a_session_object_write_failed():
     assert client.closed and worker._store is None
 
 
+def _writer_with_a_queued_write(code, release):
+    client, store = fake_store(code)
+    put_batch = client.put_batch
+    client.put_batch = lambda *args: release.wait() and put_batch(*args)
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=4,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
+    return client, writer
+
+
+@pytest.mark.parametrize(
+    "code,blocked,match",
+    [(-1, False, "write failed"), (0, True, "not written in time")],
+    ids=["failed-write", "deadline"],
+)
+def test_session_object_writer_drain_raises(code, blocked, match):
+    release = threading.Event()
+    if not blocked:
+        release.set()
+    _, writer = _writer_with_a_queued_write(code, release)
+    with pytest.raises(BlockObjectStoreError, match=match):
+        writer.drain(timeout_s=0.05 if blocked else 60.0)
+    release.set()
+    writer.close()
+
+
 def test_session_objects_hold_each_field_per_pipeline_stage():
     client, store = fake_store()
     routed = np.arange(_BLOCK_SIZE * 12, dtype=_DTYPE).reshape(_BLOCK_SIZE, 4, 3)

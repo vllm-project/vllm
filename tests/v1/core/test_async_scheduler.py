@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.engine import CheckpointState
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.kv_offload.base import OffloadingSpec, get_offload_block_hash
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -51,6 +54,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
+from vllm.v1.worker.worker_base import WorkerBase
 
 from .utils import (
     EOS_TOKEN_ID,
@@ -1702,6 +1706,33 @@ def test_pause_writes_every_object_of_the_stopped_session_requests():
     engine.worker.close()
     assert engine.client.objects
     assert all(key.startswith("job/s2/") for key in engine.client.objects)
+
+
+def test_engine_core_pause_writes_the_objects_of_the_requests_it_preempts():
+    engine = SessionEngine(
+        create_scheduler(async_scheduling=True, enable_prefix_caching=True)
+    )
+    put_batch = engine.client.put_batch
+    engine.client.put_batch = lambda *args: time.sleep(0.05) or put_batch(*args)
+    (request,) = _session_requests(["r"], 47, 8)
+    engine.scheduler.add_request(request)
+    prompt, decode = engine.schedule(), engine.schedule()
+    engine.step(prompt, {"r": [0]})
+    engine.step(decode, {"r": [0]})
+    worker = object.__new__(WorkerBase)
+    worker.model_runner = SimpleNamespace(aux_output_connector=engine.worker)
+    core = object.__new__(EngineCore)
+    core.scheduler = engine.scheduler
+    core.model_executor = Mock()
+    core.mm_receiver_cache = None
+    core._kv_cache_reclaimable = False
+    core._checkpoint_state = CheckpointState.RUNNING
+    core.collective_rpc = lambda method, args=(): [getattr(worker, method)(*args)]
+    core.pause_scheduler(mode="keep")
+    assert set(engine.client.objects) == {
+        f"job/s/{block_hash.hex()}" for block_hash in request.block_hashes[:3]
+    }
+    engine.worker.close()
 
 
 def test_session_key_of_a_block_whose_hash_follows_the_stop_is_a_tail():
