@@ -498,6 +498,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        # its expert loading writes BF16 into the experts outside their loaders
+        if any(getattr(m, "quantizes_on_load", False) for m in self.modules()):
+            raise NotImplementedError(
+                "gpt-oss does not support online quantization with "
+                "VLLM_RELOAD_MODE=direct"
+            )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
