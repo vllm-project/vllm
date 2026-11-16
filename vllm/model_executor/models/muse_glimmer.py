@@ -255,7 +255,12 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
             seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
         )
         temporal_patch_size = int(video_kwargs["temporal_patch_size"])
-        max_groups = max(1, int(video_processor.num_frames) // temporal_patch_size)
+        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
+        loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
+        if loader_frames < 0:
+            return groups * temporal_patch_size
+        max_frames = max(int(video_processor.num_frames), loader_frames)
+        max_groups = max(1, max_frames // temporal_patch_size)
         return min(groups, max_groups) * temporal_patch_size
 
 

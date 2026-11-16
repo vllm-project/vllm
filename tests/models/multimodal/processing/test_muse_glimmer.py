@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -96,3 +97,44 @@ def test_dummy_image_follows_size_hint(
         dummy["mm_placeholders"]["image"][0].get_num_embeds()
         >= processed["mm_placeholders"]["image"][0].get_num_embeds()
     )
+
+
+@pytest.mark.parametrize(
+    ("loader_frames", "num_frames"),
+    [(None, 96), (128, 128), (-1, 200)],
+)
+def test_video_budget_covers_loader_frames(loader_frames: int | None, num_frames: int):
+    ctx = build_model_context(
+        MODEL_ID,
+        model_config_kwargs={
+            "max_model_len": 20480,
+            "media_io_kwargs": (
+                {"video": {"num_frames": loader_frames}} if loader_frames else {}
+            ),
+        },
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={"video": 1}
+    )
+    assert tokens is not None
+    video = np.zeros((num_frames, 336, 336, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    processed = processor(
+        processor.dummy_inputs.get_dummy_text({"video": 1}),
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+
+    real = processed["mm_placeholders"]["video"][0].get_num_embeds()
+    assert real <= tokens["video"]
+    assert dummy["mm_placeholders"]["video"][0].get_num_embeds() == tokens["video"]
