@@ -959,11 +959,13 @@ class SessionEngine:
                     ]
         step = None
         if rows:
-            self.capturer.snapshot_routing_data.return_value = torch.from_numpy(
-                np.concatenate(rows)
-            )
+            routing = np.concatenate(rows)
+            self.capturer.snapshot_routing_data.return_value = torch.from_numpy(routing)
             step = self.worker.prepare_output(
-                _input_batch(list(block_ids), np.array(starts), np.cumsum([0] + counts))
+                _input_batch(
+                    list(block_ids), np.array(starts), np.cumsum([0] + counts)
+                ),
+                torch.from_numpy(routing[:, 0, :1].astype(np.float32)),
             )
         self._in_flight[id(scheduler_output)] = step
         return scheduler_output
@@ -1636,8 +1638,12 @@ def test_session_request_running_at_a_prefix_cache_reset_resumes(
     assert engine.segments["r"] == [(0, "v1"), (32, None)]
 
 
-def test_reset_writes_the_objects_its_preempted_session_request_completed():
+@pytest.mark.parametrize("hidden_states", [False, True], ids=["rows", "hidden-states"])
+def test_reset_writes_the_objects_its_preempted_session_request_completed(
+    hidden_states,
+):
     engine = _tier_engine(connector=None)
+    engine.worker._return_hidden_states = hidden_states
     engine.set_version(1)
     (request,) = _session_requests(["r"], 40, 12, lookahead=1)
     engine.scheduler.add_request(request)
@@ -1648,6 +1654,9 @@ def test_reset_writes_the_objects_its_preempted_session_request_completed():
     resumed = engine.schedule()
     rows = read_aux_rows(engine.store, [key], "routed_experts", timeout_s=5)
     assert rows[:, 0, 0].tolist() == list(range(32, 48))
+    if hidden_states:
+        hidden = read_aux_rows(engine.store, [key], "hidden_states", timeout_s=5)
+        assert hidden[:, 0].tolist() == list(range(32, 48))
     engine.step(resumed, {"r": [0]})
     engine.run()
     engine.close()
