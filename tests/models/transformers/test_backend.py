@@ -177,6 +177,23 @@ def test_output_head_transform(
     )
 
 
+def test_output_head_moe(vllm_runner: type[VllmRunner]) -> None:
+    """GraniteMoe keeps its head (`logits_scaling`), which `MoEMixin` must not
+    replace, and which batch-sharded sampling would skip."""
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        model_impl="transformers",
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 1},
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+    ) as model_test:
+        has_local = model_test.apply_model(
+            lambda model: hasattr(model, "compute_logits_local")
+        )
+        assert has_local == [False]
+
+
 @create_new_process_for_each_test("spawn")
 def test_compile_mm_encoder(
     vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch

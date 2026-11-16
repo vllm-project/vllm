@@ -216,7 +216,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             if output_head is not None:
                 # The head runs after the projection, so every rank needs all logits
                 self.logits_processor.use_all_gather = True
-                self.recursive_replace(output_head, prefix=OUTPUT_HEAD_ATTR)
+                Base.recursive_replace(self, output_head, prefix=OUTPUT_HEAD_ATTR)
                 self.init_parameters(output_head)
                 setattr(self, OUTPUT_HEAD_ATTR, output_head)
         else:
@@ -273,8 +273,16 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
         return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
 
-    def compute_logits_local(self, hidden_states: "torch.Tensor") -> "torch.Tensor":
-        """Logits for this TP rank's vocab shard, for batch-sharded sampling."""
+    @property
+    def compute_logits_local(self) -> Callable[["torch.Tensor"], "torch.Tensor"]:
+        """Logits for this TP rank's vocab shard, for batch-sharded sampling.
+
+        Hidden when the output head is kept, because it runs on the full vocab."""
+        if getattr(self, OUTPUT_HEAD_ATTR, None) is not None:
+            raise AttributeError("The output head needs the logits of the full vocab")
+        return self._compute_logits_local
+
+    def _compute_logits_local(self, hidden_states: "torch.Tensor") -> "torch.Tensor":
         bias = self.lm_head.bias
         return self.logits_processor(
             self.lm_head, hidden_states, bias, skip_gather=True
