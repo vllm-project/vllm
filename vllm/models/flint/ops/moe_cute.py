@@ -3,9 +3,9 @@
 """FlashInfer's SM100 NVFP4-weight / BF16-activation grouped MoE GEMMs.
 
 The FlashInfer kernel decodes E2M1 * E4M3 weight tiles to BF16 and runs BF16
-``tcgen05`` MMAs with fp32 accumulation and the per-expert fp32 global scale
+`tcgen05` MMAs with fp32 accumulation and the per-expert fp32 global scale
 applied to the accumulator. Its SwiGLU epilogue keeps gate/up in fp32 and
-rounds ``silu(g) * u`` once (sigmoid via ``ex2.approx`` + ``rcp.approx``), the
+rounds `silu(g) * u` once (sigmoid via `ex2.approx` + `rcp.approx`), the
 rounding rule every Flint MoE path follows.
 """
 

@@ -147,13 +147,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
         max_total_frames = self._get_max_video_frames(seq_len)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        return max(max_total_frames // max(num_videos, 1), 1)
 
 
 class LlavaNextVideoDummyInputsBuilder(
@@ -175,7 +173,7 @@ class LlavaNextVideoDummyInputsBuilder(
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {
@@ -344,6 +342,10 @@ class LlavaNextVideoForConditionalGeneration(
         self.pooled_grid_length = math.ceil(
             self.patch_grid_length / config.spatial_pool_stride
         )
+        image_size = vision_encoder_info.get_image_size()
+        self.tower_tokens_per_frame = vision_encoder_info.get_num_image_tokens(
+            image_width=image_size, image_height=image_size
+        )
 
         with self._mark_tower_model(vllm_config, "video"):
             # Initialize the vision tower only up to the required feature layer
@@ -504,19 +506,18 @@ class LlavaNextVideoForConditionalGeneration(
 
         # Invert the spatial pooling done by `vision_resampler`: each frame
         # contributes `pooled_grid_length ** 2` tokens after the language
-        # model's placeholder count, but `patch_grid_length ** 2` tokens
-        # when it leaves the vision encoder.
+        # model's placeholder count, but `tower_tokens_per_frame` tokens
+        # inside the vision encoder (including CLIP's CLS token).
         pooled_tokens_per_frame = self.pooled_grid_length**2
-        patch_tokens_per_frame = self.patch_grid_length**2
         if (
             num_mm_embeds <= 0
             or pooled_tokens_per_frame <= 0
-            or patch_tokens_per_frame <= 0
+            or self.tower_tokens_per_frame <= 0
         ):
             return 0, 0
 
         num_frames = num_mm_embeds // pooled_tokens_per_frame
         return (
-            num_frames * patch_tokens_per_frame,
+            num_frames * self.tower_tokens_per_frame,
             num_frames * pooled_tokens_per_frame,
         )
