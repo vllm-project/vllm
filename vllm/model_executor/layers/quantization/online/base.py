@@ -73,6 +73,7 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4WeightOnlyOnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
@@ -116,6 +117,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    kNvfp4Static: Nvfp4WeightOnlyOnlineLinearMethod,
     # lm_head only (`OnlineLMHeadMethodBase`).
     kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
     kInt8StaticChannelSym: Int8PerChannelLMHeadMethod,
