@@ -104,7 +104,6 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::super::cache::CacheSlot;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
@@ -410,7 +409,7 @@ mod tests {
         let second = info
             .prepare_multimodal(
                 vec![MediaContentPart::AudioUrl {
-                    url: String::new(),
+                    url: String::new().into(),
                     uuid: Some("audio-uuid-1".to_string()),
                 }],
                 &mut tokens_second,
@@ -440,12 +439,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sources = fetched
-            .audios
-            .into_iter()
-            .zip(fetched.audio_uuids)
-            .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
-            .collect();
+        let sources = fetched.audios.into_iter().collect();
         let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
@@ -489,12 +483,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sources = fetched
-            .audios
-            .into_iter()
-            .zip(fetched.audio_uuids)
-            .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
-            .collect();
+        let sources = fetched.audios.into_iter().collect();
         let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);

@@ -21,9 +21,9 @@ use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
-    MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
-    PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
-    VideoClip, VisionPreProcessor, VisionPreprocessingContext,
+    MediaItemInfo, MediaSource, Modality, ModelMetadata, ModelProcessorSpec, MultiModalError,
+    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver,
+    TrackedMedia, TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -354,36 +354,35 @@ fn load_preprocessor_config(
     Ok(Some(config))
 }
 
-/// Request-scoped fetched media, split per modality with tracker UUID
-/// metadata preserved in request order.
+/// Request-scoped fetched media, split per modality in fetch order.
 struct FetchedMedia {
-    images: Vec<Arc<ImageFrame>>,
-    image_uuids: Vec<Option<String>>,
-    videos: Vec<Arc<VideoClip>>,
-    video_uuids: Vec<Option<String>>,
-    audios: Vec<Arc<AudioClip>>,
-    audio_uuids: Vec<Option<String>>,
+    images: Vec<cache::CacheSlot<Arc<ImageFrame>>>,
+    videos: Vec<cache::CacheSlot<Arc<VideoClip>>>,
+    audios: Vec<cache::CacheSlot<Arc<AudioClip>>>,
 }
 
 impl FetchedMedia {
-    /// Every fetched item as `(modality, content hash, uuid)` in per-modality
-    /// request order.
+    /// Decoded misses as `(modality, content hash, uuid)` in fetch order. Raw
+    /// and local hits were already touched by their cache lookups.
     fn iter_items(&self) -> impl Iterator<Item = (Modality, &str, &Option<String>)> {
-        let images = self
-            .images
-            .iter()
-            .zip(&self.image_uuids)
-            .map(|(frame, uuid)| (Modality::Image, frame.hash.as_str(), uuid));
-        let videos = self
-            .videos
-            .iter()
-            .zip(&self.video_uuids)
-            .map(|(clip, uuid)| (Modality::Video, clip.hash.as_str(), uuid));
-        let audios = self
-            .audios
-            .iter()
-            .zip(&self.audio_uuids)
-            .map(|(clip, uuid)| (Modality::Audio, clip.hash.as_str(), uuid));
+        let images = self.images.iter().filter_map(|slot| match slot {
+            cache::CacheSlot::Pending(frame, uuid) => {
+                Some((Modality::Image, frame.hash.as_str(), uuid))
+            }
+            cache::CacheSlot::Ready(..) => None,
+        });
+        let videos = self.videos.iter().filter_map(|slot| match slot {
+            cache::CacheSlot::Pending(clip, uuid) => {
+                Some((Modality::Video, clip.hash.as_str(), uuid))
+            }
+            cache::CacheSlot::Ready(..) => None,
+        });
+        let audios = self.audios.iter().filter_map(|slot| match slot {
+            cache::CacheSlot::Pending(clip, uuid) => {
+                Some((Modality::Audio, clip.hash.as_str(), uuid))
+            }
+            cache::CacheSlot::Ready(..) => None,
+        });
         images.chain(videos).chain(audios)
     }
 }
@@ -790,13 +789,13 @@ fn extract_media_parts(
                 detail,
                 uuid,
             } => Ok(MediaContentPart::ImageUrl {
-                url: image_url.clone(),
+                url: Arc::new(image_url.clone()),
                 detail: *detail,
                 uuid: uuid.clone(),
                 max_long_side_pixel: None,
             }),
             ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
-                url: video_url.clone(),
+                url: Arc::new(video_url.clone()),
                 uuid: uuid.clone(),
                 fps: None,
                 max_long_side_pixel: None,
@@ -804,15 +803,15 @@ fn extract_media_parts(
             ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
                 // Empty base64 data is a UUID cache reference, not fetchable
                 // content; keep the URL empty so the cache path recognizes it.
-                url: if data.is_empty() {
+                url: Arc::new(if data.is_empty() {
                     String::new()
                 } else {
                     input_audio_data_url(data, format.as_deref())?
-                },
+                }),
                 uuid: uuid.clone(),
             }),
             ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
-                url: audio_url.clone(),
+                url: Arc::new(audio_url.clone()),
                 uuid: uuid.clone(),
             }),
         })
@@ -839,11 +838,12 @@ fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,
         MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageBase64 { .. }
         | MediaContentPart::ImageData { .. }
         | MediaContentPart::ImageEmbeds { .. } => Some(MmModality::Image),
-        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
-            Some(MmModality::Audio)
-        }
+        MediaContentPart::AudioUrl { .. }
+        | MediaContentPart::AudioBase64 { .. }
+        | MediaContentPart::AudioData { .. } => Some(MmModality::Audio),
         MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
             Some(MmModality::Video)
         }
@@ -972,7 +972,7 @@ impl MultimodalModelInfo {
             self.video_sampling_policy(),
             media_parts,
         )?;
-        let fetched = self.fetch_media(partition.fetch_parts).await?;
+        let fetched = self.fetch_media_into(partition.fetch_parts).await?;
         self.touch_fetched_items(&fetched);
 
         let mut prepared = Vec::new();
@@ -1030,12 +1030,10 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
-    /// Pre-touch every cache key of the request before any per-item get/put,
-    /// mirroring the pre-touch in Python's `_merge_mm_kwargs`. A probed-hit
-    /// item is held in the cache's touched set so it cannot be evicted before
-    /// this request's `address_item_for_cached` / `put_or_inline` calls (or
-    /// until the touches guard releases them at the end of the request). Keys
-    /// must match the prepare step exactly: the UUID for UUID-keyed items,
+    /// Pre-touch decoded misses before `prepare_cached`'s second lookup/put,
+    /// mirroring the pre-touch in Python's `_merge_mm_kwargs`. Earlier UUID,
+    /// local-content, and raw-byte hits were touched by their cache lookups.
+    /// Keys must match the prepare step exactly: the UUID for UUID-keyed items,
     /// otherwise the content hash. Budget-sensitive image processors bypass
     /// the cache, so their items are never touched.
     fn touch_fetched_items(&self, fetched: &FetchedMedia) {
@@ -1046,13 +1044,13 @@ impl MultimodalModelInfo {
         }
     }
 
-    /// The resolved video spec's sampling policy for the media tracker: how
+    /// The resolved video spec's sampling policy for media fetch/decode: how
     /// the connector picks a clip's frames, and the frame rate a request
     /// without `fps` is sampled at — both read from the video preprocessor
     /// config where the model's reference processor reads them (e.g.
     /// GLM-5.3-Flash keeps 32 evenly-spread frames and resamples at the
     /// configured `fps`). `None` when the model has no video lane; the
-    /// tracker then keeps its connector defaults.
+    /// tracker and raw-decode paths then keep their connector defaults.
     fn video_sampling_policy(&self) -> Option<(FrameSampling, Option<f64>)> {
         let video = self.video.as_ref()?;
         let config = &video.config;
@@ -1070,6 +1068,14 @@ impl MultimodalModelInfo {
         skip_all,
         fields(stage = "media_fetch")
     )]
+    async fn fetch_media_into(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
+        if self.mm_processor_cache.is_some() {
+            self.fetch_media_cached(media_parts).await
+        } else {
+            self.fetch_media(media_parts).await
+        }
+    }
+
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         let video_sampling_policy = self.video_sampling_policy();
@@ -1131,13 +1137,220 @@ impl MultimodalModelInfo {
         let audio_uuids = tracker_output.uuids.remove(&Modality::Audio).unwrap_or_default();
 
         Ok(FetchedMedia {
-            images,
-            image_uuids,
-            videos,
-            video_uuids,
-            audios,
-            audio_uuids,
+            images: images
+                .into_iter()
+                .zip(image_uuids)
+                .map(|(media, uuid)| cache::CacheSlot::Pending(media, uuid))
+                .collect(),
+            videos: videos
+                .into_iter()
+                .zip(video_uuids)
+                .map(|(media, uuid)| cache::CacheSlot::Pending(media, uuid))
+                .collect(),
+            audios: audios
+                .into_iter()
+                .zip(audio_uuids)
+                .map(|(media, uuid)| cache::CacheSlot::Pending(media, uuid))
+                .collect(),
         })
+    }
+
+    /// Images and audio use raw-byte cache lookups; videos keep the tracker's
+    /// fused fetch+decode path.
+    async fn fetch_media_cached(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
+        let (video_parts, raw_parts): (Vec<_>, Vec<_>) =
+            media_parts.into_iter().partition(|part| {
+                matches!(
+                    part,
+                    MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. }
+                )
+            });
+        let video = async {
+            if video_parts.is_empty() {
+                Ok(FetchedMedia {
+                    images: Vec::new(),
+                    videos: Vec::new(),
+                    audios: Vec::new(),
+                })
+            } else {
+                self.fetch_media(video_parts).await
+            }
+        };
+        let raw = async {
+            let raw_futures = raw_parts.into_iter().map(|part| {
+                let modality = cache::media_part_identity(&part)
+                    .expect("fetch partition contains only media parts")
+                    .2;
+                fetch_raw_part(
+                    Arc::clone(&self.media_connector),
+                    self.mm_cache_for(modality).cloned(),
+                    part,
+                )
+            });
+            let raw_outputs = futures::future::join_all(raw_futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            let mut images = Vec::new();
+            let mut audios = Vec::new();
+            for part in raw_outputs {
+                match part {
+                    FetchedPart::Image(slot) => images.push(slot),
+                    FetchedPart::Audio(slot) => audios.push(slot),
+                }
+            }
+            Ok(FetchedMedia {
+                images,
+                videos: Vec::new(),
+                audios,
+            })
+        };
+        let (video, raw) = futures::future::try_join(video, raw).await?;
+        Ok(FetchedMedia {
+            images: raw.images,
+            videos: video.videos,
+            audios: raw.audios,
+        })
+    }
+}
+
+enum FetchedPart {
+    Image(cache::CacheSlot<Arc<ImageFrame>>),
+    Audio(cache::CacheSlot<Arc<AudioClip>>),
+}
+
+fn raw_media_url_source(url: Arc<String>, canonical_data_prefix: &str) -> MediaSource {
+    let is_data_url = url.starts_with(canonical_data_prefix)
+        || reqwest_0_13::Url::parse(url.as_str()).is_ok_and(|parsed| parsed.scheme() == "data");
+    if is_data_url {
+        MediaSource::DataUrl(url)
+    } else {
+        MediaSource::Url(url)
+    }
+}
+
+fn validate_raw_image_cap(max_long_side_pixel: Option<u32>) -> Result<()> {
+    let Some(value) = max_long_side_pixel else {
+        return Ok(());
+    };
+    let factor = llm_multimodal::media::MAX_LONG_SIDE_PIXEL_FACTOR;
+    if value == 0 || !value.is_multiple_of(factor) {
+        return Err(
+            llm_multimodal::MediaConnectorError::InvalidMaxLongSidePixel { value, factor }.into(),
+        );
+    }
+    Ok(())
+}
+
+async fn fetch_raw_part(
+    connector: Arc<MediaConnector>,
+    cache: Option<MmProcessorCache>,
+    part: MediaContentPart,
+) -> Result<FetchedPart> {
+    match part {
+        part @ (MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageBase64 { .. }
+        | MediaContentPart::ImageData { .. }) => {
+            let (source, detail, max_long_side_pixel, uuid) = match part {
+                MediaContentPart::ImageUrl {
+                    url,
+                    detail,
+                    uuid,
+                    max_long_side_pixel,
+                } => (
+                    raw_media_url_source(url, "data:image/"),
+                    detail,
+                    max_long_side_pixel,
+                    uuid,
+                ),
+                MediaContentPart::ImageBase64 {
+                    media_type,
+                    data,
+                    detail,
+                    uuid,
+                    max_long_side_pixel,
+                } => (
+                    MediaSource::Base64 { media_type, data },
+                    detail,
+                    max_long_side_pixel,
+                    uuid,
+                ),
+                MediaContentPart::ImageData {
+                    data,
+                    mime_type: _,
+                    uuid,
+                    detail,
+                } => (MediaSource::InlineBytes(data), detail, None, uuid),
+                _ => unreachable!(),
+            };
+            let raw = connector.fetch_image_bytes(source).await?;
+            validate_raw_image_cap(max_long_side_pixel)?;
+            let transparency = TransparencyPolicy::KeepAlpha;
+            let hash = llm_multimodal::hasher::hash_image_with_transparency(
+                &raw.bytes,
+                max_long_side_pixel,
+                transparency,
+            );
+            let key = uuid.as_deref().unwrap_or(&hash);
+            let hit = cache.as_ref().and_then(|cache| cache.lookup_unfetched(key, uuid.clone()));
+            let slot = match hit {
+                Some((item, replacement)) => cache::CacheSlot::Ready(item, replacement),
+                None => {
+                    let frame = MediaConnector::decode_image(
+                        raw.bytes,
+                        detail.unwrap_or_default(),
+                        max_long_side_pixel,
+                        transparency,
+                        raw.source,
+                    )?;
+                    debug_assert_eq!(frame.hash, hash);
+                    cache::CacheSlot::Pending(frame, uuid)
+                }
+            };
+            Ok(FetchedPart::Image(slot))
+        }
+        part @ (MediaContentPart::AudioUrl { .. }
+        | MediaContentPart::AudioBase64 { .. }
+        | MediaContentPart::AudioData { .. }) => {
+            let (source, uuid) = match part {
+                MediaContentPart::AudioUrl { url, uuid } => {
+                    (raw_media_url_source(url, "data:audio/"), uuid)
+                }
+                MediaContentPart::AudioBase64 {
+                    media_type,
+                    data,
+                    uuid,
+                } => (MediaSource::Base64 { media_type, data }, uuid),
+                MediaContentPart::AudioData {
+                    data,
+                    mime_type: _,
+                    uuid,
+                } => (MediaSource::InlineBytes(data), uuid),
+                _ => unreachable!(),
+            };
+            let raw = connector.fetch_audio_bytes(source).await?;
+            let hash = llm_multimodal::hasher::hash_audio(&raw.bytes);
+            let key = uuid.as_deref().unwrap_or(&hash);
+            let hit = cache.as_ref().and_then(|cache| cache.lookup_unfetched(key, uuid.clone()));
+            let slot = match hit {
+                Some((item, replacement)) => cache::CacheSlot::Ready(item, replacement),
+                None => {
+                    let clip = connector.decode_audio(raw.bytes, raw.source).await?;
+                    debug_assert_eq!(clip.hash, hash);
+                    cache::CacheSlot::Pending(clip, uuid)
+                }
+            };
+            Ok(FetchedPart::Audio(slot))
+        }
+        MediaContentPart::ImageEmbeds { .. } => {
+            Err(MultiModalError::UnsupportedContent("image_embeds").into())
+        }
+        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
+            unreachable!("video parts use the tracker")
+        }
+        MediaContentPart::Text { .. } => {
+            bail_multimodal!("raw media fetch received a text content part")
+        }
     }
 }
 
@@ -1344,7 +1557,7 @@ pub(crate) mod tests {
     #[test]
     fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
         let part = |fps| MediaContentPart::VideoUrl {
-            url: "https://example.com/clip.mp4".to_owned(),
+            url: Arc::new("https://example.com/clip.mp4".to_owned()),
             uuid: Some("clip".to_owned()),
             fps,
             max_long_side_pixel: None,
@@ -1516,7 +1729,7 @@ pub(crate) mod tests {
 
         let info = nemotron_omni_info();
         let media = MediaContentPart::ImageUrl {
-            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+            url: Arc::new("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string()),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1566,7 +1779,7 @@ pub(crate) mod tests {
             max_model_len: Option<usize>,
         ) -> (usize, usize) {
             let media = MediaContentPart::ImageUrl {
-                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+                url: Arc::new("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string()),
                 detail: None,
                 uuid: None,
                 max_long_side_pixel: None,
@@ -2013,7 +2226,7 @@ pub(crate) mod tests {
 
     fn image_url_part() -> MediaContentPart {
         MediaContentPart::ImageUrl {
-            url: "https://example.com/image.png".to_string(),
+            url: Arc::new("https://example.com/image.png".to_string()),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,

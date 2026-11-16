@@ -120,10 +120,9 @@ impl MmProcessorCache {
         self.lookup_unfetched(uuid, Some(uuid.to_owned()))
     }
 
-    /// Look up one key that never passes through the post-fetch pre-touch
-    /// (UUID references and locally hashed content resolved before fetch):
-    /// touch it first so a hit cannot be evicted before the engine reads it
-    /// (the item stays protected until the `get_cached` inside
+    /// Look up one key that has not been pre-touched (a UUID reference or
+    /// local content): touch it first so a hit cannot be evicted before the
+    /// engine reads it (the item stays protected until the `get_cached` inside
     /// `address_item_for_cached`, or the request-end `release_touches`).
     pub(super) fn lookup_unfetched(
         &self,
@@ -230,11 +229,16 @@ pub(super) struct UuidPartition {
 ///
 /// Returns `None` for text parts. "No content" means an empty `url` or empty
 /// `data`, i.e. a pure UUID cache reference that is never fetched.
-fn media_part_identity(part: &MediaContentPart) -> Option<(Option<&str>, bool, Modality)> {
+pub(super) fn media_part_identity(
+    part: &MediaContentPart,
+) -> Option<(Option<&str>, bool, Modality)> {
     match part {
         MediaContentPart::Text { .. } => None,
         MediaContentPart::ImageUrl { url, uuid, .. } => {
             Some((uuid.as_deref(), !url.is_empty(), Modality::Image))
+        }
+        MediaContentPart::ImageBase64 { data, uuid, .. } => {
+            Some((uuid.as_deref(), !data.is_empty(), Modality::Image))
         }
         MediaContentPart::ImageData { data, uuid, .. } => {
             Some((uuid.as_deref(), !data.is_empty(), Modality::Image))
@@ -244,6 +248,9 @@ fn media_part_identity(part: &MediaContentPart) -> Option<(Option<&str>, bool, M
         }
         MediaContentPart::AudioUrl { url, uuid, .. } => {
             Some((uuid.as_deref(), !url.is_empty(), Modality::Audio))
+        }
+        MediaContentPart::AudioBase64 { data, uuid, .. } => {
+            Some((uuid.as_deref(), !data.is_empty(), Modality::Audio))
         }
         MediaContentPart::AudioData { data, uuid, .. } => {
             Some((uuid.as_deref(), !data.is_empty(), Modality::Audio))
@@ -311,13 +318,13 @@ pub(super) fn resolve_uuid_references<'a>(
                 );
             }
             (cache, uuid) => {
-                // Content-addressed reference: locally available bytes (inline
-                // or base64 data URL) can be hashed without the connector, so
-                // a hit skips its fetch AND decode. On a miss the decoded
-                // bytes go to the connector as inline content so the payload
-                // is not base64-decoded twice when its options permit.
+                // Locally available bytes whose options survive conversion to
+                // inline content can be hashed without the connector. Other
+                // parts keep their options and are hashed after one base64
+                // decode in the raw-fetch path, never once here and once there.
                 let mut part = part;
                 if let Some(cache) = cache
+                    && can_into_inline_part(&part)
                     && let Some((bytes, hash)) = hash_local_content(&part, video_sampling_policy)
                 {
                     if let Some((item, replacement)) =
@@ -326,9 +333,7 @@ pub(super) fn resolve_uuid_references<'a>(
                         modality_slots.push(UuidSlot::Ready(item, replacement));
                         continue;
                     }
-                    if can_into_inline_part(&part) {
-                        part = into_inline_part(part, bytes);
-                    }
+                    part = into_inline_part(part, bytes);
                 }
                 modality_slots.push(UuidSlot::Fetch(uuid.map(str::to_owned)));
                 fetch_parts.push(part);
@@ -349,12 +354,14 @@ fn hash_local_content(
     video_sampling_policy: Option<(llm_multimodal::FrameSampling, Option<f64>)>,
 ) -> Option<(Vec<u8>, String)> {
     use base64::Engine as _;
+    let decode_base64 =
+        |data: &str| base64::engine::general_purpose::STANDARD.decode(data.trim()).ok();
     let decode_data_url = |url: &str| -> Option<Vec<u8>> {
         let (metadata, data) = url.strip_prefix("data:")?.split_once(',')?;
         if !metadata.ends_with(";base64") {
             return None;
         }
-        base64::engine::general_purpose::STANDARD.decode(data.trim()).ok()
+        decode_base64(data)
     };
     let bytes = match part {
         MediaContentPart::ImageData { data, .. }
@@ -452,21 +459,25 @@ fn into_inline_part(part: MediaContentPart, bytes: Vec<u8>) -> MediaContentPart 
     }
 }
 
-/// Attach fetched media to its fetch slots, producing cache slots for
-/// [`prepare_cached`].
+/// Merge prefetch UUID/local hits with fetched cache slots in request order.
 pub(super) fn attach_fetched<M: HashedMedia>(
     slots: Vec<UuidSlot>,
-    fetched: impl IntoIterator<Item = M>,
+    fetched: impl IntoIterator<Item = CacheSlot<M>>,
 ) -> Vec<CacheSlot<M>> {
     let mut fetched = fetched.into_iter();
     slots
         .into_iter()
         .map(|slot| match slot {
             UuidSlot::Ready(item, replacement) => CacheSlot::Ready(item, replacement),
-            UuidSlot::Fetch(uuid) => CacheSlot::Pending(
-                fetched.next().expect("tracker output aligns with fetched parts"),
-                uuid,
-            ),
+            UuidSlot::Fetch(uuid) => {
+                match fetched.next().expect("media output aligns with fetched parts") {
+                    CacheSlot::Ready(item, replacement) => CacheSlot::Ready(item, replacement),
+                    CacheSlot::Pending(media, fetched_uuid) => {
+                        debug_assert_eq!(uuid, fetched_uuid);
+                        CacheSlot::Pending(media, fetched_uuid)
+                    }
+                }
+            }
         })
         .collect()
 }
@@ -475,7 +486,7 @@ pub(super) fn attach_fetched<M: HashedMedia>(
 /// sites read `self.mm_cache_for(modality).prepare_cached(...)`; `None`
 /// prepares everything inline.
 ///
-/// `Ready` slots (UUID references resolved before fetch) pass through.
+/// `Ready` slots (UUID or content hits resolved before preprocessing) pass through.
 /// `Pending` items are looked up by their cache key — the client UUID when
 /// supplied, otherwise the content hash — so only true misses reach
 /// `compute`; computed misses are put into shm and shadowed. The result stays
@@ -879,7 +890,7 @@ pub(crate) mod tests {
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
                     max_long_side_pixel: None,
-                    url: String::new(),
+                    url: Arc::new(String::new()),
                     detail: None,
                     uuid: Some("img-uuid-1".to_string()),
                 }],
@@ -936,7 +947,7 @@ pub(crate) mod tests {
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
                     max_long_side_pixel: None,
-                    url: "https://127.0.0.1:1/unreachable.png".to_string(),
+                    url: Arc::new("https://127.0.0.1:1/unreachable.png".to_string()),
                     detail: None,
                     uuid: Some("img-uuid-2".to_string()),
                 }],
@@ -968,7 +979,7 @@ pub(crate) mod tests {
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
                     max_long_side_pixel: None,
-                    url: String::new(),
+                    url: Arc::new(String::new()),
                     detail: None,
                     uuid: Some("missing-uuid".to_string()),
                 }],
@@ -1075,7 +1086,7 @@ pub(crate) mod tests {
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
                     max_long_side_pixel: None,
-                    url: String::new(),
+                    url: Arc::new(String::new()),
                     detail: None,
                     uuid: Some("nem-uuid".to_string()),
                 }],
@@ -1128,7 +1139,7 @@ pub(crate) mod tests {
             None,
             vec![MediaContentPart::ImageUrl {
                 max_long_side_pixel: None,
-                url: data_url,
+                url: Arc::new(data_url),
                 detail: None,
                 uuid: None,
             }],
@@ -1155,7 +1166,7 @@ pub(crate) mod tests {
     fn non_local_content_falls_through_to_fetch() {
         let cache = MmProcessorCache::new(test_shm_cache());
         let part = MediaContentPart::ImageUrl {
-            url: "https://example.com/image.png".to_string(),
+            url: Arc::new("https://example.com/image.png".to_string()),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
@@ -1181,10 +1192,10 @@ pub(crate) mod tests {
 
         let png = test_png_bytes();
         let image = MediaContentPart::ImageUrl {
-            url: format!(
+            url: Arc::new(format!(
                 "data:image/png;base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(&png)
-            ),
+            )),
             detail: None,
             uuid: None,
             max_long_side_pixel: Some(504),
@@ -1253,7 +1264,7 @@ pub(crate) mod tests {
             .prepare_multimodal(
                 vec![MediaContentPart::ImageUrl {
                     max_long_side_pixel: None,
-                    url: data_url,
+                    url: Arc::new(data_url),
                     detail: None,
                     uuid: None,
                 }],
@@ -1271,5 +1282,76 @@ pub(crate) mod tests {
         // Content-keyed items report the content hash, never a UUID.
         assert_eq!(first[0].mm_hash, second[0].mm_hash);
         assert_eq!(first[0].identifier, second[0].identifier);
+    }
+
+    async fn invalid_media_server() -> (String, tokio::task::JoinHandle<usize>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept media request");
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request).await.expect("read media request");
+            let body = b"definitely not decodable media";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.expect("write response headers");
+            socket.write_all(body).await.expect("write invalid media");
+            1
+        });
+        (format!("http://{address}/media"), server)
+    }
+
+    #[tokio::test]
+    async fn http_image_content_hit_skips_decode() {
+        use llm_multimodal::{MediaConnector, MediaConnectorConfig};
+        use vllm_engine_core_client::protocol::dtype::ModelDtype;
+
+        use super::super::tests::{QWEN3_IMAGE_PAD_ID, qwen3_vl_info};
+
+        let mut info = qwen3_vl_info().with_mm_processor_cache(Some(test_shm_cache()));
+        info.media_connector = Arc::new(
+            MediaConnector::new(
+                reqwest_0_13::Client::builder(),
+                MediaConnectorConfig {
+                    allow_private_hosts: true,
+                    ..MediaConnectorConfig::default()
+                },
+            )
+            .expect("test media connector"),
+        );
+        let hash = llm_multimodal::hasher::hash_image(b"definitely not decodable media");
+        let sent = info.mm_processor_cache.as_ref().unwrap().put_or_inline_and_track(
+            &hash,
+            &test_replacement(),
+            test_item(7),
+        );
+        let (url, server) = invalid_media_server().await;
+        let part = MediaContentPart::ImageUrl {
+            url: Arc::new(url),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        };
+        let mut tokens = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+
+        let features = info
+            .prepare_multimodal(vec![part], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .expect("a content hit must not decode the invalid HTTP response");
+
+        assert_eq!(server.await.expect("join test HTTP server"), 1);
+        assert_eq!(features.len(), 1);
+        let data = features[0].data.as_ref().expect("feature data");
+        assert!(is_address_item(data));
+        assert_eq!(address_of(data), address_of(&sent));
+        assert_eq!(features[0].mm_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(features[0].identifier, hash);
+        assert_eq!(features[0].mm_position.length, 2);
     }
 }
