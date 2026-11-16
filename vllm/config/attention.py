@@ -213,7 +213,7 @@ class AttentionConfig:
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
-    Must be a power of 2 and divisible by flex_attn_block_n.
+    Must be a multiple of 16 and divisible by flex_attn_block_n.
     If None, uses the KV cache block size for paged KV attention on
     PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
     versions."""
