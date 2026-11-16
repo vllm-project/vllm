@@ -15,7 +15,8 @@
 # PHASE 1, build environment (FROM the manylinux image; nothing from phases 1-2
 # ships in a final image, only the wheels they build):
 #   toolchain            compilers, sccache, uv venv           (no Python packages)
-#   ├─ requirement-pins  the PyTorch and FlashInfer pins cut out of requirements/cuda.txt
+#   ├─ requirement-pins  the PyTorch and FlashInfer pins cut out of requirements/cuda.txt,
+#   │                    and the Rubin pins (empty unless INSTALL_RUBIN_PRERELEASE=true)
 #   └─ base              + PyTorch                             (changes only with the pins)
 #
 # PHASE 2, build artifacts (each top-level stage names its phase 1 parent):
@@ -255,6 +256,7 @@ WORKDIR /workspace
 # layers, and every native build on top of PyTorch, cached.
 FROM toolchain AS requirement-pins
 ARG CUDA_VERSION
+ARG INSTALL_RUBIN_PRERELEASE
 COPY requirements/cuda.txt /tmp/cuda.txt
 # flashinfer.txt also carries the pins of the FlashInfer dependencies that
 # requirements/cuda.txt pins, so they are installed once, at the pinned version.
@@ -268,6 +270,14 @@ RUN mkdir /pins \
     && grep -E '^(flashinfer-python|nvidia-cutlass-dsl(\[cu13\])?|apache-tvm-ffi)==' /tmp/cuda.txt \
         | sed 's/[[:space:]]*#.*$//' > /pins/flashinfer.txt \
     && test "$(wc -l < /pins/flashinfer.txt)" -eq 3
+# The Rubin pins, empty unless this is a Rubin build, so an edit to them leaves
+# every other build's PyTorch layers and native builds cached.
+COPY requirements/rubin-prerelease.txt /tmp/rubin-prerelease.txt
+RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        cp /tmp/rubin-prerelease.txt /pins/rubin-prerelease.txt; \
+    else \
+        : > /pins/rubin-prerelease.txt; \
+    fi
 
 #################### STAGE: base ####################
 # toolchain + PyTorch: all that the native builds (csrc-build, extensions-build,
@@ -283,7 +293,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_NIGHTLY
 
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
-COPY requirements/rubin-prerelease.txt /tmp/vllm-requirements/rubin-prerelease.txt
+COPY --from=requirement-pins /pins/rubin-prerelease.txt /tmp/vllm-requirements/rubin-prerelease.txt
 # Only the PyTorch pins, under the name setup.py reads for a wheel's dependency
 # metadata. The wheel csrc-build makes is just a carrier for the compiled
 # extensions; the build stage repackages them from the full source tree.
@@ -899,7 +909,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 
 # 1. PyTorch and its CUDA libraries. Reruns only when a PyTorch pin changes.
 COPY --from=requirement-pins /pins/torch.txt /tmp/pins/torch.txt
-COPY requirements/rubin-prerelease.txt /tmp/vllm-requirements/rubin-prerelease.txt
+COPY --from=requirement-pins /pins/rubin-prerelease.txt /tmp/vllm-requirements/rubin-prerelease.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         uv pip install --system \
@@ -1273,7 +1283,7 @@ RUN --mount=type=bind,source=tools/install_efa.sh,target=/tmp/install_efa.sh,ro 
 # last Python install: it restores the torch nightly and the Triton it requires
 # after the vLLM and KV connector installs above.
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
+    --mount=type=bind,from=requirement-pins,source=/pins/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
