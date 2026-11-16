@@ -57,6 +57,7 @@ def _layerwise_copy_worker(
     writes=None,
     spec=None,
     manager_config=None,
+    array_api=False,
 ):
     config = _make_worker_vllm_config(
         kv_role, {"transfer_mode": "layerwise", **(extra or {})}
@@ -74,9 +75,9 @@ def _layerwise_copy_worker(
 
     def write(_session, sources, destinations, lengths):
         if writes is not None:
-            writes.append(tuple(lengths))
+            writes.append(tuple(map(int, lengths)))
         for src, dst, length in zip(sources, destinations, lengths):
-            ctypes.memmove(dst, src, length)
+            ctypes.memmove(int(dst), int(src), int(length))
         return 0
 
     with (
@@ -85,6 +86,16 @@ def _layerwise_copy_worker(
         patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
         patch.object(torch.accelerator, "current_stream", return_value=None),
         patch.object(torch, "Event", return_value=MagicMock()),
+        (
+            patch.object(
+                mooncake_connector.TransferEngine,
+                "batch_transfer_sync_write_arrays",
+                side_effect=write,
+                create=True,
+            )
+            if array_api
+            else contextlib.nullcontext()
+        ),
     ):
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, cache
@@ -97,7 +108,9 @@ def _layerwise_copy_worker(
                         for name in names
                     }
                 )
-            with patch.object(worker.engine, "batch_transfer_sync_write", write):
+            with patch.object(
+                worker.transfer_backend.engine, "batch_transfer_sync_write", write
+            ):
                 yield worker
         finally:
             worker.shutdown()
@@ -222,12 +235,18 @@ async def test_layerwise_batch_copies_each_request_and_layer(source_blocks):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interval", [1, 2, 4, 8])
-async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(interval):
+@pytest.mark.parametrize("array_api", [False, True], ids=["lists", "arrays"])
+async def test_layerwise_interval_batches_layers_and_flushes_each_chunk(
+    interval, array_api
+):
     """Batch real copies across layers/requests, including a partial final batch."""
     names = tuple(f"model.layers.{i}.self_attn" for i in range(5))
     writes: list[tuple[int, ...]] = []
     with _layerwise_copy_worker(
-        names=names, extra={"layerwise_transfer_interval": interval}, writes=writes
+        names=names,
+        extra={"layerwise_transfer_interval": interval},
+        writes=writes,
+        array_api=array_api,
     ) as worker:
         sources = [worker.device_kv_caches[name] for name in names]
         destinations = [torch.zeros_like(source) for source in sources]
@@ -537,7 +556,9 @@ async def test_layerwise_finished_prefill_drains_late_ready(
         assert empty.total_num_scheduled_tokens == 0
         with (
             patch.object(
-                worker.engine, "batch_transfer_sync_write", return_value=write_status
+                worker.transfer_backend.engine,
+                "batch_transfer_sync_write",
+                return_value=write_status,
             )
             if write_status
             else contextlib.nullcontext()
