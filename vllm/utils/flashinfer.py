@@ -11,8 +11,11 @@ import importlib
 import importlib.metadata
 import importlib.util
 import inspect
+import json
 import os
+import re
 import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
@@ -45,9 +48,44 @@ _BF16_TUNING_DIR = (
 )
 _bf16_tuning_files_loaded = False
 
+_DATACENTER_BLACKWELL_CAPABILITIES = ((10, 0), (10, 3))
+_DATACENTER_BLACKWELL_GPU_NAME = re.compile(r"NVIDIA (GB200|B200|GB300|B300)\b")
+
 
 def is_flashinfer_bf16_tuning_loaded() -> bool:
     return _bf16_tuning_files_loaded
+
+
+def _bf16_tuning_path_for_this_gpu(file: Path, workdir: Path) -> Path:
+    """Return the file FlashInfer should load for the current GPU.
+
+    FlashInfer ignores a tuning file whose recorded GPU name differs from the
+    current device. A file tuned on any datacenter Blackwell GPU (GB200, B200,
+    GB300, B300) is meant for all of them, so on such a GPU load a copy with the
+    current name recorded. Consumer Blackwell and other architectures keep the
+    original file and are rejected by FlashInfer as before.
+    """
+    with open(file) as f:
+        configs = json.load(f)
+    metadata = configs.get("_metadata")
+    if not isinstance(metadata, dict):
+        return file
+    saved = metadata.get("gpu")
+    if not isinstance(saved, str) or not _DATACENTER_BLACKWELL_GPU_NAME.match(saved):
+        return file
+    current = torch.cuda.get_device_name()
+    if (
+        current == saved
+        or tuple(torch.cuda.get_device_capability())
+        not in _DATACENTER_BLACKWELL_CAPABILITIES
+    ):
+        return file
+    metadata["gpu"] = current
+    path = workdir / file.name
+    with open(path, "w") as f:
+        json.dump(configs, f)
+    logger.info("Using FlashInfer tuning file %s (%s) on %s", file.name, saved, current)
+    return path
 
 
 @functools.cache
@@ -61,12 +99,14 @@ def load_flashinfer_bf16_tuning_dir() -> None:
 
     tuner = AutoTuner.get()
     loaded = []
-    for file in files:
-        try:
-            if tuner.load_configs(str(file)):
-                loaded.append(file.name)
-        except Exception as e:
-            logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
+    with tempfile.TemporaryDirectory() as workdir:
+        for file in files:
+            try:
+                path = _bf16_tuning_path_for_this_gpu(file, Path(workdir))
+                if tuner.load_configs(str(path)):
+                    loaded.append(file.name)
+            except Exception as e:
+                logger.warning("Cannot load FlashInfer tuning file %s: %s", file, e)
     global _bf16_tuning_files_loaded
     _bf16_tuning_files_loaded = bool(loaded)
     logger.info(
