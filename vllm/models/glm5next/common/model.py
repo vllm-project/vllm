@@ -4,6 +4,7 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, Literal
 
+import regex as re
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -82,6 +83,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
@@ -513,7 +515,11 @@ class Glm5NextDecoderLayer(nn.Module):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=cache_config,
-                quant_config=None,  # MLA projections run in BF16 (Glm5NextMLAAttention)
+                # FP8 / Quark checkpoints store the MLA projections in FP8, and
+                # Glm5NextMLAAttention runs them in BF16 without a quant config.
+                quant_config=(
+                    None if _mla_dequantized_at_load(quant_config) else quant_config
+                ),
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
@@ -1377,14 +1383,32 @@ class Glm5NextForConditionalGeneration(
     # at load for mixed-precision Quark checkpoints.
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvbfg_a": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "b_proj",
+            "f_a_proj",
+            "g_a_proj",
+        ],
     }
 
-    # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
+    # Weight prefixes follow the GLM-OCR / GLM-4V serialization convention
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
-    # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
-    # matching the GLM-OCR / GLM-4V serialization convention. If the real
-    # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
-    # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+    # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``).
+    # The FP8 checkpoint's ``modules_to_not_convert`` names the attention
+    # modules ``model.layers.N.self_attn`` instead, so map those too. Other
+    # ``model.layers.N`` names are left alone: the NVFP4 checkpoint uses them
+    # for the MTP layer, which shares this quant config.
+    hf_to_vllm_mapper = Glm4vForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(
+            orig_to_new_regex={
+                re.compile(r"^model\.layers\.(\d+)\.self_attn\."): (
+                    r"language_model.model.layers.\1.self_attn."
+                )
+            }
+        )
+    )
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
@@ -1601,6 +1625,18 @@ _FP8_ATTN_PROJS = {
     ".q_b_proj.": "q_b_proj",
     ".o_proj.": "o_proj",
 }
+
+
+def _mla_dequantized_at_load(quant_config: QuantizationConfig | None) -> bool:
+    """Whether the checkpoint stores the MLA projections in FP8 (FP8 and Quark
+    checkpoints), which the model dequantizes to BF16 at load (`bf16_linear`)."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+    return isinstance(quant_config, QuarkConfig) or (
+        isinstance(quant_config, Fp8Config)
+        and quant_config.is_checkpoint_fp8_serialized
+    )
 
 
 def _mla_proj_checkpoint_tensor(
