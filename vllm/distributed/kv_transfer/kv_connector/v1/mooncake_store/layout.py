@@ -200,7 +200,7 @@ def layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> in
     raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LayerRangeObjects:
     """A cache group's blocks stored as one object per layer range.
 
