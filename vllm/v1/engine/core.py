@@ -1995,30 +1995,11 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
-    def _reject_add_in_shutdown(self, request: Request) -> bool:
-        if self.shutdown_state == EngineShutdownState.RUNNING:
-            return False
-
-        logger.debug(
-            "[shutdown] EngineCore: rejecting new request request_id=%s",
-            request.request_id,
-        )
-        self._send_abort_outputs_to_client([request.request_id], request.client_index)
-        return True
-
-    def _reject_add_while_paused(self, request: Request) -> bool:
+    def _reject_new_request(self, request: Request, error: RequestError) -> bool:
+        """Reject a new request with a client-facing error and free KV state."""
         # KV cleanup markers and inputs to open streaming sessions are not new work.
-        if (
-            not self.reject_new_requests
-            or request.abort_immediately
-            or self.scheduler.has_request(request.request_id)
-        ):
+        if request.abort_immediately or self.scheduler.has_request(request.request_id):
             return False
-        error = RequestError(
-            code="engine_paused",
-            message="Generation is paused. Please retry after it resumes.",
-            retryable=True,
-        )
         self._send_finish_outputs_to_client(
             [request.request_id], request.client_index, FinishReason.ERROR, error
         )
@@ -2027,6 +2008,36 @@ class EngineCoreProc(EngineCore):
             request.abort_immediately = True
             self.add_request(request)
         return True
+
+    def _reject_add_in_shutdown(self, request: Request) -> bool:
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return False
+        rejected = self._reject_new_request(
+            request,
+            RequestError(
+                code="engine_shutting_down",
+                message="Server is shutting down.",
+                retryable=True,
+            ),
+        )
+        if rejected:
+            logger.debug(
+                "[shutdown] EngineCore: rejecting new request request_id=%s",
+                request.request_id,
+            )
+        return rejected
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        if not self.reject_new_requests:
+            return False
+        return self._reject_new_request(
+            request,
+            RequestError(
+                code="engine_paused",
+                message="Generation is paused. Please retry after it resumes.",
+                retryable=True,
+            ),
+        )
 
     def _reject_utility_in_shutdown(
         self, client_idx: int, call_id: int, method_name: str

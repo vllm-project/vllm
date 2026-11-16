@@ -93,23 +93,36 @@ async def _concurrent_request_loop(
     state: ShutdownState,
     sigterm_sent: asyncio.Event | None = None,
     concurrency: int = 10,
+    *,
+    pooling: bool = False,
+    stop_on_sigterm: bool = False,
 ):
     """Run multiple concurrent requests to keep the server busy."""
 
     async def single_request():
-        while not state.stop_requesting:
+        while not state.stop_requesting and not (
+            stop_on_sigterm and sigterm_sent is not None and sigterm_sent.is_set()
+        ):
             try:
                 state.inflight_requests += 1
-                response = await client.completions.create(
-                    model=MODEL_NAME,
-                    prompt="Write a story: ",
-                    max_tokens=200,
-                )
+                if pooling:
+                    await client.embeddings.create(
+                        model=MODEL_NAME,
+                        input="hello " * 1500,
+                    )
+                else:
+                    response = await client.completions.create(
+                        model=MODEL_NAME,
+                        prompt="Write a story: ",
+                        max_tokens=200,
+                    )
+                    # Check if any choice has finish_reason='abort'
+                    if any(
+                        choice.finish_reason == "abort" for choice in response.choices
+                    ):
+                        state.aborted_requests += 1
                 if sigterm_sent is not None and sigterm_sent.is_set():
                     state.requests_after_sigterm += 1
-                # Check if any choice has finish_reason='abort'
-                if any(choice.finish_reason == "abort" for choice in response.choices):
-                    state.aborted_requests += 1
             except openai.APIStatusError as e:
                 if e.status_code == 503:
                     state.got_503 = True
@@ -314,6 +327,81 @@ async def test_wait_timeout_completes_requests():
         assert state.got_503 or state.got_500 or state.connection_errors > 0, (
             f"Server should stop accepting requests. "
             f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
+        )
+
+        _wait_for_server_exit(proc, shutdown_timeout)
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_completes_pooling_requests():
+    """Verify in-flight /v1/embeddings requests finish with 200 during drain."""
+    shutdown_timeout = 30
+    server_args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "64",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.05",
+        "--max-num-seqs",
+        "4",
+        "--shutdown-timeout",
+        str(shutdown_timeout),
+    ]
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        server_args,
+        env_dict={"VLLM_USE_RUST_FRONTEND": "0"},
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        proc = remote_server.proc
+        child_pids = _get_child_pids(proc.pid)
+
+        state = ShutdownState()
+        sigterm_sent = asyncio.Event()
+
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(
+                client,
+                state,
+                sigterm_sent,
+                concurrency=4,
+                pooling=True,
+                stop_on_sigterm=True,
+            )
+        )
+
+        try:
+            admission_delay = await _wait_for_running_request(
+                remote_server.url_for("metrics"),
+                timeout=60,
+            )
+            proc.send_signal(signal.SIGTERM)
+            sigterm_sent.set()
+
+            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
+        finally:
+            state.stop_requesting = True
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        assert not state.got_500, (
+            f"In-flight pooling requests returned 500 during drain: {state.errors}"
+        )
+        assert not state.errors, f"Unexpected errors during drain: {state.errors}"
+        assert state.requests_after_sigterm > 0, (
+            f"Wait timeout should complete in-flight pooling requests. "
+            f"admission_delay: {admission_delay:.3f}s, "
+            f"503: {state.got_503}, 500: {state.got_500}, "
+            f"conn_errors: {state.connection_errors}, errors: {state.errors}"
         )
 
         _wait_for_server_exit(proc, shutdown_timeout)

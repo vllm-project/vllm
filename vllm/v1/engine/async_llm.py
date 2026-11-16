@@ -305,17 +305,20 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
-        shutdown_prometheus()
+        # Drain engine_core before tearing down frontend executors and metrics
+        # so in-flight requests can finish postprocessing and rendering.
+        try:
+            if engine_core := getattr(self, "engine_core", None):
+                engine_core.shutdown(timeout=timeout)
+        finally:
+            if handler := getattr(self, "output_handler", None):
+                cancel_task_threadsafe(handler)
 
-        if renderer := getattr(self, "renderer", None):
-            renderer.shutdown()
-
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown(timeout=timeout)
-
-        handler = getattr(self, "output_handler", None)
-        if handler is not None:
-            cancel_task_threadsafe(handler)
+            try:
+                if renderer := getattr(self, "renderer", None):
+                    renderer.shutdown()
+            finally:
+                shutdown_prometheus()
 
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()
