@@ -54,6 +54,10 @@ logger = init_logger(__name__)
 
 
 class Fp8MoeBackend(Enum):
+    # No kernel backend. Used for:
+    # - out-of-tree platforms (OOT/TPU), where no backend is registered;
+    # - requantization sources (checkpoint methods that only dequantize weights
+    #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "NONE"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
@@ -418,6 +422,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """FP8 MoE backend selection for one deployment configuration."""
 
     name = "Fp8"
+    placeholder_backend = Fp8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -433,7 +438,13 @@ def select_fp8_moe_backend(
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
+    # TODO: migrate to oracle base method.
+    source = Fp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 
