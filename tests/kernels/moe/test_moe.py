@@ -1270,7 +1270,7 @@ def marlin_moe_generate_valid_test_cases():
     return cases
 
 
-@dataclass
+@dataclass(slots=True)
 class MarlinMoEWeightData:
     w_ref: torch.Tensor
     qweight: torch.Tensor
