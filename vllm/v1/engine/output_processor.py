@@ -993,7 +993,8 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS: (
                 # Note: Only supports n=1. For n>1, each completion would have
                 # its own finish reason that should be collected separately.
-                [finish_reason.name.lower()] if finish_reason else []
+                # FinishReason is an IntEnum and STOP is 0, so compare with None.
+                [str(finish_reason)] if finish_reason is not None else []
             ),
         }
 

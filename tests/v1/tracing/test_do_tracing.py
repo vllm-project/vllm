@@ -14,7 +14,13 @@ from vllm.v1.engine import output_processor as op
 
 @pytest.mark.parametrize(
     ("finish_reason", "expected"),
-    [(FinishReason.STOP, ["stop"]), (FinishReason.LENGTH, ["length"]), (None, [])],
+    [
+        # STOP is 0 in the IntEnum: it must not be dropped as falsy.
+        (FinishReason.STOP, ["stop"]),
+        (FinishReason.LENGTH, ["length"]),
+        (FinishReason.ABORT, ["abort"]),
+        (None, []),
+    ],
 )
 def test_do_tracing_genai_attributes(monkeypatch, finish_reason, expected):
     captured: dict = {}
